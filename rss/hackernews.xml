@@ -9,6 +9,330 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>Writing a basic x86-64 JIT compiler from scratch in stock Python</title>
+<link>https://csl.name/post/python-jit/</link>
+<guid isPermaLink="true" >https://csl.name/post/python-jit/</guid>
+<description>&lt;p class=&quot;sans-serif author&quot;&gt;&lt;strong&gt;By &lt;a href=&quot;https://csl.name/&quot;&gt;Christian Stigen Larsen&lt;/a&gt;&lt;/strong&gt;&lt;br/&gt;08 Nov 2017&lt;/p&gt;
+&lt;p&gt;In this post I'll show how to write a rudimentary, native x86-64 &lt;a href=&quot;https://en.wikipedia.org/wiki/Just-in-time_compilation&quot;&gt;just-in-time compiler (JIT)&lt;/a&gt; in CPython, using only the built-in modules.&lt;/p&gt;
+&lt;p&gt;The code here specifically targets the UNIX systems macOS and Linux, but should be easily translated to other systems such as Windows. The complete code is available at &lt;a href=&quot;https://github.com/cslarsen/minijit&quot;&gt;https://github.com/cslarsen/minijit&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The goal is to generate new versions of the below assembly code at runtime and execute it.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;48 b8 ed ef be ad de  movabs $0xdeadbeefed, %rax
+00 00 00
+48 0f af c7           imul   %rdi,%rax
+c3                    retq
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;We will mainly deal with the left hand side — the byte sequence &lt;code&gt;48 b8 ed ...&lt;/code&gt; and so on. Those fifteen &lt;a href=&quot;https://en.wikipedia.org/wiki/Machine_code&quot;&gt;machine code bytes&lt;/a&gt; comprise an x86-64 function that multiplies its argument with the constant &lt;a href=&quot;https://en.wikipedia.org/wiki/Magic_number_(programming)&quot;&gt;&lt;code&gt;0xdeadbeefed&lt;/code&gt;&lt;/a&gt;. The JIT step will create functions with different such constants. While being a contrived form of &lt;a href=&quot;https://en.wikipedia.org/wiki/Run-time_algorithm_specialisation&quot;&gt;specialization&lt;/a&gt;, it illuminates the basic mechanics of just-in-time compilation.&lt;/p&gt;
+&lt;p&gt;Our general strategy is to rely on the built-in &lt;a href=&quot;https://docs.python.org/3/library/ctypes.html#module-ctypes&quot;&gt;&lt;code&gt;ctypes&lt;/code&gt;&lt;/a&gt; Python module to load the C standard library. From there, we can access system functions to interface with the virtual memory manager. We'll use &lt;a href=&quot;http://man7.org/linux/man-pages/man2/mmap.2.html&quot;&gt;&lt;code&gt;mmap&lt;/code&gt;&lt;/a&gt; to fetch a page-aligned block of memory. It needs to be aligned for it to become executable. That's the reason why we can't simply use the usual C function &lt;code&gt;malloc&lt;/code&gt;, because it may return memory that spans page boundaries.&lt;/p&gt;
+&lt;p&gt;The function &lt;a href=&quot;http://man7.org/linux/man-pages/man2/mprotect.2.html&quot;&gt;&lt;code&gt;mprotect&lt;/code&gt;&lt;/a&gt; will be used to mark the memory block as read-only and executable. After that, we should be able to call into our freshly compiled block of code through ctypes.&lt;/p&gt;
+&lt;h2&gt;The boiler-plate part&lt;/h2&gt;
+&lt;p&gt;Before we can do anything, we need to load the standard C library.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;import ctypes
+
+if sys.platform.startswith(&quot;darwin&quot;):
+    libc = ctypes.cdll.LoadLibrary(&quot;libc.dylib&quot;)
+    # ...
+elif sys.platform.startswith(&quot;linux&quot;):
+    libc = ctypes.cdll.LoadLibrary(&quot;libc.so.6&quot;)
+    # ...
+else:
+    raise RuntimeError(&quot;Unsupported platform&quot;)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;There are other ways to achieve this, for example&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;&amp;gt;&amp;gt;&amp;gt; import ctypes
+&amp;gt;&amp;gt;&amp;gt; import ctypes.util
+&amp;gt;&amp;gt;&amp;gt; libc = ctypes.CDLL(ctypes.util.find_library(&quot;c&quot;))
+&amp;gt;&amp;gt;&amp;gt; libc
+&amp;lt;CDLL '/usr/lib/libc.dylib', handle 110d466f0 at 103725ad0&amp;gt;
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;To find the page size, we'll call &lt;a href=&quot;http://man7.org/linux/man-pages/man3/sysconf.3.html&quot;&gt;&lt;code&gt;sysconf(_SC_PAGESIZE)&lt;/code&gt;&lt;/a&gt;. The &lt;code&gt;_SC_PAGESIZE&lt;/code&gt; constant is 29 on macOS but 30 on Linux. We'll just hard-code those in our program. You can find them by digging into system header files or writing a simple C program that print them out. A more robust and elegant solution would be to use the &lt;a href=&quot;https://github.com/cffi/cffi&quot;&gt;&lt;code&gt;cffi&lt;/code&gt; module&lt;/a&gt; instead of ctypes, because it can automatically parse header files. However, since I wanted to stick to the default CPython distribution, we'll continue using ctypes.&lt;/p&gt;
+&lt;p&gt;We need a few additional constants for &lt;code&gt;mmap&lt;/code&gt; and friends. They're just written out below. You may have to look them up for other UNIX variants.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;import ctypes
+
+if sys.platform.startswith(&quot;darwin&quot;):
+    libc = ctypes.cdll.LoadLibrary(&quot;libc.dylib&quot;)
+    _SC_PAGESIZE = 29
+    MAP_ANONYMOUS = 0x1000
+    MAP_PRIVATE = 0x0002
+    PROT_EXEC = 0x04
+    PROT_NONE = 0x00
+    PROT_READ = 0x01
+    PROT_WRITE = 0x02
+    MAP_FAILED = -1 # voidptr actually
+elif sys.platform.startswith(&quot;linux&quot;):
+    libc = ctypes.cdll.LoadLibrary(&quot;libc.so.6&quot;)
+    _SC_PAGESIZE = 30
+    MAP_ANONYMOUS = 0x20
+    MAP_PRIVATE = 0x0002
+    PROT_EXEC = 0x04
+    PROT_NONE = 0x00
+    PROT_READ = 0x01
+    PROT_WRITE = 0x02
+    MAP_FAILED = -1 # voidptr actually
+else:
+    raise RuntimeError(&quot;Unsupported platform&quot;)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Although not strictly required, it is very useful to tell ctypes the signature of the functions we'll use. That way, we'll get exceptions if we mix invalid types. For example&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;# Set up sysconf
+sysconf = libc.sysconf
+sysconf.argtypes = [ctypes.c_int]
+sysconf.restype = ctypes.c_long
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;tells ctypes that &lt;code&gt;sysconf&lt;/code&gt; is a function that takes a single integer and produces a long integer. After this, we can get the current page size with&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;pagesize = sysconf(_SC_PAGESIZE)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The machine code we are going to generate will be interpreted as unsigned 8-bit bytes, so we need to declare a new pointer type:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;# 8-bit unsigned pointer type
+c_uint8_p = ctypes.POINTER(ctypes.c_uint8)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Below we just dish out the remaining signatures for the functions that we'll use. For error reporting, it's good to have the &lt;a href=&quot;http://man7.org/linux/man-pages/man3/strerror.3.html&quot;&gt;&lt;code&gt;strerror&lt;/code&gt;&lt;/a&gt; function available. We'll use &lt;a href=&quot;http://man7.org/linux/man-pages/man3/munmap.3p.html&quot;&gt;&lt;code&gt;munmap&lt;/code&gt;&lt;/a&gt; to destroy the machine code block after we're done with it. It lets the operating system reclaim that memory.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;strerror = libc.strerror
+strerror.argtypes = [ctypes.c_int]
+strerror.restype = ctypes.c_char_p
+
+mmap = libc.mmap
+mmap.argtypes = [ctypes.c_void_p,
+                 ctypes.c_size_t,
+                 ctypes.c_int,
+                 ctypes.c_int,
+                 ctypes.c_int,
+                 # Below is actually off_t, which is 64-bit on macOS
+                 ctypes.c_int64]
+mmap.restype = c_uint8_p
+
+munmap = libc.munmap
+munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+munmap.restype = ctypes.c_int
+
+mprotect = libc.mprotect
+mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+mprotect.restype = ctypes.c_int
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;At this point, it's hard to justify using Python rather than C. With C, we don't need any of the above boiler-plate code. But down the line, Python will allow us to experiment much more easily.&lt;/p&gt;
+&lt;p&gt;Now we're ready to write the &lt;code&gt;mmap&lt;/code&gt; wrapper.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;def create_block(size):
+    ptr = mmap(0, size, PROT_WRITE | PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS, 0, 0)
+
+    if ptr == MAP_FAILED:
+        raise RuntimeError(strerror(ctypes.get_errno()))
+
+    return ptr
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This function uses &lt;code&gt;mmap&lt;/code&gt; to allocate page-aligned memory for us. We mark the memory region as readable and writable with the &lt;code&gt;PROT&lt;/code&gt; flags, and we also mark it as private and anonymous. The latter means the memory will not be visible from other processes and that it will not be file-backed. The &lt;a href=&quot;http://man7.org/linux/man-pages/man2/mmap.2.html&quot;&gt;Linux &lt;code&gt;mmap&lt;/code&gt; manual page&lt;/a&gt; covers the details (but be sure to view the man page for your system). If the &lt;code&gt;mmap&lt;/code&gt; call fails, we raise it as a Python error.&lt;/p&gt;
+&lt;p&gt;To mark memory as executable,&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;def make_executable(block, size):
+    if mprotect(block, size, PROT_READ | PROT_EXEC) != 0:
+        raise RuntimeError(strerror(ctypes.get_errno()))
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;With this &lt;code&gt;mprotect&lt;/code&gt; call, we mark the region as readable and executable. If we wanted to, we could have made it writable as well, but some systems will refuse to execute writable memory. This is sometimes called &lt;a href=&quot;https://en.wikipedia.org/wiki/W%5EX&quot;&gt;the W^X security feature&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;To destroy the memory block, we'll use&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;def destroy_block(block, size):
+    if munmap(block, size) == -1:
+        raise RuntimeError(strerror(ctypes.get_errno()))
+    del block
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The last &lt;code&gt;del&lt;/code&gt; may be superfluous, or may not work as intended. To be honest, I haven't checked if it will work inside a function. The idea is to let Python decrement the reference count, rendering it unusable.&lt;/p&gt;
+&lt;h2&gt;The fun part&lt;/h2&gt;
+&lt;p&gt;Now we're finally ready to create an insanely simple piece of JIT code!&lt;/p&gt;
+&lt;p&gt;Recall the assembly listing at the top: It's a small function — without a local stack frame — that multiplies an input number with a constant. In Python, we'd write that as&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;def create_multiplication_function(constant):
+    return lambda n: n * constant
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This is indeed a contrived example, but qualifies as JIT. After all, we do create native code at runtime and execute it. It's easy to imagine more advanced examples such as JIT-compiling &lt;a href=&quot;https://en.wikipedia.org/wiki/Brainfuck&quot;&gt;Brainfuck&lt;/a&gt; to x86-64 machine code. Or using &lt;a href=&quot;https://en.wikipedia.org/wiki/Advanced_Vector_Extensions&quot;&gt;AVX&lt;/a&gt; instructions for blazing fast, vectorized math ops.&lt;/p&gt;
+&lt;p&gt;The disassembly at the top of this post was actually generated by compiling and disassembling the following C code:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;#include &amp;lt;stdint.h&amp;gt;
+
+uint64_t multiply(uint64_t n)
+{
+  return n*0xdeadbeefedULL;
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;If you want to compile it yourself, use something like&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;$ gcc -Os -fPIC -shared -fomit-frame-pointer \
+    -march=native multiply.c -olibmultiply.so
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Here I optimized for space (&lt;code&gt;-Os&lt;/code&gt;) to generate as little machine code as possible, with position-independent code (&lt;code&gt;-fPIC&lt;/code&gt;) to prevent using absolute jumps, without any frame pointers (&lt;code&gt;-fomit-frame-pointer&lt;/code&gt;) to remove superfluous stack setup code (but it may be required for more advanced functions) and using the current CPU's native instruction set (&lt;code&gt;-march=native&lt;/code&gt;).&lt;/p&gt;
+&lt;p&gt;We could have passed &lt;code&gt;-S&lt;/code&gt; to produce a disassembly listing, but we're actually interested in the &lt;em&gt;machine code&lt;/em&gt;, so we'll rather use a tool like &lt;code&gt;objdump&lt;/code&gt;:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;$ objdump -d libmultiply.so
+...
+0000000000000f71 &amp;lt;_multiply&amp;gt;:
+ f71:   48 b8 ed ef be ad de    movabs $0xdeadbeefed,%rax
+ f78:   00 00 00 
+ f7b:   48 0f af c7             imul   %rdi,%rax
+ f7f:   c3                      retq
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;In case you are not familiar with assembly, I'll let you know how this function works. First, the &lt;code&gt;movabs&lt;/code&gt; function just puts an &lt;em&gt;immediate&lt;/em&gt; number in the RAX register. &lt;em&gt;Immediate&lt;/em&gt; is assembly-jargon for encoding something right in the machine code. In other words, it's an embedded argument for the &lt;code&gt;movabs&lt;/code&gt; instruction. So RAX now holds the constant &lt;code&gt;0xdeadbeefed&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;Also — by &lt;a href=&quot;https://software.intel.com/sites/default/files/article/402129/mpx-linux64-abi.pdf&quot;&gt;AMD64&lt;/a&gt; convention — the first integer argument will be in RDI, and the return value in RAX. So RDI will hold the number to multiply with. That's what &lt;code&gt;imul&lt;/code&gt; does. It multiplies RAX and RDI and puts the result in RAX. Finally, we pop a 64-bit return address off the stack and jump to it with RETQ. At this level, it's easy to imagine how one could implement &lt;a href=&quot;https://en.wikipedia.org/wiki/Continuation-passing_style&quot;&gt;continuation-passing style&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Note that the the constant &lt;code&gt;0xdeadbeefed&lt;/code&gt; is in little-endian format. We need to remember to do the same when we patch the code. (By the way, a good mnemonic for remembering the word order is that little endian means &quot;little-end first&quot;).&lt;/p&gt;
+&lt;p&gt;We are now ready to put everything in a Python function.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;def make_multiplier(block, multiplier):
+    # Encoding of: movabs &amp;lt;multiplier&amp;gt;, rax
+    block[0] = 0x48
+    block[1] = 0xb8
+
+    # Little-endian encoding of multiplication constant
+    block[2] = (multiplier &amp;amp; 0x00000000000000ff) &amp;gt;&amp;gt;  0
+    block[3] = (multiplier &amp;amp; 0x000000000000ff00) &amp;gt;&amp;gt;  8
+    block[4] = (multiplier &amp;amp; 0x0000000000ff0000) &amp;gt;&amp;gt; 16
+    block[5] = (multiplier &amp;amp; 0x00000000ff000000) &amp;gt;&amp;gt; 24
+    block[6] = (multiplier &amp;amp; 0x000000ff00000000) &amp;gt;&amp;gt; 32
+    block[7] = (multiplier &amp;amp; 0x0000ff0000000000) &amp;gt;&amp;gt; 40
+    block[8] = (multiplier &amp;amp; 0x00ff000000000000) &amp;gt;&amp;gt; 48
+    block[9] = (multiplier &amp;amp; 0xff00000000000000) &amp;gt;&amp;gt; 56
+
+    # Encoding of: imul rdi, rax
+    block[10] = 0x48
+    block[11] = 0x0f
+    block[12] = 0xaf
+    block[13] = 0xc7
+
+    # Encoding of: retq
+    block[14] = 0xc3
+
+    # Return a ctypes function with the right prototype
+    function = ctypes.CFUNCTYPE(ctypes.c_uint64)
+    function.restype = ctypes.c_uint64
+    return function
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;At the bottom, we return the ctypes function signature to be used with this code. It's somewhat arbitrarily placed, but I thought it was good to keep the signature close to the machine code.&lt;/p&gt;
+&lt;h2&gt;The final part&lt;/h2&gt;
+&lt;p&gt;Now that we have the basic parts we can weave everything together. The first part is to allocate one page of memory:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;pagesize = sysconf(_SC_PAGESIZE)
+block = create_block(pagesize)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Next, we generate the machine code. Let's pick the number 101 to use as a multiplier.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;mul101_signature = make_multiplier(block, 101)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;We now mark the memory region as executable and read-only:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;make_executable(block, pagesize)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Take the address of the first byte in the memory block and cast it to a callable ctypes function with proper signature:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;address = ctypes.cast(block, ctypes.c_void_p).value
+mul101 = mul101_signature(address)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;To get the memory address of the block, we use ctypes to cast it to a void pointer and extract its value. Finally, we instantiate an actual function from this address using the &lt;code&gt;mul101_signature&lt;/code&gt; constructor.&lt;/p&gt;
+&lt;p&gt;Voila! We now have a piece of &lt;em&gt;native&lt;/em&gt; code that we can call from Python. If you're in a REPL, you can try it directly:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;&amp;gt;&amp;gt;&amp;gt; print(mul101(8))
+808
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Note that this small multiplication function will run slower than a native Python calculation. That's mainly because ctypes, being a foreign-function library, has a lot of overhead: It needs to inspect what dynamic types you pass the function every time you call it, then unbox them, convert them and then do the same with the return value. So the trick is to either use assembly because you have to access some new Intel instruction, or because you compile something like Brainfuck to native code.&lt;/p&gt;
+&lt;p&gt;Finally, if you want to, you can let the system reclaim the memory holding the function. Beware that after this, you will probably crash the process if you try calling the code again. So probably best to delete all references in Python as well:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;destroy_block(block, pagesize)
+
+del block
+del mul101
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;If you run the code in its complete form from the &lt;a href=&quot;https://github.com/cslarsen/minijit&quot;&gt;GitHub&lt;/a&gt; repository, you can run the &lt;code&gt;mj.py&lt;/code&gt; program and put the multiplication constant on the command line:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;    $ python mj.py 11
+    Pagesize: 4096
+    Allocating one page of memory
+    JIT-compiling a native mul-function w/arg 11
+    Making function block executable
+    Testing function
+    mul(0) = 0
+    mul(1) = 11
+    mul(2) = 22
+    mul(3) = 33
+    mul(4) = 44
+    mul(5) = 55
+    mul(6) = 66
+    mul(7) = 77
+    mul(8) = 88
+    mul(9) = 99
+    Deallocating function
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2&gt;Debugging JIT-code&lt;/h2&gt;
+&lt;p&gt;If you want to continue learning with this simple program, you'll quickly want to disassemble the machine code you generate. One option is to simply use gdb or lldb, but you need to know where to break. One trick is to just print the hex value of the &lt;code&gt;block&lt;/code&gt; address and then wait for a keystroke:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;print(&quot;address: 0x%x&quot; % address)
+print(&quot;Press enter to continue&quot;)
+raw_input()
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Then you just run the program in the debugger, break into the debugger while the program is pausing, and disassemble the memory location. Of course you can also step-debug through the assembly code if you want to see what's going on. Here's an example lldb session:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;$ lldb python
+...
+(lldb) run mj.py 101
+...
+(lldb) c
+Process 19329 resuming
+...
+address 0x1002fd000
+Press ENTER to continue
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;At this point, hit CTRL+C to break back into the debugger, then disassemble from the memory location:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;(lldb) x/3i 0x1002fd000
+    0x1002fd000: 48 b8 65 00 00 00 00 00 00 00  movabsq $0x65, %rax
+    0x1002fd00a: 48 0f af c7                    imulq  %rdi, %rax
+    0x1002fd00e: c3                             retq
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Notice that 65 hex is 101 in decimal, which was the command line argument we passed above.&lt;/p&gt;
+&lt;p&gt;If you're not interested in debugging, but just want a disassembler, I recommend the &lt;a href=&quot;http://www.capstone-engine.org/lang_python.html&quot;&gt;Capstone&lt;/a&gt; module.&lt;/p&gt;
+&lt;h2&gt;What's next?&lt;/h2&gt;
+&lt;p&gt;A good exercise would be to JIT-compile &lt;a href=&quot;https://en.wikipedia.org/wiki/Brainfuck&quot;&gt;Brainfuck programs&lt;/a&gt; to native code. If you want to jump right in, I've made a GitHub repository at &lt;a href=&quot;https://github.com/cslarsen/brainfuck-jit&quot;&gt;https://github.com/cslarsen/brainfuck-jit&lt;/a&gt;. I even have a &lt;a href=&quot;https://speakerdeck.com/csl/how-to-make-a-simple-virtual-machine&quot;&gt;Speaker Deck presentation&lt;/a&gt; to go with it. It performs JIT-ing and optimizations, but uses GNU Lightning to compile native code instead of this approach. It should be extremely simple to boot out GNU Lightning in favor or some code generation of your own. An interesting note on the Brainfuck project is that if you just JIT-compile each Brainfuck instruction one-by-one, you won't get much of a speed boost, even if you run native code. The entire speed boost is done in the &lt;em&gt;code optimization&lt;/em&gt; stage, where you can bulk up integer operations into one or a few x86 instructions. Another candidate for such compilation would be the &lt;a href=&quot;https://github.com/nornagon/jonesforth/blob/master/jonesforth.S&quot;&gt;Forth language&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Also, before you get serious about expanding this JIT-compiler, take a look at the &lt;a href=&quot;https://github.com/Maratyszcza/PeachPy&quot;&gt;Peachpy project&lt;/a&gt;. It goes way beyond this and includes a disassembler and supports seemingly the entire x86-64 instruction set right up to &lt;a href=&quot;https://en.wikipedia.org/wiki/Advanced_Vector_Extensions&quot;&gt;AVX&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;As mentioned, there is a good deal of overhad when using ctypes to call into functions. You can use the &lt;code&gt;cffi&lt;/code&gt; module to overcome some of this, but the fact remains that if you want to call very small JIT-ed functions a large number of times, it's usually faster to just use pure Python.&lt;/p&gt;
+&lt;p&gt;What other cool uses are there? I've seen some math libraries in Python that switch to vector operations for higher performance. But I can imagine other fun things as well. For example, tools to compress and decompress native code, access virtualization primitives, sign code and so on. I do know that some &lt;a href=&quot;https://en.wikipedia.org/wiki/Berkeley_Packet_Filter&quot;&gt;BPF&lt;/a&gt; tools and regex modules JIT-compile queries for faster processing.&lt;/p&gt;
+&lt;p&gt;What I think is fun about this exercise is to get into deeper territory than pure assembly. One thing that comes to mind is how different instructions are disassembled to the same mnemonic. For example, the RETQ instruction has a different opcode than an ordinary RET, because it operates on 64-bit values. This is something that may not be important when doing assembly programming, because it's a detail that may not always matter, but it's worth being aware of the difference. I saw that gcc, lldb and objdump gave slightly different disassembly listings of the same code for RETQ and MOVABSQ.&lt;/p&gt;
+&lt;p&gt;There's another takeaway. I've mentioned that the native Brainfuck compiler I made didn't initially produce very fast code. I had to optimize to get it fast. So things won't go fast just because you use AVX, Cuda or whatever. The cold truth is that gcc contains a vast database of optimizations that you cannot possibly replicate by hand. Felix von Letiner has a &lt;a href=&quot;http://www.fefe.de/source-code-optimization.pdf&quot;&gt;classic talk about source code optimization&lt;/a&gt; that I recommend for more on this.&lt;/p&gt;
+</description>
+<pubDate>Thu, 09 Nov 2017 20:22:57 +0000</pubDate>
+<dc:creator>csl</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://csl.name/post/python-jit/</dc:identifier>
+</item>
+<item>
 <title>Creating a Modern OCR Pipeline Using Computer Vision and Deep Learning</title>
 <link>https://blogs.dropbox.com/tech/2017/04/creating-a-modern-ocr-pipeline-using-computer-vision-and-deep-learning/</link>
 <guid isPermaLink="true" >https://blogs.dropbox.com/tech/2017/04/creating-a-modern-ocr-pipeline-using-computer-vision-and-deep-learning/</guid>
@@ -257,8 +581,9 @@
 <title>Sean Parker unloads on Facebook “exploiting” human psychology</title>
 <link>https://www.axios.com/sean-parker-unloads-on-facebook-2508036343.html</link>
 <guid isPermaLink="true" >https://www.axios.com/sean-parker-unloads-on-facebook-2508036343.html</guid>
-<description>&lt;p&gt;Keith Schiller, who was Donald Trump's bodyguard for many years and served in the White House as Director of Oval Office Operations, told congressional investigators this week that a Russian associated with the 2013 Miss Universe pageant offered to &quot;send five women&quot; to Trump's Moscow hotel room, but was rejected, &lt;a href=&quot;https://www.nbcnews.com/news/us-news/trump-bodyguard-testifies-russian-offered-trump-women-was-turned-down-n819386&quot; target=&quot;_blank&quot;&gt;NBC News reports&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;Per the report, Schiller said he thought the offer was a joke and said, &quot;we don't do that type of stuff.&quot; Schiller was before the House Intelligence Committee, and addressing the contents of the Steele dossier, which alleged that Russia had tapes of Trump engaging in compromising activities in his hotel room. Schiller testified he was &quot;confident&quot; nothing of the sort had taken place, per the report.&lt;/p&gt;
+<description>&lt;p&gt;Stephen Miller, a White House senior policy adviser, was interviewed by Special Counsel Robert Mueller in his ongoing Russia probe, specifically regarding possible obstruction of justice, &lt;a href=&quot;http://www.cnn.com/2017/11/09/politics/stephen-miller-interviewed-special-counsel-russia-investigation/index.html&quot; target=&quot;_blank&quot;&gt;per CNN&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Why it matters:&lt;/strong&gt; Miller is the highest-level White House official to be swept up in the Russia probe and he's yet another person involved that is close to Trump, who continues to claim there's been &quot;no collusion&quot; and that it's all a hoax.&lt;br/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;What they discussed:&lt;/strong&gt; Miller's role in firing former FBI director James Comey and the March 2016 meeting — organized by George Papadopoulous (who was charged in Mueller's probe) — in which he told Miller and others that he was trying to set up a meeting with Vladimir Putin.&lt;br/&gt;&lt;/p&gt;
 </description>
 <pubDate>Thu, 09 Nov 2017 13:03:32 +0000</pubDate>
 <dc:creator>jbuild</dc:creator>
@@ -580,422 +905,422 @@
 <og:description>A tale of three Switches, and a reminder of the importance of good customer service</og:description>
 <og:type>article</og:type>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://headmelted.com/i-bought-a-switch-from-nintendo-and-they-threatened-me-with-legal-action-6ea77b4f1eb9?gi=b5cf2bfbbe18</dc:identifier>
+<dc:identifier>https://headmelted.com/i-bought-a-switch-from-nintendo-and-they-threatened-me-with-legal-action-6ea77b4f1eb9?gi=951665a47030</dc:identifier>
 </item>
 <item>
 <title>OVH Incident in Strasbourg</title>
 <link>http://status.ovh.com</link>
 <guid isPermaLink="true" >http://status.ovh.com</guid>
-<description>&lt;div id=&quot;tasklist_table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=id&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;ID&lt;/a&gt;&lt;/th&gt;
-&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=proj&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Project&lt;/a&gt;&lt;/th&gt;
-&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=type&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Task Type&lt;/a&gt;&lt;/th&gt;
-&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=cat&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Category&lt;/a&gt;&lt;/th&gt;
+<description>&lt;div id=&quot;tasklist_table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=id&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;ID&lt;/a&gt;&lt;/th&gt;
+&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=proj&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Project&lt;/a&gt;&lt;/th&gt;
+&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=type&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Task Type&lt;/a&gt;&lt;/th&gt;
+&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=cat&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Category&lt;/a&gt;&lt;/th&gt;
 &lt;th&gt;Summary&lt;/th&gt;
-&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=status&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Status&lt;/a&gt;&lt;/th&gt;
-&lt;th class=&quot;orderby&quot;&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=lastedit&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Last Edited  &lt;img src=&quot;http://status.ovh.com/themes/Bluey/desc.png&quot; alt=&quot;icon&quot; /&gt;&lt;/a&gt;&lt;/th&gt;
-&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=prog&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Progress&lt;/a&gt;&lt;/th&gt;
-&lt;/tr&gt;&lt;/thead&gt;&lt;tr id=&quot;task15162&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15162&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15162&lt;/a&gt;&lt;/td&gt;
+&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=status&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Status&lt;/a&gt;&lt;/th&gt;
+&lt;th class=&quot;orderby&quot;&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=lastedit&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=asc&amp;amp;order2=&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Last Edited  &lt;img src=&quot;http://status.ovh.com/themes/Bluey/desc.png&quot; alt=&quot;icon&quot; /&gt;&lt;/a&gt;&lt;/th&gt;
+&lt;th&gt;&lt;a title=&quot;Sort by this column&quot; href=&quot;http://status.ovh.com/?order=prog&amp;amp;project=0&amp;amp;tasks=&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;sort=desc&amp;amp;order2=lastedit&amp;amp;sort2=desc&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Progress&lt;/a&gt;&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tr id=&quot;task15162&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15162&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15162&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Strasbourg&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15162&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;SBG&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15162&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;SBG&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;In progress&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-09&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15161&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15161&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15161&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15161&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15161&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15161&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15161&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;sbg2-19a/b-n56&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15161&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;sbg2-19a/b-n56&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-09&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15160&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15160&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15160&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15160&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15160&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15160&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;RBX-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15160&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Rack/Baie 31A03 - vRack&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15160&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Rack/Baie 31A03 - vRack&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15159&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15159&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15159&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15159&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15159&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15159&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Planned Work&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;BHS-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15159&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Nexus 3k bhs6&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15159&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Nexus 3k bhs6&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15158&quot; class=&quot;severity1&quot; readability=&quot;1.14&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15158&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15158&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15158&quot; class=&quot;severity1&quot; readability=&quot;1.14&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15158&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15158&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Planned Work&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15158&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Nexus 3k lim1/gra1/rbx4/rbx6/sbg1/waw1&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15158&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Nexus 3k lim1/gra1/rbx4/rbx6/sbg1/waw1&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15154&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15154&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15154&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15154&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15154&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15154&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Backbone APAC&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15154&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;SYD &amp;lt;&amp;gt; SGP&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15154&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;SYD &amp;lt;&amp;gt; SGP&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15153&quot; class=&quot;severity1&quot; readability=&quot;1.1764705882353&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15153&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15153&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15153&quot; class=&quot;severity1&quot; readability=&quot;1.1764705882353&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15153&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15153&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Gravelines&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15153&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Gravelines &amp;lt; &amp;gt; Frankfurt links&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15153&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Gravelines &amp;lt; &amp;gt; Frankfurt links&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15157&quot; class=&quot;severity1&quot; readability=&quot;1.2183908045977&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15157&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15157&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15157&quot; class=&quot;severity1&quot; readability=&quot;1.2183908045977&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15157&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15157&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Backbone US&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15157&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Beauharnois &amp;lt; &amp;gt; Toronto links&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15157&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Beauharnois &amp;lt; &amp;gt; Toronto links&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15156&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15156&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15156&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15156&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15156&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15156&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;RBX-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15156&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;rbx6-21a/b-n56&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15156&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;rbx6-21a/b-n56&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15155&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15155&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15155&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15155&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15155&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15155&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15155&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;gra1-24a/b-n56&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15155&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;gra1-24a/b-n56&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-08&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15151&quot; class=&quot;severity1&quot; readability=&quot;1.1111111111111&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15151&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15151&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15151&quot; class=&quot;severity1&quot; readability=&quot;1.1111111111111&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15151&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15151&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Strasbourg&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15151&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Strasbourg &amp;lt; &amp;gt; Zurich / Milan links&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15151&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Strasbourg &amp;lt; &amp;gt; Zurich / Milan links&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-06&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15152&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15152&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15152&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15152&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15152&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15152&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Backbone EU&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15152&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;bor-1-6k &amp;lt;&amp;gt; th2-1-n7&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15152&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;bor-1-6k &amp;lt;&amp;gt; th2-1-n7&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-03&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15146&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15146&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15146&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15146&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15146&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15146&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;RBX-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15146&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;rbx6-sd1ab-n9&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15146&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;rbx6-sd1ab-n9&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-03&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-10.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;10% complete&quot; title=&quot;10% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15142&quot; class=&quot;severity1&quot; readability=&quot;1.1363636363636&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15142&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15142&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15142&quot; class=&quot;severity1&quot; readability=&quot;1.1363636363636&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15142&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15142&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Strasbourg&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15142&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Routing - Strasbourg Datacenter 2&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15142&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Routing - Strasbourg Datacenter 2&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-03&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15150&quot; class=&quot;severity1&quot; readability=&quot;3.2&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15150&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15150&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15150&quot; class=&quot;severity1&quot; readability=&quot;3.2&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15150&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15150&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15150&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G113B04, G114B04, G114B11, G115A13, G115A24, G115A25&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15150&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G113B04, G114B04, G114B11, G115A13, G115A24, G115A25&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15149&quot; class=&quot;severity1&quot; readability=&quot;3.5121951219512&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15149&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15149&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15149&quot; class=&quot;severity1&quot; readability=&quot;3.5121951219512&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15149&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15149&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15149&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G105B19, G106A04, G106B03, G106A09, G106A10, G106A11, G106A17, G106A19&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15149&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G105B19, G106A04, G106B03, G106A09, G106A10, G106A11, G106A17, G106A19&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15148&quot; class=&quot;severity1&quot; readability=&quot;3.3684210526316&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15148&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15148&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15148&quot; class=&quot;severity1&quot; readability=&quot;3.3684210526316&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15148&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15148&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15148&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G104A19, G104A20, G104B03, G104B14, G104B16, G105B07, G105B18&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15148&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G104A19, G104A20, G104B03, G104B14, G104B16, G105B07, G105B18&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15147&quot; class=&quot;severity1&quot; readability=&quot;3.3488372093023&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15147&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15147&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15147&quot; class=&quot;severity1&quot; readability=&quot;3.3488372093023&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15147&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15147&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;RBX-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15147&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;46A16, 46A26, 46B08, 46B09, 46C02&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15147&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;46A16, 46A26, 46B08, 46B09, 46C02&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15136&quot; class=&quot;severity1&quot; readability=&quot;3.3176470588235&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15136&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15136&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15136&quot; class=&quot;severity1&quot; readability=&quot;3.3176470588235&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15136&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15136&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15136&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;71A36, 71A37, 71A39, 71B06, 71B04&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15136&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;71A36, 71A37, 71A39, 71B06, 71B04&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15145&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15145&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15145&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15145&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15145&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15145&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15145&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Phone support - APAC&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15145&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Phone support - APAC&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-02&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15143&quot; class=&quot;severity1&quot; readability=&quot;1.0823529411765&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15143&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15143&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15143&quot; class=&quot;severity1&quot; readability=&quot;1.0823529411765&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15143&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15143&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Sydney&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15143&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;syd1-c1/c2-n92 - network migration&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15143&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;syd1-c1/c2-n92 - network migration&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-01&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15144&quot; class=&quot;severity1&quot; readability=&quot;1.2134831460674&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15144&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15144&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15144&quot; class=&quot;severity1&quot; readability=&quot;1.2134831460674&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15144&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15144&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15144&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Strasbourg &amp;lt; &amp;gt; Frankfurt links&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15144&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Strasbourg &amp;lt; &amp;gt; Frankfurt links&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-11-01&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15127&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15127&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15127&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15127&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15127&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15127&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Gravelines&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15127&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Gravelines &amp;lt; &amp;gt; Amsterdam&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15127&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Gravelines &amp;lt; &amp;gt; Amsterdam&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-31&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15141&quot; class=&quot;severity1&quot; readability=&quot;1.2405063291139&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15141&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15141&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15141&quot; class=&quot;severity1&quot; readability=&quot;1.2405063291139&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15141&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15141&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Singapore&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15141&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Singapore DC - sgp-g2-a72&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15141&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Singapore DC - sgp-g2-a72&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-31&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15140&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15140&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15140&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15140&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15140&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15140&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SGP-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15140&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;sgp1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15140&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;sgp1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15139&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15139&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15139&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15139&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15139&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15139&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SYD-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15139&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;syd1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15139&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;syd1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15138&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15138&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15138&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15138&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15138&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15138&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15138&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;71B55, 71B37, 71B54&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15138&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;71B55, 71B37, 71B54&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15137&quot; class=&quot;severity1&quot; readability=&quot;3.3488372093023&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15137&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15137&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15137&quot; class=&quot;severity1&quot; readability=&quot;3.3488372093023&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15137&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15137&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15137&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;71B08, 71B51, 71B52, 71B36, 71B33&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15137&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;71B08, 71B51, 71B52, 71B36, 71B33&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15135&quot; class=&quot;severity1&quot; readability=&quot;3.0128205128205&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15135&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15135&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15135&quot; class=&quot;severity1&quot; readability=&quot;3.0128205128205&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15135&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15135&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15135&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;71A46, 71A47, 71A48, 71A49&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15135&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;71A46, 71A47, 71A48, 71A49&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15133&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15133&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15133&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15133&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15133&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15133&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15133&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G113A15, G113B08, G115A20, G115A23&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15133&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G113A15, G113B08, G115A20, G115A23&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15134&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15134&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15134&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15134&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15134&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15134&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15134&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G115A12, G115A22, G115B14, G104A09&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15134&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G115A12, G115A22, G115B14, G104A09&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15131&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15131&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15131&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15131&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15131&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15131&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15131&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G114B19, G115A07, G115A10, G115A11&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15131&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G114B19, G115A07, G115A10, G115A11&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15130&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15130&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15130&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15130&quot; class=&quot;severity1&quot; readability=&quot;2.7325581395349&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15130&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15130&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15130&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;G114A09, G114A16, G114A19, G114A20&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15130&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;G114A09, G114A16, G114A19, G114A20&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15126&quot; class=&quot;severity1&quot; readability=&quot;1.0309278350515&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15126&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15126&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15126&quot; class=&quot;severity1&quot; readability=&quot;1.0309278350515&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15126&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15126&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Strasbourg&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15126&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Routing Protocol - Strasbourg Datacenter 2&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15126&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Routing Protocol - Strasbourg Datacenter 2&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-30&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15132&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15132&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15132&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15132&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15132&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15132&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;GRA-1&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15132&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;gra1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15132&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;gra1-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-27&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15129&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15129&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15129&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15129&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15129&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15129&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Backbone US&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15129&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;CHI-PAO&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15129&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;CHI-PAO&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-26&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15128&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15128&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15128&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15128&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15128&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15128&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;BHS-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15128&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;bhs6-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15128&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;bhs6-c1/c2-n92&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-26&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15125&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15125&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15125&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15125&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15125&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15125&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Modernization&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;BHS-6&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15125&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;bhs6-sd1ab-n9&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15125&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;bhs6-sd1ab-n9&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-26&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15123&quot; class=&quot;severity1&quot; readability=&quot;1.0526315789474&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15123&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15123&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15123&quot; class=&quot;severity1&quot; readability=&quot;1.0526315789474&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15123&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15123&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Strasbourg&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15123&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Routing Protocol - Strasbourg Datacenter&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15123&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Routing Protocol - Strasbourg Datacenter&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-26&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15122&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15122&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15122&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15122&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15122&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15122&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Planned Work&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;BHS-4&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15122&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;bhs2-16ab-n56&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15122&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;bhs2-16ab-n56&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-25&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15124&quot; class=&quot;severity1&quot; readability=&quot;1.2405063291139&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15124&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15124&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15124&quot; class=&quot;severity1&quot; readability=&quot;1.2405063291139&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15124&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15124&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Singapore&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15124&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Singapore DC - sgp-g1-a72&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15124&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Singapore DC - sgp-g1-a72&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-25&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15120&quot; class=&quot;severity1&quot; readability=&quot;1.0561797752809&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15120&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15120&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15120&quot; class=&quot;severity1&quot; readability=&quot;1.0561797752809&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15120&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15120&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Warsawa&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15120&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Routing Protocol - Warsawa Datacenter&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15120&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Routing Protocol - Warsawa Datacenter&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-25&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15121&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15121&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15121&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15121&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15121&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15121&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;SBG-2&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15121&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;sbg2-106a-n56-vrack&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15121&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;sbg2-106a-n56-vrack&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Planned&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-23&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-0.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;0% complete&quot; title=&quot;0% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15112&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15112&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15112&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15112&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15112&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15112&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15112&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;vac1-1-n7&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15112&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;vac1-1-n7&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-23&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15083&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15083&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15083&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15083&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15083&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15083&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15083&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Gravelines &amp;lt; &amp;gt; Brussels&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15083&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Gravelines &amp;lt; &amp;gt; Brussels&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-23&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15119&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15119&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15119&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15119&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15119&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15119&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;BHS-4&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15119&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;BHS4&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15119&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;BHS4&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-23&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15110&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15110&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15110&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15110&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15110&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15110&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Incident&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Gravelines&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15110&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;gra-d1-a75&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15110&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;gra-d1-a75&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-23&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15118&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15118&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15118&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15118&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15118&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15118&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;RBX-5&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15118&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;vss-12ab-6k&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15118&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;vss-12ab-6k&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-20&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15117&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15117&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15117&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15117&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15117&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15117&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15117&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;167.114.0.0/16&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15117&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;167.114.0.0/16&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-20&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;task15116&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15116&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;15116&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr id=&quot;task15116&quot; class=&quot;severity1&quot;&gt;&lt;td class=&quot;task_id&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15116&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;15116&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_project&quot;&gt;Network&lt;/td&gt;
 &lt;td class=&quot;task_tasktype&quot;&gt;Maintenance&lt;/td&gt;
 &lt;td class=&quot;task_category&quot;&gt;Whole Network&lt;/td&gt;
-&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15116&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;54.36.0.0/14&lt;/a&gt;&lt;/td&gt;
+&lt;td class=&quot;task_summary&quot;&gt;&lt;a href=&quot;http://status.ovh.com/?do=details&amp;amp;id=15116&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;54.36.0.0/14&lt;/a&gt;&lt;/td&gt;
 &lt;td class=&quot;task_status&quot;&gt;Closed&lt;/td&gt;
 &lt;td class=&quot;task_lastedit&quot;&gt;2017-10-20&lt;/td&gt;
 &lt;td class=&quot;task_progress&quot;&gt;&lt;img src=&quot;http://status.ovh.com/themes/Bluey/percent-100.png&quot; width=&quot;100&quot; height=&quot;10&quot; alt=&quot;100% complete&quot; title=&quot;100% complete&quot; /&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;/div&gt;&lt;div id=&quot;pagenumbers&quot;&gt;&lt;tr readability=&quot;3.2470588235294&quot;&gt;&lt;td id=&quot;taskrange&quot;&gt;Showing tasks 1 - 50 of 15085&lt;/td&gt;
-&lt;td id=&quot;numbers&quot;&gt;Page 1 of 302 &lt;span class=&quot;DoNotPrint&quot;&gt;  --   &lt;strong&gt;1&lt;/strong&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=2&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;2&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=3&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;3&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=4&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;4&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=2&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Next &amp;gt;&lt;/a&gt; &lt;a href=&quot;http://status.ovh.com/?pagenum=302&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=a5382561e67d14e087fd62b12c44a9e5&quot;&gt;Last &amp;gt;&amp;gt;&lt;/a&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td id=&quot;numbers&quot;&gt;Page 1 of 302 &lt;span class=&quot;DoNotPrint&quot;&gt;  --   &lt;strong&gt;1&lt;/strong&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=2&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;2&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=3&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;3&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=4&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;4&lt;/a&gt; - &lt;a href=&quot;http://status.ovh.com/?pagenum=2&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Next &amp;gt;&lt;/a&gt; &lt;a href=&quot;http://status.ovh.com/?pagenum=302&amp;amp;string=&amp;amp;type=&amp;amp;sev=&amp;amp;dev=&amp;amp;due=&amp;amp;cat=&amp;amp;status=&amp;amp;order2=&amp;amp;sort=&amp;amp;sort2=&amp;amp;date=&amp;amp;project=&amp;amp;order=lastedit&amp;amp;PHPSESSID=4d2fbe8b26f59999eb7d697f10e953f9&quot;&gt;Last &amp;gt;&amp;gt;&lt;/a&gt;&lt;/span&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;/div&gt;</description>
 <pubDate>Thu, 09 Nov 2017 08:28:40 +0000</pubDate>
 <dc:creator>fvv</dc:creator>
@@ -1187,31 +1512,6 @@
 <dc:language>en-US</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://www.asia.finance/entrepreneur/entrepreneurs-not-special-breed/</dc:identifier>
-</item>
-<item>
-<title>Senators push to ditch social security numbers in light of Equifax hack</title>
-<link>https://techcrunch.com/2017/11/08/are-social-security-numbers-going-away/</link>
-<guid isPermaLink="true" >https://techcrunch.com/2017/11/08/are-social-security-numbers-going-away/</guid>
-<description>&lt;img src=&quot;https://tctechcrunch2011.files.wordpress.com/2017/09/gettyimages-679539624.jpg?w=738&quot; class=&quot;&quot;/&gt;&lt;p id=&quot;speakable-summary&quot;&gt;Eyeing more secure alternatives to Social Security numbers, lawmakers in the U.S. are looking abroad. Today, the Senate Commerce Committee questioned &lt;a target=&quot;_blank&quot; href=&quot;https://techcrunch.com/2017/11/08/yahoo-senate-commerce-hearing-russia-3-billion-hack/&quot; rel=&quot;noopener&quot;&gt;former Yahoo CEO Marissa Mayer&lt;/a&gt;, Verizon chief privacy officer Karen Zacharia and both the current and former CEOs of Equifax on how to protect consumers against major data breaches. The consensus was that Social Security numbers have got to go.&lt;/p&gt;&lt;p&gt;Rounding out the panel, Entrust Datacard president and CEO Todd Wilkinson offered some context and insight about why the U.S. should indeed move away from Social Security numbers — a step that the witnesses unanimously agreed was necessary if not wholly sufficient to protect consumers moving forward, in light of the &lt;a target=&quot;_blank&quot; href=&quot;https://techcrunch.com/tag/equifax-hack/&quot; rel=&quot;noopener&quot;&gt;Equifax hack&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;“Over 145 million Americans’ insecure identities are now forever at risk, and they have limited ability to protect themselves,” Wilkinson said. “A key question for this committee to consider is: What do we do now given these identities are forever compromised?”&lt;/p&gt;
-&lt;p&gt;Social Security numbers are a privacy nightmare. While a consumer who gets hacked can replace credit card numbers and other account details, a Social Security number is relatively permanent, linked to a real identity throughout a person’s lifespan. In the hearing, Wilkinson and many of the senators present argued that the U.S. needs to move to a dynamic system of personal identity, one designed with digital security in mind — a stark contrast with an inflexible legacy system that dates back to the 1930s.&lt;/p&gt;
-&lt;p&gt;“Some combination of digital multi-factor authentication… is the right path,” former Equifax CEO Richard Smith said when asked about such a program.&lt;/p&gt;
-
-&lt;p&gt;Multiple times throughout the hearing, Brazil’s Infraestrutura de Chaves Públicas system of citizen IDs through digital certificates came up as a potential model for the U.S. as it moves forward. In this model, a certificate lasts for three years at maximum and can be used to issue a digital signature much like written signatures are used now. Unlike its counterpart in the U.S., these identity accounts can be revoked and reissued easily through an established national protocol.&lt;/p&gt;
-&lt;p&gt;Members of the Senate committee also advocated for “rigorous” data security rules, expanding FTC authority to enforce them and stiffer penalties to motivate companies to protect consumers proactively.&lt;/p&gt;
-&lt;p&gt;“The parade of high-profile data breaches seems to have no end,” said ranking committee member Bill Nelson. “We can either take action with common sense rules or we can start planning for our next hearing on the issue.”&lt;/p&gt;
-&lt;p&gt;Last month, White House cybersecurity coordinator Rob Joyce made it clear that the Trump administration is also interested in &lt;a target=&quot;_blank&quot; href=&quot;http://thehill.com/policy/cybersecurity/353588-white-house-cyber-coordinator-calls-for-end-of-social-security-numbers&quot; rel=&quot;noopener&quot;&gt;abandoning Social Security numbers&lt;/a&gt; in favor of a more secure, more digital form of identification, stating that the form of ID has “outlived its usefulness.”&lt;/p&gt;
-&lt;small&gt;Featured Image: Douglas Sacha/Getty Images&lt;/small&gt;</description>
-<pubDate>Wed, 08 Nov 2017 22:49:56 +0000</pubDate>
-<dc:creator>Varcht</dc:creator>
-<og:title>Senators push to ditch Social Security numbers in light of Equifax hack</og:title>
-<og:description>Eyeing more secure alternatives to Social Security numbers, lawmakers in the U.S. are looking abroad. Today, the Senate Commerce Committee questioned former..</og:description>
-<og:image>https://tctechcrunch2011.files.wordpress.com/2017/09/gettyimages-679539624.jpg</og:image>
-<og:url>http://social.techcrunch.com/2017/11/08/are-social-security-numbers-going-away/</og:url>
-<og:type>article</og:type>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://techcrunch.com/2017/11/08/are-social-security-numbers-going-away/</dc:identifier>
 </item>
 </channel>
 </rss>
