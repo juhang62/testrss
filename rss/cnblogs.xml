@@ -9,6 +9,337 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Docker Swarm 中最重要的概念- 每天5分钟玩转 Docker 容器技术（94） - CloudMan</title>
+<link>http://www.cnblogs.com/CloudMan6/p/7845365.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CloudMan6/p/7845365.html</guid>
+<description>&lt;p&gt;从主机的层面来看，Docker Swarm 管理的是 Docker Host 集群。所以先来讨论一个重要的概念 - 集群化（Clustering）。&lt;/p&gt;
+&lt;p&gt;服务器集群由一组网络上相互连接的服务器组成，它们一起协同工作。一个集群和一堆服务器最显著的区别在于：&lt;/p&gt;
+&lt;p&gt;集群能够像&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;strong&gt;单个&lt;/strong&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;系统那样工作，同时提供高可用、负载均衡和并行处理。&lt;/p&gt;
+&lt;p&gt;如果我们部署应用和服务时选择的是多个独立的服务器而非集群，资源的整体利用率则很难达到最优，因为我们无法提前知道如何分布这些应用才能达到资源利用的最大化。而且，应用使用资源的趋势是波动的，早上某些服务可能需要大量的内存，而下午使用量就降下来了。提前指定应用应该运行在哪个服务器上会丧失业务的弹性，当某个服务器宕机了，我们不得不手工将受影响的应用迁移到其他服务器上。&lt;/p&gt;
+&lt;p&gt;实现集群化后我们的思维方式就必须改变了：不再考虑一个一个的服务器，而是将集群看做是一个整体。&lt;/p&gt;
+&lt;p&gt;部署应用时，我们只考虑需要多少内存和 CPU，而不是考虑会使用那台服务器的内存和 CPU。我们不应该关心应用会被部署在哪里，我们关心的是运行这个应用需要哪些资源，然后将它部署到集群，集群管理程序（比如 Docker Swarm）会搞定这些细节。&lt;/p&gt;
+&lt;p&gt;集群整体容量的调整是通过往集群中添加和删除主机节点实现的。但不管做怎样的操作，集群始终还是一个整体。&lt;/p&gt;
+&lt;p&gt;本章，我们会创建 Docker Swarm 集群、部署应用、伸缩扩展应用，以及对应用执行滚动升级。&lt;/p&gt;
+&lt;h3&gt;Docker Swarm Mode&lt;/h3&gt;
+&lt;p&gt;Docker v1.12 是一个非常重要的版本，Docker 重新实现了集群的编排方式。在此之前，提供集群功能的 Docker Swarm 是一个单独的软件，而且依赖外部数据库（比如 Consul、etcd 或 Zookeeper）。&lt;/p&gt;
+&lt;p&gt;从 v1.12 开始，Docker Swarm 的功能已经完全与 Docker Engine 集成，要管理集群，只需要启动 Swarm Mode。安装好 Docker，Swarm 就已经在那里了，服务发现也在那里了（不需要安装 Consul 等外部数据库）。&lt;/p&gt;
+&lt;p&gt;相比 Kubernetes，用 Docker Swarm 创建集群非常简单，不需要额外安装任何软件，也不需要做任何额外的配置。很适合作为学习容器编排引擎的起点。&lt;/p&gt;
+&lt;h3&gt;重要概念&lt;/h3&gt;
+&lt;p&gt;在创建集群之前，先明确几个概念。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;swarm&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;swarm 运行 Docker Engine 的多个主机组成的集群。&lt;/p&gt;
+&lt;p&gt;从 v1.12 开始，集群管理和编排功能已经集成进 Docker Engine。当 Docker Engine 初始化了一个 swarm 或者加入到一个存在的 swarm 时，它就启动了 swarm mode。&lt;/p&gt;
+&lt;p&gt;没启动 swarm mode 时，Docker 执行的是容器命令；运行 swarm mode 后，Docker 增加了编排 service 的能力。&lt;/p&gt;
+&lt;p&gt;Docker 允许在同一个 Docker 主机上既运行 swarm service，又运行单独的容器。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;node&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;swarm 中的每个 Docker Engine 都是一个 node，有两种类型的 node：&lt;strong&gt;manager&lt;/strong&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;和&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;strong&gt;worker&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;为了向 swarm 中部署应用，我们需要在 manager node 上执行部署命令，manager node 会将部署任务拆解并分配给一个或多个 worker node 完成部署。&lt;/p&gt;
+&lt;p&gt;manager node 负责执行编排和集群管理工作，保持并维护 swarm 处于期望的状态。swarm 中如果有多个 manager node，它们会自动协商并选举出一个 leader 执行编排任务。&lt;/p&gt;
+&lt;p&gt;woker node 接受并执行由 manager node 派发的任务。默认配置下 manager node 同时也是一个 worker node，不过可以将其配置成 manager-only node，让其专职负责编排和集群管理工作。&lt;/p&gt;
+&lt;p&gt;work node 会定期向 manager node 报告自己的状态和它正在执行的任务的状态，这样 manager 就可以维护整个集群的状态。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;service&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;service 定义了 worker node 上要执行的任务。swarm 的主要编排任务就是保证 service 处于期望的状态下。&lt;/p&gt;
+&lt;p&gt;举一个 service 的例子：在 swarm 中启动一个 http 服务，使用的镜像是 httpd:latest，副本数为 3。&lt;/p&gt;
+&lt;p&gt;manager node 负责创建这个 service，经过分析知道需要启动 3 个 httpd 容器，根据当前各 worker node 的状态将运行容器的任务分配下去，比如 worker1 上运行两个容器，worker2 上运行一个容器。&lt;/p&gt;
+&lt;p&gt;运行了一段时间，worker2 突然宕机了，manager 监控到这个故障，于是立即在 worker3 上启动了一个新的 httpd 容器。&lt;/p&gt;
+&lt;p&gt;这样就保证了 service 处于期望的三个副本状态。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;下一节我们开始实践&lt;/span&gt; Docker Swarm。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;书籍：&lt;/strong&gt;&lt;br/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.《每天5分钟玩转Docker容器技术》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/16936307278.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/16936307278.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;&lt;p&gt;&lt;span&gt;2.《每天5分钟玩转OpenStack》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/12086376.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/12086376.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img title=&quot;https://image.ipaiban.com/upload-ueditor-image-20171010-1507627732322012171.png&quot; src=&quot;https://image.ipaiban.com/upload-ueditor-image-20171010-1507627732322012171.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 16 Nov 2017 23:46:00 +0000</pubDate>
+<dc:creator>CloudMan</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CloudMan6/p/7845365.html</dc:identifier>
+</item>
+<item>
+<title>riot.js教程【四】Mixins、HTML内嵌表达式 - liulun</title>
+<link>http://www.cnblogs.com/liulun/p/7831084.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/liulun/p/7831084.html</guid>
+<description>&lt;blockquote readability=&quot;0.35593220338983&quot;&gt;
+&lt;p&gt;前文回顾&lt;br/&gt;&lt;a href=&quot;http://www.cnblogs.com/liulun/p/7827072.html&quot;&gt;riot.js教程【三】访问DOM元素、使用jquery、mount输入参数、riotjs标签的生命周期；&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://www.cnblogs.com/liulun/p/7681073.html&quot;&gt;riot.js教程【二】组件撰写准则、预处理器、标签样式和装配方法；&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://www.cnblogs.com/liulun/p/7672876.html&quot;&gt;riot.js教程【一】简介；&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;共享mixins&quot;&gt;共享Mixins&lt;/h2&gt;
+&lt;p&gt;混合开发可以使你很好的复用代码，如下所示：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;var OptsMixin = {
+  // the `opts` argument is the option object received by the tag as well
+  init: function(opts) {
+    this.on('updated', function() { console.log('Updated!') })
+  },
+
+  getOpts: function() {
+    return this.opts
+  },
+
+  setOpts: function(opts, update) {
+    this.opts = opts
+    if (!update) this.update()
+    return this
+  }
+}
+
+&amp;lt;my-tag&amp;gt;
+  &amp;lt;h1&amp;gt;{ opts.title }&amp;lt;/h1&amp;gt;
+
+  this.mixin(OptsMixin)
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在上面这个示例中，你给页面中所有的my-tag标签增加了两个实例方法&lt;/p&gt;
+&lt;p&gt;getOpts和setOpts&lt;/p&gt;
+&lt;p&gt;来看下面的示例&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;var my_tag_instance = riot.mount('my-tag')[0]
+
+console.log(my_tag_instance.getOpts()) // will log out any opts that the tag has
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;另外，init方法是一个特殊的方法，&lt;/p&gt;
+&lt;p&gt;当一个riot标签加载一个mixin对象时，会执行init方法&lt;/p&gt;
+&lt;p&gt;init方法不是标签的实例方法，它是不可访问的&lt;/p&gt;
+&lt;p&gt;上面例子中，我们已经为my-tag设计了一个mixin对象OptsMixin，&lt;/p&gt;
+&lt;p&gt;那么我们想为这个对象补充一个方法该如何做呢？如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;function IdMixin() {
+  this.getId = function() {
+    return this._id
+  }
+}
+
+var id_mixin_instance = new IdMixin()
+
+&amp;lt;my-tag&amp;gt;
+  &amp;lt;h1&amp;gt;{ opts.title }&amp;lt;/h1&amp;gt;
+
+  this.mixin(OptsMixin, id_mixin_instance)
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;所以一个mixin对象可以是一个json对象，&lt;/p&gt;
+&lt;p&gt;也可以是一个方法的实例&lt;/p&gt;
+&lt;h2 id=&quot;全局的mixins&quot;&gt;全局的mixins&lt;/h2&gt;
+&lt;p&gt;如果你需要为你所有的标签扩展方法&lt;/p&gt;
+&lt;p&gt;你就可以使用全局mixins&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;riot.mixin(mixinObject)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;与共享mixins不同，全局mixins会直接被所有的标签加载；&lt;/p&gt;
+&lt;p&gt;要谨慎使用全局的mixins&lt;/p&gt;
+&lt;h2 id=&quot;html内嵌表达式&quot;&gt;HTML内嵌表达式&lt;/h2&gt;
+&lt;p&gt;可以在HTML内部嵌入用大括号包裹的JS表达式，&lt;/p&gt;
+&lt;p&gt;大括号包裹的JS表达式既可以被用于文本标签，也可以被用于HTML属性&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;h3 id={ /* attribute_expression */ }&amp;gt;
+  { /* nested_expression */ }
+&amp;lt;/h3&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;下面举几个例子：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;{ title || 'Untitled' }
+{ results ? 'ready' : 'loading' }
+{ new Date() }
+{ message.length &amp;gt; 140 &amp;amp;&amp;amp; 'Message is too long' }
+{ Math.round(rating) }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;为了使你的HTML标签保持clean&lt;/p&gt;
+&lt;p&gt;建议原则是尽量使用简洁的JS表达式&lt;/p&gt;
+&lt;p&gt;如果你的表达式演变的越来越复杂了&lt;/p&gt;
+&lt;p&gt;那么考虑把表达式里的一些逻辑转义到update事件中去，如下&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;my-tag&amp;gt;
+
+  &amp;lt;!-- the `val` is calculated below .. --&amp;gt;
+  &amp;lt;p&amp;gt;{ val }&amp;lt;/p&amp;gt;
+
+  // ..on every update
+  this.on('update', function() {
+    this.val = some / complex * expression ^ here
+  })
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;HTML标签中，拥有布尔值的属性，比如checked, selected这类属性&lt;/p&gt;
+&lt;p&gt;当表达式的值为false的时候，这些属性是不会添加到HTML标签中的&lt;/p&gt;
+&lt;p&gt;下面两行代码是等价的&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;input checked={ null }&amp;gt;
+
+&amp;lt;input&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;W3C规定，这类属性，就算你没给它设置值，只要他出现在HTML标签内，那么它就等价于给这类属性设置了true的值&lt;/p&gt;
+&lt;p&gt;再来看下面这行代码&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;p class={ foo: true, bar: 0, baz: new Date(), zorro: 'a value' }&amp;gt;&amp;lt;/p&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这个标签的类名经过计算后是：foo baz zorro&lt;/p&gt;
+&lt;p&gt;因为bar的值是0，0就是false，只有值是true的才会被应用到标签上&lt;/p&gt;
+&lt;p&gt;这个特性不一定用于class，还可以用在别的地方&lt;/p&gt;
+&lt;p&gt;你还可以直接这样写：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;my-tag&amp;gt;
+  &amp;lt;p class={ classes }&amp;gt;&amp;lt;/p&amp;gt;
+  &amp;lt;script&amp;gt;
+    hasAnimation() {
+      return true
+    }
+
+    this.randomNumber = 5
+
+    this.classes = {
+      foo: true,
+      bar: false,
+      number: '3 &amp;gt; randomNumber',
+      animated: 'hasAnimation()', //注意：这里要写成字符串的形式
+      baz: new Date(),
+      zorro: 'a value'
+    }
+  &amp;lt;/script&amp;gt;
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;经过计算后P的样式类有foo number animated baz zorro&lt;/p&gt;
+&lt;p&gt;HTML标签的行内样式也可以写成类似这样&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;my-tag&amp;gt;
+  &amp;lt;p style={ styles }&amp;gt;&amp;lt;/p&amp;gt;
+  &amp;lt;script&amp;gt;
+    this.styles = {
+      color: 'red',
+      height: '10rem'
+    }
+  &amp;lt;/script&amp;gt;
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;riotjs会自动把对象转换成描述样式的字符串&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;p style=&quot;color: red; height: 10rem&quot;&amp;gt;&amp;lt;/p&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;那么如何打印大括号到浏览器呢？可以用下面这种方式：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;\\{ this is not evaluated \\} &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;你如果不喜欢用大括号来告诉riotjs哪行代码是你的表达式&lt;/p&gt;
+&lt;p&gt;你可以通过配置改变这一点：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;riot.settings.brackets = '${    }'
+riot.settings.brackets = '\{\{    }}'&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意，标注之间要用一个空格隔开&lt;/p&gt;
+&lt;p&gt;riotjs的表达式，只能输出（渲染）纯文本的字符串值；&lt;/p&gt;
+&lt;p&gt;不能输出（渲染）HTML的字符串值&lt;/p&gt;
+&lt;p&gt;但是，你可以通过变通的方式完成这项工作，如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;raw&amp;gt;
+  &amp;lt;span&amp;gt;&amp;lt;/span&amp;gt;
+
+  this.root.innerHTML = opts.content
+&amp;lt;/raw&amp;gt;
+
+&amp;lt;my-tag&amp;gt;
+  &amp;lt;p&amp;gt;Here is some raw content: &amp;lt;raw content=&quot;{ html }&quot;/&amp;gt; &amp;lt;/p&amp;gt;
+
+  this.html = 'Hello, &amp;lt;strong&amp;gt;world!&amp;lt;/strong&amp;gt;'
+&amp;lt;/my-tag&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意，这样做很容易受到跨站脚本攻击，千万不要加载不受你控制的数据；&lt;/p&gt;
+</description>
+<pubDate>Thu, 16 Nov 2017 23:29:00 +0000</pubDate>
+<dc:creator>liulun</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/liulun/p/7831084.html</dc:identifier>
+</item>
+<item>
+<title>逆向实战第一讲,寻找OllyDbg调试工具的Bug并修复 - iBinary</title>
+<link>http://www.cnblogs.com/iBinary/p/7848437.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/iBinary/p/7848437.html</guid>
+<description>&lt;p&gt;首先我们要知道这个OD的Bug是什么. 我们调试一个UNICODE的窗口,看下其窗口过程.&lt;/p&gt;
+&lt;h2&gt;一丶查看OllyDbg 的Bug&lt;/h2&gt;
+&lt;h3&gt;1.1spy++查看窗口,确定是一个Unicode窗口&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117010121265-626693024.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;2.使用Olly附加&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117010428562-1871652330.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;使用Od附加之后,点击窗口,发现获取的值是错误的.所以判断Od的Bug是针对Unicode窗口,调用了Asi版本的API&lt;/p&gt;
+&lt;h3&gt;3.解决思路&lt;/h3&gt;
+&lt;p&gt;此时我们解决的时候,要Od调Od了. 而出现这个Bug的原因可能是API调用失败,我们发现,它在调用获得类的回调的时候出现错误&lt;/p&gt;
+&lt;p&gt;所以可以快速定位这个API&lt;/p&gt;
+&lt;p&gt;GetClassLongA&lt;/p&gt;
+&lt;p&gt;GetClassLongW&lt;/p&gt;
+&lt;h3&gt;4.定位此位置发先是否是调用错误&lt;/h3&gt;
+&lt;p&gt;此时我们Od调OD,然后定位此API下断点,看看是否调用错误&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117011248296-1134961464.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;发先确实是调用A版本的.所以出现错误.&lt;/p&gt;
+&lt;h2&gt;二丶解决OD Bug的两种方式&lt;/h2&gt;
+&lt;h3&gt;1.1 API HOOK的方式&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117011410796-2090378352.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;首先我们执行到返回,在次API上面我们下HOOK 钩子,跳转到我们的代码执行,然后判断其是否是Unicode窗口还是 Asi窗口,根据不同我们调用不同的函数返回即可.&lt;/p&gt;
+&lt;p&gt;此方法虽然可以解决但是有点麻烦.所以不采用&lt;/p&gt;
+&lt;h3&gt;1.2 Dll劫持的方式&lt;/h3&gt;
+&lt;p&gt;这个方法可以有效的劫持DLL,然后执行我们的代码&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117012006140-201299901.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;我们可以劫持一下这个DLL&lt;/p&gt;
+&lt;p&gt;首先我们找到我们的劫持工具&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117012111109-1163401537.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117012206906-1103587245.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;选择它的DLL,然后选择转发函数,而后会生成一个CPP,此时我们只需要写一个DLL,这个DLL的CPP就是这个,和原DLL名字一样&lt;/p&gt;
+&lt;p&gt;原DLL名字改为  DBGHELPOrg即可.&lt;/p&gt;
+&lt;p&gt;在代码里面写入我们的代码&lt;/p&gt;
+&lt;p&gt;1.首先在我们的转发里面定义函数&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117013623327-1600239125.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;里面写上我们的代码&lt;/p&gt;
+&lt;p&gt;2. 在程序加载的时候,启动我们的代码&lt;/p&gt;
+&lt;p&gt;这里的启动会在load里面启动,所以在load里面写代码就可以了.&lt;/p&gt;
+&lt;p&gt;思路:&lt;/p&gt;
+
+&lt;p&gt;思路:&lt;br/&gt;定位Call调用GetClasslongA的地方,跟进去之后会看到转发的IAT表,把里面的内容改为我们的就可以了.&lt;/p&gt;
+&lt;p&gt;我们刚才已经定位到了调用GetClassLongA的地方,那么此时我们 F7 进去可以看到转发&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117013947937-1701372257.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;我们可以看到IAT表格的位置是 0050D858 ,那么把里面的地址改为我们的地址就可以了&lt;/p&gt;
+&lt;p&gt;步骤:&lt;/p&gt;
+&lt;p&gt;　　1.定义一个指针指向IAT表格&lt;/p&gt;
+&lt;p&gt;　　2.修改内存保护属性&lt;/p&gt;
+&lt;p&gt;　　3.把IAT表格里面的内容变成我们的函数地址&lt;/p&gt;
+&lt;p&gt;　　4.还原内存保护属性.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117014614359-2030666610.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;主要是中间一不,修改IAT表中的地址为我们的地址&lt;/p&gt;
+&lt;p&gt;现在我们试一试看看是否成功&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117015002249-1914522109.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;成功获取.&lt;/p&gt;
+
+&lt;h3&gt;2.插件修改&lt;/h3&gt;
+&lt;p&gt;对于上面来说有点基础的,细心的应该可以明白,做了这一切其实简单的就是&lt;/p&gt;
+&lt;p&gt;1. 寻找API位置&lt;/p&gt;
+&lt;p&gt;2. 跳转的地方下改为我们的函数地址&lt;/p&gt;
+&lt;p&gt;3.我们的函数地址判断执行.&lt;/p&gt;
+&lt;p&gt;但是上面说起来还是比较麻烦,我们自己写一个OllyDbg的插件解决这个Bug吧.&lt;/p&gt;
+&lt;p&gt;首先使我们的插件,&lt;/p&gt;
+&lt;p&gt;开发插件所必须有的2个导出函数&lt;/p&gt;
+&lt;p&gt;ODBG_Plugindata　　　　这个函数里面是给插件名称的所以我们需要&lt;/p&gt;
+&lt;p&gt;ODBG_Plugininit　　　　   这个函数是Od启动的时候调用的.(初始化数据)&lt;/p&gt;
+&lt;p&gt;当然肯定会有释放的,这里不写了.&lt;/p&gt;
+&lt;p&gt;写插件第一步&lt;/p&gt;
+&lt;p&gt;　　建立一个DLL 工程,添加插件自带的头文件&lt;/p&gt;
+&lt;p&gt;第二步,实现插件的接口&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117021649624-1679133517.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;第三步,拷贝我们以前的代码让插件初始化的时候去工作&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117021734187-828256795.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;p&gt;遇到的问题:&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117021359156-1218071544.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果提示这个问题,那么编译选项中,链接的时候假如这个 /j即可.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117021510031-342078767.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt; 启动OD看看插件是否加载&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1197364/201711/1197364-20171117022055484-205315929.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;正常加载没有问题&lt;/p&gt;
+</description>
+<pubDate>Thu, 16 Nov 2017 18:22:00 +0000</pubDate>
+<dc:creator>iBinary</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/iBinary/p/7848437.html</dc:identifier>
+</item>
+<item>
 <title>TFS在项目中DevOps落地进程（下） - LeoLaw</title>
 <link>http://www.cnblogs.com/leolaw/p/7847062.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/leolaw/p/7847062.html</guid>
@@ -1032,357 +1363,6 @@ bash hello.sh
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/zero-zyq/p/7845944.html</dc:identifier>
-</item>
-<item>
-<title>一次触摸，Android到底干了啥 - 腾讯WeTest</title>
-<link>http://www.cnblogs.com/wetest/p/7846047.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wetest/p/7846047.html</guid>
-<description>&lt;div readability=&quot;51&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;WeTest 导读&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;当我们在写带有UI的程序的时候，如果想获取输入事件，仅仅是写一个回调函数，比如(onKeyEvent,onTouchEvent….)，输入事件有可能来自按键的，来自触摸的，也有来自键盘的，其实软键盘也是一种独立的输入事件。那么为什么我能通过回调函数获取这些输入事件呢？系统是如何精确的让程序获得输入事件并去响应的呢？为什么系统只能同一时间有一个界面去获得触摸事件呢？ 下面我们通过Android系统输入子系统的分析来回答这些问题。&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;&lt;strong&gt;&lt;span&gt;一、输入事件的转发流程&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194041171-1627224336.png&quot; alt=&quot;&quot;/&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;二、物理设备是如何将输入数据发送给内核的&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;物理设备将数据发送给内核是通过设备驱动传输的，在linux下的/dev/input/目录下有几个设备文件,event0,event1,event2……… 这些设备文件实际上是驱动创建的,他们共用一个主设备号，仅仅是次设备号不同,表示这是一类设备。比如触摸屏对应event0,触摸屏驱动被挂载后，驱动程序会进行初始化，主要是初始化CPU引脚，设置中断处理程序。&lt;/p&gt;
-&lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194058531-1493348496.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;&lt;div readability=&quot;290.1076011846&quot;&gt;
-&lt;p&gt;当按下触摸屏的时候触摸屏有个引脚电平变低了，相连的CPU引脚检查到这个连接的引脚电压变低了，那么就会触发中断，这个在触摸驱动中初始化好的，CPU有个中断向量表，这里就到了我们驱动中写好的中断处理函数，中断处理函数中就会读取触摸屏的数据，就是通过相连接的引脚组成的二进制数据比如(01011010),这个时候我们的内核就拿到的触摸屏的数据。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194122562-1795328359.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;触摸屏芯片的时序图&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;三、内核是如何把输入数据发送给用户空间Android framework的&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;内核拿到触摸屏的数据后，经过平滑处理，滤波，数据还是在内核空间，那么Android怎么拿到触摸数据呢？ Android实际上是运行在linux内核上一组进程，这一组进程组合为用户提供UI,应用程序的安装等等服务。&lt;/p&gt;
-&lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194139187-2007488865.png&quot; alt=&quot;&quot;/&gt;
-&lt;p&gt;手机开机流程是linux内核先启动，启动完成之后会将Android进程组启动起来，FrameWork属于这个进程组之中。Framewok中有个服务InputManagerService，&lt;strong&gt;我们看Android源码它在哪里实例化的：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;     SystemServer.java-----------&amp;gt;&lt;/p&gt;
-&lt;p&gt;              startOtherServices()------&amp;gt;&lt;/p&gt;
-&lt;p&gt;              /*构造InputManagerService*/&lt;/p&gt;
-&lt;p&gt;              inputManager = new InputManagerService(context);&lt;/p&gt;
-&lt;p&gt;                 /*将inputManager传递给WindowManagerService去&lt;/p&gt;
-&lt;p&gt;                 wm=WindowManagerService.main(context, inputManager,&lt;/p&gt;
-&lt;p&gt;                mFactoryTestMode !=FactoryTest.FACTORY_TEST_LOW_LEVE !mFirstBoot, mOnlyCore);&lt;/p&gt;
-&lt;p&gt;                 /*给InputManagerService设置回调*/&lt;/p&gt;
-&lt;p&gt;                 inputManager.setWindowManagerCallbacks(wm.getInputMonitor());&lt;/p&gt;
-&lt;p&gt;                  /* 全初始化好后，SystemServer调用start()函数让InputManager中两个线程开始运行。先看InputReaderThread，它是事件在用户态处理过程的起点*/&lt;/p&gt;
-&lt;p&gt;                 inputManager.start();&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;所以可以看到它在SystemServer进程中实例化并且启动，所以我们首先需要看看InputManagerService的构造函数都做了什么？&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;构造函数会调用到jni创建NativeInputManager的c++对象, NativeInputManager构造函数中创建&lt;/p&gt;
-&lt;p&gt;Sp&amp;lt;EventHub&amp;gt; eventHub = new EventHub()&lt;/p&gt;
-&lt;p&gt;mInputManager = new InputManager(eventhub,this,this);&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;eventHub对象构造函数做了下面几件事情：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; 1. 创建epoll对象,之后就可以把各个输入设备的fd添加进来多路等待输入事件&lt;/p&gt;
-&lt;p&gt;2. 利用inotify机制监听/dev/input目录下的变更,如果有则意味着设备变换,需要处理,输入设备的增减删除操作的监听，将代表inotify的fd添加到epoll中&lt;/p&gt;
-&lt;p&gt;3. 创建pipe,管道只能用来在具有公共祖先的两个之间通信.读端添加epoll中&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;InputManager对象构造函数做了下面几件事：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;1. 创建InputDispatcher&lt;/p&gt;
-&lt;p&gt;2. 创建InputReader(eventhub,inputdispatcher)，InputDispatcher继承InputListenerInterface&lt;/p&gt;
-&lt;p&gt;3. 创建InputReaderThread&lt;/p&gt;
-&lt;p&gt;4. 创建InputDispatcherThread&lt;/p&gt;
-
-&lt;p&gt;我们还记得最SystemServer.java中最后通过inputManager.start(); 来运行我们的InputManagerService,所以继续看start方法，实际上在native层的inputManager对象中,将上面创建的两个线程InputReaderThread和InputDispatcherThread的start方法中。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;对于InputReaderThread的start方法：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;1. 调用构造函数中保存的eventHub的getEvents方法获取input事件，在getEvent方法中做的事&lt;/p&gt;
-
-&lt;p&gt;1）判断是不是需要打开input设备驱动，如果需要打开设备驱动,扫描/dev/input目录下的设备文件并打开这些设备，同时会判断设备列表中有没有虚拟键盘,没有的话就创建一个device添加进去&lt;/p&gt;
-
-&lt;p&gt;2）到下一步中至少系统存在两个输入设备,一个是触摸屏,一个是虚拟键盘,因为上面这次getEvent的调用需要打开设备，所有就将这些动作封装成RawEvent事件，这里两个DEVICE_ADDED事件+FINISH_DEVICE_SCAN事件,将这些事件返回，不会往下走了&lt;/p&gt;
-
-&lt;p&gt;3）如果第二次进入getEvents方法中就会等待读取输入事件，将读取的touch事件发送返回&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194153874-927813090.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;到这里我们就知道了内核空间的触摸输入数据是如何传递到了用户空间的Android framework中的,实际上就是通过/dev/input目录下，去扫描这个目录，如果有device就打开这个device ,并添加到epoll对象中,多路等待输入事件，在loop中获取数据。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;四、Android framework是怎样将输入数据发送给APP进程的&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Android framework获取了触摸输入的数据，但是在系统中有那么多进程，那么多进程都在获取输入，它是如何进一步处理，准确的分发事件的呢？&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;InputReaderThread的start方法中做的第二件事情:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;调用processEventsLocked方法处理上面的getEvents方法返回的的RawEvent&lt;/p&gt;
-&lt;p&gt;1）根据RawEvent的类型不同，调用不同的方法处理,有  ● 普通的touch事件&lt;/p&gt;
-&lt;p&gt;.● 添加设备的事件&lt;/p&gt;
-&lt;p&gt;.● 删除设备的事件&lt;/p&gt;
-&lt;p&gt;.● FiNISHED_DEVICE_SCAN&lt;/p&gt;
-
-&lt;p&gt;2）对于touch事件: 调用这个touch事件对应的输入设备(之间创建的InputDevice)的process方法，该方法内部调用内部的InputMapper的process方法,一个输入设备有很多个Mapper,遍历所有的Mapper,并调用process,假定我们是一个支持多点触摸的touch screen，它的mapper是MultiTouchInputMapper,调用它的process方法。&lt;/p&gt;
-
-&lt;p&gt;3）MultiTouchInputMapper的process方法内部会这样处理：&lt;/p&gt;
-&lt;p&gt;首先每次一个touchEvent获取Slot,在没有收到EV_SYN之前对应的Slot都是相同的,然后依次处理x,y,pressure,touch_major，这些值初始化slot的各个变量；&lt;/p&gt;
-
-&lt;p&gt;当收到ev.type== EV_SYN并且ev.code = SYN_MT_REPORT那么当前的slot的index加1，给下一次触摸事件去记录，同时sync函数处理这次触摸事件；&lt;/p&gt;
-
-&lt;p&gt;然后CurrentCookedPointerData和LastCookedPointerData进行一些列的操作，up,down还是move事件，然后对应的不同事件，调用dispatchMotion,内部调用InputDispatcher的notifyMotion&lt;/p&gt;
-
-&lt;p&gt;4）对于InputDispatcher的notifyMotion：&lt;/p&gt;
-&lt;p&gt; ● 如果InputDispatcher设置了inputFilter,那么首先调用inputFilter来消费这些事件&lt;/p&gt;
-&lt;p&gt; ● 如果没有inputFiler,或者inputFilter对这些事件不感兴趣,那么就会构造一个MotionEntry,添加到mInboundQueue,并唤醒InputDispatcher线程处理&lt;/p&gt;
-
-&lt;p&gt;5）对于InputDispatcher的线程处理循环：&lt;/p&gt;
-&lt;p&gt; ● 优化app切换延迟,当切换超时，则抢占分发，丢弃其他所有即将要处理的事件；&lt;/p&gt;
-&lt;p&gt; ● 分发事件：&lt;/p&gt;
-&lt;p&gt; 首先调用findTouchedWindowTagetsLocked寻找有focus的window窗口， 并把这些创建保存在inputTargets数组中；&lt;/p&gt;
-
-&lt;p&gt;之前注册的monitor的InputChannel这里也会添加到inputTargets数组中；&lt;/p&gt;
-
-&lt;p&gt;然后向inputTargets数组一一分发事件。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194214874-1879960505.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;到这里我们就知道了是如何找到这个APP进程的了。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;五、APP进程是如何将输入数据发送给它对应的Activity的&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Activity是一个进程的基本组件，可以认为它代表了一个界面，是一堆View的集合，每次Activity启动的时候都做了什么呢？&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;1、实际上取决于它背后的ViewRootImpl做了什么，在ViewRootImpl.java中的setView方法中,实例化InputChannel,当然会判断当前的窗口能不能接受输入事件,接着在调用到session.java中的addToDisplay方法传递给WindowManagerService,实际上是调用WindowManagerService的addWindow方法,在WindowManagerService中会创建一对InputChannel[],然后InputChannel[1]转移到这个inputChannel， 然后setView方法继续创建一个WindowInputEventReceiver对象,然后将上面创建好的InputChannel&lt;/p&gt;
-
-&lt;p&gt;2、WindowManagerService中的addWindow方法:&lt;/p&gt;
-&lt;p&gt;    InputChannel[] inputChannels = InputChannel.openInputChannelPair(name)&lt;/p&gt;
-&lt;p&gt;    /*Channel[0]保存在server端*/&lt;/p&gt;
-&lt;p&gt;    win.setInputChannel[inputChannels[0]]&lt;/p&gt;
-&lt;p&gt;    /* Channel[1]返回给ViewRootImpl端*/&lt;/p&gt;
-&lt;p&gt;    inputChannels[1].transferTo(outInputChannel)&lt;/p&gt;
-&lt;p&gt;    /*注册到inputManagerService中*/&lt;/p&gt;
-&lt;p&gt;   mInputManager.registerInputChannel(win.mInputChannel,win.mInputWindowHandle)&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/992994/201711/992994-20171116194237406-619610567.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;到这里我们就能明白如何将时间分发给对应的Activity了，其实是给了它背后的ViewRootImpl。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;六、Activity又是如何将输入数据发送给具体的View的&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;最后一步就是将事件分发到Activity中具体的View了,从ViewRootImpl中将事件分发给具体的View,很好理解，因为触摸的范围在到这里是知道的，每个View的位置以及状态到这里也是知道的，因为View要正确渲染的话，Android图形框架会搞定这一切，测量每个View的大小，确定每个View的位置，ViewRootImpl会一层一层将数据分发到自己每个View中，但是每个View自己知道这个触摸事件是不是作用在自己身上的，如果不是就丢弃了，往下面分发。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;总结&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;触摸事件的分发流程看起来挺复杂，但是Android实现的还是很优雅的，我们去分析它的流程，对于我们想实现一些比较的酷的功能是有帮助的。当然对于我们调试代码也会有帮助，当发现触摸后，系统无响应，将上面的流程分解，总是能分析出原因。&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;&lt;strong&gt;腾讯WeTest提供上千台真实手机&lt;/strong&gt;，随时随地进行测试，保障应用/手游品质。节省百万硬件费用，加速敏捷研发流程。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;同时腾讯WeTest兼容性测试团队积累了10年的手游测试经验&lt;/strong&gt;，旨在通过制定针对性的测试方案，精准选取目标机型，执行专业、完整的测试用例，来提前发现游戏版本的兼容性问题，针对性地做出修正和优化，来保障手游产品的质量。目前该团队已经支持所有腾讯在研和运营的手游项目。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;欢迎进入：&lt;/strong&gt;&lt;strong&gt;&lt;a href=&quot;http://wetest.qq.com/product/cloudphone?from=content_cnblogs&quot; target=&quot;_blank&quot;&gt;http://wetest.qq.com/product/cloudphone &lt;/a&gt;体验安卓真机&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;欢迎进入：&lt;a href=&quot;http://wetest.qq.com/product/expert-compatibility-testing?from=content_cnblogs&quot; target=&quot;_blank&quot;&gt;http://wetest.qq.com/product/expert-compatibility-testing &lt;/a&gt;使&lt;/strong&gt;&lt;strong&gt;用专家兼容测试服务。&lt;/strong&gt;WeTest兼容性测试团队期待与您交流！You Create，We Test！&lt;/p&gt;
-
-&lt;p&gt;如果对使用当中有任何疑问，欢迎联系腾讯WeTest企业QQ：800024531&lt;/p&gt;
-
-&lt;/div&gt;</description>
-<pubDate>Thu, 16 Nov 2017 11:44:00 +0000</pubDate>
-<dc:creator>腾讯WeTest</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wetest/p/7846047.html</dc:identifier>
-</item>
-<item>
-<title>通过hibernate封装数据库持久化过程回顾泛型/继承/实现等概念 - 窗外天空晴朗</title>
-<link>http://www.cnblogs.com/young-z/p/7842905.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/young-z/p/7842905.html</guid>
-<description>&lt;h2&gt;　　前言&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;在开发过程中，我们不难发现，客户的需求以及产品的定位对开发内容的走向有很大的决策作用，而这些往往需要在一开始就尽可能考虑周全和设计完善。为什么说是尽可能，因为我们都知道，需求这种东西，一言难尽...作为开发者，既然无法掌控需求的变更等因素，那我们就要把握好自身能决定的工具资源等，架构设计、技术选型等等。有的人可能会说，我才多久经验之类，架构什么的不都是leader们大佬们的事情么，选什么数据库用什么技术又不是我能决定的。如果你有这种想法，我只能觉得你说得很对。不知道大家在开发过程中，有没有遇到，某个场景或者效果用现有的工具技术你觉得无法实现或者很难实现，又或者你知道又可以实现的技术框架却不会用？echarts、POI等，对于我来说，都符合上述场景。总的来说，有的东西在开发过程中可以当作学习，有些东西却需要你额外花时间在工作之外去研究。当然，如果你说你工作中不管需要什么新技术，你一天之类就可以掌握，那也是能力。而且这不是嘲讽什么的，是实实在在的，我现在愈发觉得学习能力的重要性，他对一个人的潜在能力增长曲线的影响太大，当然你有能力却不学习，那也注定是一条直线射穿。Spring、Strus 2、Hibernate、Mybatis、Spring MVC是比较常见的Web项目会用到的框架，持久层目前来看主要有Hibernate、Mybatis、Spring data jpa等，目前我在用Spring data jpa，这个东西真的厉害，用起来比我以前的想法又上了一个台阶，而且跟hibernate支持的也很好，Hibernate本身也是jpa规范的实现。接下来文中项目中类与方法设计的思路是之前基于Hibernate的，正好回顾一下，认识下其中的不足，好结合现在用的Jpa改进。&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;　　项目结构一览&lt;/h2&gt;
-&lt;p&gt;以web项目技术框架选型为Spring+Hibernate+Spring MVC为例，忽略配置以及web前端文件，后台结果最精简情况大致如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1179031/201711/1179031-20171116100104140-456390324.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;从数据库方向依次向前介绍:&lt;/p&gt;
-&lt;p&gt;1.domain层，这个东西的标准解释是领域模型，我们orm对象关系映射的实体类一般就放在该层下，即实体层，类似的叫法，entity、model、pojo等作用大抵如此；&lt;/p&gt;
-&lt;p&gt;2.repository层，数据库访问层，这个就是dao层，存放数据库访问操作的方法；&lt;/p&gt;
-&lt;p&gt;3.service层，业务逻辑层，用于存放业务逻辑方法的地方，与dao层相比，有的人可能开始会觉得这个service层没有什么必要，或者不太清楚两者的区别。首先关于两者区别：业务逻辑层，故名思意，他的重要定位是业务，业务需求什么，他就要提供什么，举个例子，dao层提供了你删除商品的方法和添加日志的方法，这两个方法分别对应有两个实体对象商品和日志，操作的也是数据库相应的单个表，但是实际情况是你通过单个方法总感觉哪里不对劲，业务场景下，如果需要你删除东西后会有相应的日志记录，而日志又不会凭空捏造，需要有事件对应。这时候，service层的作用就体现出来了，简单的可以这么理解，复杂的数据库处理你靠单个dao方法无法实现的时候，你在service层去构造这个方法就行，通过SpringIOC特性，在service层注入你需要的调用的dao方法所在的类或者接口，实际场景一般都是接口。其次关于必要性，我曾经也想过，直接在controller里面注入多个dao类或者接口不是也能达到想要的效果吗？Controller顾名思义，控制器，它在web结果中，主要起到一个接受和转发请求并控制的作用，当你的业务逻辑相对简单的时候，你觉得看不出多大区别，当实际项目业务逻辑相对复杂很多的情况下，这个controller就有点炸了，像个身兼多职操劳过度的苦工，另外结合上一个疑惑，还有一个很重要的概念就是事务，而Spring的事务管理做得也很到位，通过编程式事务管理或者声明式事务管理都可以实现，而事务一般就设置在业务逻辑也就是service层上，关于事务也是很重要和精髓的一块，需要学习也值得学习。&lt;/p&gt;
-&lt;p&gt;4.controller层，控制层，用struts 2也许会叫action层吧，或者通用点，叫web层其实也可以。他可以&lt;span class=&quot;con&quot;&gt;接收不同的请求url，调用相应的service层代码，操作数据库，跳转到制定页面，也可以不跳转，直接返回数据，这里的数据目前用json的比较多，典型的应用场景：ajax发起异步请求，DispatcherServlet捕获请求后对url进行解析，分发到相应的控制类中的相应方法中执行其中代码，该方法上加上@ResponseBody即可。&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;&lt;span class=&quot;con&quot;&gt;　　关于Hibernate在项目中的定位&lt;/span&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;span class=&quot;con&quot;&gt;Hibernate是一个典型的ORM持久层框架，ORM即Object Relational Mapping（对象关系映射），即实体类与数据库表之间的关系映射，通俗的讲，一张表对应一个实体类，一条记录对应一个实体类对象，字段对应实体类属性。对数据库的操作在Hibernate中有一个重要对象session，通过session封装一系列数据库操作方法在数据库访问层，所以在上面的结构中，Hibernate主要操作和作用的有domain层和repository层,下面示例也省略其他层代码。&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;&lt;span class=&quot;con&quot;&gt;　　示例&lt;/span&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;span class=&quot;con&quot;&gt;domain层，这里简单使用，Mysql数据库主键也用的int自增型，实际应用数据量较大等情况下会用varchar，保存使用UUID赋值主键。&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;@Entity
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; @Table(name=&quot;TBL_USER&quot;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; User {
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; Integer id;
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String username;
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String password;
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    @Id
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;     @GeneratedValue(strategy=&lt;span&gt;GenerationType.AUTO)
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Integer getId() {
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; id;
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; setId(Integer id) {
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.id =&lt;span&gt; id;
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; String getUsername() {
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; username;
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; setUsername(String username) {
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.username =&lt;span&gt; username;
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; String getPassword() {
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; password;
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; setPassword(String password) {
-&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.password =&lt;span&gt; password;
-&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; &lt;span&gt;    @Override
-&lt;/span&gt;&lt;span&gt;28&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; String toString() {
-&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt; &quot;User [id=&quot; + id + &quot;, username=&quot; + username + &quot;, password=&quot; + password + &quot;]&quot;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;31&lt;/span&gt;     
-&lt;span&gt;32&lt;/span&gt;     
-&lt;span&gt;33&lt;/span&gt;     
-&lt;span&gt;34&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;repository层&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;con&quot;&gt;BaseDao泛型接口&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; BaseDao&amp;lt;T&amp;gt;&lt;span&gt; {
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; edit(Object obj);        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;添加或者更新一条记录 &lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; delete(&lt;span&gt;int&lt;/span&gt; id);            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据主键删除一条记录&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; T load(&lt;span&gt;int&lt;/span&gt; id);                &lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据主键查找一条记录(懒加载)&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; T get(&lt;span&gt;int&lt;/span&gt; id);                &lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据主键查找一条记录(非懒加载)&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span class=&quot;con&quot;&gt;BaseDao泛型实现类&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; BaseDaoImpl&amp;lt;T&amp;gt; &lt;span&gt;implements&lt;/span&gt; BaseDao&amp;lt;T&amp;gt;&lt;span&gt; {
-    @Resource
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; SessionFactory factory;
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; Class&amp;lt;T&amp;gt; clazz = GeneriscUtil.getGenericType(&lt;span&gt;this&lt;/span&gt;&lt;span&gt;.getClass());
-    
-    &lt;/span&gt;&lt;span&gt;protected&lt;/span&gt;&lt;span&gt; Session getSession() {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; factory.getCurrentSession();
-    }
-    
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; edit(Object obj) {
-        getSession().saveOrUpdate(obj);
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; delete(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id) {
-        Object object &lt;/span&gt;=&lt;span&gt; getSession().get(clazz, id);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(object != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            getSession().delete(object);
-        }
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; T load(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; (T) getSession().load(clazz, id);
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; T get(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; (T) getSession().get(clazz, id);
-    }
-
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;泛型工具类&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; GeneriscUtil {
-    @SuppressWarnings(&lt;/span&gt;&quot;rawtypes&quot;&lt;span&gt;)
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; Class getGenericType(Class clazz){
-        Type genType &lt;/span&gt;= clazz.getGenericSuperclass();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取泛型父类  &lt;/span&gt;
-        Type[] types =&lt;span&gt; ((ParameterizedType) genType).getActualTypeArguments();
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!(types[0] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; Class)) {
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Object.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;;   
-        } 
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (Class) types[0&lt;span&gt;];
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 最后:UserDao接口和UserDaoImpl实现类&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; UserDao &lt;span&gt;extends&lt;/span&gt; BaseDao&amp;lt;User&amp;gt;&lt;span&gt; {
-    User login(String username, String password);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-@Repository(&quot;UserDao&quot;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; UserDaoImpl &lt;span&gt;extends&lt;/span&gt; BaseDaoImpl&amp;lt;User&amp;gt; &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; UserDao {
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; User login(String username, String password) {
-        String hql &lt;/span&gt;= &quot;from User u where u.username=:un and u.password=:pwd&quot;&lt;span&gt;;
-        Query query &lt;/span&gt;=&lt;span&gt; getSession().createQuery(hql);
-        query.setString(&lt;/span&gt;&quot;un&quot;&lt;span&gt;, username) 
-            .setString(&lt;/span&gt;&quot;pwd&quot;&lt;span&gt;, password);
-        Object obj &lt;/span&gt;=&lt;span&gt; query.uniqueResult();
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; obj != &lt;span&gt;null&lt;/span&gt; ? (User)obj : &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-    }
-    
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;　　还有其的XXXDao和XXXDaoImpl,通过继承和实现，可以让全部Impl实现类很轻松地就拥有基本的CRUD等通用数据库操作方法，如果某个实体有特殊的Dao操作只需要在相应Dao接口实现，然后在Impl实现类中实现该特殊方法就行，以前认识到的知识点在这里有了深入理解。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;　　泛型是一种思想，也是一种技术，动态的获取类型，让编程更加灵活，这里利用泛型，我们可以先不制定实体类对象具体类型，构造一个泛型的Dao接口和实现类，让后面各自具体的实体Dao去继承泛型的时候再确定类型，从而也得到了泛型中定义的基本方法。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;　　继承体现的是代码重用思想，当一个方法被构造多次的时候我们就要思考代码重用的问题了，在这里每个实体对象都需要基本的数据库操作方法，如果一个个的去定义将会十分繁琐和枯燥，通过继承我们可以省去很多代码。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;　　实现不同于继承，它没有节省代码，而且又涉及到抽象的概念，在单个父类与多个子类的继承关系中，父类某个方法对应的子类实现有差异时，我们对于父类的该方法，即可定义为抽象方法，子类各自实现具体细节即可。举个例子：动物父类，子类有鸟、鱼等，定义动物时，会定义睡觉方法，但是每种动物睡觉情况都不一样，鸟睡树上，鱼睡水下，你没法指定具体实现细节，所以就可以定义一个抽象的睡觉方法void sleep（）；具体的动物实现接口后，重写该抽象方法，展示实现细节。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;　　总结继承和实现：继承通用的，实现特殊的。在文中构造的持久层中，我们的所有实体通过继承轻松地拥有了所有的通用数据库操作方法，各自特殊的操作需求可在各自接口中生命然后在实现类中实现即可。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;　　最后，文中的项目中其实还存在许多不足的地方，主键的类型其实也可以用泛型,dao层有通用组件，service层是否应该也有通用的，若是有该如何构造等等，一些问题我在现在用的spring data jpa中得到了答案，所以应该会另外梳理一下写出来。&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Thu, 16 Nov 2017 11:29:00 +0000</pubDate>
-<dc:creator>窗外天空晴朗</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/young-z/p/7842905.html</dc:identifier>
-</item>
-<item>
-<title>机器学习训练模型的一般错误 - 学会思考の小R</title>
-<link>http://www.cnblogs.com/hello-world-n/p/7845925.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hello-world-n/p/7845925.html</guid>
-<description>&lt;p&gt;在我们构建完机器学习模型，经常会遇到训练得到模型无法正确预测，这之后我们往往会采取下面的一些方案：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;增加训练数据&lt;/li&gt;
-&lt;li&gt;减少特征的个数&lt;/li&gt;
-&lt;li&gt;增加更多的特征&lt;/li&gt;
-&lt;li&gt;增加多项式特征（X1*X2 ...）&lt;/li&gt;
-&lt;li&gt;增大lambda的值&lt;/li&gt;
-&lt;li&gt;减小lambda的值&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;若是不了解模型具体的问题所在，而根据随便拿出一个方案去试错，这往往都是既费力又费心，往往个把月过去了仍然在进行模型的调试。&lt;/p&gt;
-&lt;h2 id=&quot;cv-数据集-数据集处理&quot;&gt;CV 数据集 [数据集处理]&lt;/h2&gt;
-&lt;p&gt;将一个数据集先按下面进行划分：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Training set: 60%&lt;/li&gt;
-&lt;li&gt;Cross validation set: 20%&lt;/li&gt;
-&lt;li&gt;Test set: 20%&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;计算模型误差-误差计算&quot;&gt;计算模型误差 [误差计算]&lt;/h2&gt;
-&lt;p&gt;1.线性回归，直接使用代价函数即可，如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;for i = 1:m
-    %依次递增的数据量进行训练模型
-    theta = trainLinearReg(X(1:i,:), y(1:i), lambda);
-    %train数据集的测试，使用时去除lambda
-    error_train(i) =linearRegCostFunction(X(1:i,:), y(1:i), theta, 0);
-    %cv数据集的测试
-    error_val(i) = linearRegCostFunction(Xval, yval, theta, 0);
-end&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;2.logistic回归，引出0-1错分率：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192053312-822260243.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;过拟合和欠拟合-误差分析&quot;&gt;过拟合和欠拟合 [误差分析]&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192011640-2036375820.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;欠拟合：高&lt;em&gt;偏差&lt;/em&gt;，Jcv近似于Jtrain。&lt;br/&gt;过拟合：高&lt;em&gt;方差&lt;/em&gt;，Jcv远大于Jtrain。&lt;br/&gt;这2个问题是机器学习中最经典的错误情况，很多现象也是由它们一手操办的，来看看下面的3种情况：&lt;/p&gt;
-&lt;hr/&gt;&lt;h3 id=&quot;样本&quot;&gt;样本&lt;/h3&gt;
-&lt;p&gt;根据上面误差计算部分得来的Training set和cv set得到相应图片&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192021812-645357694.png&quot;/&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;High bias：Jcv与Jtrain非常接近，&lt;strong&gt;加入过多样本，对模型的优化没作用&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192030202-830326963.png&quot;/&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;High variance：Jcv远大于Jtrain，&lt;strong&gt;增加样本，可以对模型进行优化&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192039406-2061575307.png&quot;/&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;h3 id=&quot;多项式特征&quot;&gt;多项式特征&lt;/h3&gt;
-&lt;p&gt;多项式特征的选择的多少往往也会给我们带来很大的麻烦，过多的多项式特征会使模型过拟合，而过少的多项式特征会使模型欠拟合。&lt;br/&gt;那么我们该如何进行多项式的选择，下面便引入解决方案：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192101077-2083666451.png&quot;/&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;使用training set训练每一个多项式，得出相应的theta值。&lt;/li&gt;
-&lt;li&gt;使用cv set获得误差最小的多项式。&lt;/li&gt;
-&lt;li&gt;最后使用test set对多项式进行评估。&lt;/li&gt;
-&lt;/ol&gt;&lt;hr/&gt;&lt;h3 id=&quot;lambda&quot;&gt;lambda&lt;/h3&gt;
-&lt;p&gt;正规化的引入，就是为了防止过拟合，而lambda对拟合程度有着很大影响。若是没有lambda则会出现过拟合现象；而若是lambda过大则会出现欠拟合现象。&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192108140-2040754352.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;那怎么选择一个较好的lambda呢？&lt;br/&gt;方法类似于多项式特征的选取，稍有不同的就是自己要定义lambda集合。&lt;/p&gt;
-&lt;p&gt;测试代码段&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;for i = 1:length(lambda_vec)
-        lambda = lambda_vec(i);
-        theta = trainLinearReg(X, y, lambda);
-        %评估时切记不可在cv set和test set中加入lambda值
-        error_train(i) = linearRegCostFunction(X, y, theta, 0);
-        error_val(i) = linearRegCostFunction(Xval, yval, theta, 0);
-end&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;测试结果：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1006924/201711/1006924-20171116192117031-778675845.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;学习曲线&quot;&gt;学习曲线&lt;/h2&gt;
-&lt;p&gt;很多情况下因为特征很多，我们往往很难将数据展现出来，而可视化的数据往往给我们的分析带来了很大的帮助；learning curve的绘制无疑是一大助手，learning curve通常是由training set和cv set的误差绘制出来的，中间最重要的就是将training set使用递增的方式进行训练，而cv set则是全部进行使用。如【计算模型误差的代码部分】。&lt;/p&gt;
-</description>
-<pubDate>Thu, 16 Nov 2017 11:22:00 +0000</pubDate>
-<dc:creator>学会思考の小R</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hello-world-n/p/7845925.html</dc:identifier>
 </item>
 </channel>
 </rss>
