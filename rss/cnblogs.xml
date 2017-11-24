@@ -9,6 +9,292 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Spring AOP高级——源码实现（3）AopProxy代理对象之JDK动态代理的创建过程 - 余林丰</title>
+<link>http://www.cnblogs.com/yulinfeng/p/7876386.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yulinfeng/p/7876386.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;&lt;em&gt;spring-aop-4.3.7.RELEASE &lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　在&lt;a href=&quot;http://www.cnblogs.com/yulinfeng/p/7811965.html&quot; target=&quot;_blank&quot;&gt;《Spring AOP高级——源码实现（1）动态代理技术》&lt;/a&gt;中介绍了两种动态代理技术，当然在Spring AOP中代理对象的生成也是运用的这两种技术。本文将介绍Spring AOP如何通过JDK动态代理的方式创建代理对象。&lt;/p&gt;
+&lt;p&gt;　　JDK动态代理以及CGLIB代理这两种生成代理对象的方式在Spring AOP中分别对应两个类：JdkDynamicAopProxy和ObjenesisCglibAopProxy，而AopProxy是这两个类的父接口。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201711/630246-20171121231607336-1968028473.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　AopProxy接口中定义了两个基本方法：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; AopProxy {
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;    &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;    *使用默认的类加载器生成代理对象，默认的类加载器通常是当前线程
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;    *的上下文类加载器，可通过Thread#getContextClassLoader()获得
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;   Object getProxy();
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;    &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;    * 使用指定的类加载器创建代理对象，通常用于比较低级别的代理对象
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;    * 创建，至于什么时候用这个暂时先放一放
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt; &lt;span&gt;   Object getProxy(ClassLoader classLoader);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　接着来看它的实现——JdkDynamicAopProxy。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//①&lt;/span&gt;&lt;span&gt;首先查看JdkDynamicAopProxy类的成员变量&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; JdkDynamicAopProxy &lt;span&gt;implements&lt;/span&gt; AopProxy, InvocationHandler, Serializable {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;JDK动态代理需要实现 InvocationHandler类&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt; 
+&lt;span&gt; 4&lt;/span&gt;    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;long&lt;/span&gt; serialVersionUID = 5531744639992436476L&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; 
+&lt;span&gt; 6&lt;/span&gt;    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; Log logger = LogFactory.getLog(JdkDynamicAopProxy.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
+&lt;span&gt; 8&lt;/span&gt;    &lt;span&gt;/**&lt;/span&gt;&lt;span&gt; 代理类的相关配置，这个类继承自ProxyConfig，都是代理类的相关配置&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;final&lt;/span&gt;&lt;span&gt; AdvisedSupport advised;
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; 
+&lt;span&gt;11&lt;/span&gt;    &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt; &lt;span&gt;    * 用于判断目标对象实现的接口是否定义了equals方法
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;     &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt;    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; equalsDefined;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; 
+&lt;span&gt;16&lt;/span&gt;    &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt;17&lt;/span&gt; &lt;span&gt;    * 用于判断目标对象实现的接口是否定义了hashCode方法
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;     &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt;    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt; hashCodeDefined;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　类中有两个成员变量需要额外注意一下，一个是第14行的equalsDefined变量和第19行的hashCodeDefined变量。&lt;/p&gt;
+&lt;p&gt;　　讨论它们之前需要首先明确一点，通常情况下，Spring AOP代理对象不会对equals和hashCode方法增强，注意这是在通常情况下，那什么是“通常情况”，什么又是“不通常情况”呢？&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;如果目标对象直接重写Object对象的equals或hashCode方法，此时Spring AOP则不会对它增强，equalsDefined=false或hashCodeDefined=false；如果目标对象实现的接口定义了equals或hashCode方法，此时Spring AOP则会对它增强，equalsDefined=true或hashCodeDefined=true。&lt;/strong&gt;所以“通常情况”就是我们并不会在接口定义equals或hashCode方法，“不通常情况”就是在有的特殊情况下在接口定义equals或hashCode方法。再换句话说，如果我们需要Spring AOP增强equals或hashCode方法则必须要在其目标对象的实现接口定义equals或hashCode方法。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;//②&lt;/span&gt;&lt;span&gt;再来看看JdkDynamicAopProxy类的构造方法&lt;/span&gt;
+&lt;span&gt;2&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; JdkDynamicAopProxy(AdvisedSupport config) &lt;span&gt;throws&lt;/span&gt; AopConfigException {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;只有一个带AdvisedSupport类型的构造方法，这个类型上面提到过是生成代理类的相关配置，必须不能为空，否则将抛出参数异常的错误&lt;/span&gt;
+&lt;span&gt;3&lt;/span&gt;    Assert.notNull(config, &quot;AdvisedSupport must not be null&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;    &lt;span&gt;if&lt;/span&gt; (config.getAdvisors().length == 0 &amp;amp;&amp;amp; config.getTargetSource() == AdvisedSupport.EMPTY_TARGET_SOURCE) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;AdvisedSupport配置类中需要定义通知器和目标源。&lt;/span&gt;
+&lt;span&gt;5&lt;/span&gt;       &lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; AopConfigException(&quot;No advisors and no TargetSource specified&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; &lt;span&gt;   }
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;    &lt;span&gt;this&lt;/span&gt;.advised = config;    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;赋值给成员变量&lt;/span&gt;
+&lt;span&gt;8&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　构造方法中对于参数的校验有个比较特殊地方，构造方法不仅需要判断参数不能为空，而且要判断参数中的两个变量——advisors通知器和targetSource目标源。&lt;/p&gt;
+&lt;p&gt;　　通知器在&lt;a href=&quot;http://www.cnblogs.com/yulinfeng/p/7841167.html&quot; target=&quot;_blank&quot;&gt;《Spring AOP高级——源码实现（2）Spring AOP中通知器（Advisor）与切面（Aspect）》&lt;/a&gt;中讲解过它是一个特殊的切面，而targetSource目标则是为了获取target目标对象，这两个都是实现AOP的重要组成部分必然不能为空。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;③接下来是生成代理对象的getProxy方法&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;@Override
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Object getProxy() {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;    &lt;span&gt;return&lt;/span&gt; getProxy(ClassUtils.getDefaultClassLoader());    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;没有指定ClassLoader则通过Thread.currentThread.getContextClassLoader()获取当前线程上下文的类加载器。&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;}
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; 
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;@Override
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Object getProxy(ClassLoader classLoader) {
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (logger.isDebugEnabled()) {
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;       logger.debug(&quot;Creating JDK dynamic proxy: target source is &quot; + &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.advised.getTargetSource());
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;   }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;    Class&amp;lt;?&amp;gt;[] proxiedInterfaces = AopProxyUtils.completeProxiedInterfaces(&lt;span&gt;this&lt;/span&gt;.advised, &lt;span&gt;true&lt;/span&gt;);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取代理对象需要实现的完整接口&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt;    findDefinedEqualsAndHashCodeMethods(proxiedInterfaces);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里就是上面提到过的判断的目标对象实现的接口是否定义了equals或hashCode方法，具体原因不再展开&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt;    &lt;span&gt;return&lt;/span&gt; Proxy.newProxyInstance(classLoader, proxiedInterfaces, &lt;span&gt;this&lt;/span&gt;);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;通过JDK生成代理对象。第一个ClassLoader代表创建类的类加载器，第二个表示需要被代理的目标对象的接口，第三个参数InvocationHandler叫做调用处理器，在这里它就是对象本身，调用的代理对象方法实际就是调用InvocationHandler接口中的invoke方法。&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 　　第12行调用了AopProxyUtils.completeProxiedInterfaces(this.advised, true)方法，传入了Spring AOP代理对象配置对象，第二个参数表示是否暴露DecoratingProxy接口，如果设置为true则代理对象会实现DecoratingProxy接口，这个方法是在Spring4.3后新增的方法。来看看这个方法的实现。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44.277090909091&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; Class&amp;lt;?&amp;gt;[] completeProxiedInterfaces(AdvisedSupport advised, &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; decoratingProxy) {
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     Class&amp;lt;?&amp;gt;[] specifiedInterfaces = advised.getProxiedInterfaces();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取目标对象实现的接口&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt;     …&lt;span&gt;//&lt;/span&gt;&lt;span&gt;省略的代码是通过AdviceSupport没有获取到目标对象的实现接口时，则通过直接通过target目标对象来获取&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;boolean&lt;/span&gt; addSpringProxy = !advised.isInterfaceProxied(SpringProxy.&lt;span&gt;class&lt;/span&gt;);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;是否新增SpringProxy,在AdvisedSupport#isInterfaceProxied方法中会判断传入的接口是否已经由目标对象实现。此处传入SpringProxy.class判断目标对象是否已经实现该接口，如果没有实现则在代理对象中需要新增SpringProxy，如果实现了则不必新增。&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;boolean&lt;/span&gt; addAdvised = !advised.isOpaque() &amp;amp;&amp;amp; !advised.isInterfaceProxied(Advised.&lt;span&gt;class&lt;/span&gt;);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;是否新增Adviced接口，注意不是Advice通知接口。ProxyConfig#isOpaque方法用于返回由这个配置创建的代理对象是否应该避免被强制转换为Advised类型。还有一个条件和上面的方法一样，同理，传入Advised.class判断目标对象是否已经实现该接口，如果没有实现则在代理对象中需要新增Advised，如果实现了则不必新增。&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;boolean&lt;/span&gt; addDecoratingProxy = (decoratingProxy &amp;amp;&amp;amp; !advised.isInterfaceProxied(DecoratingProxy.&lt;span&gt;class&lt;/span&gt;));    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;是否新增DecoratingProxy接口，同样的判断条件有两个，第一个参数decoratingProxy，在调用completeProxiedInterfaces方法时传入的是true，第二个判断条件和上面一样判断被代理的目标对象是否已经实现了DecoratingProxy接口。通常情况下这个接口也会被加入到代理对象中，这是Spring4.3新增的。&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt;     &lt;span&gt;int&lt;/span&gt; nonUserIfcCount = 0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addSpringProxy) {
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         nonUserIfcCount++&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addAdvised) {
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;         nonUserIfcCount++&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addDecoratingProxy) {
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         nonUserIfcCount++&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;     Class&amp;lt;?&amp;gt;[] proxiedInterfaces = &lt;span&gt;new&lt;/span&gt; Class&amp;lt;?&amp;gt;[specifiedInterfaces.length + nonUserIfcCount];    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;代理类的接口一共是目标对象的接口+上面三个接口SpringProxy、Advised、DecoratingProxy&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt;     System.arraycopy(specifiedInterfaces, 0, proxiedInterfaces, 0, specifiedInterfaces.length);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;将目标对象的接口拷贝，这个方法在&lt;a href=&quot;http://www.cnblogs.com/yulinfeng/p/6597711.html&quot; target=&quot;_blank&quot;&gt;《System.arraycopy(src, srcPos, dest, destPos, length) 与 Arrays.copyOf(original, newLength)区别》&lt;/a&gt;有介绍
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;下面就是讲那三个接口加入到specifiedInterfaces数组中并返回&lt;/span&gt;
+&lt;span&gt;20&lt;/span&gt;     &lt;span&gt;int&lt;/span&gt; index =&lt;span&gt; specifiedInterfaces.length;
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addSpringProxy) {
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;         proxiedInterfaces[index] = SpringProxy.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;;             
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;         index++&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addAdvised) {
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt;         proxiedInterfaces[index] = Advised.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;         index++&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;28&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (addDecoratingProxy) {
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt;         proxiedInterfaces[index] = DecoratingProxy.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;32&lt;/span&gt;     &lt;span&gt;return&lt;/span&gt;&lt;span&gt; proxiedInterfaces;    
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 　　生成代理对象后，下一步当然就是调用代理方法，当然这就包括了调用AOP的增强方法以及目标对象的方法。　　&lt;/p&gt;
+&lt;p&gt;　　JDK动态代理生成的代理对象需要实现InvocationHandler接口和invoke方法，这个invoke方法就是JDK代理对象进行拦截的回调入口。 JdkDynamicAopProxy就实现了InvocationHandler接口，这个接口只有一个方法invoke。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; Object invoke(Object proxy, Method method, Object[] args)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这个方法有三个参数：&lt;/p&gt;
+&lt;p&gt;　　proxy:指的是我们所代理的那个真实的对象；&lt;/p&gt;
+&lt;p&gt;　　method:指的是我们所代理的那个真实对象的某个方法的Method对象；&lt;/p&gt;
+&lt;p&gt;　　args:指的是调用那个真实对象方法的参数。&lt;/p&gt;
+&lt;p&gt;　　接下来一步一步查看JdkDynamicAopProxy是如何实现invoke方法的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;⑤代理对象的回调方法&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;@Override
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; Object invoke(Object proxy, Method method, Object[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Throwable {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;    MethodInvocation invocation;
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     Object oldProxy = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;boolean&lt;/span&gt; setProxyContext = &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
+&lt;span&gt; 8&lt;/span&gt;     TargetSource targetSource = &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.advised.targetSource;
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;     Class&amp;lt;?&amp;gt; targetClass = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     Object target = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; 
+&lt;span&gt;12&lt;/span&gt;     &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;this&lt;/span&gt;.equalsDefined &amp;amp;&amp;amp;&lt;span&gt; AopUtils.isEqualsMethod(method)) {
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里就是之前提到过的，“通常情况”Spring AOP不会对equals方法进行拦截增强，所以这里判断如果目标对象没有定义equals方法的话，就会直接调用而不会增强&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; equals(args[0&lt;span&gt;]);
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;         &lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;this&lt;/span&gt;.hashCodeDefined &amp;amp;&amp;amp;&lt;span&gt; AopUtils.isHashCodeMethod(method)) {
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;同上&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt;&lt;span&gt; hashCode();
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;         &lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (method.getDeclaringClass() == DecoratingProxy.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里是上面的疑点，也是Spring4.3新出现的特性&lt;/span&gt;
+&lt;span&gt;23&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; AopProxyUtils.ultimateTargetClass(&lt;span&gt;this&lt;/span&gt;&lt;span&gt;.advised);
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;         &lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;this&lt;/span&gt;.advised.opaque &amp;amp;&amp;amp; method.getDeclaringClass().isInterface() &amp;amp;&amp;amp;
+&lt;span&gt;26&lt;/span&gt;                 method.getDeclaringClass().isAssignableFrom(Advised.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;)) {
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个地方就有点意思了，Spring AOP不会增强直接实现Advised接口的目标对象，再重复一次，也就是说如果目标对象实现的Advised接口，则不会对其应用切面进行方法的增强。&lt;/span&gt;
+&lt;span&gt;28&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; AopUtils.invokeJoinpointUsingReflection(&lt;span&gt;this&lt;/span&gt;.advised, method, args);  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个方法是一个对Java通过反射调用方法的封装  &lt;/span&gt;
+&lt;span&gt;29&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt;         Object retVal;    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;方法的返回值&lt;/span&gt;
+&lt;span&gt;31&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (&lt;span&gt;this&lt;/span&gt;.advised.exposeProxy) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;是否暴露代理对象，默认false可配置为true，如果暴露就意味着允许在线程内共享代理对象，注意这是在线程内，也就是说同一线程的任意地方都能通过AopContext获取该代理对象，这应该算是比较高级一点的用法了。&lt;/span&gt;
+&lt;span&gt;32&lt;/span&gt;             oldProxy =&lt;span&gt; AopContext.setCurrentProxy(proxy);
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt;             setProxyContext = &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;35&lt;/span&gt;         target = targetSource.getTarget();  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;通过目标源获取目标对象&lt;/span&gt;
+&lt;span&gt;36&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (target != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt;             targetClass = target.getClass();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取目标对象Class对象&lt;/span&gt;
+&lt;span&gt;38&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;39&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;...暂略  &lt;/span&gt;
+&lt;span&gt;40&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　上面可以说是对方法调用的一些预处理，有几个重要的地方：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;第13-29行，对一些情况的特殊判断，主要是不对目标对象应用切面；&lt;/li&gt;
+&lt;li&gt;第31行，判断是否暴露代理对象，默认false不暴露，如果暴露则表示在线程内的任意位置都能通过AopContext获取代理对象；&lt;/li&gt;
+&lt;li&gt;第35行，通过目标源获取目标对象。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;　　下面可以说是重中之重，也就是具体是如何对目标对象应用切面对其方法进行增强的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;46&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;⑥获取拦截器链，并调用增强方法及目标对象的方法&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;@Override
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; Object invoke(Object proxy, Method method, Object[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Throwable {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;...&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt;     List&amp;lt;Object&amp;gt; chain = &lt;span&gt;this&lt;/span&gt;.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个方法获取拦截器链。&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (chain.isEmpty()) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;拦截器链如果为空的话就直接调用目标对象的方法。.&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt;        Object[] argsToUse =&lt;span&gt; AopProxyUtils.adaptArgumentsIfNecessary(method, args);
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;        retVal = AopUtils.invokeJoinpointUsingReflection(target, method, argsToUse);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;直接调用目标对象的方法。&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;else&lt;/span&gt; {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;通过ReflectiveMethodInvocation.proceed调用拦截器中的方法和目标对象方法&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;         invocation = &lt;span&gt;new&lt;/span&gt; ReflectiveMethodInvocation(proxy, target, method, args, targetClass, chain);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;ReflectiveMethodInvocation对象完成对AOP功能实现的封装    &lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;         retVal = invocation.proceed();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取返回值&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     Class&amp;lt;?&amp;gt; returnType = method.getReturnType();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取返回值类型&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (retVal != &lt;span&gt;null&lt;/span&gt; &amp;amp;&amp;amp; retVal == target &amp;amp;&amp;amp; returnType != Object.&lt;span&gt;class&lt;/span&gt; &amp;amp;&amp;amp; returnType.isInstance(proxy) &amp;amp;&amp;amp; !RawTargetAccess.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;.isAssignableFrom(method.getDeclaringClass())) {
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 一些列的判断条件，如果返回值不为空，且为目标对象的话，就直接将目标对象赋值给retVal&lt;/span&gt;
+&lt;span&gt;17&lt;/span&gt;     retVal =&lt;span&gt; proxy;
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;     &lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (retVal == &lt;span&gt;null&lt;/span&gt; &amp;amp;&amp;amp; returnType != Void.TYPE &amp;amp;&amp;amp;&lt;span&gt; returnType.isPrimitive()) {
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;     &lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; AopInvocationException(&quot;Null return value from advice does not match primitive return type for: &quot; + method);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;没有返回值&lt;/span&gt;
+&lt;span&gt;21&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;     &lt;span&gt;return&lt;/span&gt;&lt;span&gt; retVal;
+&lt;/span&gt;&lt;span&gt;23 &lt;/span&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;...暂略&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 　　这段代码有3个比较关键的地方：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;第5行，获取拦截器链，相当于是获取潜在的增强方法，只是潜在，后续还有匹配的判断；&lt;/li&gt;
+&lt;li&gt;第8行，没有获取到拦截器链，此时相当于直接调用目标对象的方法，AopUtils.invokeJoinpointUsingReflection方法实际是对JDK反射调用方法的一个封装；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;第12行，这里就是进入拦截器链中增强方法和目标对象的调用的地方，关键。&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;　　接下来就是进入ReflectiveMethodInvocation.proceed方法，来探讨下Spring AOP是如何对目标对象调用方法进行增强以及调用的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;⑦连接器链的调用，ReflectiveMethodInvocation#proceed，这是一个递归方法，退出条件就是调用完了拦截链中的所有拦截器方法后，再调用目标对象的方法。&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;这个方法的逻辑在于通过拦截器链，逐个获取其中的拦截器，再通过匹配判断，判断是否适用，如果适用则取出拦截器中的通知器并通过通知器的invoke方法调用，如果不适用则递归调用。
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;@Override
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; Object proceed() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Throwable {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;       &lt;span&gt;if&lt;/span&gt; (&lt;span&gt;this&lt;/span&gt;.currentInterceptorIndex == &lt;span&gt;this&lt;/span&gt;.interceptorsAndDynamicMethodMatchers.size() - 1) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;调用完了所有的拦截链中拦截器的增强方法，直接调用目标对象的方法并退出&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt;       &lt;span&gt;return&lt;/span&gt; invokeJoinpoint();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个方法就是调用AopUtils.invokeJoinpointUsingReflection，上面提到过。&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;   }
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; 
+&lt;span&gt; 9&lt;/span&gt;    Object interceptorOrInterceptionAdvice =
+&lt;span&gt;10&lt;/span&gt;      &lt;span&gt;this&lt;/span&gt;.interceptorsAndDynamicMethodMatchers.get(++&lt;span&gt;this&lt;/span&gt;.currentInterceptorIndex);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;从拦截器链中获取拦截器&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;    &lt;span&gt;if&lt;/span&gt; (interceptorOrInterceptionAdvice &lt;span&gt;instanceof&lt;/span&gt; InterceptorAndDynamicMethodMatcher) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里进行动态匹配&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;       InterceptorAndDynamicMethodMatcher dm =
+&lt;span&gt;13&lt;/span&gt; &lt;span&gt;            (InterceptorAndDynamicMethodMatcher) interceptorOrInterceptionAdvice;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;       &lt;span&gt;if&lt;/span&gt; (dm.methodMatcher.matches(&lt;span&gt;this&lt;/span&gt;.method, &lt;span&gt;this&lt;/span&gt;.targetClass, &lt;span&gt;this&lt;/span&gt;.arguments)) {    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里如果和定义的切点匹配，那么这个通知就会得到执行&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;          &lt;span&gt;return&lt;/span&gt; dm.interceptor.invoke(&lt;span&gt;this&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;      }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;       &lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;          &lt;span&gt;return&lt;/span&gt; proceed();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;不适用递归继续获取拦截器进行匹配、判断、调用&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt; &lt;span&gt;      }
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;   }
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;    &lt;span&gt;else&lt;/span&gt; {        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里判断出这个拦截器是一个MethodInterceptor则直接调用&lt;/span&gt;
+&lt;span&gt;22&lt;/span&gt;       &lt;span&gt;return&lt;/span&gt; ((MethodInterceptor) interceptorOrInterceptionAdvice).invoke(&lt;span&gt;this&lt;/span&gt;);   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;动态匹配失败则直接调用&lt;/span&gt;
+&lt;span&gt;23&lt;/span&gt; &lt;span&gt;   }
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这里就是整个调用过程，同样有一个大的重点：&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;第11行，这里是进行动态匹配&lt;/strong&gt;，什么是动态匹配呢？我们给出如下的示例，按照xml配置一个通知器而不是切面。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;定义通知器bean，需要实现Advice接口&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;testAdvisor&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;com.springdemo.aop.MyAdvice&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;目标对象&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;testPoint&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;com.springdemo.aop.TestPoint&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;advisor通知器&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;testAop&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;org.springframework.aop.framework.ProxyFactoryBean&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt;     &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;目标对象实现的接口&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;proxyInterfaces&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;         &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;com.springdemo.aop.Test&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;     &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;拦截器，也就是上面定义的通知器beanId&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;interceptorNames&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;list&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt;             &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;testAdvisor&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;list&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;16&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;17&lt;/span&gt;     &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;目标对象，也就是上面定义的目标对象beanId&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;targetName&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt;         &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;testPoint&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;20&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;21&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;bean&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　上面的注释已经比较清楚了，如果我们按照这样的方式来实现一个目标对象的方法增强，那么此时，在调用代理对象的方法时，也就是在执行上面ReflectiveMethodInvocation.proceed方法时是不会进行动态匹配的，因为我们在定义一个advisor通知器也就是上面的Myadvice类的时候是一定会实现Advice接口，如果我们定义的是MethodBeforeAdvice那么此时就已经确定一定会是前置通知。所以它一定会进入else那个分支去。&lt;/p&gt;
+&lt;p&gt;　　如果，我们不是通过定义advisor通知器的方式，而是直接定义一个切面，那么，在我们定义切面这个类是是不需要实现任何接口的，其中的任意方法都可以作为前置或者后置通知，这取决于你的xml配置，例如下面的配置：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;aop:config&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;aop:aspect &lt;/span&gt;&lt;span&gt;ref&lt;/span&gt;&lt;span&gt;=&quot;aspectTest&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;aop:pointcut &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;test&quot;&lt;/span&gt;&lt;span&gt; expression&lt;/span&gt;&lt;span&gt;=&quot;execution(* com.demo.TestPoint.test())&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;aop:before &lt;/span&gt;&lt;span&gt;method&lt;/span&gt;&lt;span&gt;=&quot;doBefore&quot;&lt;/span&gt;&lt;span&gt; pointcut-ref&lt;/span&gt;&lt;span&gt;=&quot;test&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;aop:after-returning &lt;/span&gt;&lt;span&gt;method&lt;/span&gt;&lt;span&gt;=&quot;doAfter&quot;&lt;/span&gt;&lt;span&gt; pointcut-ref&lt;/span&gt;&lt;span&gt;=&quot;test&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;aop:aspect&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;aop:config&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　关于这个地方的理解，建议多写几个demo通过打断点的方式反复咀嚼。下一篇将会介绍Spring AOP是如何通过CGLib生成代理对象的，本文还有很多很多不足之处，希望有看到的人懂的不懂的都能指出来，非常非常感谢。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;strong&gt;这是一个能给程序员加buff的公众号 &lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201710/630246-20171018224424427-1683168589.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 23 Nov 2017 15:52:00 +0000</pubDate>
+<dc:creator>余林丰</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/yulinfeng/p/7876386.html</dc:identifier>
+</item>
+<item>
 <title>【强化学习笔记】关于一篇对话系统文献综述的读后感 - 狼.wrz</title>
 <link>http://www.cnblogs.com/wolfray/p/7887652.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/wolfray/p/7887652.html</guid>
@@ -2785,403 +3071,6 @@ changeUrl &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;k
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/makor/p/implement-of-state-and-result-in-celery.html</dc:identifier>
-</item>
-<item>
-<title>JavaWeb框架SSH_Struts2_(二) - Mairr</title>
-<link>http://www.cnblogs.com/Mairr/p/7871538.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Mairr/p/7871538.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;1.  Struts2的核心配置(详解)&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;本章内容目录：&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;ul&gt;&lt;li&gt;配置struts.xml文件
-&lt;ol&gt;&lt;li&gt;struts.xml文件&lt;/li&gt;
-&lt;li&gt;常量配置&lt;/li&gt;
-&lt;li&gt;包配置&lt;/li&gt;
-&lt;li&gt;包含配置&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li&gt;Action配置
-&lt;ol&gt;&lt;li&gt;实现Action控制类&lt;/li&gt;
-&lt;li&gt;配置Action&lt;/li&gt;
-&lt;li&gt;使用通配符&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li&gt;Action访问Servlet API
-&lt;ol&gt;&lt;li&gt;通过ActionContext类访问&lt;/li&gt;
-&lt;li&gt;通过特定接口访问、&lt;/li&gt;
-&lt;li&gt;通过ServletActionContext访问&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li&gt;Result结果类型
-&lt;ol&gt;&lt;li&gt;配置Result&lt;/li&gt;
-&lt;li&gt;预定义的结果类型&lt;/li&gt;
-&lt;li&gt;dispatcher结果类型&lt;/li&gt;
-&lt;li&gt;redirect结果类型&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.  具体内容&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.1  配置Struts.xml文件&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.1 Struts.xml文件&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/span&gt;Struts2框架的核心配置文件是Struts.xml，该文件主要用来配置Action和请求的对应关系。Struts.xml文件可以被Struts2框架自动加载。&lt;/p&gt;
-&lt;p&gt;搭建好了的Struts2项目（可参考上一讲如何搭建Struts2项目），其配置文件Struts.xml如下所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1194681/201711/1194681-20171121095402899-1395317404.png&quot; alt=&quot;&quot; width=&quot;790&quot; height=&quot;233&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　待配置的分块如下（注意注释部分）：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;?&lt;/span&gt;&lt;span&gt;xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;?&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;!&lt;/span&gt;&lt;span&gt;DOCTYPE struts PUBLIC
-        &quot;-//Apache Software Foundation//DTD Struts Configuration 2.5//EN&quot;
-        &quot;http://struts.apache.org/dtds/struts-2.5.dtd&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;constant元素用于常量的配置&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;constant &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;struts.enable.DynamicMethodInvocation&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;constant &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;struts.devMode&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;ture&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    
-    
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;package元素用于包配置&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;package &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;default&quot;&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;/&quot;&lt;/span&gt;&lt;span&gt;extends&lt;/span&gt;&lt;span&gt;=&quot;struts-default&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;配置Action&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;index&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;配置Result&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;dispatcher&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;location&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/index.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;package&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;br/&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;include元素用于包含配置&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;example.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　简单的包含关系：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1194681/201711/1194681-20171121110153743-1535164946.png&quot; alt=&quot;&quot; width=&quot;778&quot; height=&quot;387&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.2  常量配置&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;　&lt;/strong&gt;　Struts2中常量配置共有3种方式：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;在struts.xml文件中通过&amp;lt;constant&amp;gt;元素配置常量;&lt;/li&gt;
-&lt;li&gt;在struts.properties文件中配置常量;&lt;/li&gt;
-&lt;li&gt;在web.xml文件中通过&amp;lt;init-param&amp;gt;元素配置常量;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;（1） 在Struts.xml文件中通过&amp;lt;constant&amp;gt;元素配置常量&lt;/p&gt;
-&lt;p&gt;　　在Struts.xml文件中通过&amp;lt;constant.../&amp;gt;来配置常量时，需要两个必填的属性name和value。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;name：该属性指定了常量的常量名;&lt;/li&gt;
-&lt;li&gt;value：该属性指定了常量的常量值;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;　　在Struts.xml文件中配置的示例代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;设置默认编码集为UTF-8&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;constant &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;struts.enable.SlashesInActionNames&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;设置使用开发模式&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;constant &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;struts.devMode&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;ture&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　要注意的是，在struts.properties文件能配置的常量都可以在struts.xml文件中用&amp;lt;constant...&amp;gt;元素来配置。&lt;/p&gt;
-
-&lt;p&gt;（2）在struts.properties文件是一个标准的properties文件，其格式为Key-Value对，即每个key对应一个value，key表示的是Struts2框架中的常量，而value表示的是常量值，具体配置如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-###设置默认编码集为UTF-&lt;span&gt;8&lt;/span&gt;&lt;span&gt;
-struts.il8n.encoding&lt;/span&gt;=UTF-&lt;span&gt;8&lt;/span&gt;&lt;span&gt;
-
-###设置action请求的扩展名为action或者没有扩展名
-struts.action.extension&lt;/span&gt;=&lt;span&gt;action,
-
-###设置不使用开发模式
-struts.devMode&lt;/span&gt;=&lt;span&gt;false&lt;/span&gt;&lt;span&gt;
-
-###设置不开启动态方法调用
-struts.enable.DynamicMethodInvocation&lt;/span&gt;=&lt;span&gt;false&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上述代码段中，=号的左边的是key，右边是key对应的value，另外，代码片段中的###表示的是properties文件中的解释信息（注释），用于解释说明。&lt;/p&gt;
-
-&lt;p&gt;（3）在web.xml文件中通过初始化参数配置常量&lt;/p&gt;
-&lt;p&gt;　　在web.xml文件中配置核心过滤器StrutsPrepareAndExecuteFilter时，通过初始化参数来配置常量。通过&amp;lt;filter&amp;gt;元素的&amp;lt;init-param&amp;gt;子元素指定，每个&amp;lt;init-param&amp;gt;元素配置了一个struts常量。在web.xml文件中通过初始化参数配置常量方式，如下列代码段所示：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        
-        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;指定struts2的核心过滤器&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;struts2&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.apache.struts2.dispatcher.filter.StrutsPrepareAndExecuteFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;通过init-param元素配置struts2常量，配置默认编码集为UTF-8&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;struts.il8n.encoding&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;UTF-8&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    
-    
-    
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;struts2&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/*&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　需要注意的是， &amp;lt;init-param&amp;gt;标签要放到&amp;lt;filter&amp;gt;之中。&lt;/p&gt;
-&lt;p&gt;　　此外，Struts2框架的加载常量有一定的顺序，通常搜索顺序如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;default.properties:该文件在struts2-core-2.3.24.jar文件中的org.apache.struts2包里面;&lt;/li&gt;
-&lt;li&gt;struts-default.xml:该文件保存在struts2-core-2.3.24.jar文件中;&lt;/li&gt;
-&lt;li&gt;struts-plugin.xml:该文件保存在struts-Xxx-2.3.24.jar等Struts2插件JAR包中;&lt;/li&gt;
-&lt;li&gt;struts.xml：该文件是Web应用自己的Struts配置文件Struts2配置文件;&lt;/li&gt;
-&lt;li&gt;struts.properties：该文件是Web应用默认的Struts配置文件;&lt;/li&gt;
-&lt;li&gt;web.xml：该文件是Web应用的配置文件;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;2.1.3  包配置&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　Struts2框架的核心组件是Action和拦截器，它使用包来管理Action和拦截器。每个包就是多个Action、多个拦截器、多个拦截器引用的集合。在Struts.xml文件中，package元素定义了一个包配置，每个package元素定义了一个包配置。package常用属性如下表所示：&lt;/p&gt;
-
-&lt;table border=&quot;0&quot;&gt;&lt;tbody readability=&quot;5&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;span&gt;属性&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;说明&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;name&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;必填属性，指定包的名字，此名字是该包被其他包引用的key&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;可选属性，该属性定义该包的命名空间&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;extends&lt;/span&gt;&lt;/td&gt;
-&lt;td readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span&gt;可选属性，指定该包继承自其他包，可以继承其他包的Action定义、&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;拦截器定义等。属性直常设为“strruts-default”&lt;/span&gt;&lt;/p&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;abstract&lt;/span&gt;&lt;/td&gt;
-&lt;td readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span&gt;可选属性，他指定该包是否是一个抽象包，抽象包不能包含Action&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;定义。（例如：abstract=“true”----&amp;gt;抽象包）&lt;/span&gt;&lt;/p&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
-&lt;p&gt;&lt;strong&gt;2.1.3  包含配置&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　Struts2默认只加载struts.xml文件，但一旦通过多个XML文件来配置Action，就必须通过struts.xml文件来包含其他配置文件。结下来示例一段代码来说明;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;包含4个配置文件&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;   不指定路径，默认在src下时的方式  &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;struts-shop.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;struts-user.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;struts-shoppingcart.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-    
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;  配置文件在具体包中的方式  &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;cn/intcast/action/struts-product.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;struts&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.2  Action的配置&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.2.1 实现Action控制类&lt;/strong&gt;&lt;/strong&gt;&lt;span&gt;&lt;strong&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/strong&gt;Action作为Struts框架的核心类，实现对用户请求的处理，Action类被称为业务逻辑控制器。一个Action类代表一次请求或调用，每个请求的动作都对应于一个相应的Action类，一个Action类是一个独立的工作单元。也就是说，用户的每次请求动作都对应于一个相应的Action类里面，由这个Action类来进行处理。简而言之，Action就是用来处理一次用户请求的对象。&lt;/p&gt;
-&lt;p&gt;　　实现Action控制有3中方式：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/strong&gt;(1) POJO的实现&lt;/p&gt;
-&lt;p&gt;　　Action可以不继承特殊的类或不实现任何特殊接口，仅仅是一个POJO。POJO全称是Plain Ordinary Java Object（简单的Java对象），只要具有一部分getter/setter方法的类就可以称作为POJO。一般这个POJO类中，要有一个公共的无参构造方法和一个execute（）方法。execute方法是Action类的默认请求处理方法，其方法格式如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; String execute() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exeception {
-     &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;success&quot;&lt;span&gt;;   
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; execute（）方法要求如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;方法的权限修饰符为public&lt;/li&gt;
-&lt;li&gt;返回一个字符串，就是指示的下一个页面的Result&lt;/li&gt;
-&lt;li&gt;方法没有参数&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;　　也就是说满足上述要求的POJO都可以算作是Struts的Action实现，但在实际的开发中，通常会让开发者自己编写Action类实现Action接口或者继承ActionSupport类。&lt;/p&gt;
-&lt;p&gt;　　（2）实现Action接口&lt;/p&gt;
-&lt;p&gt;　　（3）继承ActionSupport类&lt;span&gt;&lt;strong&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　（上述两个小部分都是java的简单实现，这篇文章不再赘述）&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.2.2 配置Action&lt;/strong&gt;&lt;/strong&gt;&lt;span&gt;&lt;strong&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/strong&gt;Action映射是框架中的基本“工作单元”。Action映射就是将一个请求的URL映射到一个Action类，当一个Actio请求匹配某个Action名称时，框架就使用这个映射来确定如何处理请求。在Struts.xml文件中，通过&amp;lt;action&amp;gt;元素对请求的Action和Action类进行配置。&lt;/p&gt;
-&lt;p&gt;　　&amp;lt;action&amp;gt;元素中共有4个属性，具体说明如下：&lt;/p&gt;
-&lt;table border=&quot;0&quot;&gt;&lt;tbody readability=&quot;4&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;span&gt;属性&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;说明&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;name&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;必填属性，标识Action，指定了Action所处理的请求的URL&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;class&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;可选属性，指定Action对应的实现类&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;method&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;可选属性，指定请求Action时调用的方法&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;converter&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;可选属性，指定类型转换器的类&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;　　需要注意的是，在配置action元素时，如果没有指定class属性直，则其默认直为com.opensymphony.work2.ActionSupport类，该默认类会使用默认的处理方法execute（）方法来处理请求，实际上，ActionSupport类中的execute（）不会做任何处理，而是直接返回success直。在配置&amp;lt;action&amp;gt;元素时，如果指定了method属性，则该Action可以调用method属性中指定的方法，如果不指定method属性，则Action会调用execute（）方法。&lt;/p&gt;
-&lt;p&gt;　　接下来看一个struts.xml文件中配置的action元素，代码片段如下所示：（注意：action的配置在struts.xml的package包平配置的内部）&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;userAction&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;cn.itcast.action.UserAction&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-           &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/success.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　&amp;lt;action&amp;gt;类的属性直将在其他地方引用，例如.jsp页面form表单的action属性直;class属性指明了Action的实现类。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.2.3 使用通配符&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/strong&gt;在&lt;/span&gt;使用method属性时，由于在Action类中有多个业务逻矩处理方法，在配置Action时，就需要使用多个action元素。在实现同样功能的情况下减轻struts.xml配置文件的负担，借助于通配符映射。&lt;/p&gt;
-&lt;p&gt;　　使用通配符配置时，&amp;lt;package&amp;gt;元素的内容如下所示;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;package &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;User&quot;&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;/user&quot;&lt;/span&gt;&lt;span&gt;extends&lt;/span&gt;&lt;span&gt;=&quot;struts-default&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;User_Action_*&quot; &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;cn.itcast.action.UserAction&quot; &lt;/span&gt;&lt;span&gt;method&lt;/span&gt;&lt;span&gt;=&quot;(1)&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/index.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;package&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; 
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　注意对于result也可以采用通配符。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.3  Action访问Servlet API&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;　　 在struts2中，Action并没有直接和Servlet API进行耦合，也就是说，在Struts2的Action中不能直接访问Servlet API。在实现业务逻辑时，经常要访问Servlet中的对象，如session、request和application等。在struts2中，访问Servlet API有三种方法。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.3.1 通过ActionContest类访问&lt;br/&gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　ActionContext类访问Servlet API的常用方法：&lt;/p&gt;
-&lt;table border=&quot;0&quot;&gt;&lt;tbody readability=&quot;19&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;span&gt;方法声明&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;功能描述&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;void put（String key，Object value）&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;将key-value键值对放入ActionContext中，模拟Servlet API中的HttpServletHttpServletRequest的setAttribute（）方法&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;&lt;span&gt;Object get（String key）&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;通过参数key来查找当前ActionContext中的直&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;6.5&quot;&gt;&lt;td readability=&quot;6&quot;&gt;
-&lt;p&gt;&lt;span&gt;Map&amp;lt;String,Object&amp;gt; getApplication()&lt;/span&gt;&lt;/p&gt;
-&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;返回一个Aplication级的Map对象&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td readability=&quot;5&quot;&gt;
-&lt;p&gt;&lt;span&gt;static ActionContext getContext()&lt;/span&gt;&lt;/p&gt;
-&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;获取当前线程的ActionContext对象&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;Map&amp;lt;String,Object&amp;gt; getParameters()&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;返回一个包含所有HttpServletRequest参数信息的Map对象&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;Map&amp;lt;String,Object&amp;gt; getSession()&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;返回一个Map类型的HttpSession&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;void setApplication （Map&amp;lt;String,Object&amp;gt;application）&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;设置Application上下文　　&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;span&gt;void setSession (Map&amp;lt;String,Object&amp;gt;session)&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;设置一个Map类型的Session&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.3.2 通过特定接口访问&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;&lt;li&gt;ServletRequestAware：实现该接口的Action可以直接访问Web应用的HttpServletRequest实例;&lt;/li&gt;
-&lt;li&gt;RequestResponseAware：实现该接口的Action可以直接访问Web应用的HttpServletResponse实例;&lt;/li&gt;
-&lt;li&gt;SessionAware：实现该接口的Action可以直接访问Web应用的ServletContext实例;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;2.3.3 通过ServletActionContext访问&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-
-
-&lt;ul&gt;&lt;li&gt;static HttpServletRequest getRequest（）：获取Web应用的HttpServletRequest对象;&lt;/li&gt;
-&lt;li&gt;static HttpServletResponse getResponse（）：获取Web应用的HttpServletResponse对象;&lt;/li&gt;
-&lt;li&gt;static ServletContext getServletContext（）：获取Web应用中的ServletContext对象;&lt;/li&gt;
-&lt;li&gt;static PageContext getPageContext（）：获取Web应用中的PageContext对象。&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.4 Result结果类型&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.4.1 配置Result&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;　　&lt;/strong&gt;在struts.xml文件中进行Result的配置，使用&amp;lt;result&amp;gt;元素来配置Result逻辑视图与无力视图之间的映射，&amp;lt;result&amp;gt;元素可以有name和type属性，但这两种属性都不是必选的;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1194681/201711/1194681-20171121110153743-1535164946.png&quot; alt=&quot;&quot; width=&quot;778&quot; height=&quot;387&quot;/&gt;name属性：指定逻辑视图的名称，默认值是success;&lt;/li&gt;
-&lt;li&gt;type属性：指定返回的视图资源类型，不同的类型代表不同的结果输出，默认值是dispatcher。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;　　在Struts,xml文件中的&amp;lt;result&amp;gt;元素配置代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;logiAction&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;cn.itcast.action.loginAction&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;success&quot;&lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;dispatcher&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;location&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/success.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　注意:&amp;lt;param&amp;gt;子元素的name属性有两个直，分别如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;location：指定该逻辑视图所对应的实际视图资源;&lt;/li&gt;
-&lt;li&gt;parse：指定在逻辑视图资源名称中是否可以使用OGNL表达式。默认值为true，表示可以使用，如果设为false，则表示不支持。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;上述配置可以简化为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;logiAction&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;cn.itcast.action.loginAction&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/success.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　需要注意的是，在Result中，指定实际资源位置时，可以使用绝对路径，也可以使用相对路径。绝对路径以斜杠（/）开头，例如&amp;lt;result&amp;gt;/success.jsp&amp;lt;result&amp;gt;,相当于当前Web应用程序的上下文路径;相对路径不以斜杠开头，例如&amp;lt;result&amp;gt;success.jsp&amp;lt;/result&amp;gt;,相当于当前执行的Action路径。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.4.2 预定义的结果类型&lt;br/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　在struts2中，当框架调用Action对请求进行处理后，就要向用户呈现一个结果视图。在struts2中，预定义了多种ResultType，其实就是定义了多种展示结果技术。&lt;/p&gt;
-&lt;p&gt;　　每个&amp;lt;result-type&amp;gt;元素都是一种视图技术或者跳转方式的封装，其中的name属性指出在&amp;lt;result&amp;gt;元素中如何引用这种视图技术或者跳转方式，对应着&amp;lt;result&amp;gt;元素的type属性。struts2中预定义的ResultTyoe如下所示;&lt;/p&gt;
-&lt;table border=&quot;0&quot;&gt;&lt;tbody readability=&quot;11&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;span&gt;属性&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;说明&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;chain&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来处理Action链，被跳转的Action中仍能获取送上个页面的直、如request信息&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;em&gt;&lt;span&gt;&lt;span&gt;dispatcher&lt;/span&gt;&lt;/span&gt;&lt;/em&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来转向页面，通常处理JSP，默认的结果类型&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;freemarker&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来整合FreeWorker模板结果类型&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;httpheader&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来处理特殊的HTTP行为结果类型&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;span&gt;&lt;em&gt;&lt;span&gt;redirect&lt;/span&gt;&lt;/em&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;重定向到一个URL，被跳转的页面中丢失传递的信息&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;redirectAction&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;重定向到一个Action，跳转的页面中丢失传递的信息&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;stream&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;向浏览器发送InputStream对象，通常用来处理文件下载，还可用于Ajax数据&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;velocity&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来整合Velocity木板结果类型&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;xslt&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;用来整合XML/ XSLT结果类型&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;plainText&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span&gt;显示原始文件内容，例如文件源代码&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span&gt;postback&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt; &lt;span&gt;使得当前请求参数以表单形式提交&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;　　上表列举了Struts2中预定义的全部11种结果类型，其中dispatcher是默认的结果类型，主要用来与JSP整合。在这全部11中结果类型中，dispatcher和redirect是比较常用的结果集。&lt;/p&gt;
-&lt;p&gt;　　需要注意的是，&lt;span&gt;&lt;em&gt;&lt;strong&gt;dispatcher结果类型是将请求转发到JSP视图资源，而redirect类型是将请求重定向到JSP视图资源。他们之间最大的差别就是一个是请求转发、一个是请求重定向。&lt;/strong&gt;&lt;/em&gt;&lt;/span&gt;如果重定向了请求，那么将丢失所有参数，其中包括Action的处理结果。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.4.3 dispatcher结果类型&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　&lt;span&gt;&lt;em&gt;&lt;strong&gt;dispatcher结果类型用来表示“转发”到指定的结果资源，他是struts2的默认结果类型。&lt;/strong&gt;&lt;/em&gt;&lt;/span&gt;dispatcher结果类型实现的是org.apache. struts2. dispatcher.ServletDispatcherResult,该类有location和parse两个属性，可以通过struts.xml配置文件中的result元素的param资源书来设置，代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;success&quot;&lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;dispatcher&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-           &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;location&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/success.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-           &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;parse&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;true&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; 
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上述代码中，location参数用于指定Action执行完毕后要转向的目标;parse参数是一个布尔型的直，默认是true，表示解析location参数中的OGNL表达式子，如果是faulse，则不解析。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.4.4 redirect结果类型&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;　　redirect结果类型用来重定向到指定的结果资源，该资源可以是JSP文件，也可以是Action类。使用redirect结果类型时，系统将调用HttpServletResponse的sendRedirect（）方法将请求重定向到指定的URL。&lt;/p&gt;
-&lt;p&gt;　　redirect结果类型实现的类是org.apache.struts2.dispatcher.ServletRedirectResult。在使用redirect时，用户要完成一次和服务器之间的交互，浏览器需要发送两次请求，请求过程如下图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1194681/201711/1194681-20171123203145703-517230293.png&quot; alt=&quot;&quot; width=&quot;653&quot; height=&quot;324&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;　　使用redirect结果类型的工作过程如下：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;浏览器发送一个请求，Struts框架调用对应的Action实例对请求进行处理;&lt;/li&gt;
-&lt;li&gt;Action返回“success”结果字符串，Struts2框架根据这个结果选择对应的结果类型，这里使用的是redirect结果类型;&lt;/li&gt;
-&lt;li&gt;ServletRedirectResult在内部使用HttpServletResponse的sendRedirect（）方法将请求重新定向到目标资源;&lt;/li&gt;
-&lt;li&gt;浏览器重新发送一个针对目标资源的新请求;&lt;/li&gt;
-&lt;li&gt;目标资源作为响应呈现给用户。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;　　代码：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;action &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;logiAction&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;cn.itcast.action.loginAction&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;success&quot;&lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;redirect&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/success.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;error&quot;&lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;dispatcher&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/error.jsp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;action&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上述配置中，&amp;lt;result&amp;gt;元素使用redirect类型，表示当Action处理请求后重新生成一个请求。&lt;/p&gt;
-
-
-&lt;p&gt;　&lt;span&gt;&lt;strong&gt;　PS：什么是请求转发和请求重定向，具体区别是什么？（明天补上，同学越去喝酒了，哈哈哈哈哈）&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Thu, 23 Nov 2017 13:12:00 +0000</pubDate>
-<dc:creator>Mairr</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Mairr/p/7871538.html</dc:identifier>
 </item>
 </channel>
 </rss>
