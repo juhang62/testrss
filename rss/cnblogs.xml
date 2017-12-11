@@ -9,6 +9,596 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Azure 基础：使用 Traffic Manager 分流用户请求 - sparkdev</title>
+<link>http://www.cnblogs.com/sparkdev/p/8017001.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/sparkdev/p/8017001.html</guid>
+<description>&lt;p&gt;&lt;span&gt;为了减少 web 服务器的宕机时间，同时也提高服务器的响应性能，我们往往部署多个站点并通过负载均衡来对外提供服务。Azure 提供的 Traffic Manager 服务属于负载均衡的一种，特点是工作在 DNS 层，因此具有配置简单的优势。本文将通过一个 demo 演示如何通过 Traffic Manager 实现根据用户的地理位置来分流用户的请求。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;本质上讲 Traffic Manager 是 Azure 提供的 DNS 解析服务。它提供的核心能力有：&lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;提升响应能力(把请求路由到低延迟的节点)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;减少宕机时间(把请求路由到健康的节点)&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;span&gt;Traffic Manager 会通过我们配置的规则把请求解析到响应延迟最低的节点上去，并同时监控节点的健康状况，如果发现某个节点出现健康问题就会把请求解析到其它健康的节点上。我们还可以通过更加灵活的配置来决定不同的节点可以响应不同数量的请求。或者是随时添加新的节点提升服务的响应能力。通过 Traffic Manager 这些功能都够轻松实现并且配置起来却很简单。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;有了这样的能力我们不仅可以轻松的提示服务的响应性能还可以逐个的断开节点进行维护或升级，从而实现无宕机的 web 服务。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;Traffic Manager 工作在 DNS 级别，这一点非常重要！&lt;/span&gt;&lt;br/&gt;&lt;span&gt;在整个工作过程中，Traffic Manager 只负责告诉用户的 web 客户端：你访问的服务器在哪里。所以它没有代理的功能，也不参与用户与服务器的通信过程：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210150724661-1725559203.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;从上图中我们可以清晰的看到，用户的 web 客户端只是在进行 DNS 解析的时候通过 DNS 的 CNAME 找到 Traffic Manager，并由 Traffic Manager 根据你的配置完成最终的解析并返回 web 服务的 IP 地址。在这之后，用户的 web 客户端都是直接访问 web 服务器的，直到你设置的 TTL 超时，  web 客户端才会重新进行一次 DNS 解析。所以 Traffic Manager 不是代理或网关，它也看不到 web 客户端与服务器之间的数据传递。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;当我们部署了多个 web 服务器时，如何设置策略让不同的用户访问到不同的 web 服务器上呢？当前 Traffic Manger 内置了四种路由策略：&lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;Priority (主节点处理所有请求，次节点作为随时可用的备份存在)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Weighted (按照指定的权重分配流量)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Performance (按照最小延迟分配流量)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Geographic (按照地理位置分配流量)&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;Priority(基于优先级的路由策略)&lt;/strong&gt; 可按照优先级设置多个从节点(web 服务器)，当其中的某个或多个节点失效时，活着的节点中具有最高优先级者对外提供服务。这个策略主要用来提高服务的可用性。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Weighted(基于权重的路由策略)&lt;/strong&gt; 可以为不同的节点(web 服务器)设置不同的权重。比如服务器1配置高、性能好，就可以设置比较高的权重，这样分配给它的请求就会多些(具体的多少是按照服务器的权重计算出来的)。当然如果其中有服务器离线了，Traffic Manager 就会把负载分配到其它的节点。因此我们也可以使用这种路由策略让服务器逐个的离线并进行升级从而实现渐进式的发布。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Performance(基于性能的路由策略)&lt;/strong&gt; 提升服务器的响应时间可谓是重中之重，这种策略会根据最小的网络延迟来路由用户的请求。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Geographic(基于地理位置的路由策略)&lt;/strong&gt; 对于全球化的服务，最好是在不同的地理位置上部署服务器以就近响应用户的请求。Traffic Manager 也支持这样的策略。本文中接下来的 demo 就将演示如何创建一个基于地理位置进行路由的 Traffic Manager 设置。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;假设我们有两台主机，一台在香港，另一台在新加坡。我们希望新加坡的用户访问的是放在新加坡的主机，香港的用户和全世界其它地方的用户访问的都是放在香港的主机。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;创建 Traffic Manager 配置文件&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;使用 Traffic Manager 服务需要从创建 Traffic Manager 配置文件开始。在 Azure 的门户网站上新建一个 &quot;Traffic Manager profile&quot;(不太熟悉 Azure 的朋友可以先去申请创建一个免费的 Azure 账户)：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151031240-1959898724.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;除了填写合适的名称还要选择正确的路由策略，这里我们选择的 &quot;Geographic&quot; 表示基于地理位置的路由策略。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;添加 endpoint&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;所谓的 endpont 这里就是需要进行域名解析的主机或者是服务。本文的 demo 使用的是两台放在 Azure 上的虚拟主机。我们先添加放在新加坡的主机(请保证你已经创建了该主机，并且区域选的是 Southeast Asia，同时设置了主机的 DNS 名称)：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151121271-1010049390.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;上图中 webvm2-ip 其实是虚拟主机的 IP。另外在选择 Regional grouping 为 &quot;Asia&quot;，然后选择 Contry/Region 为 &quot;Sinqapore&quot;。此时 Regional grouping 中的 &quot;Asia&quot; 被清空了，看来是个 bug。但是这种情况并不影响保存。这个问题存在挺长时间了，难道是个 feature ？？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;按照相同的方式我们再添加一个位于香港的节点，由于香港的主机会被除了新加坡之外的其它所有地区的用户访问，所以在 Geo-mapping 中设置为 &quot;All(World)&quot; 就可以了(Azure 的 Traffic Manager 服务会保证用户的请求会被解析到正确的节点)：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151203630-2051270099.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;监控节点健康状况&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;当我们完成节点的添加后，Traffic Manager 会监控节点的健康状况：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151324568-1905394113.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&quot;Degraded&quot; 说明当前监控到的节点有问题，所以我们需要调整一下相关的配置。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;打开 Traffic Manager 中的 &quot;Configuration&quot; 界面，把 &quot;Endpoint monitor settings&quot; 中的 Protocol 改为 TCP，端口改成 22，并清空 Path 中的内容：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151353896-636980968.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;原因是默认的配置中通过 http 协议和 80 端口监控服务器的健康状况，但是笔者并没有在两个节点上运行 web 服务。改成 TCP 协议和 22 号端口(demo 中的两台虚拟主机运行的是 linux，并且都监听了 22 号端口)就可以了。修改配置后，节点的状态马上就变成 &quot;Online&quot; 了：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151419286-536404837.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&quot;Online&quot; 说明节点处于健康的，可以稳定提供服务的状态。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;对节点监控是非常重要的，Traffic Manager 就是依靠健康监控来实现自动故障转移的。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;完成 Traffic Manager 配置的最后一步是在 DNS 解析中配置域名的 CNAME。笔者在 GoDaddy 购买了域名 filterinto.com，现在我们就给它添加一个 CNAME 并指向前面创建的 Traffic Manager 服务：demox.traffimanager.net：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151528708-1015432515.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;保存上面的配置就可以了。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;接下来该测试我们的配置是否达到了目的。重新说明一下我们预定的目标：&lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;新加坡的用户访问的是放在新加坡的主机&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;香港的用户和全世界其它地方的用户访问的都是放在香港的主机&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;span&gt;先登录到一台放置在新加坡的虚拟机(使用云服务的好处是你可以在全世界的任何区域随意的创建虚拟主机！)，然后执行 dig 命令：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+$ dig demo.filterinto.com +noall +answer
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151646677-1891926334.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这就是我们希望新加坡的用户访问到的主机，它的 IP 地址为：52.230.11.28。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;接下来直接在本地(哥们儿是天朝子民)执行相同的 dig 命令：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+$ dig demo.filterinto.com +noall +answer
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/952033/201712/952033-20171210151726255-1289754468.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其实你只要在新加坡之外的其它地方执行这个命令，解析到的主机 IP 地址都是：52.229.175.83。到这里我们可以证明 Traffic Manager 已经能够正常工作了。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;注意，IP 地址与国家和区域的关系是由专门的机构管理的，我们基本不需要怀疑其正确性。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;从 dig 命令的输出中我们也可以看到 DNS 的解析过程为：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;demo.filterinto.com
+demox.trafficmanager.net             &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 我们创建的 Traffic Manager 服务&lt;/span&gt;
+eagle.eastasia.cloudapp.azure.com    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; Azure 提供的主机域名&lt;/span&gt;
+&lt;span&gt;52.229&lt;/span&gt;.&lt;span&gt;175.83&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;其中第二三两行的解析都是由 Azure 完成的。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;负载均衡可以在不同的层级以不同的技术实现，本文介绍的 Traffic Manager 就是在 DNS 层&lt;span&gt;的一种&lt;/span&gt;实现。本文选择尽可能简单的 demo 只是为了说明 Traffic Manager 是什么、能够做什么。如果要把它应用到生产中则需要考察并测试更多的细节，具体请参考 Azure 的官方文档。&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Sun, 10 Dec 2017 23:54:00 +0000</pubDate>
+<dc:creator>sparkdev</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/sparkdev/p/8017001.html</dc:identifier>
+</item>
+<item>
+<title>验证 Swarm 数据持久性 - 每天5分钟玩转 Docker 容器技术（104） - CloudMan</title>
+<link>http://www.cnblogs.com/CloudMan6/p/8016994.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CloudMan6/p/8016994.html</guid>
+<description>&lt;p&gt;上一节我们成功将 Rex-Ray Volume 挂载到了 Service。本节验证 Failover 时，数据不会丢失。&lt;/p&gt;
+&lt;h6&gt;&lt;span&gt;&lt;strong&gt;Scale Up&lt;/strong&gt;&lt;/span&gt;&lt;/h6&gt;
+&lt;p&gt;增加一个副本：&lt;/p&gt;
+&lt;pre&gt;
+docker service update --replicas 2 my_web
+&lt;/pre&gt;
+&lt;p&gt;运行之前我们先推测一下，理想的结果应该是：swarm 在&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;swarm-worker2&lt;/span&gt;&lt;/code&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;上启动第二个副本，同时也将挂载 volume&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;my_web&lt;/span&gt;&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;对比一下实际的运行结果：&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;535.png&quot; src=&quot;https://i.imgsafe.org/cd/cdf3aa3b42.png&quot; alt=&quot;535.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;出现了一点复杂的状况：&lt;/p&gt;
+&lt;ol class=&quot; list-paddingleft-2&quot; readability=&quot;0&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;swarm 首先尝试在&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;swarm-worker2&lt;/span&gt;&lt;/code&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;上启动第二个副本，但在 mount volume 失败。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;重试了三次都失败了。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;最后在&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;swarm-worker1&lt;/span&gt;&lt;/code&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;成功启动第二个副本。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;mount 失败的原因是：以 VirtualBox 为 backend 的 Rex-Ray volume 不支持同时 attach 到多个 Host。&lt;/p&gt;
+&lt;p&gt;需要注意：这实际上是 VirtualBox 的限制，而非 Rex-Ray。如果 backend 选择 Ceph RBD 就没有这个问题。&lt;/p&gt;
+&lt;h6&gt;&lt;span&gt;&lt;strong&gt;更新 Volume&lt;/strong&gt;&lt;/span&gt;&lt;/h6&gt;
+&lt;p&gt;更新 volume 的内容。&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;536.png&quot; src=&quot;https://i.imgsafe.org/cd/cde1f47a5b.png&quot; alt=&quot;536.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;service 返回更新内容，数据已经同步到副本。&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;540.png&quot; src=&quot;https://i.imgsafe.org/cd/cde22839a4.png&quot; alt=&quot;540.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当前的实验环境如图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;538.png&quot; src=&quot;https://i.imgsafe.org/cd/cde22ae947.png&quot; alt=&quot;538.png&quot;/&gt;&lt;/p&gt;
+&lt;h6&gt;&lt;span&gt;&lt;strong&gt;Failover&lt;/strong&gt;&lt;/span&gt;&lt;/h6&gt;
+&lt;p&gt;现在模拟故障情况。shutdown 节点&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;swarm-worker1&lt;/span&gt;&lt;/code&gt;，过一会，所有副本都会迁移到&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;code&gt;&lt;span&gt;swarm-worker2&lt;/span&gt;&lt;/code&gt;。&lt;/p&gt;
+&lt;div&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;539.png&quot; src=&quot;https://i.imgsafe.org/cd/cde2178e11.png&quot; alt=&quot;539.png&quot;/&gt;&lt;/div&gt;
+
+&lt;p&gt;访问 service，以前更新的内容完整地保留了下来。&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;540.png&quot; src=&quot;https://i.imgsafe.org/cd/cde22839a4.png&quot; alt=&quot;540.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当前的实验环境如图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;541.png&quot; src=&quot;https://i.imgsafe.org/cd/cde2471dbd.png&quot; alt=&quot;541.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Rex-Ray 作为 Swarm 的存储编排方案能够很好地支持跨主机 volume 管理，而且当容器在集群中迁移时 volume 也能够自动迁移。&lt;/p&gt;
+&lt;p&gt;Swarm 数据管理就讨论到这里，下一节我们学习 Service 的 Replicated Mode 和 Global Mode。&lt;br/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://www.cnblogs.com/Users/wanglei/百度云同步盘/容器/images/480.png?v=1510821977521&quot; alt=&quot;&quot;/&gt;&lt;strong&gt;书籍：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.《每天5分钟玩转Docker容器技术》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/16936307278.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/16936307278.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;&lt;p&gt;&lt;span&gt;2.《每天5分钟玩转OpenStack》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/12086376.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/12086376.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img title=&quot;https://i.imgsafe.org/68/68da21ce15.png&quot; src=&quot;https://i.imgsafe.org/68/68da21ce15.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Sun, 10 Dec 2017 23:15:00 +0000</pubDate>
+<dc:creator>CloudMan</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CloudMan6/p/8016994.html</dc:identifier>
+</item>
+<item>
+<title>Java集合（2）一 ArrayList 与 LinkList - knock_小新</title>
+<link>http://www.cnblogs.com/konck/p/7758265.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/konck/p/7758265.html</guid>
+<description>&lt;h2 id=&quot;目录&quot;&gt;目录&lt;/h2&gt;
+&lt;p&gt;&lt;a href=&quot;http://www.cnblogs.com/konck/p/7739471.html&quot;&gt;Java集合（1）一 集合框架&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://www.cnblogs.com/konck/p/7758265.html&quot;&gt;Java集合（2）一 ArrayList 与 LinkList&lt;/a&gt;&lt;br/&gt;Java集合（3）一 红黑树、TreeMap与TreeSet（上）&lt;br/&gt;Java集合（4）一 红黑树、TreeMap与TreeSet（下）&lt;br/&gt;Java集合（5）一 HashMap与HashSet&lt;/p&gt;
+&lt;h2 id=&quot;引言&quot;&gt;引言&lt;/h2&gt;
+&lt;p&gt;ArrayList&amp;lt;E&amp;gt;和LinkList&amp;lt;E&amp;gt;在继承关系上都继承自List&amp;lt;E&amp;gt;接口，上篇文章我们分析了List&amp;lt;E&amp;gt;接口的特点：有序，可以重复，并且可以通过整数索引来访问。&lt;br/&gt;他们在自身特点上有很多相似之处，在具体实现上ArrayList&amp;lt;E&amp;gt;和LinkList&amp;lt;E&amp;gt;又有很大不同，ArrayList&amp;lt;E&amp;gt;通过数组实现，LinkList&amp;lt;E&amp;gt;则使用了双向链表。将他们放到一起学习可以更清楚的理解他们的区别。&lt;/p&gt;
+&lt;h2 id=&quot;框架结构&quot;&gt;框架结构&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201710/368583-20171030221444246-424733005.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201710/368583-20171030221453886-1944858110.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从上面的结构图可以看出ArrayList&amp;lt;E&amp;gt;和LinkList&amp;lt;E&amp;gt;在继承结构上基本相同，值得注意的是LinkList&amp;lt;E&amp;gt;在继承了List&amp;lt;E&amp;gt;接口的同时还继承了Deque&amp;lt;E&amp;gt;接口。&lt;br/&gt;Deque&amp;lt;E&amp;gt;是一个双端队列的接口，LinkList&amp;lt;E&amp;gt;由于在实现上采用了双向链表，所以可以很自然的实现双端队列头尾进出的特点。&lt;/p&gt;
+&lt;h2 id=&quot;数据结构&quot;&gt;数据结构&lt;/h2&gt;
+&lt;p&gt;上一篇文章中我们说过，为什么一个Collection&amp;lt;E&amp;gt;接口会衍生出这么多实现类，其中最大的原因就是每一种实现在数据结构上都有差别，而不同的数据结构又导致了每种集合在使用场景上又各有不同。&lt;br/&gt;ArrayList&amp;lt;E&amp;gt;和LinkList&amp;lt;E&amp;gt;的根本区别就在数据结构上，只有了解了他们各自的数据结构，才能更加深入的明白他们各自的使用场景。&lt;br/&gt;在ArrayList&amp;lt;E&amp;gt;的源代码中有一个elementData变量，这个变量就代表了ArrayList&amp;lt;E&amp;gt;所使用的数据结构：数组。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//The array buffer into which the elements of the ArrayList are stored.&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;transient&lt;/span&gt; Object[] elementData;&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;elementData变量是ArrayList&amp;lt;E&amp;gt;操作的基础，他所有的操作都是基于elementData这个Object类型的数组来实现的。&lt;br/&gt;数组有以下几个特点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;数组大小一旦初始化之后，长度固定。&lt;/li&gt;
+&lt;li&gt;数组中元素之间的内存地址是连续的。&lt;/li&gt;
+&lt;li&gt;只能存储一种类数据类型的元素。&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201711/368583-20171130181322886-1201578333.png&quot;/&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;在这里面有个transient关键字值得注意，他的作用是标志当前对象不需要序列化。&lt;br/&gt;如果大家了解序列化，请跳过下面的介绍：&lt;br/&gt;&lt;em&gt;序列化是什么？&lt;/em&gt;&lt;br/&gt;序列化简单说就是将一个对象持久化的过程。将对象转换成字节流的过程就叫序列化，一个对象要在网络中传播就必须被转换成字节流。对应的，一个对象从字节流转换成对象的过程就叫反序列化。&lt;br/&gt;在Java中，标志一个对象可以被序列化只需要继承Serializable接口即可，Serializable接口是一个空接口。&lt;br/&gt;明白了什么是序列化的概念，再来看transient关键字，java中规定被声明为transient的关键在被序列化的时候会被忽略，可是为什么要忽略这个对象呢？如果被忽略了那反序列化的时候这个对象怎样恢复呢？&lt;br/&gt;我们先来想想什么样的对象在序列化时需要被忽略？序列化是一个耗时也耗费空间的过程，一般在一个对象中除了必须持久化的变量，还会存在很多中间变量或临时变量，声明这些变量的作用是方便我们操作这个类，举个例子：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;11&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;import java.io.IOException;&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;import java.io.ObjectInputStream;&lt;/span&gt;
+
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;class&lt;/span&gt; SerializableDateTime &lt;span class=&quot;kw&quot;&gt;implements&lt;/span&gt; java.&lt;span class=&quot;fu&quot;&gt;io&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;Serializable&lt;/span&gt; {
+
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; serialVersionUID = -8291235042612920489L;
+
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; String date = &lt;span class=&quot;st&quot;&gt;&quot;2011-11-11&quot;&lt;/span&gt;;
+
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; String time = &lt;span class=&quot;st&quot;&gt;&quot;11:11&quot;&lt;/span&gt;;
+
+    &lt;span class=&quot;co&quot;&gt;//不需要序列化的对象&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;transient&lt;/span&gt; String dateTime;
+
+    &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;initDateTime&lt;/span&gt;() {
+        dateTime = date + time;
+    }
+
+    &lt;span class=&quot;co&quot;&gt;//反序列化的时候调用，给dateTime赋值&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;readObject&lt;/span&gt;(ObjectInputStream inputStream) &lt;span class=&quot;kw&quot;&gt;throws&lt;/span&gt; IOException, ClassNotFoundException {
+        inputStream.&lt;span class=&quot;fu&quot;&gt;defaultReadObject&lt;/span&gt;();
+        &lt;span class=&quot;fu&quot;&gt;initDateTime&lt;/span&gt;();
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;SerializableDateTime对象中的dateTime对象如果在外界调用的时候会赋值，但是这个对象并不是基础数据，不需要序列化，在反序列化的时候可以通过调用initDateTime返回获取他的值，所以只需要序列化date和time对象即可。将dateTime对象标记为transient，则可以达到按需序列化的目的。&lt;br/&gt;那在ArrayList&amp;lt;E&amp;gt;中为什么要忽略elementData这个对象呢？&lt;br/&gt;主要是因为elementData对象不仅包含了所有有用的元素，还存在许多没有未使用的空间，而这些空间是不需要全部序列化的，为了节约空间，所以只序列化了elementData中存有对象的那一部分，在反序列化的时候又恢复elementData对象的空间，这样可以达到节约序列化空间和时间的目的。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;14&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//序列化时调用&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;writeObject&lt;/span&gt;(java.&lt;span class=&quot;fu&quot;&gt;io&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;ObjectOutputStream&lt;/span&gt; s)
+    &lt;span class=&quot;kw&quot;&gt;throws&lt;/span&gt; java.&lt;span class=&quot;fu&quot;&gt;io&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;IOException&lt;/span&gt;{
+    &lt;span class=&quot;co&quot;&gt;// Write out element count, and any hidden stuff&lt;/span&gt;
+    &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; expectedModCount = modCount;
+    s.&lt;span class=&quot;fu&quot;&gt;defaultWriteObject&lt;/span&gt;();
+
+    &lt;span class=&quot;co&quot;&gt;// Write out size as capacity for behavioural compatibility with clone()&lt;/span&gt;
+    s.&lt;span class=&quot;fu&quot;&gt;writeInt&lt;/span&gt;(size);
+
+    &lt;span class=&quot;co&quot;&gt;// Write out all elements in the proper order.&lt;/span&gt;
+    &lt;span class=&quot;co&quot;&gt;//序列化size大小的元素，size的大小是实际存储元素的大小，不是elementData元素的大小&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i=&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i&amp;lt;size; i++) {
+        s.&lt;span class=&quot;fu&quot;&gt;writeObject&lt;/span&gt;(elementData[i]);
+    }
+
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (modCount != expectedModCount) {
+        &lt;span class=&quot;kw&quot;&gt;throw&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ConcurrentModificationException();
+    }
+}
+
+&lt;span class=&quot;co&quot;&gt;//反序列化时调用&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;readObject&lt;/span&gt;(java.&lt;span class=&quot;fu&quot;&gt;io&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;ObjectInputStream&lt;/span&gt; s)
+    &lt;span class=&quot;kw&quot;&gt;throws&lt;/span&gt; java.&lt;span class=&quot;fu&quot;&gt;io&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;IOException&lt;/span&gt;, ClassNotFoundException {
+    elementData = EMPTY_ELEMENTDATA;
+
+    &lt;span class=&quot;co&quot;&gt;// Read in size, and any hidden stuff&lt;/span&gt;
+    s.&lt;span class=&quot;fu&quot;&gt;defaultReadObject&lt;/span&gt;();
+
+    &lt;span class=&quot;co&quot;&gt;// Read in capacity&lt;/span&gt;
+    s.&lt;span class=&quot;fu&quot;&gt;readInt&lt;/span&gt;(); &lt;span class=&quot;co&quot;&gt;// ignored&lt;/span&gt;
+
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (size &amp;gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;) {
+        &lt;span class=&quot;co&quot;&gt;// be like clone(), allocate array based upon size not capacity&lt;/span&gt;
+        &lt;span class=&quot;co&quot;&gt;//恢复elementData对象的空间&lt;/span&gt;
+        &lt;span class=&quot;fu&quot;&gt;ensureCapacityInternal&lt;/span&gt;(size);
+
+        Object[] a = elementData;
+        &lt;span class=&quot;co&quot;&gt;// Read in all elements in the proper order.&lt;/span&gt;
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i=&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i&amp;lt;size; i++) {
+            &lt;span class=&quot;co&quot;&gt;//填充elementData元素的内容&lt;/span&gt;
+            a[i] = s.&lt;span class=&quot;fu&quot;&gt;readObject&lt;/span&gt;();
+        }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这种序列化和反序列化的方法非常巧妙，在我们编程的过程中也可以借鉴这种办法来节约序列化和反序列化的空间和时间。&lt;/p&gt;
+&lt;p&gt;LinkedList&amp;lt;E&amp;gt;在底层实现上采用了链表这种数据结构，而且是双向链表，即每个元素都包含他的上一个和下一个元素的引用：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//链表的第一个元素&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;transient&lt;/span&gt; Node&amp;lt;E&amp;gt; first;
+
+&lt;span class=&quot;co&quot;&gt;//链表的最后一个元素&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;transient&lt;/span&gt; Node&amp;lt;E&amp;gt; last;
+
+&lt;span class=&quot;co&quot;&gt;//链表的内部类表示&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;class&lt;/span&gt; Node&amp;lt;E&amp;gt; {
+    &lt;span class=&quot;co&quot;&gt;//当前元素&lt;/span&gt;
+    E item;
+    &lt;span class=&quot;co&quot;&gt;//下一个元素&lt;/span&gt;
+    Node&amp;lt;E&amp;gt; next;
+    &lt;span class=&quot;co&quot;&gt;//上一个元素&lt;/span&gt;
+    Node&amp;lt;E&amp;gt; prev;
+
+    Node(Node&amp;lt;E&amp;gt; prev, E element, Node&amp;lt;E&amp;gt; next) {
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;item&lt;/span&gt; = element;
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;next&lt;/span&gt; = next;
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;prev&lt;/span&gt; = prev;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;链表的特点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;长度不固定，可以随时增加和减少&lt;/li&gt;
+&lt;li&gt;链表中的元素在内存地址上可以是连续的，也可以是不连续的，大部分情况下都是不连续的。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201711/368583-20171130181533839-1359821119.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;构造函数&quot;&gt;构造函数&lt;/h2&gt;
+&lt;p&gt;ArrayList&amp;lt;E&amp;gt;提供了3种构造方式，默认的构造函数会初始化一个空的数组，在之后添加元素的过程中会对数组进行扩容，扩容操作在一定程度上会影响数组的性能。如果能提前预估最终的数组使用空间大小，可以通过ArrayList(int initialCapacity) 这种构造方式来初始化数组大小，这样会减少扩容造成的性能损失。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; ArrayList(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; initialCapacity) {
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (initialCapacity &amp;gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;) {
+        &lt;span class=&quot;co&quot;&gt;//初始化数组大小&lt;/span&gt;
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;elementData&lt;/span&gt; = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; Object[initialCapacity];
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (initialCapacity == &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;) {
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;elementData&lt;/span&gt; = EMPTY_ELEMENTDATA;
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; {
+        &lt;span class=&quot;kw&quot;&gt;throw&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; IllegalArgumentException(&lt;span class=&quot;st&quot;&gt;&quot;Illegal Capacity: &quot;&lt;/span&gt;+
+                                            initialCapacity);
+    }
+}
+
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; ArrayList() {
+    &lt;span class=&quot;co&quot;&gt;//初始化一个空的数组&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;elementData&lt;/span&gt; = DEFAULTCAPACITY_EMPTY_ELEMENTDATA;
+}
+
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; ArrayList(Collection&amp;lt;? &lt;span class=&quot;kw&quot;&gt;extends&lt;/span&gt; E&amp;gt; c) {
+    elementData = c.&lt;span class=&quot;fu&quot;&gt;toArray&lt;/span&gt;();
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; ((size = elementData.&lt;span class=&quot;fu&quot;&gt;length&lt;/span&gt;) != &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;) {
+        &lt;span class=&quot;co&quot;&gt;// c.toArray might (incorrectly) not return Object[] (see 6260652)&lt;/span&gt;
+        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (elementData.&lt;span class=&quot;fu&quot;&gt;getClass&lt;/span&gt;() != Object[].&lt;span class=&quot;fu&quot;&gt;class&lt;/span&gt;)
+            elementData = Arrays.&lt;span class=&quot;fu&quot;&gt;copyOf&lt;/span&gt;(elementData, size, Object[].&lt;span class=&quot;fu&quot;&gt;class&lt;/span&gt;);
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; {
+        &lt;span class=&quot;co&quot;&gt;// replace with empty array.&lt;/span&gt;
+        &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;elementData&lt;/span&gt; = EMPTY_ELEMENTDATA;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;LinkList&amp;lt;E&amp;gt;只提供了2种构造方式，默认的构造函数是一个空函数，因为链表这种数据结构在使用上不需要初始化空间，也不需要扩容，每次需要添加元素时直接追加就可以，在空间的最大化利用上链表比数组更加合理。这并不代表链表使用的空间小，相反，链表每个节点因为要存储下一个节点引用（双向链表会存储上下两个节点的引用），在相同元素空间使用上会比数组大的多。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;7&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; LinkedList() {
+}
+
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; LinkedList(Collection&amp;lt;? &lt;span class=&quot;kw&quot;&gt;extends&lt;/span&gt; E&amp;gt; c) {
+    &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;();
+    &lt;span class=&quot;fu&quot;&gt;addAll&lt;/span&gt;(c);
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2 id=&quot;添加元素&quot;&gt;添加元素&lt;/h2&gt;
+&lt;p&gt;ArrayList&amp;lt;E&amp;gt;在添加元素的过程中，需要考虑数组空间是否足够，不够的情况下需要扩容。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//ArrayList&amp;lt;E&amp;gt;添加元素到末尾&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;boolean&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(E e) {
+    &lt;span class=&quot;co&quot;&gt;//检查数组容量，不够就扩容，扩容调用grow(int minCapacity) 方法&lt;/span&gt;
+    &lt;span class=&quot;fu&quot;&gt;ensureCapacityInternal&lt;/span&gt;(size + &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;);  
+    elementData[size++] = e;
+    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+}
+
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;ensureExplicitCapacity&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; minCapacity) {
+    modCount++;
+
+    &lt;span class=&quot;co&quot;&gt;// overflow-conscious code&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (minCapacity - elementData.&lt;span class=&quot;fu&quot;&gt;length&lt;/span&gt; &amp;gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;)
+        &lt;span class=&quot;fu&quot;&gt;grow&lt;/span&gt;(minCapacity);
+}
+
+&lt;span class=&quot;co&quot;&gt;//扩容&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;grow&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; minCapacity) {
+    &lt;span class=&quot;co&quot;&gt;// overflow-conscious code&lt;/span&gt;
+    &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; oldCapacity = elementData.&lt;span class=&quot;fu&quot;&gt;length&lt;/span&gt;;
+    &lt;span class=&quot;co&quot;&gt;//向右位移一位，相当于除以2，比除法运算要快，每次扩容在原容量的基础上增加一半，新的容量为原容量的1.5倍。&lt;/span&gt;
+    &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; newCapacity = oldCapacity + (oldCapacity &amp;gt;&amp;gt; &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;);
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (newCapacity - minCapacity &amp;lt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;)
+        newCapacity = minCapacity;
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (newCapacity - MAX_ARRAY_SIZE &amp;gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;)
+        newCapacity = &lt;span class=&quot;fu&quot;&gt;hugeCapacity&lt;/span&gt;(minCapacity);
+    &lt;span class=&quot;co&quot;&gt;// minCapacity is usually close to size, so this is a win:&lt;/span&gt;
+    &lt;span class=&quot;co&quot;&gt;//拷贝所有数据元素到新的数组中，内部调用System.arraycopy来拷贝所有数组元素&lt;/span&gt;
+    elementData = Arrays.&lt;span class=&quot;fu&quot;&gt;copyOf&lt;/span&gt;(elementData, newCapacity);
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;不扩容：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201712/368583-20171206230055363-1239000105.png&quot;/&gt;&lt;br/&gt;扩容：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201712/368583-20171206230248269-1491321289.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从中可以看出，不扩容的情况下添加元素到末尾非常方便，时间复杂度为O(1)，扩容的情况下每次都需要拷贝所有元素到新数组，时间复杂度上为O(n)，存在一定性能损耗。&lt;/p&gt;&lt;p&gt;LinkedList&amp;lt;E&amp;gt;在添加元素时由于链表的特性，不需要考虑扩容的问题，但LinkedList&amp;lt;E&amp;gt;每次都需要new一个Node来存储元素。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//LinkedList&amp;lt;E&amp;gt;添加元素到末尾&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;boolean&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(E e) {
+    &lt;span class=&quot;fu&quot;&gt;linkLast&lt;/span&gt;(e);
+    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+}
+
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;linkLast&lt;/span&gt;(E e) {
+    &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; Node&amp;lt;E&amp;gt; l = last;
+    &lt;span class=&quot;co&quot;&gt;//new一个新的链表元素并链接到末尾&lt;/span&gt;
+    &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; Node&amp;lt;E&amp;gt; newNode = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; Node&amp;lt;&amp;gt;(l, e, &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;);
+    last = newNode;
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (l == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;)
+        first = newNode;
+    &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt;
+        l.&lt;span class=&quot;fu&quot;&gt;next&lt;/span&gt; = newNode;
+    size++;
+    modCount++;
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201712/368583-20171206230733441-1949467563.png&quot;/&gt;&lt;/p&gt;&lt;p&gt;ArrayList&amp;lt;E&amp;gt;在添加元素到指定索引位置的时候，除了检查容量之外，由于数组具有在空间连续存储的特性，还需要对插入元素之后的所有节点做一次位移。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;14&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//ArrayList&amp;lt;E&amp;gt;添加元素到指定索引位置&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index, E element) {
+    &lt;span class=&quot;fu&quot;&gt;rangeCheckForAdd&lt;/span&gt;(index);
+
+    &lt;span class=&quot;fu&quot;&gt;ensureCapacityInternal&lt;/span&gt;(size + &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;);  &lt;span class=&quot;co&quot;&gt;// Increments modCount!!&lt;/span&gt;
+    System.&lt;span class=&quot;fu&quot;&gt;arraycopy&lt;/span&gt;(elementData, index, elementData, index + &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;,size - index);
+    elementData[index] = element;
+    size++;
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201711/368583-20171130181801667-175597278.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;LinkedList&amp;lt;E&amp;gt;添加到指定位置时首先需要先查找元素的位置，然后添加。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;//LinkedList&amp;lt;E&amp;gt;添加元素到指定索引位置&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index, E element) {
+    &lt;span class=&quot;fu&quot;&gt;checkPositionIndex&lt;/span&gt;(index);
+    
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (index == size)
+        &lt;span class=&quot;co&quot;&gt;//直接添加元素到末尾&lt;/span&gt;
+        &lt;span class=&quot;fu&quot;&gt;linkLast&lt;/span&gt;(element);
+    &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt;
+        &lt;span class=&quot;co&quot;&gt;//添加到指定位置前先查找当前位置已经存在的元素&lt;/span&gt;
+        &lt;span class=&quot;fu&quot;&gt;linkBefore&lt;/span&gt;(element, &lt;span class=&quot;fu&quot;&gt;node&lt;/span&gt;(index));
+}
+
+&lt;span class=&quot;co&quot;&gt;//查找指定索引的元素&lt;/span&gt;
+Node&amp;lt;E&amp;gt; &lt;span class=&quot;fu&quot;&gt;node&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index) {
+    &lt;span class=&quot;co&quot;&gt;// assert isElementIndex(index);&lt;/span&gt;
+    &lt;span class=&quot;co&quot;&gt;//指定索引小于元素数量的一半时从first开始遍历，大于元素数量的一半时从last开始遍历&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (index &amp;lt; (size &amp;gt;&amp;gt; &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;)) {
+        Node&amp;lt;E&amp;gt; x = first;
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; index; i++)
+            x = x.&lt;span class=&quot;fu&quot;&gt;next&lt;/span&gt;;
+        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; x;
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; {
+        Node&amp;lt;E&amp;gt; x = last;
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = size - &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;; i &amp;gt; index; i--)
+            x = x.&lt;span class=&quot;fu&quot;&gt;prev&lt;/span&gt;;
+        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; x;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201711/368583-20171130181813745-1983036645.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;LinkedList&amp;lt;E&amp;gt;的这种查找对性能有影响吗？相比ArrayList&amp;lt;E&amp;gt;的扩容以及位移插入位后面所有的元素性能如何？我们来对插入到头部、尾部以及中间位置3种特殊情况做个简单测试。&lt;br/&gt;插入到尾部：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;10&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addTailElementArrayList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ArrayList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addTailElementArrayList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}
+
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addTailElementLinkedList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; LinkedList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addTailElementLinkedList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td align=&quot;left&quot;&gt;ArrayList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;160&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td align=&quot;left&quot;&gt;LinkList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;110&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;插入到头部：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addHeadElementArrayList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ArrayList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;, i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addHeadElementArrayList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}
+
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addHeadElementLinkedList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; LinkedList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;, i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addHeadElementLinkedList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td align=&quot;left&quot;&gt;ArrayList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;10&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;900&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td align=&quot;left&quot;&gt;LinkList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;6&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;插入到中间：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addCenterIndexElementArrayList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ArrayList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(list.&lt;span class=&quot;fu&quot;&gt;size&lt;/span&gt;()&amp;gt;&amp;gt;&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;, i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addCenterIndexElementArrayList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}
+
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;addCenterIndexElementLinkedList&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; count) {
+
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; startTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    List&amp;lt;Integer&amp;gt; list = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; LinkedList&amp;lt;Integer&amp;gt;();
+    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; count; i++) {
+        list.&lt;span class=&quot;fu&quot;&gt;add&lt;/span&gt;(list.&lt;span class=&quot;fu&quot;&gt;size&lt;/span&gt;()&amp;gt;&amp;gt;&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;, i);
+    }
+    &lt;span class=&quot;dt&quot;&gt;long&lt;/span&gt; endTime = System.&lt;span class=&quot;fu&quot;&gt;currentTimeMillis&lt;/span&gt;();
+    System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;addCenterIndexElementLinkedList time: &quot;&lt;/span&gt; + (endTime - startTime));
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td align=&quot;left&quot;&gt;ArrayList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;1&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;6&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;400&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td align=&quot;left&quot;&gt;LinkList&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;0&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;3&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;80&lt;/td&gt;
+&lt;td align=&quot;left&quot;&gt;10000&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;从中可以得处几个简单结论：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;在添加到末尾时，ArrayList&amp;lt;E&amp;gt;和LinkedList&amp;lt;E&amp;gt;在性能上差距不明显，尽管ArrayList&amp;lt;E&amp;gt;需要扩容，但LinkedList&amp;lt;E&amp;gt;也需要new一个Node对象。&lt;/li&gt;
+&lt;li&gt;在插入到头部时，LinkedList&amp;lt;E&amp;gt;性能明显好于ArrayList&amp;lt;E&amp;gt;，因为ArrayList&amp;lt;E&amp;gt;每次都需要将所有元素向后移动一个位置，而LinkedList&amp;lt;E&amp;gt;由于是双向链表每次只需要改变first元素就可以了。&lt;/li&gt;
+&lt;li&gt;在插入到中间位置的时候，ArrayList&amp;lt;E&amp;gt;性能优明显好于LinkedList&amp;lt;E&amp;gt;，这是因为ArrayList&amp;lt;E&amp;gt;此时只需要移动一半的元素，而LinkedList&amp;lt;E&amp;gt;因为其双向链表查找元素的特殊性，只能从头或者尾部开始遍历，每次都需要遍历一半的元素，这个操作耗费了大量时间，而ArrayList&amp;lt;E&amp;gt;在扩容以及移动元素上的性能消耗比想象的要小。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;我们在ArrayList&amp;lt;E&amp;gt;和LinkedList&amp;lt;E&amp;gt;的选择上，需要充分考虑使用时的场景，LinkedList&amp;lt;E&amp;gt;在插入数据上并不是一定比ArrayList&amp;lt;E&amp;gt;性能好，相反的在很多情况下ArrayList&amp;lt;E&amp;gt;性能反而要好的多。不能因为插入操作多，就一定选用LinkedList&amp;lt;E&amp;gt;，还需要考虑插入元素的位置等其他因素来最终决定。&lt;/p&gt;
+&lt;h2 id=&quot;删除元素&quot;&gt;删除元素&lt;/h2&gt;
+&lt;p&gt;ArrayList&amp;lt;E&amp;gt;删除元素通过遍历元素查找到相等的元素然后使用索引删除，删除之后还要将被删除元素后的元素前移。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;14&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;boolean&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;remove&lt;/span&gt;(Object o) {
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (o == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; index &amp;lt; size; index++)
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (elementData[index] == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+                &lt;span class=&quot;fu&quot;&gt;fastRemove&lt;/span&gt;(index);
+                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+            }
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; {
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; index &amp;lt; size; index++)
+            &lt;span class=&quot;co&quot;&gt;//查找到equals的元素的索引然后删除&lt;/span&gt;
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (o.&lt;span class=&quot;fu&quot;&gt;equals&lt;/span&gt;(elementData[index])) {
+                &lt;span class=&quot;fu&quot;&gt;fastRemove&lt;/span&gt;(index);
+                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+            }
+    }
+    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;false&lt;/span&gt;;
+}
+
+&lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;fastRemove&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; index) {
+    modCount++;
+    &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; numMoved = size - index - &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;;
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (numMoved &amp;gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;)
+        &lt;span class=&quot;co&quot;&gt;//所有删除元素后的元素前移&lt;/span&gt;
+        System.&lt;span class=&quot;fu&quot;&gt;arraycopy&lt;/span&gt;(elementData, index&lt;span class=&quot;dv&quot;&gt;+1&lt;/span&gt;, elementData, index,
+                            numMoved);
+    elementData[--size] = &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;; &lt;span class=&quot;co&quot;&gt;// clear to let GC do its work&lt;/span&gt;
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201711/368583-20171130181829729-152302327.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;LinkedList&amp;lt;E&amp;gt;通过向后遍历链表的方式查找到equals的元素直接删除即可。&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;boolean&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;remove&lt;/span&gt;(Object o) {
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (o == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (Node&amp;lt;E&amp;gt; x = first; x != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;; x = x.&lt;span class=&quot;fu&quot;&gt;next&lt;/span&gt;) {
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (x.&lt;span class=&quot;fu&quot;&gt;item&lt;/span&gt; == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+                &lt;span class=&quot;fu&quot;&gt;unlink&lt;/span&gt;(x);
+                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+            }
+        }
+    } &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; {
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (Node&amp;lt;E&amp;gt; x = first; x != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;; x = x.&lt;span class=&quot;fu&quot;&gt;next&lt;/span&gt;) {
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (o.&lt;span class=&quot;fu&quot;&gt;equals&lt;/span&gt;(x.&lt;span class=&quot;fu&quot;&gt;item&lt;/span&gt;)) {
+                &lt;span class=&quot;fu&quot;&gt;unlink&lt;/span&gt;(x);
+                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
+            }
+        }
+    }
+    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;false&lt;/span&gt;;
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/368583/201712/368583-20171206230313753-1253481055.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;遍历元素&quot;&gt;遍历元素&lt;/h2&gt;
+&lt;p&gt;在遍历元素上ArrayList&amp;lt;E&amp;gt;存在更有效的方式，他实现了RandomAccess接口，代表ArrayList&amp;lt;E&amp;gt;支持快速访问。&lt;br/&gt;RandomAccess本身是一个空接口，这种接口一般用来代表一类特征，RandomAccess代表实现类具有快速访问的特征。ArrayList&amp;lt;E&amp;gt;实现快速访问的方式是通过索引。这代表ArrayList&amp;lt;E&amp;gt;在遍历时通过for循环方式要比通过Iterator或ListIterator迭代器方式要快。LinkedList&amp;lt;E&amp;gt;没有实现这个借口，所以一般还是通过Iterator迭代器来访问。&lt;/p&gt;
+</description>
+<pubDate>Sun, 10 Dec 2017 22:54:00 +0000</pubDate>
+<dc:creator>knock_小新</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/konck/p/7758265.html</dc:identifier>
+</item>
+<item>
 <title>weakSelf 和 strongSelf - 鸿鹄当高远</title>
 <link>http://www.cnblogs.com/jukaiit/p/8018883.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/jukaiit/p/8018883.html</guid>
@@ -147,7 +737,7 @@
 &lt;li&gt;该工具支持根据筛选条件查询key，add new key，reload等。&lt;/li&gt;
 &lt;li&gt;支持常用redis操作，针对目标key执行rename，delete，addrow，reload value操作。&lt;/li&gt;
 &lt;li&gt;命令控制台操作 ！大家感兴趣可以自己玩一下。&lt;br/&gt;另外关于实体修改后自动更新缓存的实现远离可以参考&lt;br/&gt;&lt;a href=&quot;http://www.cnblogs.com/loyldg/p/using-redis-in-abp-2.html&quot; class=&quot;uri&quot;&gt;http://www.cnblogs.com/loyldg/p/using-redis-in-abp-2.html&lt;/a&gt;&lt;br/&gt;这个文章。&lt;/li&gt;
-&lt;/ol&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;strong&gt;Github项目地址：&lt;a href=&quot;https://github.com/Jimmey-Jiang/ABP-ASP.NET-Boilerplate-Project-CMS&quot; class=&quot;uri&quot;&gt;https://github.com/Jimmey-Jiang/ABP-ASP.NET-Boilerplate-Project-CMS&lt;/a&gt;&lt;/strong&gt;&lt;br/&gt;本文链接：&lt;a href=&quot;http://www.cnblogs.com/anyushengcms/p/8013201.html&quot; class=&quot;uri&quot;&gt;http://www.cnblogs.com/anyushengcms/p/8013201.html&lt;/a&gt;&lt;/p&gt;
 </description>
 <pubDate>Sun, 10 Dec 2017 15:54:00 +0000</pubDate>
 <dc:creator>安于生</dc:creator>
@@ -841,340 +1431,10 @@ QVector&amp;lt;QTcpSocket*&amp;gt; clients; &lt;span&gt;//&lt;/span&gt;&lt;span&
 <title>谈谈换行 - stoneniqiu</title>
 <link>http://www.cnblogs.com/stoneniqiu/p/8017127.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/stoneniqiu/p/8017127.html</guid>
-<description>&lt;p&gt;前几天表弟突然打电话给我说，经过四个月的学习Java，最近拿到了几个offer，不知道选哪家。一问，有老虎证券，摩拜单车，搜狐和滴滴。薪水都是2w+，年薪30万左右。其实这些都蛮不错，最后决定选择了滴滴。&lt;/p&gt;
-&lt;p&gt;说实话我蛮惊讶的，表弟是北航研究生，毕业两年一直做物联网婴儿方面的创业项目，但因种种原因项目没有继续下去，于是决定找工作。早之前和我聊，说想干程序员，觉得程序员工资高，那时我已有辞职的打算，他笑着说，简直像围城啊，我都想进来，你却要出去。我说，没办法路不一样。他本专业是机械自动化，还有机械设计方面的设计专利。没想到这么快就拿到了这么好的offer。他的简历写的是两年工作经验，且只写了一个项目经验，还是学习java时自己做的一个系统，面试滴滴的时候有好些问题也没有回答上来，但就是过了。&lt;/p&gt;
-&lt;h3&gt;选择比努力重要&lt;/h3&gt;
-&lt;p&gt;其实如果让一个工作几年的程序员去换一种语言，也许很多人就像让他取个丑媳妇一样难为情。过去的沉默成本让他难以抉择。我之前也考虑过要不要学习下java。当时我内心的想法（借口）就是我干嘛要学一个差不多的后端语言呢，其实现在想来，这是两种很不同的语言，结构、用法是相似，但生态（市场）完全不同。打开51job，选择java开发工程师，再选2-3w的范围，拉出来有6页，而别的语言有的只有一页，这说明两点，一个是前者需求大，二个是达到高薪相对于别的语言容易。从投资的角度说，在成本和风险差不多的情况下，当然是选回报率更高的产品。所以表弟就毫不犹豫的选择了java，现在看来也很正确。&lt;/p&gt;
-&lt;h3&gt;&lt;strong&gt;代价&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;我想成本有两个，一个是入行成本，一个是沉默成本。四个月的学习时间，只是一个基本的学习成本。其实换做是我们，给你四个月时间，专门去学习一门语言，如果有其他语言的基础，你可能还不要这么多时间就能上手，因为编程的路子是通的，所以编程的入行成本不高，外行人完全可以自学了入门，周遭都有好些半路来做程序员的，未来肯定有全民编程的时候。区别最大的成本在于告别过去，重新开始。表弟创业结束，对机械兴趣也不大，四个月的学习就当是抛砖引玉。但像我自己，9月底离开上海，现在和一群90后一起正准备期末考试，之前6年的编程经验只能业余耍耍，对未来的工作暂时没有什么帮助，培训一年之后还要实习一年，我的入行成本和沉默成本都比较大，但考虑到长远的未来，也是做出了换行的决定。&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;起点&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;在过去的成本中，学历几乎是每个HR眼中的硬通货。大家都见过能力很强但学历不怎么样的人，但人性就是以人的过去判断人，除非你现场证明给他们看，如果有这样的机会的话。像一些能力证书也是很通用的；其实我们在一些商业书籍中经常看到一个人从一个行业转到另一个行业，被委以重任。因为人家之前的成绩很漂亮。所以，不单是学历，就在当前的领域里做出好的成绩，比如在知名的企业、参与过知名的项目、很擅长某些领域，对未来的换行没准也是有帮助的。HR往人群中一扫，先入眼的，自然是那些站的高点的人。同样是基于经验，新行业的内部人士的引荐也可以提高你的起点。 &lt;/p&gt;
-
-&lt;p&gt;总的说来，过去的已经是既定的，学历出生难以改变。不管考虑不考虑换行，把当前的工作做好都是正确的。对一件事有兴趣不妨花点精力入门学习一下，花不了多少精力，不要老是背负这过去的沉默成本，没准就是未来橄榄枝的必要条件。以上并不是鼓励大家去学java，只是由自己换行和表弟换行想到的一些。&lt;/p&gt;
-</description>
+<description>[unable to retrieve full-text content]前几天表弟突然打电话给我说，经过四个月的学习Java，最近拿到了几个offer，不知道选哪家。一问，有老虎证券，摩拜单车，搜狐和滴滴。薪水都是2w+，年薪30万左右。其实这些都蛮不错，最后决定选择了滴滴。 说实话我蛮惊讶的，表弟是北航研究生，毕业两年一直做物联网婴儿方面的创业项目，但因种种原因项目没</description>
 <pubDate>Sun, 10 Dec 2017 15:11:00 +0000</pubDate>
 <dc:creator>stoneniqiu</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/stoneniqiu/p/8017127.html</dc:identifier>
-</item>
-<item>
-<title>前端自动化测试漫长路之——Selenium初探 - Young Dreamer</title>
-<link>http://www.cnblogs.com/wmhuang/p/8011815.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wmhuang/p/8011815.html</guid>
-<description>&lt;h2 id=&quot;引言&quot;&gt;引言&lt;/h2&gt;
-&lt;p&gt;最近想解决前端开发或测试中的两个问题：一是界面UI的布局适配，能否在测试的过程中，通过命令操作真机打开相应页面然后截屏，通过对图片识别分类，发现有问题的图片，然后及时修复；二是页面性能分析，很多时候页面只能在指定的Webview中使用，能否直接通过命令打开指定的页面，分析页面在真实APP中的性能，并生成报告。这两个问题的前提就是通过命令直接操作手机App，带着问题找线索，于是我就结识了&lt;code&gt;Selenium&lt;/code&gt;，下面将结合实例和大家分享一下。&lt;/p&gt;
-&lt;h2 id=&quot;selenium是什么&quot;&gt;Selenium是什么？&lt;/h2&gt;
-&lt;p&gt;先看一下&lt;a href=&quot;http://www.seleniumhq.org/&quot;&gt;官网&lt;/a&gt;的解释：&lt;/p&gt;
-&lt;blockquote readability=&quot;11&quot;&gt;
-&lt;p&gt;Selenium automates browsers. That's it! What you do with that power is entirely up to you. Primarily, it is for automating web applications for testing purposes, but is certainly not limited to just that. Boring web-based administration tasks can (and should!) be automated as well.&lt;br/&gt;Selenium has the support of some of the largest browser vendors who have taken (or are taking) steps to make Selenium a native part of their browser. It is also the core technology in countless other browser automation tools, APIs and frameworks.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;从上面的话我们可以知道3个点：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;利用Selenium可以自动化操作浏览器，来实现web程序的自动化测试；&lt;/li&gt;
-&lt;li&gt;Selenium是一个综合性的项目，提供了提供了不同语言版本的类库和工具，来支持浏览器的自动化；&lt;/li&gt;
-&lt;li&gt;主流浏览器基于W3C规定的的Web Driver规范，提供了相应的Web Driver，而标准的主要技术支持来源于Selenium项目。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;一图胜千言，Selenium在自动化测试中扮演的角色如下图所示：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/605230/201712/605230-20171210224525177-1069517099.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;selenium如何用&quot;&gt;Selenium如何用？&lt;/h2&gt;
-&lt;p&gt;我们的诉求是通过脚本控制本地和手机上的浏览器，甚至APP中的Webview，Selenuim正好提供了WebDriver API供我们使用。从上面可以知道Selenium支持多种语言，如python、go、javascript等，对于前端而言，首选当然是javascript。以下是相关的操作步骤：&lt;/p&gt;
-&lt;h3 id=&quot;环境准备&quot;&gt;环境准备&lt;/h3&gt;
-&lt;p&gt;该环节主要是两步：&lt;/p&gt;
-&lt;ol readability=&quot;0.47341772151899&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;在项目中下载selenium-webdriver&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;7&quot;&gt;
-&lt;pre class=&quot;sourceCode bash&quot;&gt;
-&lt;code class=&quot;sourceCode bash&quot;&gt;&lt;span class=&quot;kw&quot;&gt;npm&lt;/span&gt; install selenium-webdriver --save&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1.86875&quot;&gt;
-&lt;p&gt;下载浏览器提供的WebDriver，并将该命令文件放置在系统变量PATH下&lt;br/&gt;我使用的是chrome的&lt;a href=&quot;https://sites.google.com/a/chromium.org/chromedriver/&quot;&gt;WebDriver&lt;/a&gt;，针对不同的chrome版本，需要下载不同版本的WebDriver，否则程序会报错。网上有好心人已经整理出了chrome的WebDriver与chrome的版本映射表，可以&lt;a href=&quot;http://blog.csdn.net/huilan_same/article/details/51896672&quot;&gt;点击查看&lt;/a&gt;。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;h3 id=&quot;代码编写&quot;&gt;代码编写&lt;/h3&gt;
-&lt;p&gt;selenium-webdriver的说明文档相当的赞，在selenium-webdriver包的目录下有几个文件：chrome.js、edge.js、ie.js、phantom.js等，这些都是selenium-webdriver针对不同的浏览器的webdriver的调用做了封装，打开chrome.js，在文件的开头有详细的文档说明。&lt;br/&gt;chrome.js中提到了3种使用场景：分别是Headless Chrome、Customizing the ChromeDriver Server、Working with Android。而我需要的场景就是Working with Android。&lt;br/&gt;实例代码如下：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode js&quot;&gt;
-&lt;code class=&quot;sourceCode javascript&quot;&gt;&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; chrome &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;require&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'selenium-webdriver/chrome'&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;Builder&lt;span class=&quot;op&quot;&gt;}&lt;/span&gt; &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;require&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'selenium-webdriver'&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; driver &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;Builder&lt;/span&gt;()
-          .&lt;span class=&quot;at&quot;&gt;forBrowser&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'chrome'&lt;/span&gt;)
-          .&lt;span class=&quot;at&quot;&gt;setChromeOptions&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;chrome&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;Options&lt;/span&gt;()
-              .&lt;span class=&quot;at&quot;&gt;androidPackage&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'com.example'&lt;/span&gt;)
-              .&lt;span class=&quot;at&quot;&gt;androidActivity&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'com.example.Activity'&lt;/span&gt;))
-          .&lt;span class=&quot;at&quot;&gt;build&lt;/span&gt;()&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;其中需要要点就是指定要操作的浏览器类型、APP包的名字、android程序的Activity名字。一般webview的内核都是基于webkit的，指定浏览器类型为chrome即可，APP的包名和Activity名字可以通过命令工具aapt获取，关于aapt的详细介绍可以参考&lt;a href=&quot;http://www.jianshu.com/p/8d691b6bf8b4&quot;&gt;这篇博客&lt;/a&gt;。&lt;br/&gt;通过以上两步，就可以通过node执行相应的js文件，实现通过命令来控制APP了，这里是几个我测试的demo，供大家&lt;a href=&quot;https://github.com/huangwenming/learning-notes/tree/master/automateBrowser&quot;&gt;下载&lt;/a&gt;。&lt;/p&gt;
-&lt;h2 id=&quot;selenium-webdriver运行原理&quot;&gt;selenium-webdriver运行原理&lt;/h2&gt;
-&lt;p&gt;上面的操作涉及到了两个核心，即浏览器提供的webdriver和浏览器（chrome/chromium）。selenium-webdriver的作用就是利用webdriver将浏览器启动起来，并实现一系列自动操作。但究竟webdriver和浏览器是怎样一个协同关系呢，从chrome.js文件的注释中可以找到一些线索。&lt;/p&gt;
-&lt;blockquote readability=&quot;9.6153846153846&quot;&gt;
-&lt;p&gt;By default, every Chrome session will use a single driver service, which is started the first time a &lt;a href=&quot;mailto:%7B@link&quot;&gt;{@link&lt;/a&gt; Driver} instance is created and terminated when this process exits. The default service will inherit its environment from the current process and direct all output to /dev/null. You may obtain a handle to this default service using &lt;a href=&quot;mailto:%7B@link&quot;&gt;{@link&lt;/a&gt; #getDefaultService getDefaultService()} and change its configuration with &lt;a href=&quot;mailto:%7B@link&quot;&gt;{@link&lt;/a&gt; #setDefaultService setDefaultService()}.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;从上面可以知道，selenium-webdriver先通过webdriver启动了一个driver service，该service又启动chrome，分别起在不同的端口。&lt;br/&gt;通过查阅资料，可以知道driver service在开启chrome的同时，为chrome安装了一个&lt;code&gt;Chrome Automation Extension&lt;/code&gt;扩展程序，该扩展程序的描述是：&lt;code&gt;Exposes extension APIs for automating Chrome&lt;/code&gt;，通过查看其源码，可以看到launchApp、getWindowInfo等函数，主要是提供了一些操作chrome的相关方法。&lt;br/&gt;一图胜千言，selenium-webdriver的工作原理如下图所示，该图来源于&lt;a href=&quot;https://kkboxsqa.wordpress.com/2015/03/20/chromedriver-under-the-hood/&quot;&gt;网络&lt;/a&gt;：&lt;br/&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/605230/201712/605230-20171210224759365-956970653.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Tips：&lt;/strong&gt;&lt;br/&gt;上面知道了driver service与chrome之间的关系，知道默认情况下driver service的生命周期和测试的Chrome session是同步的，意味着每次测试都需要开启一个driver service，如果频繁的开启和关闭service，势必会造成资源浪费。&lt;br/&gt;针对这个情况，官方的描述是这样的：&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;The ChromeDriver class starts the ChromeDriver server process at creation and terminates it when quit is called. This can waste a significant amount of time for large test suites where a ChromeDriver instance is created per test.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;官方针对该情况提出了两个解决办法：&lt;/p&gt;
-&lt;ol readability=&quot;2&quot;&gt;&lt;li readability=&quot;5&quot;&gt;
-&lt;p&gt;Start the ChromeDriver server separately before running your tests, and connect to it using the Remote WebDriver.&lt;br/&gt;即测试之前先单独启动driver server，然后使用Remote WebDriver连接上driver server所在的端口。官方提供了一个python的示例：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;11&quot;&gt;
-&lt;pre class=&quot;sourceCode python&quot;&gt;
-&lt;code class=&quot;sourceCode python&quot;&gt;&lt;span class=&quot;im&quot;&gt;import&lt;/span&gt; time
-&lt;span class=&quot;im&quot;&gt;from&lt;/span&gt; selenium &lt;span class=&quot;im&quot;&gt;import&lt;/span&gt; webdriver
-&lt;span class=&quot;im&quot;&gt;import&lt;/span&gt; selenium.webdriver.chrome.service &lt;span class=&quot;im&quot;&gt;as&lt;/span&gt; service
-service &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; service.Service(&lt;span class=&quot;st&quot;&gt;'/path/to/chromedriver'&lt;/span&gt;)
-service.start()
-capabilities &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; {&lt;span class=&quot;st&quot;&gt;'chrome.binary'&lt;/span&gt;: &lt;span class=&quot;st&quot;&gt;'/path/to/custom/chrome'&lt;/span&gt;}
-driver &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; webdriver.Remote(service.service_url, capabilities)
-driver.get(&lt;span class=&quot;st&quot;&gt;'http://www.google.com/xhtml'&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-time.sleep(&lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;) &lt;span class=&quot;co&quot;&gt;# Let the user actually see something!&lt;/span&gt;
-driver.quit()&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;4.5&quot;&gt;
-&lt;p&gt;Use the ChromeDriverService. This is available for most languages and allows you to start/stop the ChromeDriver server yourself.&lt;br/&gt;可自己创建一个driver，同时为这个driver指定相应的service。这样不仅可以为driver提供个性化的服务（如log日志），还可以控制service的生命周期。&lt;br/&gt;代码如下：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;10&quot;&gt;
-&lt;pre class=&quot;sourceCode js&quot;&gt;
-&lt;code class=&quot;sourceCode javascript&quot;&gt;&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; chrome &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;require&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'selenium-webdriver/chrome'&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; service &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;chrome&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;ServiceBuilder&lt;/span&gt;()
-.&lt;span class=&quot;at&quot;&gt;loggingTo&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;'/my/log/file.txt'&lt;/span&gt;)
-.&lt;span class=&quot;at&quot;&gt;enableVerboseLogging&lt;/span&gt;()
-.&lt;span class=&quot;at&quot;&gt;build&lt;/span&gt;()&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; options &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;chrome&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;Options&lt;/span&gt;()&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;// configure browser options ...&lt;/span&gt;
- &lt;span class=&quot;kw&quot;&gt;let&lt;/span&gt; driver &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;chrome&lt;/span&gt;.&lt;span class=&quot;va&quot;&gt;Driver&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;createSession&lt;/span&gt;(options&lt;span class=&quot;op&quot;&gt;,&lt;/span&gt; service)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;小结&quot;&gt;小结&lt;/h2&gt;
-&lt;p&gt;前端自动化测试的道路是漫长的，对selenium的挖掘才刚刚开始。本文并没有解决引言中提到的两个问题，selenium-webdriver只是解决了第一步，即通过命令行来操作app，后面将继续学习，继续总结分享。&lt;/p&gt;
-</description>
-<pubDate>Sun, 10 Dec 2017 15:02:00 +0000</pubDate>
-<dc:creator>Young Dreamer</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wmhuang/p/8011815.html</dc:identifier>
-</item>
-<item>
-<title>基于 HTML5 Canvas 的 3D 碰撞检测 - xhload3d</title>
-<link>http://www.cnblogs.com/xhload3d/p/8018626.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/xhload3d/p/8018626.html</guid>
-<description>&lt;p&gt;这是公司大神写的一个放官网上给用户学习的例子，我一开始真的不知道这是在干嘛，就只是将三个形状图元组合在一起，然后可以同时旋转、放大缩小这个三个图形，点击“Animate”就能让中间的那一个图元单独绕着某一个点旋转，表单最上方的“Axis”真的完全不知道拿来干嘛用的，觉得好累赘，而且是官网的 Demo，也没有解释。。。所以我今天得任务就是完全剖析这个例子！&lt;img src=&quot;http://static.blog.csdn.net/xheditor/xheditor_emot/default/struggle.gif&quot; alt=&quot;奋斗&quot; data-cke-saved-src=&quot;http://static.blog.csdn.net/xheditor/xheditor_emot/default/struggle.gif&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;本文例子：&lt;a href=&quot;http://www.hightopo.cn/demo/3drotate/3d-rotate.html&quot; target=&quot;_blank&quot; data-cke-saved-href=&quot;http://www.hightopo.cn/demo/3drotate/3d-rotate.html&quot;&gt;http://www.hightopo.cn/demo/3drotate/3d-rotate.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;首先让我们来看下这个案例：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/591709/201710/591709-20171020095805459-315445261.png&quot; alt=&quot;&quot; width=&quot;887&quot; height=&quot;465&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;我们来看看如何操作这个 3d 交互模型，可以直接滑动“Rotation”的滑动条，你会看到 3d 和左下角的 2d 上的图元都会旋转，接着点击“Axis”中的任意一个值，然后点击“Animate”，你会看到中间这个图元会旋转，同时滑动“Range”的滑动条，这是控制你旋转的幅度的，如果你调到“0”，那么就不会旋转，调到“30”就会旋转30度，以此类推。接着调整“Reset”你会发现，不是完全刷新这个界面，而是局部刷新两边的圆柱，根据这两个圆柱与中间节点之间的关联而重置的。&lt;/p&gt;
-&lt;p&gt;左下角的是整个 3d 场景内的俯视图，这样我们可以非常直观地看清图元的移动方向和位置。&lt;/p&gt;
-&lt;p&gt;可能你会好奇这个是怎么俯视图是怎么放上去的？如果 3d 中的图元变化，这个俯视图中的图元也会跟着变化么？如何把右上角的 form 表单和左下角的视图又是怎么放的？如何只移动 3d 二把这两个固定在这边？或者你可能还有别的问题，在这里我会尽量清楚地解答，实在找不到答案可以去官网 &lt;a href=&quot;http://www.hightopo.cn/&quot; target=&quot;_blank&quot; data-cke-saved-href=&quot;http://www.hightopo.cn/&quot;&gt;HT for Web&lt;/a&gt; 查找你的问题。&lt;/p&gt;
-&lt;p&gt;好了，基础就是先布局，布 3d 场景，HT 在提供方法方面算是非常细致的了，平时我们生成网格可能就要花费一段时间，又是基础代码，新手开发人员都能很快上手呢~短短几行代码就能创建一个 3d 场景，简直太快。。。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-dm = new&lt;span&gt; ht.DataModel();
-g3d = new&lt;span&gt; ht.graph3d.Graph3dView(dm);
-g3d.setGridVisible(true);//设置网格可视
-g3d.setGridSize(m);//设置网格大小
-g3d.setGridGap(w);//设置网格间距
-g3d.setEye([-200, 150, 200]);//设置camera位置
-g3d.getView().className = 'main'&lt;span&gt;;
-document.body.appendChild(g3d.getView());&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;由于 HT 默认将所有组件都设置了 style “position:absolute”，所以当我们初始化这个组件之后，一定要在 style 中写上位置，并且将这个组件添加进你想要添加进的标签中，这个例子中，form 表单、2d 组件和3d 组件都互不依附，所以我们直接将这三个都添加进 body 中即可，还有一点值得注意的，所有 &lt;a href=&quot;http://www.hightopo.cn/&quot; target=&quot;_blank&quot; data-cke-saved-href=&quot;http://www.hightopo.cn/&quot;&gt;HT&lt;/a&gt; 组件的最根层都是一个 div，是通过组件的 getView() 函数获得的。所以我们如果要添加进 HTML 标签中，肯定也要是 HTML 标签才行。&lt;/p&gt;
-&lt;p&gt;然后再界面的右上角放上 form 表单，放到右上角就直接设置 style 中的“top”“bottom”“left”“right”即可，2d 图同理：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
-&lt;pre&gt;
-formPane = new&lt;span&gt; ht.widget.FormPane();
-formPane.setLabelAlign('right'&lt;span&gt;);
-formPane.getView().className = 'formpane'&lt;span&gt;;
-document.body.appendChild(formPane.getView());
-formPane.addRow(['Rotation:'&lt;span&gt;, {
-    id: 'rotation'&lt;span&gt;,
-    slider: {
-        min: -180&lt;span&gt;,
-        max: 180&lt;span&gt;,
-        value: 0&lt;span&gt;,
-        step: 1&lt;span&gt;,
-        onValueChanged: function&lt;span&gt;(e){
-            node.setRotation(this.getValue() * Math.PI / 180&lt;span&gt;);
-        }
-    }
-}], [60, 0.1]);&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;因为这个例子的 form 表单中的行数和内容比较多，所以我这边就只取了一个 form 表单自定义行的例子。这边的“id”只是为了能快速查找到这个元素，slider 是 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/plugin/form/ht-form-guide.html&quot; target=&quot;_blank&quot;&gt;HT form 表单&lt;/a&gt;自定义的一个方法，滑动条功能，设置了该属性后 HT 将根据属性值自动构建 ht.widger.Slider 对象，具体参数可以参考 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/plugin/form/ht-form-guide.html&quot; target=&quot;_blank&quot;&gt;HT for Web 表单手册&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;至于左下角的 2d 俯视图，这是通过跟 3d 共享同一个 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/core/datamodel/ht-datamodel-guide.html&quot; target=&quot;_blank&quot;&gt;dataModel&lt;/a&gt; 数据模型，只要我们绘制好了图形，然后添加进 dataModel 中去，不管是什么组件，只要调用了这个 dataModel 的都可以拥有dataModel 中的所有数据：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-g2d = new&lt;span&gt; ht.graph.GraphView(dm);
-g2d.getView().className = 'g2d'&lt;span&gt;;
-g2d.setEditable(true&lt;span&gt;);
-document.body.appendChild(g2d.getView());
-ht.Default.callLater(g2d.fitContent, g2d, [true, 50, true]);&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;ht.Default.callLater(func, scope, args, delay) 获取全局下一个编号，其中 func 指的是回调函数，scope 指的是函数域，args 指的是函数参数列表，delay 则是延迟时间（毫秒）。这个函数可以在页面打开时回调 g2d.fitContent 函数，这个函数的作用域仅在 g2d 中，参数列表是 fitContent(anim, padding, notZoomIn) 函数的参数，这三个参数分别代表“是否使用动画”，“缩放后图元区域与拓扑边缘的距离”，以及“是否将最小缩放值限定为 1”。&lt;/p&gt;
-&lt;p&gt;接着将 3d 中的图元添加进去，这里我不截取全部代码，只取一个比较特别的有趣的图元，中间外层的透明图元：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-shape = new&lt;span&gt; ht.Shape();
-shape.s({
-    'all.reverse.cull': true&lt;span&gt;,
-    'all.color': 'rgba(0, 255, 0, 0.5)'&lt;span&gt;,
-    'all.transparent': true&lt;span&gt;
-});
-shape.setThickness(2&lt;span&gt;);
-dm.add(shape);
-var resetShape = function&lt;span&gt;() {
-    var cs = node.getCorners(10, 10&lt;span&gt;);
-    cs.push(cs[0&lt;span&gt;]);
-    shape.setPoints(cs);
-    g3d.setBoundaries(ht.Default.toBoundaries(cs));
-};
-resetShape();&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;代码中有比较有趣的几点：&lt;/p&gt;
-&lt;p&gt;1. 这边用了 node.getCorners() 这个方法，这个是获取四个点，对于 2d 来说就是左上、右上、右下、左下四个点；对于 3d 来说就是直接获取底面的四个“左上、右上、右下、左下”点，这个我反应了好一会儿才反应过来。。。并以这四个点为基础作为 shape 的 points。&lt;/p&gt;
-&lt;p&gt;2. 这边还用了 setBoundaries(boundaries) 函数,借用 ht.Default.toBoundaries 函数来将不符合 setBoundaries 函数参数的格式转换成它需要的参数格式。虽然我认为这一行在这个例子中没有什么作用，但是还是让我好好学习了一把碰撞测试。&lt;/p&gt;
-&lt;p&gt;我们在碰撞测试的时候经常要设置 g3d.setNear 函数，我实在没搞懂这个函数是拿来干嘛的，结果这个例子让我注意到，如果“我”的视线的近端截面位置也就是 setNear(1)，那么我能看到的就是比表面跟进 1 的距离，这个函数默认设置为 10，就算我们不设置这个值我们也能在 3d 中看到图元的内部去，刚刚我们介绍的 getCorners() 函数，其实它还有两个参数 xpadding 和 ypadding，分别代表“水平方向 padding”“垂直方向 padding”，也就是说，在我们获取四个角的同时，我们还能设置这四个角和边之间的 padding。只要将这个值设置得比 setNear 设置的大，我们就不会看到 3d 图元的内部中去了。&lt;/p&gt;
-&lt;p&gt;我们还注意到似乎是“废代码”的一行： cs.push(cs[0])。这个完全不是废代码啊，帮了很大忙呢！在 HT 中，用 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/core/shape/ht-shape-guide.html&quot; target=&quot;_blank&quot;&gt;ht.Shape&lt;/a&gt; 创建的图元，只要你不手动设置绘制关闭，那么就会停留在你最终绘制的位置，所以我把最后的一个点又和第一个点连起来，那么就是一个封闭的图形了，否则你会看到后面缺了一部分，像这样：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/591709/201710/591709-20171020100817677-1071597255.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;我在其他文章中也提到过 HT 封装了一些很方便的方法和事件，比如 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/core/datamodel/ht-datamodel-guide.html#ref_datamodel&quot; target=&quot;_blank&quot;&gt;dataModel#md&lt;/a&gt;，监听数据的属性的变化，这边我们用了 md 方法来判断只有中间这个 node 能够绕着一个点旋转，具体参考 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/core/datamodel/ht-datamodel-guide.html&quot; target=&quot;_blank&quot;&gt;HT for Web 数据模型手册&lt;/a&gt;：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-dm.md(function&lt;span&gt;(e){
-    if(e.data ===&lt;span&gt; node){
-        if(e.property === 'rotation'&lt;span&gt;){
-            formPane.v('rotation', 180 / Math.PI *&lt;span&gt; e.newValue);
-        }
-        resetShape();
-    }
-});&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这边我想要说一下“绕着一个点旋转”的功能，这边没有用我们自定义的 anchor 锚点，但是功能类似，通过获取 form 表单上选择的“left、right、front、back”来设置旋转中心点，&lt;a href=&quot;http://www.hightopo.cn/guide/guide/plugin/form/ht-form-guide.html&quot; target=&quot;_blank&quot;&gt;HT 中 form 表单&lt;/a&gt;通过 getValue(id) 简写成 v(id) 根据 id 获取对应 item 元素值：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;45&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;formPane.addRow([
-    {
-         button: {
-             label: 'Animate'&lt;span&gt;,
-             onClicked: function&lt;span&gt;(){
-                 var dx = 0&lt;span&gt;,
-                 dy = 0&lt;span&gt;,
-                 range = formPane.v('range') * Math.PI / 180&lt;span&gt;;
-                 if(formPane.v('left'&lt;span&gt;)){
-                     dx = -node.getWidth()/2;
-&lt;span&gt;                 }
-                 if(formPane.v('right'&lt;span&gt;)){
-                     dx = node.getWidth()/2;
-&lt;span&gt;                 }
-                 if(formPane.v('back'&lt;span&gt;)){
-                     dy = -node.getHeight()/2;
-&lt;span&gt;                 }
-                 if(formPane.v('front'&lt;span&gt;)){
-                     dy = node.getHeight()/2;
-&lt;span&gt;                 }
-                 animate(node, range, dx, dy);
-             }
-         }
-     },
-     {
-         button: {
-             label: 'Reset'&lt;span&gt;,
-             onClicked: function&lt;span&gt;(){
-                 node.setRotation(0&lt;span&gt;);
-             }
-         }
-     }
-], [0.1, 0.1]);&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;看到这边你还是没懂？快去我们官网上从 &lt;a href=&quot;http://www.hightopo.cn/guide/guide/core/beginners/ht-beginners-guide.html&quot; target=&quot;_blank&quot;&gt;beginners&lt;/a&gt; 重头开始学习吧！&lt;/p&gt;
-</description>
-<pubDate>Sun, 10 Dec 2017 14:51:00 +0000</pubDate>
-<dc:creator>xhload3d</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/xhload3d/p/8018626.html</dc:identifier>
-</item>
-<item>
-<title>MLR算法[Paper笔记] - rongyux</title>
-<link>http://www.cnblogs.com/rongyux/p/8018493.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/rongyux/p/8018493.html</guid>
-<description>&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;介绍&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    MLR算法是alibaba在2012年提出并使用的广告点击率预估模型，2017年发表出来。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    如下图，LR不能拟合非线性数据，MLR可以拟合非线性数据，因为划分-训练模式。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221525599-546956448.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;讨论，非线性拟合能力：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    数据划分规则如下公式，特征分片数m=1时，退化为LR；上图MLR中m=4。m越大，模型的拟合能力越强，一般m=12。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221547974-1959132092.png&quot; alt=&quot;&quot; width=&quot;313&quot; height=&quot;133&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;基础知识&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    优化方法：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    1）剃度下降：&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221613521-533402495.png&quot; alt=&quot;&quot; width=&quot;137&quot; height=&quot;19&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt; 　　　　&lt;span&gt;大小：一阶导数，方向：导数负方向。由目标函数的泰勒一阶展开式求得&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    2）牛顿法：&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221636646-491790021.png&quot; alt=&quot;&quot; width=&quot;134&quot; height=&quot;19&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　　　大小：一阶导数，方向：－海信矩阵的逆。由目标函数的泰勒二阶展开式求&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    3）拟牛顿法(LBFGS)：牛顿方向通过约等替换，每个样本保存下面三个参数：delta x ，delta剃度 和p：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221645990-178460106.png&quot; alt=&quot;&quot; width=&quot;261&quot; height=&quot;73&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    增量替换，计算牛顿方向D&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221701333-1654644344.png&quot; alt=&quot;&quot; width=&quot;280&quot; height=&quot;256&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    LBFGS方法通过一阶导数中值定理，避免了计算海信矩阵（复杂度太大）。但是L1范数不能求导，所以需要OWLQN方法。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    4）OWLQN：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    (1)次梯度定义如下，&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221719255-1368949812.png&quot; alt=&quot;&quot; width=&quot;274&quot; height=&quot;65&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;   (2)不可导点取左or右次梯度，如下 &lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221730068-1248592061.png&quot; alt=&quot;&quot; width=&quot;238&quot; height=&quot;99&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    直观解释，当你打算用左偏导时，说明是在负象限，因此要加上一个负值，使得更新之后参数更往负象限前进，这样就避免了跨象限；当打算用右偏导数时，说明在正象限，一次要加上一个正值，使得更新之后参数更往正象限前进，从而避免跨象限；否则，只能直接设置subgradient为0。  &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;   (3)象限搜索line search：&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221744740-1502350922.png&quot; alt=&quot;&quot; width=&quot;204&quot; height=&quot;65&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    x不在0点时，line search在x_i所在象限搜索；如果模型参数在0点，就要在(2)次梯度约束的象限内进行line search.&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;MLR算法&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;　　　　&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221758958-1683207791.png&quot; alt=&quot;&quot; width=&quot;393&quot; height=&quot;351&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;算法公式如下：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;0计算边界下降方向d：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221820708-1688785842.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;1计算梯度大小：theta在0处不可导，取sign符号函数dij。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221833193-575301969.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;2计算最终下降方向p：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221845818-1256214325.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;3象限内梯度下降，同OWLQN，line search：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221858240-1082187416.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;paper介绍，MLR与LBFGS有三点不同：&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;1）OWLQN需要计算次梯度，MLR需要计算方向导数；&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;2）计算最终下降方向p时，MLR也要进行象限约束；&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;3）象限搜索line search，与OWLQN相似。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;分布式框架实现&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;分布式&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221917286-954550960.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;User特征共享&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221930880-796759332.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;    个人理解是为了加快运算速度，具体特征划分如下所示。其中，c是用户特征，nc是非用户特征。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210221942505-2083395803.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;实验结果&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;strong&gt;&lt;span&gt;   &lt;/span&gt;&lt;/strong&gt;&lt;span&gt; &lt;span&gt;实验截图略，具体图表可以查看参考&lt;/span&gt;paper&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/751250/201712/751250-20171210222000958-28028334.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;纵坐标是内存使用率，特征共享技巧使速度提高了三倍。&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;参考&lt;/span&gt;paper：Learning Piece-wise Linear Models from Large Scale Data for Ad Click Prediction&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;MsoNormal&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-</description>
-<pubDate>Sun, 10 Dec 2017 14:22:00 +0000</pubDate>
-<dc:creator>rongyux</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/rongyux/p/8018493.html</dc:identifier>
 </item>
 </channel>
 </rss>
