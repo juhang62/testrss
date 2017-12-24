@@ -9,6 +9,398 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Java IO（3）非阻塞式输入输出（NIO） - OKevin</title>
+<link>http://www.cnblogs.com/yulinfeng/p/8095326.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yulinfeng/p/8095326.html</guid>
+<description>&lt;p&gt;　　在上篇&lt;a href=&quot;http://www.cnblogs.com/yulinfeng/p/7995559.html&quot; target=&quot;_blank&quot;&gt;《Java IO（2）阻塞式输入输出（BIO）》&lt;/a&gt;的末尾谈到了什么是阻塞式输入输出，通过Socket编程对其有了大致了解。现在再重新回顾梳理一下，对于只有一个“客户端”和一个“服务器端”来讲，服务器端需要阻塞式接收客户端的请求，这里的阻塞式表示服务器端的应用代码会被挂起直到客户端有请求过来，在高并发的应用场景有多个客户端发起连接下非阻塞式IO（NIO）是不二之选（且只需要在服务器端使用1个线程来管理，并不需要多个线程来处理多个连接）。在现实情况下，Tomcat、Jetty等很多Web服务器均使用了NIO技术。&lt;/p&gt;
+&lt;p&gt;　　接下来对于非阻塞式输入输出（NIO）的学习以及理解首先从它的三个基础概念讲起。&lt;/p&gt;
+
+&lt;p&gt;　　在NIO中，你需要忘掉“流”这个概念，取而代之的是“通道”。举例在网络应用程序中有多个客户端连接，此时数据传输的概念并不是“流”而“通道”，通道与流最大的不同就是，通道是双向的，而流是单向的（例如InputStream、OutputStream）。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224011945834-1739208232.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　在NIO中并不是简单的将流的概念替换为了通道，与通道搭配的是缓冲区。在BIO的字节流中并不会使用到缓冲区，而是直接操作文件通过字节方式直接读取，而NIO则不同，它会将通道中的数据读入缓存区，或者将缓存区的数据写入通道。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224012022490-341023930.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　如果使用NIO的应用程序中只有一个Channel，选择器则是可以不需要的，而如果有多个Channel，换言之有多个连接时，此时通过选择器，在服务器端的应用程序中就只需要1个线程对多个连接进行管理。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224005614412-952603084.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　当然从最开始就说到Channel是双向的，所以在最终图的示例为下图所示：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224011824678-440734084.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　下面再重新回到这三个概念，详细解释它们是如何协同工作的。&lt;/p&gt;
+
+&lt;p&gt;　　通常情况下Channel会和Buffer配合使用，但可以不使用Channel。首先需要明确的是，应用程序不管是从文件（包括网络或者其他什么地方）中读取数据，还是写入数据到文件（包括网络或者其他什么地方）都需要Buffer。&lt;/p&gt;
+&lt;h2&gt;1. 直接将数据写入Buffer，应用程序从Buffer中获取数据&lt;/h2&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; ByteBuffer buffer = ByteBuffer.allocate(1024&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt; b = 121&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; &lt;span&gt;buffer.put(b);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; buffer.flip();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;读写转换，由“写模式”转换为“读模式”&lt;/span&gt;
+&lt;span&gt;5&lt;/span&gt; System.out.println((&lt;span&gt;char&lt;/span&gt;)buffer.get());    
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　第1行，分配一个1KB大小的Buffer缓冲区，ByteBuffer.allcoate返回HeapByteBuffer实例。&lt;/p&gt;
+&lt;p&gt;　　第3行，向Buffer中写入一个字节。&lt;/p&gt;
+&lt;p&gt;　　第4行，Buffer由“写模式”转换为“读模式”。&lt;/p&gt;
+&lt;p&gt;　　第5行，ByteBuffer.get方法读取Buffer中的数据，并且position索引+1。 在上面的代码中有一个重点——flip方法，这个方法的存在是由于Buffer兼顾了读和写的操作，在ByteBuffer的实现中有三个重要的成员变量需要注意： capacity——Buffer容量 position——索引位置 limit——读时表示最大容量，即limit = capacity；写时表示最后一个数据所在的索引位置。 用图例来说明上面代码的执行过程。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224005921381-202188784.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224010023287-1056636325.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224010112725-1104610757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　从上图可以清晰的看到Buffer内部是如何进行读写操作的，其中调用flip方法是很关键且重要的一个步骤，试想如果不调用flip进行读写转换，此时position、limit、capacity的索引位置将会如下图所示。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224010145975-554045538.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　此时进行读的操作将会得到一个错误数据（0）。 尽管在讲这个小标题“直接将数据写入Buffer，应用程序从Buffer中获取数据”，但实际上已经简要介绍了Buffer的内部实现原理。&lt;/p&gt;
+&lt;p&gt;　　通过上面的例子可以看到，Channel和Buffer并不一定要在一起，单独使用Buffer也是可以的，但要使用Chnnel那就必须得配合Buffer。&lt;/p&gt;
+&lt;h2&gt;2. 从文件中读取数据写入Buffer，应用程序从Buffer中获取数据&lt;/h2&gt;
+&lt;p&gt;　　此时的数据来源是文件，开头提过在NIO中忘掉“流”，记住“通道”。在NIO中可以通过传统的流获取通道。例如从输入流FileInputSteram中调用getChannel，或者从输出流FileOutputStream中调用getChannel，当然还有兼顾输入和输出的RandomAccessFile类从中调用getChannel。&lt;/p&gt;
+&lt;p&gt;　　BIO中首先获取流，NIO中首先获取通道。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; RandomAccessFile file = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;/Users/yulinfeng/Documents/Coding/Idea/simplenio/src/main/java/com/demo/test.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; FileChannel channel =&lt;span&gt; file.getChannel();
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; ByteBuffer buffer = ByteBuffer.allocate(1024&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; &lt;span&gt;channel.read(buffer);
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; &lt;span&gt;buffer.flip();
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; System.out.println(&lt;span&gt;new&lt;/span&gt; String(buffer.array()));
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　看到这段NIO读取文件数据的代码，心中默写传统的BIO是如何读取文件数据的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('610723ba-7cae-4d45-996d-253f131164f5')&quot; readability=&quot;32&quot;&gt;&lt;img id=&quot;code_img_closed_610723ba-7cae-4d45-996d-253f131164f5&quot; class=&quot;code_img_closed&quot; src=&quot;http://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_610723ba-7cae-4d45-996d-253f131164f5&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('610723ba-7cae-4d45-996d-253f131164f5',event)&quot; src=&quot;http://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_610723ba-7cae-4d45-996d-253f131164f5&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;59&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; InputStream in = &lt;span&gt;new&lt;/span&gt; FileInputStream(&quot;/Users/yulinfeng/Documents/Coding/Idea/simplenio/src/main/java/com/demo/test.json&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[] bytes = &lt;span&gt;new&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[1024&lt;span&gt;];
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; &lt;span&gt;in.read(bytes);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; System.out.println(&lt;span&gt;new&lt;/span&gt; String(bytes));
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;　　展开代码可以看到，基本上如出一辙，在NIO中就是多了Buffer这个媒介来读取数据。&lt;/p&gt;
+&lt;p&gt;　　回到NIO读取文件数据的代码。 第1行，获取文件流。 第2行，获取Channel通道。 第3-6行，创建Buffer缓冲区，并将数据读取从通道读取到缓冲区。 同样还是用图例来说明上面代码的执行过程。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224010418756-1285602917.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201712/630246-20171224010450928-804522574.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　最后调用ByteBuffer.array方法返回缓冲区中的值，此时并未移动position的数组下标。这个例子结合图例我相信能很清楚地看到NIO是如何从文件中读取数据的，下面这个例子将输出数据到文件。&lt;/p&gt;
+&lt;h2&gt;3. 从应用程序中将数据输出到文件中&lt;/h2&gt;
+&lt;p&gt;　　前面都是应用程序从Buffer中获取数据并且用图例的方式了解了它的内部运行原理。本例将把数据通过Buffer写到文件中，当然得记住还需要通过Channel才能写入文件。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; RandomAccessFile file = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;E:\\IdeaProjects\\simplenio\\src\\main\\java\\com\\demo\\out\\test.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; FileChannel channel =&lt;span&gt; file.getChannel();
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; ByteBuffer buffer = Charset.forName(&quot;utf-8&quot;).encode(&quot;{\&quot;name\&quot;: \&quot;Kevin\&quot;}&quot;);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里会自动进行读写转换，第1个例子需要手动调用flip方法进行读写模式的转换&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　通过上面的例子很容易想到，首先需要通道，那么就利用可读可写的RandomAccessFile获取通道；其次需要缓冲区；最后将缓冲区的数据写入到通道中即可。这段代码其实可以把重点放到是如何从缓冲区写到管道的。&lt;/p&gt;
+&lt;p&gt;　　第1-2行，通过可读可写的RandomAccessFile类获取Channel通道。（要是只需要写文件，也可以通过FileOutputStream.getChannel获得）&lt;/p&gt;
+&lt;p&gt;　　第3行，将字符串{“name”: “Kevin”}通过UTF-8编码写入Buffer缓冲区，NIO会对自动对其进行读写模式的转换，不需要手动调用flip方法。&lt;/p&gt;
+&lt;p&gt;　　第4行，将Buffer中的数据写入通道。&lt;/p&gt;
+&lt;h2&gt;4. 从一个文件读数据，再写到另一个文件&lt;/h2&gt;
+&lt;p&gt;　　NIO不易掌握，需要反复练习，所以本文会给出多个例子反复操练并领会NIO的设计哲学。&lt;/p&gt;
+&lt;p&gt;　　这个例子有两种实现方式，第一种基于上面的例子就能拼凑出来，第二种则需要掌握一个新的API——&lt;strong&gt;transferFrom / transferTo&lt;/strong&gt;&lt;/p&gt;
+&lt;h3&gt;4.1通过上面的知识读文件再写文件&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; RandomAccessFile readFile = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;E:\\IdeaProjects\\simplenio\\src\\main\\java\\com\\demo\\inout\\from.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; FileChannel readChannel =&lt;span&gt; readFile.getChannel();
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; ByteBuffer buffer = ByteBuffer.allocate(1024&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; &lt;span&gt;readChannel.read(buffer);
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; buffer.flip();      &lt;span&gt;//&lt;/span&gt;&lt;span&gt;读写转换&lt;/span&gt;
+&lt;span&gt;6&lt;/span&gt; RandomAccessFile writeFile = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;E:\\IdeaProjects\\simplenio\\src\\main\\java\\com\\demo\\inout\\to.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt; FileChannel writeChannel =&lt;span&gt; writeFile.getChannel();
+&lt;/span&gt;&lt;span&gt;8&lt;/span&gt; writeChannel.write(buffer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　经过上面的几个例子写出这个示例应该没什么问题，需要注意的是第x行的buffer.flip方法是读写转换，这在上面有提到过。&lt;/p&gt;
+&lt;h3&gt;4.2 通过新的API——transferFrom读文件并写文件&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; RandomAccessFile fromFile = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;E:\\IdeaProjects\\simplenio\\src\\main\\java\\com\\demo\\inout\\from.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; FileChannel fromChannel =&lt;span&gt; fromFile.getChannel();
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; RandomAccessFile toFile = &lt;span&gt;new&lt;/span&gt; RandomAccessFile(&quot;E:\\IdeaProjects\\simplenio\\src\\main\\java\\com\\demo\\inout\\to.json&quot;, &quot;rw&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; FileChannel toChannel =&lt;span&gt; toFile.getChannel();
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; 
+&lt;span&gt;6&lt;/span&gt; toChannel.transferFrom(fromChannel, 0, fromChannel.size());
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　通过transferFrom就能将一个通道直接输出到另一个通道而不需要缓冲区做中转。&lt;/p&gt;
+&lt;h2&gt;5. Socket网络应用程序是如何使用NIO的&lt;/h2&gt;
+&lt;p&gt;　　前面的例子全是有关本地文件的读写操作，在一个应用程序中有可能免不了通过网络来传输数据，传统的Socket编程利用的是BIO，也就是阻塞式输入输出。而NIO同样也可应用到Socket网络编程中。下面两个例子均是1个客户端对应1个服务器端。此时并不能很好的体会BIO和NIO的区别，若多个客户端对应1个服务器端，此时NIO的优点便很快显现，不过要实现多个客户端对应1个服务器端则需要Selector（选择器），由于现在还并未详细认识它所以将“多个客户端对应1个服务器端”放置在后面提及。  &lt;/p&gt;
+&lt;h3&gt;5.1 阻塞式网络编程（BIO Socket）&lt;/h3&gt;
+&lt;p&gt;　　BIO Socket是我取的名字，意思是利用传统的阻塞式IO来进行Socket编程，本文虽主讲NIO，但也需要了解并熟练掌握BIO。故，在此先使用传统的IO来进行Socket编程以便能对下文的NIO Socket有一个类比。在本例中使用UDP协议传输数据。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; * BIO客户端
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * Created by Kevin on 2017/12/18.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Client {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         String data = &quot;this is Client.&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         DatagramSocket socket = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; DatagramSocket();
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         DatagramPacket packet = &lt;span&gt;new&lt;/span&gt; DatagramPacket(data.getBytes(), data.getBytes().length, InetAddress.getByName(&quot;127.0.0.1&quot;), 8989&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;        socket.send(packet);
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; * 服务器端
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * BIO Created by Kevin on 2017/12/18.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Server {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         DatagramSocket socket = &lt;span&gt;new&lt;/span&gt; DatagramSocket(8989&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;byte&lt;/span&gt;[] data = &lt;span&gt;new&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[1024&lt;span&gt;];
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         DatagramPacket packet = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; DatagramPacket(data, data.length);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         socket.receive(packet);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;服务器端在未收到数据时，会在此处被阻塞挂起&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;         System.out.println(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; String(packet.getData()));
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这是我们比较熟悉的Socket编程，其中有特点的就是在服务器端的第x行代码，此处若未收到来自客户端的数据，服务器端将会被阻塞。&lt;/p&gt;
+&lt;h3&gt;5.2 非阻塞式网络编程（NIO Socket）&lt;/h3&gt;
+&lt;p&gt;　　在通常情况下，对于网络编程用的比较多的还是阻塞式。非阻塞式在应用程序中并不是特别常见，但它在Tomcat等Web服务器中却很常见。这是因为对于非阻塞式的网络编程其最大的优点或者说是最大的使用场景就是面对多个客户端时良好的性能表现。&lt;/p&gt;
+&lt;p&gt;　　此处我们还是在单一的客户端场景下使用非阻塞式网络编程（多个客户端就会使用到Selector选择器，下文会展开）。同样在本例中使用UDP协议传输数据。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; * NIO客户端
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * Created by Kevin on 2017/12/18.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Client {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         DatagramChannel channel = DatagramChannel.open();       &lt;span&gt;//&lt;/span&gt;&lt;span&gt;类似读取本地文件，首先都需要建立一个通道&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;         ByteBuffer buffer = Charset.forName(&quot;utf-8&quot;).encode(&quot;this is Client.&quot;);     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;其次建立一个缓冲区&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;         channel.send(buffer, &lt;span&gt;new&lt;/span&gt; InetSocketAddress(&quot;127.0.0.1&quot;, 8989&lt;span&gt;));
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; *NIO 服务器端
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * Created by Kevin on 2017/12/18.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Server {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         DatagramChannel channel =&lt;span&gt; DatagramChannel.open();
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         channel.socket().bind(&lt;span&gt;new&lt;/span&gt; InetSocketAddress(&quot;127.0.0.1&quot;, 8989&lt;span&gt;));
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         ByteBuffer buffer = ByteBuffer.allocate(1024&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         channel.receive(buffer);    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;服务器端没有收到来自客户端的数据，会在这里和BIO Socket一样被阻塞&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;         System.out.println(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; String(buffer.array()));
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　对于NIO Socket的服务器端第10行可能会感到疑惑，既然是非阻塞的那么为什么在这个地方还是被阻塞了呢？在未收到客户端的数据时为什么还是被阻塞挂起了呢？这就需要用开头提到的这是1个客户端对应1个服务器端的场景，BIO和NIO并无明显区别，对于BIO或许更有优势，因为它的API相对来说更简单一些。而如果是多个客户端，如果使用NIO，服务器端会利用Selector（选择器）来选择准备好了的数据，而不会想此例一样一直等待一个客户端传输数据。接下来就是对Selector选择器的进一步认识。&lt;/p&gt;
+
+&lt;p&gt;　　看到这里对于NIO似乎还只有一个认识，API变得负责了，莫名其妙地从“流”的概念转换为了“通道”“+“缓冲区”，并且似乎和BIO并无多大区别。要我说，最大的区别和改进莫过于彻底理解NIO中的Selector（选择器）。 在&lt;a href=&quot;http://www.cnblogs.com/yulinfeng/p/7995559.html&quot; target=&quot;_blank&quot;&gt;《Java IO（2）阻塞式输入输出（BIO）》&lt;/a&gt;一文的末尾提到了在服务器端利用线程来处理数据以便使得程序能拥有更大的吞吐量，这种利用新开一个线程来处理接收到的数据不失为一种常用的计策。但是，在程序中，我个人认为还是要谨慎使用多线程，毕竟线程的上下文切换是有一定的开销的，况且线程如果过多还有可能造成Java虚拟机的栈溢出。Selector选择器的出现就可以使用1个线程来管理。&lt;/p&gt;
+&lt;p&gt;　　上面的示例程序都只有一个通道，也就是说同时只会读取或写入一个文件，如果现在有多个客户端，此时也就有多个通道，Selector选择器将会选择已经准备好了的通道读取数据。&lt;/p&gt;
+&lt;p&gt;　　要使用Selector选择器，免不了大致会经过以下几个流程：创建Selector选择器；将Channel通道修改为非阻塞模式（只有Socket才能修改为非阻塞模式，FileChannel不能修改），并将通道注册至Selector；Selector调用select方法对通道进行选择。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; * NIO 客户端，此处只有一个客户端连接
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * Created by Kevin on 2017/12/24.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Client {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         DatagramChannel channel =&lt;span&gt; DatagramChannel.open();
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         ByteBuffer buffer = Charset.forName(&quot;utf-8&quot;).encode(&quot;this is Client.&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         channel.send(buffer, &lt;span&gt;new&lt;/span&gt; InetSocketAddress(&quot;127.0.0.1&quot;, 8989&lt;span&gt;));
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　如上注释所说，此处的示例仍然是只有一个客户端连接，对于服务器端的连接下面将会使用Selector选择器，重要部分在注释中已说明。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt; * NIO 服务器端
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; * Created by Kevin on 2017/12/23.
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Server {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         Selector selector = Selector.open();    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;Selector选择器&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;         DatagramChannel channel = DatagramChannel.open();   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;Channel通道&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;         channel.configureBlocking(&lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         channel.bind(&lt;span&gt;new&lt;/span&gt; InetSocketAddress(&quot;127.0.0.1&quot;, 8989&lt;span&gt;));
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;         channel.register(selector, SelectionKey.OP_READ);   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;此通道注册在Selector时关注是否可读&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;         &lt;span&gt;while&lt;/span&gt; (&lt;span&gt;true&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;             selector.select();  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果没有一个注册到此Selector上的通道就绪，则阻塞；反之，只要有一个通道就绪则不会被阻塞。selectNow方法不论是否有通道就绪，都不会阻塞。&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt;             Iterator&amp;lt;SelectionKey&amp;gt; iterator = selector.selectedKeys().iterator();   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;选择就绪的通道&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;             &lt;span&gt;while&lt;/span&gt;&lt;span&gt; (iterator.hasNext()) {
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;                 SelectionKey key =&lt;span&gt; iterator.next();
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;                iterator.remove();
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;                 &lt;span&gt;if&lt;/span&gt; (key.isReadable()) {     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;收到客户端数据&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt; &lt;span&gt;                    receive(key);
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;                }
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;                 &lt;span&gt;if&lt;/span&gt; (key.isWritable()) {     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;服务器端通道准备好向客户端发送数据&lt;/span&gt;
+&lt;span&gt;22&lt;/span&gt; &lt;span&gt;                    send(key);
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;                }
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; 
+&lt;span&gt;28&lt;/span&gt;     &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt;29&lt;/span&gt; &lt;span&gt;     * 服务器端收到客户端数据，并做处理
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; key
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt;      &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt;32&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; receive(SelectionKey key) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt;         DatagramChannel channel =&lt;span&gt; (DatagramChannel) key.channel();
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt;         ByteBuffer byteBuffer = ByteBuffer.allocate(1024&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;35&lt;/span&gt; &lt;span&gt;        channel.receive(byteBuffer);
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt;         System.out.println(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; String(byteBuffer.array()));
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;38&lt;/span&gt;     &lt;span&gt;/**&lt;/span&gt;
+&lt;span&gt;39&lt;/span&gt; &lt;span&gt;     * 服务器端通道已准备好向客户端发送数据
+&lt;/span&gt;&lt;span&gt;40&lt;/span&gt; &lt;span&gt;     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; key
+&lt;/span&gt;&lt;span&gt;41&lt;/span&gt;      &lt;span&gt;*/&lt;/span&gt;
+&lt;span&gt;42&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; send(SelectionKey key) {
+&lt;/span&gt;&lt;span&gt;43&lt;/span&gt; 
+&lt;span&gt;44&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;45&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　对于使用Selector选择器，可以使得服务器端只使用1个线程来管理多个连接，尽管在上面的例子没有给出示例代码，但这种场景在Web应用中可以说是必然的，因为对于客户端（浏览器）一定是很多的，而服务器就只有一个，此时正是NIO场景的最大使用，当然上面的例子也可以看到JDK原生NIO编程相比于BIO是略微有点复杂的，市面上也有很多优秀的第三方NIO框架——Netty、Mina均是对NIO的再次封装，这在以后也会提到，此篇关于NIO的了解暂到此处，以后将会在对此有更深刻的理解时再次讲解。下篇将介绍——AIO（异步输入输出）。 &lt;/p&gt;
+
+
+&lt;p&gt;&lt;strong&gt;这是一个能给程序员加buff的公众号 &lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/630246/201710/630246-20171018224424427-1683168589.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Dec 2017 17:16:00 +0000</pubDate>
+<dc:creator>OKevin</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/yulinfeng/p/8095326.html</dc:identifier>
+</item>
+<item>
+<title>2017，知识与财富 - shoufengwei</title>
+<link>http://www.cnblogs.com/shoufengwei/p/8095183.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/shoufengwei/p/8095183.html</guid>
+<description>&lt;h2 id=&quot;纪念这逝去的一年芳华&quot;&gt;纪念这逝去的一年芳华&lt;/h2&gt;
+&lt;p&gt;不知是何原因，当我想要去总结这一年的时候脑子里突然就蹦出了这两个词，依稀记得去年写的是感恩乐观努力。时间过的真快，在还没有忘记上一年关键词的时候这一年已经过去了。就是在这一年年的总结中时间匆匆流逝，然而还是不得不总结一下，以对得起这流失的一年芳华，也为来年提供一个方向。&lt;/p&gt;
+&lt;p&gt;要说这一年是知识和财富大丰收，那显然没有，各方面四平八稳的过着，惊不起一点涟漪。至于为何叫知识与财富，似乎是想要说明一些问题，比如阐述一下知识与财富的关系、知识与财富哪个重要等等，这些问题个个都是大问题，我只能通过自己这一年的实际情况来谈谈相关的体会与感悟。&lt;/p&gt;
+&lt;h2 id=&quot;回顾2017&quot;&gt;回顾2017&lt;/h2&gt;
+&lt;p&gt;先来看一下2016年总结给自己定的目标的完成情况。&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;2017要以全新的角度来认识自己，以更加积极乐观的心态面对这个世界，以更加努力的态度解决未知。努力实现以下几点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;继续进行分布式地理信息系统研究&lt;/li&gt;
+&lt;li&gt;&lt;em&gt;继续学英语，争取考一次雅思或托福&lt;/em&gt;&lt;/li&gt;
+&lt;li&gt;找准方向，为出第一本书或者翻译第一本书进行技术储备&lt;/li&gt;
+&lt;li&gt;锻炼身体&lt;/li&gt;
+&lt;li&gt;多读书&lt;/li&gt;
+&lt;li&gt;常回家看看，多陪陪父母及朋友&lt;/li&gt;
+&lt;li&gt;多旅游&lt;/li&gt;
+&lt;li&gt;&lt;em&gt;多挣钱&lt;/em&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/blockquote&gt;
+&lt;p&gt;第一句总语很关键，基本实现。这一年从多方面对自己有了全新的认识，心态更加积极乐观，只是“更加努力”有点差强人意，某些方面稍微有些放纵。&lt;/p&gt;
+&lt;p&gt;凡是正体的都是完成了的，斜体未完成，下同。本身定的目标就缺少量化标准，有点随心所欲。下面的部分会详细介绍完成情况，这里主要介绍一下为什么有些没有完成（找借口）。&lt;/p&gt;
+&lt;p&gt;英语倒是有学，总体提高不大，没敢去尝试考一次雅思或托福，主要是懈怠，但是也翻译了一本技术书籍，读了两本英文原著，对英语的理解从应试到了应用，真正的将其作为等同于汉语的一门语言来看待，对英语学习有了一点点小感悟，个人感觉读原著应该是最好的学习方式，除了直接处在英语的氛围内。平时也想去学会英语，可是时间总是这么不经意的就流逝了，一闭一睁一天、一周、一年就过去了。&lt;/p&gt;
+&lt;p&gt;多挣钱基本无从谈起，当时考虑可能要换工作，所以定了这么一个目标，结果日子照旧，钱没挣上。但是同样对金钱有了一点新的感悟。&lt;/p&gt;
+&lt;p&gt;锻炼身体这一条勉强通过，一年平均每周一至两个3公里，消失的6块腹肌又有了雏形，但是坐的时间太长活动还是太少，导致腰和脖子都不太舒服，这一点2018能有好转吗？必须！&lt;/p&gt;
+&lt;p&gt;总体上来说这一年是达到了自己16年总结定下的目标的，接下来开始详细回顾2017。&lt;/p&gt;
+&lt;h2 id=&quot;知识篇&quot;&gt;知识篇&lt;/h2&gt;
+&lt;h3 id=&quot;技术&quot;&gt;技术&lt;/h3&gt;
+&lt;p&gt;这一年显然不是知识领悟涨幅最大的一年，这一年并没有把很多精力投入到学习上，忙于各种事情，飞了大概有30次，看上去时间仿佛过的很快，一周周转瞬即逝，不免发出“时间总是过的很快，有些人觉得很快，也有些人觉得很快。”的感叹。但是静下心来发现时间大部分都被耽误掉了，并没有很好的利用点滴时间。前几年还有大段的几个月的时间供自己静下心来研究一件事情，现在是越来越难了，各种事情，一言难尽。。。但知识也确实在增长，这更多的是一种在前几年储备的基础上的增长，看上去也涨了不少，更多靠的是惯性，建立在之前已有的基础上。&lt;/p&gt;
+&lt;p&gt;就拿Geotrellis来说，目前总共写了35篇博客介绍使用方法及感悟，排除刚开始瞎写的因素，从16年4月开始研究，本年度只写了8篇，虽说今年解决了一些问题，但明显没有去年对此技术研究的那么深入。&lt;/p&gt;
+&lt;p&gt;全年一直贯穿着使用Python进行地理信息处理工作，包括矢量数据、栅格数据、连接数据库、可视化等一套完整的数据处理和可视化流程。Python是这两年比较火的语言，未来在地理信息和人工智能方面应用会更广。&lt;/p&gt;
+&lt;p&gt;OpenStack和Docker两个云平台和虚拟化技术应该是自己今年最大的收获，通过这两个技术基本上把各大技术串接到了一起，从做网线开始到网络规划、网络管理、服务器规划、服务器管理、云平台搭建、分布式集群搭建等等一系列技术，这些技术都是自己利用闲暇时间一点点摸索出来的，学的是痛并快乐着，收获很多，但这也是基于前几年对数据中心各方面技术上的事务不断探索积累的结果，有了这些积累后在面对这些新问题的时候能够不慌张，知道该朝什么方向努力，经过不懈的一点点的尝试终于小有所获。&lt;/p&gt;
+&lt;p&gt;后期又学习了GO语言，研究了三维可视化表达，大致了解了WebGL的原理等，又尝试了Cesium三维地信可视化框架，这是个不错的东西，做出来的前端地图效果非常炫。&lt;/p&gt;
+&lt;p&gt;12月开始进行人工智能有关知识学习，准备充当一次被风吹起的猪。这块之前接触过一点，做过一点机器视觉方面的工作，目前正在学习吴恩达的课程，Python倒是派上了用场。&lt;/p&gt;
+&lt;p&gt;这一年写了些技术文章，不知道能不能帮助到其他人，起码我自己在这个过程中收获很多，即总结了自己的思路又提高了表达能力。这里就不放全部链接了，详情查看&lt;a href=&quot;http://www.cnblogs.com/shoufengwei/&quot;&gt;博客园&lt;/a&gt;或者&lt;a href=&quot;http://www.jianshu.com/u/d35a64082cb3&quot;&gt;简书&lt;/a&gt;。&lt;/p&gt;
+&lt;p&gt;本年度读了几本技术书籍，详情如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://wsf1990.gitbooks.io/shapeless-guide/content/&quot;&gt;shapeless-guide&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Scala函数式编程&lt;/li&gt;
+&lt;li&gt;网络攻防实践&lt;/li&gt;
+&lt;li&gt;Linux命令行与Shell脚本编程大全&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;技术书籍读的不多，大部分时间都是看博客和教程，这一点需要改进，一些经典的书籍还是值得一读。&lt;/p&gt;
+&lt;p&gt;其中&lt;a href=&quot;https://www.gitbook.com/book/wsf1990/shapeless-guide/details&quot;&gt;shapeless-guide&lt;/a&gt;是我翻译的第一本技术书籍，跟小伙伴一起大概用了两个多月的时间完成。第一次尝试，刚开始有些困难，走过一遍之后心里就有底了，这也为读两本有中文对照的英文书刊奠定了基础。&lt;/p&gt;
+&lt;h3 id=&quot;文学&quot;&gt;文学&lt;/h3&gt;
+&lt;p&gt;当然知识不仅是技术，作为一个技术人我时刻想要认识自己、认识世界，于是选择读书，这一年读了30本左右的文学作品，罗列如下：&lt;/p&gt;
+&lt;p&gt;每本书读完都写了读后感，有的还写了多篇，写的不好，谨以此记录自己的读书轨迹。其中最要提的就是《红楼梦》，以前怎么都看不进去这本书，今年偶然买了一本，拿起就放不下，读了一遍还想再读第二遍；关于蒋介石的两本书让我对蒋介石和那段历史有了全新的认识，当然这两本书也不能代表真正的历史，只能是个参考；《老人与海》先读的中文版又读了英文版，《中国哲学简史》直接读的英文版，读这两个英文原著对自己的英语感觉培养提升很大，起码不再惧怕直接看英文的东西；读了几本东野圭吾的小说，东野先生的作品参差不齐，有些非常好，如《解忧杂货店》和《白夜行》，但是《假面系列》、《名侦探的守则》、《东野圭吾在坏笑》则非常一般，未能坚持读完。读了这些书之后我感觉读书是找到更好的自己的最好也是最省钱的方式。&lt;/p&gt;
+&lt;p&gt;电影这一年也没少看，基本上每个月得欣赏那么两三部，也有在自己电脑上欣赏的经典片子。感觉比较好的如下：&lt;/p&gt;
+&lt;h3 id=&quot;行走&quot;&gt;行走&lt;/h3&gt;
+&lt;p&gt;这一年走了不少地方，欣赏了很多美景和古迹，见到了许许多多的人。最难忘的是4月份去的西藏，都说这是一片神奇的土地，但是没去之前一切只能停留在想象中，当真正的站在这块土地呼吸那里的空气的时候，会不由自主的在心底嗷地一声：原来是这样的啊。神奇的山、神奇的水、蓝蓝的天空、美丽的草原、悠闲自得的羊马群，最重要的是那些充满信仰的灵魂。还去了伊犁大草原、敦煌莫高窟、麦积山石窟等地方，每个地方都有一段不一样的收获和感悟。这一年的行走记录如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;兰州 2017.4&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/9855af697605&quot;&gt;面朝五泉，春暖花开&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/11220bc39b0f&quot;&gt;春风又绿河两岸，睹物思人又一春&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;西藏 2017.4&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/572a43bccd42&quot;&gt;直指灵魂的旅行&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/01c4458c971c&quot;&gt;寻佛之旅&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/ccdd7c0f13db&quot;&gt;穿越四季的遇见—巴松措&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/135b8986ed40&quot;&gt;圣洁的水啊你为什么如此圣洁&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/e740b45cf658&quot;&gt;人生难免无意外&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/be418ca8ccc0&quot;&gt;不畏千辛万苦两世弘法路&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/c98eec16db6c&quot;&gt;醉美西藏——扎西德勒&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/1b9d37c6a009&quot;&gt;千回万转，不过梦一场&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/dd7c291950f7&quot;&gt;转山转水转佛塔&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-89da36bf5dbc11c2.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-80e612a936106db5.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-f33cc102a032ade1.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-a573845c698035a6.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;武汉 2017.5&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/4c08311f115a&quot;&gt;五元夜游武汉&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/3fb4e89b68ae&quot;&gt;武汉如此多娇&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/6b4a49e7fcfd&quot;&gt;尽览大好河山，饱读天下诗书&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-58184754a78c29bf.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;酒泉 2017.5&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/e20f68cc0189&quot;&gt;大漠孤烟，长河落日&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/15c6900b7948&quot;&gt;弱水三千，滋养大漠绿叶&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-387bf27d0322181a.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;伊犁 2017.6&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/d807bcb46e87&quot;&gt;伊犁——一个不愿再来的美景&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-a1dc4c6c6f0b00d8.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-dee299dd982c7819.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-779e1e8d60c5359d.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-10f651e20c53d4d4.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;乌鲁木齐 2017.7&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;南山&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-8c3d3b94f2d01eae.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;上海 2017.8&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;外滩&lt;/li&gt;
+&lt;li&gt;东方明珠&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-1d8fd8461c8666cf.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;敦煌 2017.10.1&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/89936db3ecd4&quot;&gt;熟悉的大漠，熟悉的味道，跨越千年的旅行&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-89b0ef935580b178.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;吐鲁番 2017.10.2&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/a125ab3fb24d&quot;&gt;十年百年千年万年 那年芳华，静待花开&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-8a40930daa58d3fe.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;北京 2017.11&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;香山&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/b43b68652ecc&quot;&gt;天坛&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/5896d9fbf41c&quot;&gt;南锣鼓巷&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/5896d9fbf41c&quot;&gt;地坛&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/5896d9fbf41c&quot;&gt;雍和宫&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/5896d9fbf41c&quot;&gt;德云社&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;http://www.jianshu.com/p/4d2162ee22a5&quot;&gt;国家大剧院&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-0b89f9228c1dba70.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/1457239-74034a1f34c00091.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1080/q/50&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;天水 2017.12&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;麦积山石窟&lt;/li&gt;
+&lt;li&gt;街亭温泉&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;这些走过的路看过的风景都将记录在我岁月的年轮里，见证世界的神奇也见证自己在苍茫的大地上移动的轨迹。&lt;/p&gt;
+&lt;h2 id=&quot;财富篇&quot;&gt;财富篇&lt;/h2&gt;
+&lt;p&gt;这一年对财富有了新的思考，以前自己还算是个比较节俭的人，这一年钱没少花，但我觉得花的挺值，不是说感悟到钱是挣出来的不是省出来的等等，而是我明白了一个道理，一个人当下有多少钱与将来有多少钱之间没有必然的联系。&lt;/p&gt;
+&lt;p&gt;比如说拆迁拿到了1000万，那么恐怕这辈子也就这1000万了，手里握着这些钱会无所事事，不知道自己要去干什么，估计是买几套房子（最理想的情况）买个车，然后靠房租四平八稳的过着下半生，不出大问题肯定饿不着。这样的生活也是大部分人向往的，我也想要这样的生活，但是恐怕是没有这个拆迁的机会了。我不反对任何一种生活方式，只要自己觉得OK又不妨碍到其他人那么这就是适合自己的。&lt;/p&gt;
+&lt;p&gt;但是一个人真正拥有的财富恐怕在与自己的价值，有1000万和让自己值1000万这完全是两个概念，值1000万即使现在身无分文也一定会拿到手这1000万，还可能是几倍、几十倍的，在这个过程中“身价”也会继续增长。真正的财富是无论身处何处、无论当下有多少钱都有从头再来、东山再起的能力。&lt;/p&gt;
+&lt;p&gt;这一年面临多次抉择，不能说自己的选择到底是对还是错，本身选择也就没有对错，人生只有一次，不可能会有重新选择其他方案的机会。几次选择都跟金钱和前途有些关系，年中的时候写过一篇文章，说世界上有那么路，而我一直在选最难走的那条，最终如同崔健的那首歌：可你却总是笑我，一无所有。但难走的路才能让自己提高，难走的路才能让自己看清自己，难走的路也才能提高自己的“身价”，否则生活就如一碗水，永远不会有一点波澜，碗里的水如何能够去见识这个世界，碗里的水如何能够取得真正属于自己的“财富”。最终“我要给你我的追求，还有我的自由。”。&lt;/p&gt;
+&lt;h2 id=&quot;二者关系&quot;&gt;二者关系&lt;/h2&gt;
+&lt;p&gt;然而人到中年就很容易产生危机。最近42岁中兴程序员跳楼在IT圈炒的沸沸扬扬，不对此人做任何评价，就事论事，当然此事绝对很复杂。随着这一跃，其身价顿时化为0，虽然人到中年压力确实很大，但他更应该提前准备好让自己拥有东山再起的能力和机会。&lt;/p&gt;
+&lt;p&gt;什么是“身价”？“身价”源于对自己和外部世界清醒的认识，认识这二者都非常困难，我们只有通过不断的知识积累、不断努力、不断行走在这个世界来一点点的靠近目标，最终“不役于物”的时候你就拥有了整个世界，更无需说财富，这就是庄子的《逍遥游》。当然“身价”也包括自身拥有的或者继承的财富。&lt;/p&gt;
+&lt;p&gt;大学学马列主义的时候，被老师抽中做了个随意的演讲，思考半天写了一篇《论家庭环境对伟人的影响》。大概是说毛、邓、马克思、列宁这些伟人，绝不可能出自贫下中农，因为伟人必须要站的比别人高才能比别人看的远，只有身处社会中上层才能看清这个社会、看清自己，他们才拥有了绝对高的“身价”。&lt;/p&gt;
+&lt;p&gt;所谓寒门再难出人才不是因为富人的打压，无可厚非富人占据了更多的社会资源，但重要的是贫穷限制了想象力，使得“寒门”无法去想象外面的世界，更不用谈去认识这个世界。本身就占据的资源少，又无法坚持去通过努力提高自己，也就更不用谈去认识自己，“身价”自然就低了。然而只要知道自己要的是什么，不断坚持去提高自己，去多看看这个世界，终究会达到让自己吃惊的程度。&lt;/p&gt;
+&lt;p&gt;读书和远行绝对是提升自己的最好方式，无论是技术书籍还是文学作品，读过的任何一本书、学到的任何一个技术、走过的每一步路、看过的每一个景最终都会变成“身价”累加到流逝的芳华中。&lt;/p&gt;
+&lt;p&gt;所以知识（广义）决定“身价”，“身价”决定未来，这就是我所认为的知识与财富的关系，孰重孰轻一目了然。&lt;/p&gt;
+&lt;h2 id=&quot;section&quot;&gt;2018&lt;/h2&gt;
+&lt;p&gt;2018要保持谦虚谨慎的心态，不以物喜，不以己悲，把握自己的内心，丰富自己的生活，去体验和享受生活、体验这个世界。努力完成以下几项任务：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;技术研究，永不停息：地信、大数据、&lt;strong&gt;机器学习&lt;/strong&gt;、&lt;strong&gt;硬件开发&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;继续学英语，最少&lt;strong&gt;读1本英文原著&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;增强人际交往能力、涉足管理&lt;/li&gt;
+&lt;li&gt;锻炼身体，全年&lt;strong&gt;300公里&lt;/strong&gt;以上、&lt;strong&gt;腹肌保持&lt;/strong&gt;、打&lt;strong&gt;羽毛球&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;多读书，&lt;strong&gt;20本以上&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;多旅游，&lt;strong&gt;蹦一次极&lt;/strong&gt;、&lt;strong&gt;潜一次泳&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;事业&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;这几年技术研究都是浮于表面，涉足的领域很广，但是没有专心去精通一门，这一点2018要有所改进，在某一方面找到自己的兴趣，并持之以恒的进行深入的学习；读书已经融入我的血液，2018多读些好书和经典书籍；2018最想干的两件事，蹦极和潜泳，有些事情年轻的时候不干就再也没有机会了，正是说的这些吧。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;时间都去哪儿了，他总是这么轻易的流逝，流逝在我读过的每一本书、在我走过的每一条路、在我发过的每一个呆，这些流逝的时间会穿成一条线，记录下我平凡而美好的生活，我要做的就是让这条线上的每个点都是有意义的不是虚度的，努力让这条线拥有更高的高度，撑起生命的厚度，最终收获一个充盈的自己。&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Dec 2017 16:48:00 +0000</pubDate>
+<dc:creator>shoufengwei</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/shoufengwei/p/8095183.html</dc:identifier>
+</item>
+<item>
 <title>单点登录系统实现 - ITDragon龙</title>
 <link>http://www.cnblogs.com/itdragon/p/8094722.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/itdragon/p/8094722.html</guid>
@@ -2040,234 +2432,6 @@ onclick=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;updown(this,{{ content.nid }}
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/super925/p/8093453.html</dc:identifier>
-</item>
-<item>
-<title>ActiveMQ基本详解与总结 - 回首笑人间</title>
-<link>http://www.cnblogs.com/Survivalist/p/8094069.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Survivalist/p/8094069.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;MQ简介&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　MQ全称为Message Queue, 消息队列（MQ）是一种应用程序对应用程序的通信方法。应用程序通过写和检索出入列队的针对应用程序的数据（消息）来通信，而无需专用连接来链接它们。消息传递指的是程序之间通过在消息中发送数据进行通信，而不是通过直接调用彼此来通信，直接调用通常是用于诸如远程过程调用的技术。排队指的是应用程序通过队列来通信。队列的使用除去了接收和发送应用程序同时执行的要求。其中较为成熟的MQ产品有IBMWEBSPHERE MQ。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;MQ特点&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　MQ的消费-生产者模型的一个典型的代表，一端往消息队列中不断的写入消息，而另一端则可以读取或者订阅队列中的消息。MQ和JMS类似，但不同的是JMS是SUN JAVA消息中间件服务的一个标准和API定义，而MQ则是遵循了AMQP协议的具体实现和产品。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;使用场景&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　在项目中，将一些无需即时返回且耗时的操作提取出来，进行了异步处理，而这种异步处理的方式大大的节省了服务器的请求响应时间，从而提高了系统的吞吐量。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;JMS简介&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　JMS即Java消息服务（Java Message Service）应用程序接口是一个Java平台中关于面向消息中间件（MOM）的API，用于在两个应用程序之间，或分布式系统中发送消息，进行异步通信。Java消息服务是一个与具体平台无关的API，绝大多数MOM提供商都对JMS提供支持。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;定义&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　JMS（Java Messaging Service）是Java平台上有关面向消息中间件(MOM)的技术规范，它便于消息系统中的Java应用程序进行消息交换,并且通过提供标准的产生、发送、接收消息的接口简化企业应用的开发，翻译为Java消息服务。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;简介&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　JMS是一种与厂商无关的 API，用来访问消息收发系统消息。它类似于JDBC(Java DatabaseConnectivity)：这里，JDBC 是可以用来访问许多不同关系数据库的 API，而 JMS 则提供同样与厂商无关的访问方法，以访问消息收发服务。许多厂商目前都支持JMS，包括 IBM 的 MQSeries、BEA的 Weblogic JMS service和 Progress 的 SonicMQ，这只是几个例子。 JMS 使您能够通过消息收发服务（有时称为消息中介程序或路由器）从一个 JMS 客户机向另一个JMS客户机发送消息。消息是 JMS 中的一种类型对象，由两部分组成：报头和消息主体。报头由路由信息以及有关该消息的元数据组成。消息主体则携带着应用程序的数据或有效负载。根据有效负载的类型来划分，可以将消息分为几种类型，它们分别携带：简单文本(TextMessage)、可序列化的对象 (ObjectMessage)、属性集合 (MapMessage)、字节流 (BytesMessage)、原始值流 (StreamMessage)，还有无有效负载的消息 (Message)。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;JMS和MQ的关系&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　JMS是一个用于提供消息服务的技术规范，它制定了在整个消息服务提供过程中的所有数据结构和交互流程。而MQ则是消息队列服务，是面向消息中间件（MOM）的最终实现，是真正的服务提供者；MQ的实现可以基于JMS，也可以基于其他规范或标准。&lt;/p&gt;
-&lt;p&gt;支持JMS的开源MQ：&lt;/p&gt;
-&lt;p&gt;目前选择的最多的是ActiveMQ。&lt;/p&gt;
-&lt;p&gt;ActiveMQ 是Apache出品，最流行的，能力强劲的开源消息总线。ActiveMQ 是一个完全支持JMS1.1和J2EE 1.4规范的 JMS Provider实现,尽管JMS规范出台已经是很久的事情了,但是JMS在当今的J2EE应用中间仍然扮演着特殊的地位。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;主要特点&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;1. 多种语言和协议编写客户端。语言: Java, C, C++, C#, Ruby, Perl, Python, PHP。应用协议: OpenWire,Stomp REST,WSNotification,XMPP,AMQP&lt;/p&gt;
-&lt;p&gt;2. 完全支持JMS1.1和J2EE 1.4规范 (持久化,XA消息,事务)&lt;/p&gt;
-&lt;p&gt;3. 对Spring的支持,ActiveMQ可以很容易内嵌到使用Spring的系统里面去,而且也支持Spring2.0的特性&lt;/p&gt;
-&lt;p&gt;4. 通过了常见J2EE服务器(如 Geronimo,JBoss 4, GlassFish,WebLogic)的测试,其中通过JCA 1.5 resource adaptors的配置,可以让ActiveMQ可以自动的部署到任何兼容J2EE 1.4 商业服务器上&lt;/p&gt;
-&lt;p&gt;5. 支持多种传送协议:in-VM,TCP,SSL,NIO,UDP,JGroups,JXTA&lt;/p&gt;
-&lt;p&gt;6. 支持通过JDBC和journal提供高速的消息持久化&lt;/p&gt;
-&lt;p&gt;7. 从设计上保证了高性能的集群,客户端-服务器,点对点&lt;/p&gt;
-&lt;p&gt;8. 支持Ajax&lt;/p&gt;
-&lt;p&gt;9. 支持与Axis的整合&lt;/p&gt;
-&lt;p&gt;10. 可以很容易得调用内嵌JMS provider,进行测试&lt;/p&gt;
-&lt;p&gt;11. ActiveMQ速度非常快；一般要比jbossMQ快10倍。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;优点&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　是一个快速的开源消息组件(框架)，支持集群，同等网络，自动检测，TCP，SSL，广播，持久化，XA，和J2EE1.4容器无缝结合，并且支持轻量级容器和大多数跨语言客户端上的Java虚拟机。消息异步接受，减少软件多系统集成的耦合度。消息可靠接收，确保消息在中间件可靠保存，多个消息也可以组成原子事务。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;缺点&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;　　ActiveMQ默认的配置性能偏低，需要优化配置，但是配置文件复杂，ActiveMQ本身不提供管理工具；示例代码少；主页上的文档看上去比较全面，但是缺乏一种有效的组织方式，文档只有片段，用户很难由浅入深进行了解，二、文档整体的专业性太强。在研究阶段可以通过查maillist、看Javadoc、分析源代码来了解。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;ActiveMQ应用场景&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;1、 不同语言应用集成&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;ActiveMQ 中间件用Java语言编写，因此自然提供Java客户端 API。但是ActiveMQ 也为C/C++、.NET、Perl、PHP、Python、Ruby 和一些其它语言提供客户端。在你考虑如何集成不同平台不同语言编写应用的时候，ActiveMQ 拥有巨大优势。在这样的例子中，多种客户端API通过ActiveMQ 发送和接受消息成为可能，无论使用的是什么语言。此外，ActiveMQ 还提供交叉语言功能，该功能整合这种功能，无需使用远程过程调用（RPC）确实是个优势，因为消息协助应用解耦。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2、 作为RPC的替代&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;使用RPC同步调用的应用十分普遍。假设大多数客户端服务器应用使用RPC，包括ATM、大多数WEB应用、信用卡系统、销售点系统等等。尽管很多系统很成功，但是转换使用异步消息可以带来很多好处，而且也不会放弃响应保证。使用同步请求的系统在规模上有较大的限制，因为请求会被阻塞，从而导致整个系统变慢。如果使用异步消息替代，可以很容易增加额外的消息接收者，使得消息能被并发消耗，从而加快请求处理。当然，你的系统应用间应该是解耦的。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;3、 应用之间解耦&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;正如之前讨论的，紧耦合架构可以导致很多问题，尤其是如果他们是分布的。松耦合架构，在另一方面，证实了更少的依赖性，能够更好地处理不可预见的改变。不仅可以在系统中改变组件而不影响整个系统，而且组件交互也相当的简单。相比使用同步的系统（调用者必须等待被调用者返回信息），异步系统（调用方发送消息后就不管，即fire-and-forget）能够给我们带来事件驱动架构（event-driven architecture EDA）。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;4、 作为事件驱动架构的主干&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;解耦，异步架构的系统允许通过代理器自己配置更多的客户端，内存等（即vertical scalability）来扩大系统，而不是增加更多的代理器（即horizontal scalability）。考虑如亚马逊这样繁忙的电子商务系统。当用户购买物品，事实上系统需要很多步骤去处理，包括下单，创建发票，付款，执行订单，运输等。但是用户下单后，会立即返回“谢谢你下单”的界面。不只是没有延迟，而且用户还会受到一封邮件表明订单已经收到。在亚马逊下单的例子就是一个多步处理的例子。每一步都由单独的服务去处理。当用户下单是，有一个同步的体积表单动作，但整个处理流程并不通过浏览器同步处理。相反地，订单马上被接受和反馈。而剩下的步骤就通过异步处理。如果在处理过程中出错，用户会通过邮件收到通知。这样的异步处理能提供高负载和高可用性。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;5、 提高系统扩展性&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;很多使用事件驱动设计的系统是为了获得高可扩展性，例如电子商务，政府，制造业，线上游戏等。通过异步消息分开商业处理步骤给各个应用，能够带来很多可能性。考虑设计一个应用来完成一项特殊的任务。这就是面向服务的架构（service-oriented architecture SOA）。每一个服务完成一个功能并且只有一个功能。应用就通过服务组合起来，服务间使用异步消息和最终一致性。这样的设计便可以引入一个复杂事件处理概念（complex event processing CEP）。使用CEP，部件间的交互可以被记录追踪。在异步消息系统中，可以很容易在部件间增加一层处理。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;个人理解总结&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;activeMQ是什么？&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　是Apache公司旗下的一个消息总线&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;activeMQ能干什么？&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　用来在服务与服务之间进行异步通信的&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;activeMQ优势&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;1.流量肖锋&lt;/p&gt;
-&lt;p&gt;2.任务异步处理&lt;/p&gt;
-&lt;p&gt;特点：可以解耦合&lt;/p&gt;
-&lt;p&gt;　　(学习新技术的三要素：是什么？能干什么？有什么优势？)&lt;/p&gt;
-
-&lt;p&gt;　图1：&lt;/p&gt;
-&lt;div&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/1290673/201712/1290673-20171223181126443-1440145013.png&quot; alt=&quot;&quot; width=&quot;1128&quot; height=&quot;748&quot;/&gt;&lt;div&gt;&lt;img src=&quot;file:///C:/Users/hp/AppData/Local/YNote/data/lv753951lv@163.com/171e17c175a245ad8f96f2ad5a6523fc/day08_mq原理理解.png&quot; alt=&quot;&quot; data-media-type=&quot;image&quot; data-attr-org-src-id=&quot;CC8A358A7E4B4090A4DA57D43C240913&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;div&gt;&lt;img src=&quot;file:///C:/Users/hp/AppData/Local/YNote/data/lv753951lv@163.com/171e17c175a245ad8f96f2ad5a6523fc/day08_mq原理理解.png&quot; alt=&quot;&quot; data-media-type=&quot;image&quot; data-attr-org-src-id=&quot;CC8A358A7E4B4090A4DA57D43C240913&quot;/&gt;&lt;/div&gt;
-&lt;div&gt; 
-&lt;div&gt;&lt;img src=&quot;file:///C:/Users/hp/AppData/Local/YNote/data/lv753951lv@163.com/171e17c175a245ad8f96f2ad5a6523fc/day08_mq原理理解.png&quot; alt=&quot;&quot; data-media-type=&quot;image&quot; data-attr-org-src-id=&quot;CC8A358A7E4B4090A4DA57D43C240913&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;通信模式：&lt;/p&gt;
-&lt;p&gt;1.点对点(queue)&lt;/p&gt;
-&lt;p&gt;》一个消息只能被一个服务接收&lt;/p&gt;
-&lt;p&gt;》消息一旦被消费，就会消失&lt;/p&gt;
-&lt;p&gt;》如果没有被消费，就会一直等待，直到被消费&lt;/p&gt;
-&lt;p&gt;》多个服务监听同一个消费空间，先到先得&lt;/p&gt;
-&lt;p&gt;详解：这个特点的原理是这样的，在activeMQ&lt;/p&gt;
-&lt;p&gt;2.发布/订阅模式(topic)&lt;/p&gt;
-&lt;p&gt; 　　》一个消息可以被多个服务接收&lt;/p&gt;
-&lt;p&gt;　　》订阅一个主题的消费者，只能消费自它订阅之后发布的消息。&lt;/p&gt;
-&lt;p&gt;　　》消费端如果在生产端发送消息之后启动，是接收不到消息的，除非生产端对消息进行了持久化(例如广播，只有当时听到的人能听到信息)&lt;/p&gt;
-
-&lt;p&gt;　　图2：&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1290673/201712/1290673-20171223181458412-189645569.png&quot; alt=&quot;&quot; width=&quot;926&quot; height=&quot;441&quot;/&gt;　　&lt;/div&gt;
-
-&lt;p&gt;注：消息是被推送和拉取的(消息生产端和消费端)，不是mq服务器去主动发送的&lt;/p&gt;
-&lt;p&gt;总：一些简单常用的应用场景&lt;/p&gt;
-&lt;p&gt;1.发送邮件&lt;/p&gt;
-&lt;p&gt;详解：&lt;/p&gt;
-&lt;p&gt;　　最经典的就是当用户注册时，我们就需要用activeMQ来做为中间件，当用户注册后，我门把用户的邮箱号和验证码等信息通过activeMQ的生产端发送到activeMQ的消息队列中，而一旦消息队列中出现了数据，我们的邮件模块通过实时的监控activeMQ的消息队列就能通过消费端获取到这个数据，染回邮件模块就会自行的去对数据进行解析，给用户发送邮件&lt;/p&gt;
-&lt;p&gt;2.发送短信&lt;/p&gt;
-&lt;p&gt;详解：&lt;/p&gt;
-&lt;p&gt;　　原理同发送邮件相同&lt;/p&gt;
-&lt;p&gt;3.同步索引库&lt;/p&gt;
-&lt;p&gt;详解：&lt;/p&gt;
-&lt;p&gt;　　为了缓解数据库的压力，我们把经常被调用的数据放入索引库中，当有请求查询时，我们会先去查询索引库，如果索引库内有数据，那么我们就不用就数据库进行查询，这样就能大大的减轻服务器的压力，可是随之而来的一个问题是，假如我们服务器内的数据已经发生了改变，而浏览用户查询数据时，因为索引库中已经有数据了，那么这样一来数据库与索引库的数据就不一致了，那么怎么解决这个问题呢？我们想到了通过用activeMQ来监听数据库的操作来实现数据库与索引库的数据同步，当后台管理员或房产经纪人对数据库的数据进行了增删改的操作时，我们通过activeMQ监听到了数据的改变，获取到被修改的数据的id，然后在另一个服务模块中通过这个数据的id去数据库先查询一把，然后根据查询结果进行判断，再去做索引库的数据同步。打个比方，如果查询结果返回的是空，就说明商品已经被删除，那么我们就可以根据数据的id去把索引库中的数据也一并删除了。&lt;/p&gt;
-&lt;p&gt;4.同步静态页面&lt;/p&gt;
-&lt;p&gt;详解：&lt;/p&gt;
-&lt;p&gt;　　此原理同上一个同步索引库是一个原理，目的都是为了减缓服务器的压力，我们经过数据分析发现，其实我们的一些商品详情页面的数据其实都是大同小异的，完全可以通过freemarker页面静态化的模块加上后台查询出的数据拼装成一个静态页面，而这些数据从哪来呢？我们经过讨论和研究，最后一致认为还是放在缓冲中比较好，这样一来就能大大的减轻了数据 库的压力，而另一个好处是，由于页面是纯静态页面，所以页面上的数据都是死数据，这样一来就不用像JSP动态页面那样需要和后台数据库有大量的数据交互，可以最大化的降低服务器的压力，其实这个技术已经有很多大型公司在使用了，比如淘宝，京东，网易等，我们要是细心一些就会发现，他们的页面其实就都是HTML格式的静态页面。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;　　声明：本文为原创文章，其他人转载需要对文章进行特殊备注和声明原文地址。&lt;/span&gt;&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;file:///C:/Users/hp/AppData/Local/YNote/data/lv753951lv@163.com/456878ce048f414e9f21d4f62a308ce3/02_发布订阅模式.png&quot; alt=&quot;&quot; data-media-type=&quot;image&quot; data-attr-org-src-id=&quot;7E6322178959413488A6A2BCFCE93236&quot;/&gt;&lt;/div&gt;
-
-
-</description>
-<pubDate>Sat, 23 Dec 2017 10:18:00 +0000</pubDate>
-<dc:creator>回首笑人间</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Survivalist/p/8094069.html</dc:identifier>
-</item>
-<item>
-<title>vue项目的骨架及常用组件介绍 - baby格鲁特</title>
-<link>http://www.cnblogs.com/ChengWuyi/p/8093486.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ChengWuyi/p/8093486.html</guid>
-<description>&lt;h2&gt;vue项目基础结构&lt;/h2&gt;
-&lt;p&gt;一个vue的项目，我觉得最小的子集其实就是{vue,vue-router,component}，vue作为基础库，为我们提供双向绑定等功能。vue-router连接不同的&quot;页面&quot;，component作为样式或者行为输出，你可以通过这三个东西来实现最基本的静态SPA网站。当然我在这里不谈vue全家桶这样宽泛的概念，我会如数家珍的把主要的技术点一一列举。&lt;/p&gt;
-&lt;p&gt;1.vue-cli：搭建基本的vue项目骨架，脚手架工具&lt;/p&gt;
-&lt;p&gt;2.sass-loader&amp;amp;node-sass:我是使用的sass作为样式的预编译工具，两者缺一不可，大家也可以自行选择，less,stylus都可以&lt;/p&gt;
-&lt;p&gt;3.postcss:实现响应式布局的关键，px=&amp;gt;rem。大漠已经提出了基于vw,vh的布局方案，不过我暂时持观望态度。&lt;/p&gt;
-&lt;p&gt;4.vuex:管理复杂的数据流向，状态机工具，特化的Flux&lt;/p&gt;
-&lt;p&gt;5.vuex-persistedstate:将vuex中state持久化的工具&lt;/p&gt;
-&lt;p&gt;6.vue-router:实现SPA间“页面”之间的跳转&lt;/p&gt;
-&lt;p&gt;7.vue-lazyload:实现图片的懒加载，优化http传输性能&lt;/p&gt;
-&lt;p&gt;8.vue-awesome-swiper:轮播功能的实现及一些特殊切换效果的完成&lt;/p&gt;
-&lt;p&gt;9.better-scroll:实现列表滚动及父子组件间的滚动问题&lt;/p&gt;
-&lt;p&gt;10.axios:http工具，实现向API请求数据，以及拦截器的实现&lt;/p&gt;
-&lt;p&gt;11.fastclick:解决300ms延迟的库&lt;/p&gt;
-&lt;p&gt;以上这些，都是我觉得一个中大型的vue项目需要用到的，还有一些比如我在实现图片上传中用到了jsx的语法，需要babel-jsx这样的东西，不具有普适性，就不例举了。&lt;/p&gt;
-
-&lt;p&gt; 下面简述一下上面说到的这些东西，有的东西会单独的来出来细说：&lt;/p&gt;
-&lt;h2&gt;1.vue-cli：&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/vuejs/vue-cli&quot; target=&quot;_blank&quot;&gt;https://github.com/vuejs/vue-cli&lt;/a&gt; &lt;/p&gt;
-&lt;p&gt;脚手架工具，当我们选择vue作为我们的开发技术栈以后，就要开始为我们的项目搭建目录及开发的环境。安装好node以后，通过以后命令进行安装&lt;/p&gt;
-&lt;p&gt;npm install -g vue-cli 将vue-cli安装到全局环境&lt;/p&gt;
-&lt;p&gt;vue init webpack my-vue-demo 创建基于webpack模板的名为my-vue-demo文件名的vue项目&lt;/p&gt;
-&lt;p&gt;这里的模板有6中，不过我们比较常用的就是webpack了。&lt;/p&gt;
-&lt;p&gt;期间你会看到有一些例如e2e这样的单元测试的工具和ESLint检测代码质量的工具，我觉得都是可以不必安装的。&lt;/p&gt;
-&lt;p&gt;那么，其实我们最关心的就是在src文件夹下面的内容了。可以看下图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/642545/201712/642545-20171223151348943-2006320399.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;上图就是一个在刨除vue-cli的基本结构，在项目上比较成熟的vue骨架了。&lt;/p&gt;
-&lt;h2&gt;2&amp;amp;3 :sass,postcss&lt;/h2&gt;
-&lt;p&gt;直接写css得洪荒时代已经过去了，预编译的样式处理器帮助我们解放了生产力，提高了效率。sass,less,stylus各有优缺，也各有信徒。&lt;/p&gt;
-&lt;p&gt;要使用sass的话，你需要安装一下sass-loader和node-sass，不过node-sass不是很好装，被墙的厉害，建议还是用taobao的镜像。如果安装完成后还是报错无法解析的话，你可能就需要去webpack.base.conf.js里去看看是否设置好了对应的loader。&lt;/p&gt;
-&lt;p&gt;postcss的常用功能&lt;/p&gt;
-&lt;p&gt;px2rem =&amp;gt; 可以帮助我们实现px到rem单位的转换，只需要你定义好相应的转换标准就可以了。&lt;/p&gt;
-&lt;p&gt;autoprefixer =&amp;gt; 兼容性的处理postcss也可以帮我们处理好。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34.5&quot;&gt;&lt;img id=&quot;code_img_closed_5f90c8fa-9e40-4299-9003-5552bafc0a69&quot; class=&quot;code_img_closed&quot; src=&quot;http://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_5f90c8fa-9e40-4299-9003-5552bafc0a69&quot; class=&quot;code_img_opened&quot; src=&quot;http://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_5f90c8fa-9e40-4299-9003-5552bafc0a69&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;64&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt;vue-loader.conf.js&lt;/span&gt;
-module.exports =&lt;span&gt; {
-  loaders: utils.cssLoaders({
-    sourceMap: isProduction
-      &lt;/span&gt;?&lt;span&gt; config.build.productionSourceMap
-      : config.dev.cssSourceMap,
-    extract: isProduction
-  }),
-  postcss: [
-    require(&lt;/span&gt;'autoprefixer'&lt;span&gt;)({
-      browsers: [&lt;/span&gt;'iOS &amp;gt;= 7', 'Android &amp;gt;= 4.1'&lt;span&gt;]
-    }),
-    require(&lt;/span&gt;'postcss-px2rem'&lt;span&gt;)
-    ({ remUnit: &lt;/span&gt;64&lt;span&gt; })
-  ]
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
-
-&lt;h2&gt;4,5:vuex,vuex-persistedstate&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/robinvdvleuten/vuex-persistedstate&quot; target=&quot;_blank&quot;&gt;https://github.com/robinvdvleuten/vuex-persistedstate&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;一个中大型的vue项目，肯定有复杂的状态需要去管理。简单的event bus已经不再适用了。&lt;/p&gt;
-&lt;p&gt;特化的Flux架构，vuex就迎头顶上。简而言之：他就是我们处理无论是用户操作，API返回，URL变更等多重操作的状态管理工具。以后我会具体的说下vuex。&lt;/p&gt;
-&lt;p&gt;用过vuex的人，会发现一个很痛苦的地方，就是vuex里面的state，只要我们去刷新，它就被释放掉了。有的状态还好，没有了大不了我们可以让用户去重新操作一遍。但是像登录这样的操作，你不可能让用户刷一下就去登一下吧。当然，你会说，我们可以存到local啊，cookie里面啊。是可以！但是这样的话,state就和local里的数据形成了一种松散的关联，state显得十分的脆弱，因为你无法预知你什么时候会少写一个setStore这样的方法。vuex-persistedstate帮我们解决了这样的问题，它帮我们直接把state映射到了本地的缓存环境，我们可以在computed里面用vuex提供的mapState辅助函数，来动态的更新local里面的数据。而不需要持久化的state，我们依旧可以刷新来释放掉。&lt;/p&gt;
-&lt;h2&gt;6.vue-router&lt;/h2&gt;
-&lt;p&gt;当我们使用vue来构建SPA的应用时，就等于说我们完全的分离了前后端。或者通俗点的说：这就是一个纯前端的项目。后端仅仅提供数据，任何的逻辑都在前端实现。既然&quot;脱离&quot;了后端，那么肯定就没有request Mapping这样的同步映射url了。那么，前端就需要router来实现我们前端&quot;页面&quot;的跳转。vue-router就帮我们做了这样的事情，他提供给了路由守卫给我们，我们可以设置全局的，组件内的路由守卫，来实现特定的业务逻辑。 提供过渡动画，来更加生动的展示SPA应用应有的风采等等，这个以后也要具体的来说。&lt;/p&gt;
-&lt;h2&gt;7.vue-lazyload&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/hilongjw/vue-lazyload&quot; target=&quot;_blank&quot;&gt;https://github.com/hilongjw/vue-lazyload&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;实现图片的懒加载。这是前端性能优化的一个必须面对的问题：图片。懒加载可以减少请求的数量，而且在很直观的视觉上，也有一个良好的过渡。当然，图片我们也是需要去做一些处理的，使用webp格式来减小图片的质量，或者通过oss来对图片作处理。&lt;/p&gt;
-&lt;h2&gt;8.vue-awesome-swiper&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/surmon-china/vue-awesome-swiper&quot; target=&quot;_blank&quot;&gt;https://github.com/surmon-china/vue-awesome-swiper&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;通过它可以实现基本轮播，横轴的切换，横轴的列表滚动等。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/642545/201712/642545-20171223165139818-1148541998.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;例如我要去实现四个tab切换这样的功能，但是简单的display这样的效果我又觉得不是很满意。那么我们就可以通过swiper来实现，每次tab里面的content都会对应swiper的一个swiper-item。切换的tab，其实就是swiper里面的next page或者before page.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;data(){
-　　&lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;{
-　　　　swiperOption: {
-            slidesPerView :&lt;/span&gt;'auto'&lt;span&gt;,
-            direction: &lt;/span&gt;'horizontal'&lt;span&gt;,
-            freeMode : &lt;/span&gt;&lt;span&gt;true&lt;/span&gt;&lt;span&gt;,
-            loop: &lt;/span&gt;&lt;span&gt;false&lt;/span&gt;&lt;span&gt;,
-            spaceBetween: &lt;/span&gt;20&lt;span&gt;,
- 　　　},
-    }
-}    &lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&amp;lt;swiper :options=&quot;swiperOption&quot; ref=&quot;swiper&quot; v-&lt;span&gt;if&lt;/span&gt;=&quot;list&amp;amp;&amp;amp; list.length !== 0&quot;&amp;gt;
-            &amp;lt;swiper-slide v-&lt;span&gt;for&lt;/span&gt;=&quot;(item,index) in list&quot; :key=&quot;index&quot; class=&quot;hot-item&quot;&amp;gt;
-              &amp;lt;router-link :to=&quot;{name:'quickCar',params:{carID:item.CarID}}&quot; class=&quot;description_car&quot;&amp;gt;
-                &amp;lt;img v-lazy=&quot;item.Attachments.length !==0 &amp;amp;&amp;amp; item.Attachments[0].FilePath&quot;/&amp;gt;
-                  &amp;lt;span&amp;gt;&amp;amp;yen;{{item.price}}/日&amp;lt;/span&amp;gt;
-              &amp;lt;/router-link&amp;gt;
-            &amp;lt;/swiper-slide&amp;gt;
-  &amp;lt;/swiper&amp;gt;
- &amp;lt;p class=&quot;noData&quot; v-&lt;span&gt;else&lt;/span&gt;&amp;gt;&amp;lt;/p&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h2&gt;9.better-scroll&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/ustbhuangyi/better-scroll&quot; target=&quot;_blank&quot;&gt;https://github.com/ustbhuangyi/better-scroll&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;实现纵轴列表的滚动，以及当有嵌套的路由的时候，通过better-scroll来实现的禁止父路由随着子路由的滚动的问题。&lt;/p&gt;
-&lt;p&gt;better-scroll其实也可以去实现横轴的滚动，但是为什么不使用better-scroll来处理呢？这是因为在better-scroll实现横轴滚动的时候，我们无法在better-scorll的content的内容区域里去下向拉动我们的页面。所以导致的一个Bug就是，在better-scroll横轴滚动的区域里，页面动不了了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/642545/201712/642545-20171223165835834-909470123.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;如上图：横轴滚动下面还有内容，但是在图片所示的区域里面，无法向下拉动。所以横轴的滚动其实也是通过vue-awesome-swiper来实现的。&lt;/p&gt;
-&lt;h2&gt;10.axios&lt;/h2&gt;
-&lt;p&gt;基本功能就是通过axios来请求后台接口的数据。并且axios可以配合router更好的实现类似后台的拦截器的功能，例如处理token过期这样问题。因为当token过期的时候，仅仅通过vue-router的router.beforeEach来处理就有点无能为力了。这时候就需要配合后台响应返回的code来进行url的处理。&lt;/p&gt;
-&lt;h2&gt;11.fastclick&lt;/h2&gt;
-&lt;p&gt; 解决点透和点击延时的问题&lt;/p&gt;
-&lt;p&gt;具体可以看钗神的源码分析 &lt;a href=&quot;https://www.cnblogs.com/yexiaochai/p/3442220.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/yexiaochai/p/3442220.html&lt;/a&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Sat, 23 Dec 2017 09:31:00 +0000</pubDate>
-<dc:creator>baby格鲁特</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ChengWuyi/p/8093486.html</dc:identifier>
 </item>
 </channel>
 </rss>
