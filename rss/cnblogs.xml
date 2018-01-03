@@ -9,6 +9,629 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Spring Boot实战之数据库操作 - liuxiaopeng</title>
+<link>http://www.cnblogs.com/paddix/p/8178943.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/paddix/p/8178943.html</guid>
+<description>&lt;p&gt;　　上篇文章中已经通过一个简单的HelloWorld程序讲解了Spring boot的基本原理和使用。本文主要讲解如何通过spring boot来访问数据库，本文会演示三种方式来访问数据库，第一种是JdbcTemplate，第二种是JPA，第三种是Mybatis。之前已经提到过，本系列会以一个博客系统作为讲解的基础，所以本文会讲解文章的存储和访问（但不包括文章的详情），因为最终的实现是通过MyBatis来完成的，所以，对于JdbcTemplate和JPA只做简单演示，MyBatis部分会完整实现对文章的增删改查。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;一、准备工作&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　在演示这几种方式之前，需要先准备一些东西。第一个就是数据库，本系统是采用MySQL实现的，我们需要先创建一个tb_article的表：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;44&quot;&gt;
+&lt;pre class=&quot;brush:sql;gutter:true;&quot;&gt;
+DROP TABLE IF EXISTS `tb_article`;
+
+CREATE TABLE `tb_article` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `title` varchar(255) NOT NULL DEFAULT '',
+  `summary` varchar(1024) NOT NULL DEFAULT '',
+  `status` int(11) NOT NULL DEFAULT '0',
+  `type` int(11) NOT NULL,
+  `user_id` bigint(20) NOT NULL DEFAULT '0',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `public_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　后续的演示会对这个表进行增删改查，大家应该会看到这个表里面并没有文章的详情，原因是文章的详情比较长，如果放在这个表里面容易影响查询文章列表的效率，所以文章的详情会单独存在另外的表里面。此外我们需要配置数据库连接池，这里我们使用druid连接池，另外配置文件使用yaml配置，即application.yml（你也可以使用application.properties配置文件，没什么太大的区别，如果对ymal不熟悉，有兴趣也可以查一下，比较简单）。连接池的配置如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+spring:
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/blog?useUnicode=true&amp;amp;characterEncoding=UTF-8&amp;amp;useSSL=false
+    driverClassName: com.mysql.jdbc.Driver
+    username: root
+    password: 123456
+    type: com.alibaba.druid.pool.DruidDataSource
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　最后，我们还需要建立与数据库对应的POJO类，代码如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+public class Article {
+    private Long id;
+    private String title;
+    private String summary;
+    private Date createTime;
+    private Date publicTime;
+    private Date updateTime;
+    private Long userId;
+    private Integer status;&lt;br/&gt;private Integer type;&lt;p&gt;}
+&lt;/p&gt;&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　好了，需要准备的工作就这些，现在开始实现数据库的操作。&lt;/p&gt;
+
+&lt;p&gt; &lt;span&gt;&lt;strong&gt;二、与JdbcTemplate集成&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　首先，我们先通过JdbcTemplate来访问数据库，这里只演示数据的插入，上一篇文章中我们已经提到过，Spring boot提供了许多的starter来支撑不同的功能，要支持JdbcTemplate我们只需要引入下面的starter就可以了：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+&amp;lt;dependency&amp;gt;
+       &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+       &amp;lt;artifactId&amp;gt;spring-boot-starter-jdbc&amp;lt;/artifactId&amp;gt;
+&amp;lt;/dependency&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　现在我们就可以通过JdbcTemplate来实现数据的插入了：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;56&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+public interface ArticleDao {
+    Long insertArticle(Article article);
+}
+
+@Repository
+public class ArticleDaoJdbcTemplateImpl implements ArticleDao {
+
+    @Autowired
+    private NamedParameterJdbcTemplate jdbcTemplate;
+
+    @Override
+    public Long insertArticle(Article article) {
+        String sql = &quot;insert into tb_article(title,summary,user_id,create_time,public_time,update_time,status) &quot; +
+                &quot;values(:title,:summary,:userId,:createTime,:publicTime,:updateTime,:status)&quot;;
+        Map&amp;lt;String, Object&amp;gt; param = new HashMap&amp;lt;&amp;gt;();
+        param.put(&quot;title&quot;, article.getTitle());
+        param.put(&quot;summary&quot;, article.getSummary());
+        param.put(&quot;userId&quot;, article.getUserId());
+        param.put(&quot;status&quot;, article.getStatus());
+        param.put(&quot;createTime&quot;, article.getCreateTime());
+        param.put(&quot;publicTime&quot;, article.getPublicTime());
+        param.put(&quot;updateTime&quot;, article.getUpdateTime());
+        return (long) jdbcTemplate.update(sql, param);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　我们通过JUnit来测试上面的代码：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@RunWith(SpringJUnit4ClassRunner.class)
+@SpringBootTest(classes = Application.class)
+public class ArticleDaoTest {
+
+    @Autowired
+    private ArticleDao articleDao;
+
+    @Test
+    public void testInsert() {
+        Article article = new Article();
+        article.setTitle(&quot;测试标题&quot;);
+        article.setSummary(&quot;测试摘要&quot;);
+        article.setUserId(1L);
+        article.setStatus(1);
+        article.setCreateTime(new Date());
+        article.setUpdateTime(new Date());
+        article.setPublicTime(new Date());
+        articleDao.insertArticle(article);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　 要支持上面的测试程序，也需要引入一个starter：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+ &amp;lt;dependency&amp;gt;
+        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+        &amp;lt;artifactId&amp;gt;spring-boot-starter-test&amp;lt;/artifactId&amp;gt;
+        &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
+ &amp;lt;/dependency&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　从上面的代码可以看出，其实除了引入jdbc的start之外，基本没有配置，这都是spring boot的自动帮我们完成了配置的过程。上面的代码需要注意的Application类的位置，该类必须位于Dao类的父级的包中，比如这里Dao都位于com.pandy.blog.dao这个包下，现在我们把Application.java这个类从com.pandy.blog这个包移动到com.pandy.blog.app这个包中，则会出现如下错误：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+Caused by: org.springframework.beans.factory.NoSuchBeanDefinitionException: No qualifying bean of type 'com.pandy.blog.dao.ArticleDao' available: expected at least 1 bean which qualifies as autowire candidate. Dependency annotations: {@org.springframework.beans.factory.annotation.Autowired(required=true)}
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.raiseNoMatchingBeanFound(DefaultListableBeanFactory.java:1493)
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.doResolveDependency(DefaultListableBeanFactory.java:1104)
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.resolveDependency(DefaultListableBeanFactory.java:1066)
+        at org.springframework.beans.factory.annotation.AutowiredAnnotationBeanPostProcessor$AutowiredFieldElement.inject(AutowiredAnnotationBeanPostProcessor.java:585)
+        ... 28 more
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　也就是说，找不到ArticleDao的实现，这是什么原因呢？上一篇博文中我们已经看到@SpringBootApplication这个注解继承了@ComponentScan，其默认情况下只会扫描Application类所在的包及子包。因此，对于上面的错误，除了保持Application类在Dao的父包这种方式外，也可以指定扫描的包来解决：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@SpringBootApplication
+@ComponentScan({&quot;com.pandy.blog&quot;})
+public class Application {
+    public static void main(String[] args) throws Exception {
+        SpringApplication.run(Application.class, args);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;三、与JPA集成&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　现在我们开始讲解如何通过JPA的方式来实现数据库的操作。还是跟JdbcTemplate类似，首先，我们需要引入对应的starter：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+&amp;lt;dependency&amp;gt;
+       &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+       &amp;lt;artifactId&amp;gt;spring-boot-starter-data-jpa&amp;lt;/artifactId&amp;gt;
+&amp;lt;/dependency&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　然后我们需要对POJO类增加Entity的注解，并指定表名（如果不指定，默认的表名为article），然后需要指定ID的及其生成策略，这些都是JPA的知识，与Spring boot无关，如果不熟悉的话可以看下JPA的知识点：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@Entity(name = &quot;tb_article&quot;)
+public class Article {
+    @Id
+    @GeneratedValue
+    private Long id;
+    private String title;
+    private String summary;
+    private Date createTime;
+    private Date publicTime;
+    private Date updateTime;
+    private Long userId;
+    private Integer status;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　最后，我们需要继承JpaRepository这个类，这里我们实现了两个查询方法，第一个是符合JPA命名规范的查询，JPA会自动帮我们完成查询语句的生成，另一种方式是我们自己实现JPQL（JPA支持的一种类SQL的查询）。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+public interface ArticleRepository extends JpaRepository&amp;lt;Article, Long&amp;gt; {
+
+    public List&amp;lt;Article&amp;gt; findByUserId(Long userId);
+
+    @Query(&quot;select art from com.pandy.blog.po.Article art where title=:title&quot;)
+    public List&amp;lt;Article&amp;gt; queryByTitle(@Param(&quot;title&quot;) String title);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　好了，我们可以再测试一下上面的代码：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@RunWith(SpringJUnit4ClassRunner.class)
+@SpringBootTest(classes = Application.class)
+public class ArticleRepositoryTest {
+    @Autowired
+    private ArticleRepository articleRepository;
+
+    @Test
+    public void testQuery(){
+        List&amp;lt;Article&amp;gt; articleList = articleRepository.queryByTitle(&quot;测试标题&quot;);
+        assertTrue(articleList.size()&amp;gt;0);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　注意，这里还是存在跟JdbcTemplate类似的问题，需要将Application这个启动类未于Respository和Entity类的父级包中，否则会出现如下错误：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+Caused by: org.springframework.beans.factory.NoSuchBeanDefinitionException: No qualifying bean of type 'com.pandy.blog.dao.ArticleRepository' available: expected at least 1 bean which qualifies as autowire candidate. Dependency annotations: {@org.springframework.beans.factory.annotation.Autowired(required=true)}
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.raiseNoMatchingBeanFound(DefaultListableBeanFactory.java:1493)
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.doResolveDependency(DefaultListableBeanFactory.java:1104)
+        at org.springframework.beans.factory.support.DefaultListableBeanFactory.resolveDependency(DefaultListableBeanFactory.java:1066)
+        at org.springframework.beans.factory.annotation.AutowiredAnnotationBeanPostProcessor$AutowiredFieldElement.inject(AutowiredAnnotationBeanPostProcessor.java:585)
+        ... 28 more
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　当然，同样也可以通过注解@EnableJpaRepositories指定扫描的JPA的包，但是还是不行，还会出现如下错误：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+Caused by: java.lang.IllegalArgumentException: Not a managed type: class com.pandy.blog.po.Article
+        at org.hibernate.jpa.internal.metamodel.MetamodelImpl.managedType(MetamodelImpl.java:210)
+        at org.springframework.data.jpa.repository.support.JpaMetamodelEntityInformation.&amp;lt;init&amp;gt;(JpaMetamodelEntityInformation.java:70)
+        at org.springframework.data.jpa.repository.support.JpaEntityInformationSupport.getEntityInformation(JpaEntityInformationSupport.java:68)
+        at org.springframework.data.jpa.repository.support.JpaRepositoryFactory.getEntityInformation(JpaRepositoryFactory.java:153)
+        at org.springframework.data.jpa.repository.support.JpaRepositoryFactory.getTargetRepository(JpaRepositoryFactory.java:100)
+        at org.springframework.data.jpa.repository.support.JpaRepositoryFactory.getTargetRepository(JpaRepositoryFactory.java:82)
+        at org.springframework.data.repository.core.support.RepositoryFactorySupport.getRepository(RepositoryFactorySupport.java:199)
+        at org.springframework.data.repository.core.support.RepositoryFactoryBeanSupport.initAndReturn(RepositoryFactoryBeanSupport.java:277)
+        at org.springframework.data.repository.core.support.RepositoryFactoryBeanSupport.afterPropertiesSet(RepositoryFactoryBeanSupport.java:263)
+        at org.springframework.data.jpa.repository.support.JpaRepositoryFactoryBean.afterPropertiesSet(JpaRepositoryFactoryBean.java:101)
+        at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.invokeInitMethods(AbstractAutowireCapableBeanFactory.java:1687)
+        at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1624)
+        ... 39 more
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这个错误说明识别不了Entity，所以还需要通过注解@EntityScan来指定Entity的包，最终的配置如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@SpringBootApplication
+@ComponentScan({&quot;com.pandy.blog&quot;})
+@EnableJpaRepositories(basePackages=&quot;com.pandy.blog&quot;)
+@EntityScan(&quot;com.pandy.blog&quot;)
+public class Application {
+    public static void main(String[] args) throws Exception {
+        SpringApplication.run(Application.class, args);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;四、与MyBatis集成&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　最后，我们再看看如何通过MyBatis来实现数据库的访问。同样我们还是要引入starter：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+&amp;lt;dependency&amp;gt;
+      &amp;lt;groupId&amp;gt;org.mybatis.spring.boot&amp;lt;/groupId&amp;gt;
+      &amp;lt;artifactId&amp;gt;mybatis-spring-boot-starter&amp;lt;/artifactId&amp;gt;
+      &amp;lt;version&amp;gt;1.1.1&amp;lt;/version&amp;gt;
+&amp;lt;/dependency&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　由于该starter不是spring boot官方提供的，所以版本号于Spring boot不一致，需要手动指定。&lt;/p&gt;
+&lt;p&gt;　　MyBatis一般可以通过XML或者注解的方式来指定操作数据库的SQL，个人比较偏向于XML，所以，本文中也只演示了通过XML的方式来访问数据库。首先，我们需要配置mapper的目录。我们在application.yml中进行配置：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+mybatis:
+  config-locations: mybatis/mybatis-config.xml
+  mapper-locations: mybatis/mapper/*.xml
+  type-aliases-package: com.pandy.blog.po
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这里配置主要包括三个部分，一个是mybatis自身的一些配置，例如基本类型的别名。第二个是指定mapper文件的位置，第三个POJO类的别名。这个配置也可以通过 Java configuration来实现，由于篇幅的问题，我这里就不详述了，有兴趣的朋友可以自己实现一下。&lt;/p&gt;
+&lt;p&gt;　　配置完后，我们先编写mapper对应的接口：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+public interface ArticleMapper {
+
+    public Long insertArticle(Article article);
+
+    public void updateArticle(Article article);
+
+    public Article queryById(Long id);
+
+    public List&amp;lt;Article&amp;gt; queryArticlesByPage(@Param(&quot;article&quot;) Article article, @Param(&quot;pageSize&quot;) int pageSize,
+                                             @Param(&quot;offset&quot;) int offset);
+
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　该接口暂时只定义了四个方法，即添加、更新，以及根据ID查询和分页查询。这是一个接口，并且和JPA类似，可以不用实现类。接下来我们编写XML文件：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;57&quot;&gt;
+&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
+&amp;lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot; ?&amp;gt;
+&amp;lt;!DOCTYPE mapper PUBLIC &quot;-//mybatis.org//DTD Mapper 3.0//EN&quot; &quot;http://mybatis.org/dtd/mybatis-3-mapper.dtd&quot; &amp;gt;
+&amp;lt;mapper namespace=&quot;com.pandy.blog.dao.ArticleMapper&quot;&amp;gt;
+
+    &amp;lt;resultMap id=&quot;articleMap&quot; type=&quot;com.pandy.blog.po.Article&quot;&amp;gt;
+        &amp;lt;id column=&quot;id&quot; property=&quot;id&quot; jdbcType=&quot;INTEGER&quot;/&amp;gt;
+        &amp;lt;result column=&quot;title&quot; property=&quot;title&quot; jdbcType=&quot;VARCHAR&quot;/&amp;gt;
+        &amp;lt;result column=&quot;summary&quot; property=&quot;summary&quot; jdbcType=&quot;VARCHAR&quot;/&amp;gt;
+        &amp;lt;result column=&quot;user_id&quot; property=&quot;userId&quot; jdbcType=&quot;INTEGER&quot;/&amp;gt;
+        &amp;lt;result column=&quot;status&quot; property=&quot;status&quot; jdbcType=&quot;INTEGER&quot;/&amp;gt;
+        &amp;lt;result column=&quot;create_time&quot; property=&quot;createTime&quot; jdbcType=&quot;TIMESTAMP&quot;/&amp;gt;
+        &amp;lt;result column=&quot;update_time&quot; property=&quot;updateTime&quot; jdbcType=&quot;TIMESTAMP&quot;/&amp;gt;
+        &amp;lt;result column=&quot;public_time&quot; property=&quot;publicTime&quot; jdbcType=&quot;TIMESTAMP&quot;/&amp;gt;
+    &amp;lt;/resultMap&amp;gt;
+
+    &amp;lt;sql id=&quot;base_column&quot;&amp;gt;
+      title,summary,user_id,status,create_time,update_time,public_time
+    &amp;lt;/sql&amp;gt;
+
+    &amp;lt;insert id=&quot;insertArticle&quot; parameterType=&quot;Article&quot;&amp;gt;
+        INSERT INTO
+        tb_article(&amp;lt;include refid=&quot;base_column&quot;/&amp;gt;)
+        VALUE
+        (#{title},#{summary},#{userId},#{status},#{createTime},#{updateTime},#{publicTime})
+    &amp;lt;/insert&amp;gt;
+
+    &amp;lt;update id=&quot;updateArticle&quot; parameterType=&quot;Article&quot;&amp;gt;
+        UPDATE tb_article
+        &amp;lt;set&amp;gt;
+            &amp;lt;if test=&quot;title != null&quot;&amp;gt;
+                title = #{title},
+            &amp;lt;/if&amp;gt;
+            &amp;lt;if test=&quot;summary != null&quot;&amp;gt;
+                summary = #{summary},
+            &amp;lt;/if&amp;gt;
+            &amp;lt;if test=&quot;status!=null&quot;&amp;gt;
+                status = #{status},
+            &amp;lt;/if&amp;gt;
+            &amp;lt;if test=&quot;publicTime !=null &quot;&amp;gt;
+                public_time = #{publicTime},
+            &amp;lt;/if&amp;gt;
+            &amp;lt;if test=&quot;updateTime !=null &quot;&amp;gt;
+                update_time = #{updateTime},
+            &amp;lt;/if&amp;gt;
+        &amp;lt;/set&amp;gt;
+        WHERE id = #{id}
+    &amp;lt;/update&amp;gt;
+
+    &amp;lt;select id=&quot;queryById&quot; parameterType=&quot;Long&quot; resultMap=&quot;articleMap&quot;&amp;gt;
+        SELECT id,&amp;lt;include refid=&quot;base_column&quot;&amp;gt;&amp;lt;/include&amp;gt; FROM tb_article
+        WHERE id = #{id}
+    &amp;lt;/select&amp;gt;
+
+    &amp;lt;select id=&quot;queryArticlesByPage&quot; resultMap=&quot;articleMap&quot;&amp;gt;
+        SELECT id,&amp;lt;include refid=&quot;base_column&quot;&amp;gt;&amp;lt;/include&amp;gt; FROM tb_article
+        &amp;lt;where&amp;gt;
+            &amp;lt;if test=&quot;article.title != null&quot;&amp;gt;
+                title like CONCAT（'%',${article.title},'%'）
+            &amp;lt;/if&amp;gt;
+            &amp;lt;if test=&quot;article.userId != null&quot;&amp;gt;
+                user_id = #{article.userId}
+            &amp;lt;/if&amp;gt;
+        &amp;lt;/where&amp;gt;
+        limit #{offset},#{pageSize}
+
+    &amp;lt;/select&amp;gt;
+&amp;lt;/mapper&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　最后，我们需要手动指定mapper扫描的包：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@SpringBootApplication
+@MapperScan(&quot;com.pandy.blog.dao&quot;)
+public class Application {
+    public static void main(String[] args) throws Exception {
+        SpringApplication.run(Application.class, args);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　好了，与MyBatis的集成也完成了，我们再测试一下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;37&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+@RunWith(SpringJUnit4ClassRunner.class)
+@SpringBootTest(classes = Application.class)
+public class ArticleMapperTest {
+
+    @Autowired
+    private ArticleMapper mapper;
+
+    @Test
+    public void testInsert() {
+        Article article = new Article();
+        article.setTitle(&quot;测试标题2&quot;);
+        article.setSummary(&quot;测试摘要2&quot;);
+        article.setUserId(1L);
+        article.setStatus(1);
+        article.setCreateTime(new Date());
+        article.setUpdateTime(new Date());
+        article.setPublicTime(new Date());
+        mapper.insertArticle(article);
+    }
+
+    @Test
+    public void testMybatisQuery() {
+        Article article = mapper.queryById(1L);
+        assertNotNull(article);
+    }
+
+    @Test
+    public void testUpdate() {
+        Article article = mapper.queryById(1L);
+        article.setPublicTime(new Date());
+        article.setUpdateTime(new Date());
+        article.setStatus(2);
+        mapper.updateArticle(article);
+    }
+
+    @Test
+    public void testQueryByPage(){
+        Article article = new Article();
+        article.setUserId(1L);
+        List&amp;lt;Article&amp;gt; list = mapper.queryArticlesByPage(article,10,0);
+        assertTrue(list.size()&amp;gt;0);
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;　　&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;五、总结&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　本文演示Spring boot与JdbcTemplate、JPA以及MyBatis的集成，整体上来说配置都比较简单，以前做过相关配置的同学应该感觉比较明显，Spring boot确实在这方面给我们提供了很大的帮助。后续的文章中我们只会使用MyBatis这一种方式来进行数据库的操作，这里还有一点需要说明一下的是，MyBatis的分页查询在这里是手写的，这个分页在正式开发中可以通过插件来完成，不过这个与Spring boot没什么关系，所以本文暂时通过这种手动的方式来进行分页的处理。&lt;/p&gt;
+
+</description>
+<pubDate>Tue, 02 Jan 2018 23:48:00 +0000</pubDate>
+<dc:creator>liuxiaopeng</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/paddix/p/8178943.html</dc:identifier>
+</item>
+<item>
+<title>学习 Kubernetes 的 Why 和 How - 每天5分钟玩转 Docker 容器技术（114） - CloudMan</title>
+<link>http://www.cnblogs.com/CloudMan6/p/8178483.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CloudMan6/p/8178483.html</guid>
+<description>&lt;p&gt;&lt;span&gt;这是一个系统学习 Kubernetes 的教程，有下面两个特点：&lt;/span&gt;&lt;/p&gt;
+&lt;ol class=&quot; list-paddingleft-2&quot; readability=&quot;-0.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;系统讲解当前最流行的容器编排引擎 Kubernetes&lt;br/&gt;包括了安装部署、应用管理、网络、存储、监控、日志管理等多各个方面。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;重实践并兼顾理论&lt;br/&gt;通过大量实验和操作带领大家学习 Kubernetes。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;span&gt;因为 &lt;span&gt;Kubernetes 太热门了&lt;/span&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2017 年 9 月，Mesosphere 宣布 支持 Kubernetes；10 月，Docker 宣布将在新版本中加入对 Kubernetes 的原生支持。至此，容器编排引擎领域的三足鼎立时代结束，Kubernetes 赢得全面胜利。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其实早在 2015 年 5 月，Kubernetes 在 Google 上的的搜索热度就已经超过了 Mesos 和 Docker Swarm，从那儿之后更是一路飙升，将对手甩开了十几条街。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;img-responsive&quot; title=&quot;569.5.png&quot; src=&quot;https://i.imgsafe.org/b5/b5c99dd63a.png&quot; alt=&quot;569.5.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;目前，AWS、Azure、Google、阿里云、腾讯云等主流公有云提供的是基于 Kubernetes 的容器服务；Rancher、CoreOS、IBM、Mirantis、Oracle、Red Hat、VMWare 等无数厂商也在大力研发和推广基于 Kubernetes 的容器 CaaS 或 PaaS 产品。可以说，Kubernetes 是当前容器行业最炙手可热的明星。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;每一轮新技术的兴起，无论对公司还是个人既是机会也是挑战。如果这项新技术未来必将成为主流，那么作为 IT 从业者，正确的做法就 &lt;span&gt;尽快掌握&lt;/span&gt;。因为：&lt;/span&gt;&lt;/p&gt;
+&lt;ol class=&quot; list-paddingleft-2&quot; readability=&quot;0&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;&lt;span&gt;新技术意味着新的市场和新的需求。&lt;br/&gt;初期掌握这种技术的人不会很多，而市场需求会越来越大，因而会形成供不应求的卖方市场，物以稀为贵，这对技术人员将是一个难得的价值提升机会。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;学习新技术需要时间和精力，早起步早成材。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;span&gt;机会讲过了，咱们再来看看挑战。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;新技术往往意味着技术上的突破和创新，会有不少新的概念和方法。&lt;br/&gt;对于 Kubernetes 这项平台级技术，覆盖的技术范围非常广，包括了计算、网络、存储、高可用、监控、日志管理等多个方面，要掌握这些新技术对 IT 老兵尚有不小难度，更别说新人了。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;这套教程的目标读者包括：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;IT 实施和运维工程师&lt;/span&gt;&lt;br/&gt;越来越多的应用将以容器的方式在开发、测试和生产环境中运行。掌握基于 Kubernetes 的容器平台运维能力将成为实施和运维工程师的核心竞争力。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;软件开发人员&lt;/span&gt;&lt;br/&gt;基于容器的微服务架构（Microservice Architecture）会逐渐成为开发应用系统的主流。而 Kubernetes 将是运行微服务应用的理想平台，市场将需要大量具备 Kubernetes 技能的应用程序开发人员。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;这个教程将通过大量实例系统讲解 Kubernetes 的核心技术。大家一定要跟着教程实践，这样才能把知识变成自己的。如果仅仅是看一遍最多能记住几个概念，在工作中是用不起来的。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;理论一定要联系实际&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;CloudMan 希望通过这个教程降低大家的学习曲线，真正掌握 Kubernetes。&lt;/span&gt;&lt;span&gt; &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;http://www.cnblogs.com/Users/wanglei/百度云同步盘/容器/images/480.png?v=1510821977521&quot; alt=&quot;&quot;/&gt;&lt;span&gt;&lt;strong&gt;书籍：&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.《每天5分钟玩转Docker容器技术》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/16936307278.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/16936307278.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;&lt;p&gt;&lt;span&gt;2.《每天5分钟玩转OpenStack》&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;a href=&quot;https://item.jd.com/12086376.html&quot; target=&quot;_blank&quot;&gt;https://item.jd.com/12086376.html&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img title=&quot;https://i.imgsafe.org/68/68da21ce15.png&quot; src=&quot;https://i.imgsafe.org/68/68da21ce15.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Tue, 02 Jan 2018 23:46:00 +0000</pubDate>
+<dc:creator>CloudMan</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CloudMan6/p/8178483.html</dc:identifier>
+</item>
+<item>
+<title>【ASP.NET MVC系列】浅谈NuGet在VS中的运用 - Alan_beijing</title>
+<link>http://www.cnblogs.com/wangjiming/p/8177821.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/wangjiming/p/8177821.html</guid>
+<description>&lt;p&gt; &lt;span&gt;一     概述&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;在我们讲解NuGet前，我们先来看看一个例子。&lt;/p&gt;
+&lt;p&gt;1.例子：&lt;/p&gt;
+&lt;p&gt; 假设现在开发一套系统，其中前端框架我们选择Bootstrap,由于选择Bootstrap作为前端框架，因此，在项目中，我们需要引入Bootstrap相关文件，大致会执行如下操作。&lt;/p&gt;
+&lt;p&gt;步骤一：下载Bootstrap文件&lt;/p&gt;
+&lt;p&gt;输入Bootstrap官网域名   http://v3.bootcss.com/&lt;/p&gt;
+&lt;p&gt; 输入域名，进入官网&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102185034971-241464948.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;步骤二：选择合适的版本，下载Bootstrap包&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102185215596-1701352905.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;步骤三：将包引入到项目中&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102185522924-1084347309.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;关于将Bootstrap包引入到Project中，过程似乎比较麻烦，更可怕的的是，当在项目中的Bootstrap包需要更新时，需要做重复的工作，这是非常繁琐的，很好的是，VS自带的NuGet包管理器很好地&lt;/p&gt;
+&lt;p&gt;帮助我们解决了此类问题。&lt;/p&gt;
+&lt;p&gt;2.何为Nuget包管理器？&lt;/p&gt;
+&lt;p&gt;对于.NET和VS而言，NuGet是一个.NET包管理系统，它可以很容易地响应运用程序中添加、更新和删除外部库文件及其依赖。&lt;/p&gt;
+&lt;p&gt;除此之外，我们可以通过创建包，发布包实现包之间的共享，使共享得以实现。&lt;/p&gt;
+&lt;p&gt;站在微软的角度：要尽可能地尝试，不要指望Microsoft为我们提供所需要的每一段代码，在.NET平台上进行开发的开发人员多大数百万甚至上千万，而每一个开发人员都有其独特的技术和有待解决&lt;/p&gt;
+&lt;p&gt;的问题，等待Microsoft去解决每个开发人员的每个问题，既形不成规模，也没有意义。值得庆幸的是，他们可以通过网上发布的一些库莱解决他们或他们客户遇到的问题。然而，面对网上的这些有&lt;/p&gt;
+&lt;p&gt;用的库我们面临三大挑战：发现，安装和维护。但庆幸的是，NuGet却很好地解决了此类问题。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;二    将包添加到库&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;将包添加到库，有许多方式，常用方式为Manage NuGet Package 和 Package Manager Console，下面将结合VS2017和基于ASP.NET MVC模板讲解该两种方式。&lt;/p&gt;
+&lt;p&gt;（一）Manage  NuGet  Packages&lt;/p&gt;
+&lt;p&gt;1.准备好VS2017开发环境，并用VS的MVC模板创建一个默认项目：NuGetDemo&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102155559018-2014290807.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;分析：&lt;/p&gt;
+&lt;p&gt;细心的你会发现，在上图中出项了packages.config文件，其实，它就是NuGet包的配置文件，因为我们在选择基于MVC模板创建项目时，默认的引入了第三方库文件，如Bootstrap,Jquery等；&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102160217799-957675204.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2.打开NuGet包管理器&lt;/p&gt;
+&lt;p&gt;引用=&amp;gt;管理Nuget程序包&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102160627128-178807823.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;3.打开NuGet包管理器后，我们可执行如下操作&lt;/p&gt;
+&lt;p&gt;(1)浏览包  (2)查看当前系统已安装包  (3)更新包  (4)在搜索框中搜索包&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102161405299-1509915289.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;4.查看包的详细信息&lt;/p&gt;
+&lt;p&gt;我们以log4net为例&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102161657565-870026605.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;分析：&lt;/p&gt;
+&lt;p&gt;包的基本信息&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102163011174-1460115988.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 5.安装&lt;/p&gt;
+&lt;p&gt;在安装AnyLog.Log4Net之前，先选择好安装版本，然后再安装。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102164019956-755627034.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;6.查看安装情况&lt;/p&gt;
+&lt;p&gt;(1)查看控制台输出安装信息情况 &lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102163944112-1040548467.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; (2)查看NuGet包已安装情况&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102164318737-1263756132.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(3)查看项目引用情况&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102164438393-901352082.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(4)查看packages.config文件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102164804565-1387748562.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;7.更新包&lt;/p&gt;
+&lt;p&gt;NuGet包管理器不仅能帮助我们安装包，而且还能帮助我们维护包，我们可以借助NuGet包管理器来更新包。&lt;/p&gt;
+&lt;p&gt;注意：当我们更新包时，这个操作也会更新该包的所以依赖，以确保只安装依赖的兼容保本。&lt;/p&gt;
+&lt;p&gt;在以下例子中，我们在项目NuGet中安装了Log4net  2.0.3版本，现在，我们将其更新都最新版本2.0.8，选择“更新”。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102170214190-1972376972.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;点击确认。&lt;/p&gt;
+&lt;p&gt;注意，此步会更新运用程序中与Log4net相关所有内容。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102170432534-626316071.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;查看更新结果&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102170633924-425731348.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt; 8.包恢复&lt;/p&gt;
+&lt;p&gt;NuGet默认的工作流程是把包文件夹提交到版本控制，这样做的一个好处是可从版本控制检索解决方案，以确保构建解决方案的每个包都能够安装，而且这些包还不需要从其他位置检索。&lt;/p&gt;
+&lt;p&gt;但是，这样做也是有弊端的，Packages文件夹不是VS解决方案的一部分，因此，通过VS集成管理版本控制的开发人员需要进行一个额外的步骤以确保Packages文件夹能够提交。&lt;/p&gt;
+&lt;p&gt;(1)TFS可以自动提交Packages文件夹&lt;/p&gt;
+&lt;p&gt;(2)分布式版本控制系统(如Git)，不建议把Packages文件夹提交到版本控制，因为分布式版本控制系统不擅长处理二进制文件，如果项目中大量的包都有变化，分布式版本控制系统库就会&lt;/p&gt;
+&lt;p&gt;变得很庞大。&lt;/p&gt;
+&lt;p&gt;可喜的是，NuGet 1.6引入的包修复功能来处理这些问题，这样就支持一个新的个工作流程，我们就不需要把Packages文件夹提交到源代码控制了。&lt;/p&gt;
+&lt;p&gt;这个过程需要手动执行几个步骤：对每个项目都需要执行单独的一步操作，以启用包恢复(在NuGet2.0~2.6中，每个开发人员还需要配置VS来允许包恢复)&lt;/p&gt;
+&lt;p&gt;注意：&lt;/p&gt;
+&lt;p&gt;         现在NuGet包恢复时自动启用的，但是在VS的Package Manager设置中使用下面两个选项，可以禁用包恢复功能：&lt;/p&gt;
+&lt;p&gt;          a.允许NuGet下载缺少包；&lt;/p&gt;
+&lt;p&gt;          b.在VS中构建运用程序时，自动检查缺少的包；&lt;/p&gt;
+&lt;p&gt;通过NuGet 2.7 自动包恢复功能。&lt;/p&gt;
+&lt;p&gt;（二）Package Manager Console&lt;/p&gt;
+&lt;p&gt;Package Manager Console是Visual Studio 中基于PowerShell的控制台，不仅提供了强大的功能来查找和安装包，而且还支持Manager NuGet Packages对话框不支持的一些功能。&lt;/p&gt;
+&lt;p&gt;1.启动控制台&lt;/p&gt;
+&lt;p&gt;工具=&amp;gt;NuGet包管理器=&amp;gt;程序包管理器控制台&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102175627721-1100913108.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2.查看当前项目已安装的包&lt;/p&gt;
+&lt;p&gt;在控制台中输入Get--Package，可以查看当前项目已安装的包&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102181107534-1483460895.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;拓展：&lt;/p&gt;
+&lt;p&gt;(1)以前版本，可以通过以下命令来过滤包&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+Get-Package -ListAvailable -Filter Route
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102232101784-761208425.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(2)可以采用如下命令代替Get-Package -ListAvailable -Filter 命令&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+Find-Package [-Id]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102232612346-1202607332.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;3.安装包&lt;/p&gt;
+&lt;p&gt;在控制台中通过：Install-Package 包名  &lt;/p&gt;
+&lt;p&gt;下图中，我们在项目中安装Log4net,因此输入Install-Package Log4net,由于我已在项目中安装了Log4net,因此提示已经安装。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102181035440-869911372.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;拓展：&lt;/p&gt;
+&lt;p&gt;(1)PowerShell命令的支持扩展功能，相当于智能感应。输入命令部分字符，按Tab键就可以查看输入的内容，从而实现智能感应。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102233430237-867870472.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(2) PowerShell支持复合命令，比如通过将一个命令管道传输到另一个命令。&lt;/p&gt;
+&lt;p&gt;如下命令向解决方案中每一个项目安装一个包。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+Get-Project -ALL | Install-Package  log4net
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102182707362-74134014.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(3)PowerShell也支持动态添加新命令&lt;/p&gt;
+&lt;p&gt;PowerShell强大之处在于，安装的一些包可以为shell添加新命令。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102235536956-2099112960.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;（三）其他方式启动NuGet&lt;/p&gt;
+&lt;p&gt; 如在项目名称中添加，这里不论述，核心内容还是在如上的（一）和（二）部分。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180102222732206-1153586757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 4.关于包源和项目的选择&lt;/p&gt;
+&lt;p&gt; 通过选择程序包源右边的齿轮，即可查看该包及对包的基本操作&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103000341628-338934350.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;5.NuGet包管理器概述&lt;/p&gt;
+&lt;p&gt;(1)NuGe包管理器基本界面&lt;/p&gt;
+&lt;p&gt;在控制台操作中，由两大部分组成：常规和程序包源&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103003455768-1249776797.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(2)程序包源概述&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103004258534-1032715757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;拓展：&lt;/p&gt;
+&lt;p&gt;在Manage  NuGet  Packages 操作包方式中，与如上对应的操作&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103004554846-2022329619.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;例子讲解：&lt;/p&gt;
+&lt;p&gt;下面我们讲解基于如上两种模式添加autofac包的操作过程&lt;/p&gt;
+&lt;p&gt;Manage  NuGet  Packages 方式&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103004752299-396690535.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;控制台操作方式&lt;/p&gt;
+&lt;p&gt;(1)找到autofac包的NuGet地址&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103004938018-1398418560.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;(2)添加autofac包&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1066923/201801/1066923-20180103005242487-2034805025.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;三    创建包&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;篇幅有限，以后专门写一篇文章概述......&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;四    发布包&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;篇幅有限，以后专门写一篇文章概述......&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;五    参考文献&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;【01】ASP.NET MVC5 高级编程(Jon Galloway,Brad Wilson,K.Scott Allen,David Matson ,孙远帅 译)&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;六   版权区&lt;/span&gt;&lt;/p&gt;
+&lt;div&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;感谢您的阅读，若有不足之处，欢迎指教，共同学习、共同进步。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;博主网址：http://www.cnblogs.com/wangjiming/。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;极少部分文章利用读书、参考、引用、抄袭、复制和粘贴等多种方式整合而成的，大部分为原创。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;如您喜欢，麻烦推荐一下；如您有新想法，欢迎提出，邮箱：2016177728@qq.com。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;可以转载该博客，但必须著名博客来源。&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/div&gt;
+</description>
+<pubDate>Tue, 02 Jan 2018 16:57:00 +0000</pubDate>
+<dc:creator>Alan_beijing</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/wangjiming/p/8177821.html</dc:identifier>
+</item>
+<item>
 <title>在html中使用js - happynood</title>
 <link>http://www.cnblogs.com/xuyan1/p/js.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/xuyan1/p/js.html</guid>
@@ -2149,339 +2772,6 @@ Failed to obtain JDBC Connection; nested exception is org.apache.commons.dbcp.SQ
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/qingquanzi/p/8179042.html</dc:identifier>
-</item>
-<item>
-<title>Java设计模式总汇一 - CMusketeer</title>
-<link>http://www.cnblogs.com/cmusketeer/p/8146510.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/cmusketeer/p/8146510.html</guid>
-<description>&lt;p&gt;PS：首先我们要带着问题读文章&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;什么是设计模式&lt;/li&gt;
-&lt;li&gt;为什么要用设计模式&lt;/li&gt;
-&lt;li&gt;使用设计模式有什么好处&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;　　设计模式是一套被反复使用的、多数人知晓的、经过分类编目的、代码设计经验的总结。使用设计模式是为了重用代码、让代码更容易被他人理解、保证代码可靠性。 毫无疑问，设计模式于己于他人于系统都是多赢的，设计模式使代码编制真正工程化，设计模式是软件工程的基石，如同大厦的一块块砖石一样。项目中合理地运用设计模式可以完美地解决很多问题，每种模式在现实中都有相应的原理来与之对应，每种模式都描述了一个在我们周围不断重复发生的问题，以及该问题的核心解决方案，这也是设计模式能被广泛应用的原因。&lt;/p&gt;
-&lt;p&gt;　　　该篇文章主要写的是（介绍没有顺序）&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;适配器设计模式&lt;/li&gt;
-&lt;li&gt;单例设计模式&lt;/li&gt;
-&lt;li&gt;静态代理设计模式&lt;/li&gt;
-&lt;li id=&quot;6155-1513685496264&quot;&gt;简单工厂设计模式&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;1：适配器设计模式&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;意图：&lt;/strong&gt;将一个类的接口转换成客户希望的另外一个接口。适配器模式使得原本由于接口不兼容而不能一起工作的那些类可以一起工作。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;主要解决：&lt;/strong&gt;主要解决在软件系统中，常常要将一些&quot;现存的对象&quot;放到新的环境中，而新环境要求的接口是现对象不能满足的。&lt;/p&gt;
-&lt;p&gt;官方给出：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;优点：&lt;/strong&gt; 1、可以让任何两个没有关联的类一起运行。 2、提高了类的复用。 3、增加了类的透明度。 4、灵活性好。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;缺点：&lt;/strong&gt; 1、过多地使用适配器，会让系统非常零乱，不易整体进行把握。比如，明明看到调用的是 A 接口，其实内部被适配成了 B 接口的实现，一个系统如果太多出现这种情况，无异于一场灾难。因此如果不是很有必要，可以不使用适配器，而是直接对系统进行重构。 2.由于 JAVA 至多继承一个类，所以至多只能适配一个适配者类，而且目标类必须是抽象类。&lt;/p&gt;
-&lt;p&gt;示例：这里我简单写一个关于两个接口的例子，来调用里面的方法来看看效果这两个接口我们可以理解成充电器，一个是苹果lighting口，一个安卓充电器，我们都知道这两个充电器接口是不一样的，但是淘宝上有卖转换头的，可以在苹果头上套一个转换器就可以冲安卓手机里，这中间的转换头就是我们所说的适配器，我再配张图（中间一头是方形一头是圆形就是适配器）&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1258190/201712/1258190-20171229220440148-1502730271.png&quot; alt=&quot;&quot; width=&quot;776&quot; height=&quot;264&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;好，废话不多说，开始&lt;/p&gt;
-&lt;p&gt;（1）首先写一个A苹果接口，一个B安卓接口然后实现该接口里的方法，开始工作&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-//实现A
-class PowerA {
-        public void workA(){}
-}
-class PowerAiml extends PowerA{
-        public void workA(){
-                System.out.println(&quot;我是A，我要开始工作了&quot;);
-        }
-}
-//实现B
-class PowerB {
-        public void workB(){}
-}
-class PowerBiml extends PowerB{
-        public void workB(){
-                System.out.println(&quot;我是B，我要开始工作了&quot;);
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; （2）写一个方法只有A（苹果）接口可以用。&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public static void work(PowerA a){
-                System.out.println(&quot;开始-------&quot;);
-                a.workA();
-                System.out.println(&quot;结束-------&quot;);
-        }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; （3）调用查看效果&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-PowerA pa=new PowerAiml();
-                work(pa);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1258190/201801/1258190-20180102185706174-357747784.png&quot; alt=&quot;&quot; width=&quot;538&quot; height=&quot;136&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这样使用是没有任何问题的，因为参数就是PowerA a，只要是传入实现PowerA接口的class都可以调用该方法，但是，问题来了，如果我想让使用PowerB怎么办呢，有两个方法，一个是再写一个work2（PowerB b），另一个是用适配器的方法，显然第一种方法对于这个例子是最简单的，但是在一个软件编写的过程中不光是这一点代码，代码有很多，难道都要再写方法吗，那样子就太麻烦了，现在就用适配器的方法&lt;/p&gt;
-&lt;p&gt;（4）适配器&lt;/p&gt;
-&lt;p&gt;想要使用A方法，就要伪装成A，把适配器实现PowerA&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-//适配器：
-class Adapter1 extends PowerA{
-        public PowerB b;
-        public Adapter1(PowerB b){
-                this.b=b;
-        }
-        //当调用A的时候，就自动调用B里的方法。
-        public void workA(){
-                b.workB();
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 调用的时候是，一头与B关联，一头与A关联&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-PowerB b=new PowerBiml();
-Adapter1 adapter=new Adapter1(b);
-work(adapter);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1258190/201801/1258190-20180102190643424-941545564.png&quot; alt=&quot;&quot; width=&quot;591&quot; height=&quot;151&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;解释一下：在Adapter1中传入的b，然后把adapter传入work，虽然调用的都是workA，但是关键来了，在workA方法中又调用了b.workB()；就是这么一个思路。&lt;/p&gt;
-&lt;p&gt;这是一个非常简单的例子，在开发过程中，真正要用到适配器要比这个看似复杂点，原理都是一样的，毕竟小孩子的性格是天真的，大人的性格就变化莫测了。&lt;/p&gt;
-&lt;h2&gt;2：代理设计模式&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;意图：&lt;/strong&gt;为其他对象提供一种代理以控制对这个对象的访问。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;主要解决：&lt;/strong&gt;在直接访问对象时带来的问题，比如说：要访问的对象在远程的机器上。在面向对象系统中，有些对象由于某些原因（比如对象创建开销很大，或者某些操作需要安全控制，或者需要进程外的访问），直接访问会给使用者或者系统结构带来很多麻烦，我们可以在访问此对象时加上一个对此对象的访问层。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;何时使用：&lt;/strong&gt;想在访问一个类时做一些控制。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;如何解决：&lt;/strong&gt;增加中间层。&lt;/p&gt;
-&lt;p&gt;静态代理模式，说白了就是委托，将所有的事情都委托给别人帮你完成，你所要做的，就是给代理一些东西，接下来所有的事情都是代理帮你完成，你完全不用去关心内部是如何实现的。举个例子简单的说一下，一个人买衣服，可以去实体店也可以去网上，买火车票的时候，你就知道售票员就会给你 你想要的票，而且你只需要给他钱和身份证以及地点就可以了，他会经过处理，最后把票给你，他就处于一个代理模式。下面我简单写一个例子&lt;/p&gt;
-&lt;p&gt;比如说我只想要水，我就给你送水的公司打电话让他们送一桶水，然后我就在家等着就可以，在这期间谁送水，怎么送，需要多久，什么样的水等一切我都不需要知道，这都被送水公司代理了。OK&lt;/p&gt;
-&lt;p&gt;（1）先写一个要水的类和接口&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-class Action{
-        public void work(){}
-}
-class MyAction extends Action{
-        public void work(){
-                //在这期间可能会有我不想做的事，但还是要有，比如说一共耗时，打水结果要的是水，但必需要拿水桶等。
-                //这些东西都是可以让代理给做了，
-                System.out.println(&quot;获得水&quot;);
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; （2）写代理类&lt;/p&gt;
-&lt;p&gt;如果不写代理类的话，也可以直接调用work方法，但是就相当于自己去搬水，而不是用代理。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-/**
- * 代理类
- *      控制，在方法前或后所要做的类。
- * */
-class DaiLiAction extends Action{
-        private Action action;
-        public DaiLiAction(Action action){
-                this.action=action;
-        }
-        public void work(){
-                System.out.println(&quot;我是送水公司&quot;);
-                System.out.println(&quot;代理正在处理中。。。&quot;);
-                System.out.println(&quot;代理处理完了返回给你结果&quot;);
-                action.work();
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; （3）调用即可&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Action ac=new MyAction();
-//把对象给代理类，工作是由代理完成。
-DaiLiAction dai=new DaiLiAction(ac);
-dai.work();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1258190/201801/1258190-20180102193352487-1701837732.png&quot; alt=&quot;&quot; width=&quot;506&quot; height=&quot;135&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;3：单例设计模式&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.cnblogs.com/cmusketeer/p/8016550.html&quot; target=&quot;_blank&quot;&gt;http://www.cnblogs.com/cmusketeer/p/8016550.html&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;4:简单工厂设计模式&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;意图：&lt;/strong&gt;定义一个创建对象的接口，让其子类自己决定实例化哪一个工厂类，工厂模式使其创建过程延迟到子类进行。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;主要解决：&lt;/strong&gt;主要解决接口选择的问题。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;何时使用：&lt;/strong&gt;我们明确地计划不同条件下创建不同实例时。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;如何解决：&lt;/strong&gt;让其子类实现工厂接口，返回的也是一个抽象的产品。&lt;/p&gt;
-&lt;p&gt;哦，对了，这是简单工厂设计模式，还有抽象工厂设计模式，和这个类似，下一篇再说，这里先举例说明这个模式，使用该模式可以降低使用者和被使用者之间的依赖。比如说，我开了一个工厂，下面有部门，一个是造手机的，一个是造电脑的，OK&lt;/p&gt;
-&lt;p&gt;（1）创建手机和电脑类&lt;/p&gt;
-&lt;div readability=&quot;22&quot;&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-/**
- * 工厂接口
- * */
-interface Factory1{
-        public void create();
-}
-
-/**
- * 手机
- * */
-class Phone implements Factory1{
-        @Override
-        public void create() {
-                System.out.println(&quot;我是造--手机--的&quot;);
-                
-        }
-}
-/**
- * 电脑
- * */
-class Computer implements Factory1{
-        @Override
-        public void create() {
-                System.out.println(&quot;我是造--电脑--的&quot;);
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（2）创建工厂控制类FactoryControl&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-/**
- * 工厂控制类
- * */
-
-class FactoryControl{
-        public static Factory1 getGood(String good){
-                if(good.equalsIgnoreCase(&quot;phone&quot;)){
-                        return new Phone();
-                }else if(good.equalsIgnoreCase(&quot;computer&quot;)){
-                        return new Computer();
-                }
-                return null;
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; (3)调用和效果&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Factory1 factory=FactoryControl.getGood(&quot;phone&quot;);
-                factory.create();
-                
-                factory=FactoryControl.getGood(&quot;computer&quot;);
-                factory.create();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1258190/201801/1258190-20180102200431878-1015970498.png&quot; alt=&quot;&quot; width=&quot;546&quot; height=&quot;99&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;当然，也可以不经过FactoryControl（工厂类）,也是可以调用的，但是如果是大工程，使用该模式可以降低使用者和被使用者之间的依赖。这里就算你传入一个耳机，没有这个功能，它也不会报错，返回null。&lt;/p&gt;
-&lt;p&gt;好了，下一篇就会继续写剩下的19个设计模式，例子都是简单易懂的，只要理解了，慢慢的再写复杂的代码就轻松了，只要有了思想，写代码就简单了，可以告别有能力但总觉得无处施展的尴尬。&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Tue, 02 Jan 2018 12:11:00 +0000</pubDate>
-<dc:creator>CMusketeer</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/cmusketeer/p/8146510.html</dc:identifier>
-</item>
-<item>
-<title>我是如何确认线上CLOSE_WAIT产生的原因及如何解决的。 - 杜先生的博客</title>
-<link>http://www.cnblogs.com/dukuan/p/8178728.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/dukuan/p/8178728.html</guid>
-<description>&lt;p&gt;1、阐述&lt;/p&gt;
-&lt;p&gt;　　内部架构：Tomcat应用程序---&amp;gt; nginx ---&amp;gt; 其他Tomcat应用程序，内部Tomcat应用通过nginx调用其他应用。&lt;/p&gt;
-&lt;p&gt;　　HTTP插件：HttpClient 4.2.3&lt;/p&gt;
-&lt;p&gt;　　关闭连接的代码：httpClient.getConnectionManager().closeIdleConnections(5, TimeUnit.SECONDS);&lt;/p&gt;
-&lt;p&gt;2、说明&lt;/p&gt;
-&lt;p&gt;　　要说明的是CLOSE_WAIT产生的原因和服务器、nginx、其他配置无关，是HttpClient的getConnectionManager引起的。&lt;/p&gt;
-&lt;p&gt;3、排查思路&lt;/p&gt;
-&lt;p&gt;　　这个问题已经困扰我很久了，查看过网上的很多办法，也试过很多方法。&lt;/p&gt;
-&lt;p&gt;　　比如：修改服务器内核、修改nginx配置文件、更改nginx版本，都是没有用的，还是上面那句话和服务器、nginx无关。&lt;/p&gt;
-&lt;p&gt;　　最后决定自己分析请求，查找真正的根本原因，以下为排查的最终步骤&lt;/p&gt;
-&lt;p&gt;4、问题排查&lt;/p&gt;
-&lt;p&gt;　　首先确认CLOSE_WAIT产生的链接，链接的IP和端口&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102174806393-1814489249.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　由上图看出是本机链接nginx 81端口造成的CLOSE_WAIT&lt;/p&gt;
-&lt;p&gt;　　抓包分析其中一个CLOSE_WAIT所用的本机端口：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102175517690-400142819.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　抓包分析正常关闭的请求：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102180730049-872426492.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　分析不正常端口41584，晚上22点01分02秒请求连接，22点01分02秒传输数据结束，22点02分07秒，nginx发送关闭连接的包，Tomcat同意关闭，问题就出现在这里，在Nginx请求关闭连接后，Tomcat并没有回复同样关闭连接的包，没有完成四次握手，故产生了CLOSE_WAIT。&lt;/p&gt;
-&lt;p&gt;　　分析所有正常连接发现没有产生CLOSE_WAIT的端口都是Tomcat主动关闭的，产生CLOSE_WAIT的都是nginx主动关闭，Tomcat被动关闭的。&lt;/p&gt;
-&lt;p&gt;　　再次分析所有的不正常端口&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102182923253-1093009831.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　发现Tomcat周期性的向Nginx发送关闭连接的请求，但是Nginx回复Reset包，说白了就是Tomcat请求关闭连接，但是Nginx说我没有这个链接(已经在前面主动关闭)，所有CLOSE_WAIT会一直存在，直至两个小时以后系统强制关闭。至于为什么会周期性的一起并发的关闭的连接，而不是一个一个关闭，或者为什么在收到Nginx关闭连接请求，Tomcat不关闭，看上述Java代码：httpClient.getConnectionManager().closeIdleConnections(5, TimeUnit.SECONDS);&lt;/p&gt;
-&lt;p&gt;　　这段代码表示调用httpClient的getConnectionManager，然后利用closeIdleConnections进行关闭空闲连接，5代表是五秒(不知道解释的对不对)。&lt;/p&gt;
-&lt;p&gt;　　网上查找getConnectionManager，说是httpclient的链接池管理工具。就是把请求都扔里面，然后Manager帮你做相关处理。&lt;/p&gt;
-&lt;p&gt;　　但是上述代码写的是5秒之内连接空闲就会关闭，httpclient又是一个很成熟的技术，于是没有怀疑这个的问题(我不是开发，代码层我无法分析)。&lt;/p&gt;
-&lt;p&gt;　　继续分析其他正常关闭的包，发现并不是所有正常关闭的连接都是五秒关闭的，而产生CLOSE_WAIT的，一般请求关闭都是超过65秒的(65是nginx keepalive timeout的值)，为了确认问题的根源，我把nginx的keepalive timeout设置为240秒(Nginx主动关闭连接后，最长Tomcat第一次发送关闭连接的包据数据传输完毕的时间间隔为3分28秒)，实时查看CLOSE的增长变得缓慢，改为360秒，几乎不怎么增长，但是还有增长，索性改为0，过了一个多小时，只会下降，不会增多，所以断定是HTTPCLIENT出现的问题。&lt;/p&gt;
-&lt;p&gt;5、继续分析&lt;/p&gt;
-&lt;p&gt;　　查看httpclient官方文档：http://hc.apache.org/httpcomponents-client-ga/httpclient/apidocs/org/apache/http/conn/ClientConnectionManager.html&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102190431628-677106284.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　上面说在给定的时间内(上述代码的五秒)链接没有被使用，就会在池中关闭连接。同时也会关闭过期的连接。&lt;/p&gt;
-&lt;p&gt;　　看解释说只要连接5秒没有被使用，就会关闭连接，不会大于65秒的，至此又回到诧异懵逼中。。。&lt;/p&gt;
-&lt;p&gt;　　再次回想连接池中周期性发送FIN包，让我判断没有在五秒内关闭连接只有两种可能：一、配置没有生效，二、HTTPCLIENT空闲连接检测机制。&lt;/p&gt;
-&lt;p&gt;　　把自己的想法说给开发人员说后，无法断定空间连接检测的机制是什么，于是决定修改代码，换用另一种关闭的方式(没有时间考虑上面的两个想法)：将所有完成请求的连接通过httpclient的releaseConnection和SHUTDOWN进行关闭，修改完成并在测试环境部署(测试环境也同样有CLOSE_WAIT)，运行至今改过代码的并无产生任何CLOSE_WAIT。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1095387/201801/1095387-20180102193654440-544118200.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;6、总结&lt;/p&gt;
-&lt;p&gt;　　CLOSE_WAIT产生的原因是由代码引起的，目前能确认的是HTTPCLIENT的getConnectionManager的连接池引起的，但是为什么设置的5秒没有生效，空闲连接的检测机制是什么，这些还无法得知，&lt;/p&gt;
-
-
-
-
-</description>
-<pubDate>Tue, 02 Jan 2018 11:23:00 +0000</pubDate>
-<dc:creator>杜先生的博客</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/dukuan/p/8178728.html</dc:identifier>
-</item>
-<item>
-<title>2017年总结和明年规划 - 大魔王先生</title>
-<link>http://www.cnblogs.com/wtzbk/p/8169154.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wtzbk/p/8169154.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;一、前言&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       &lt;/strong&gt;这一年的变化很大，其实也是受到园友的影响，在此谢谢Edison Chou!也是因为他开始我的博客之旅，还有很多思想方面，习惯都有很大的影响。当然答应你的龙井，今年明前茶给你搞点，哈哈。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;二、2017年终总结&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       &lt;/strong&gt;这一年一共写了20篇博客，最少每篇访问量基本在200人左右，收获粉丝18枚，这是一个很大的进步。当然这20篇博客也是伴随着我的学习过程，下面我主要说一下学习了那些东西：&lt;/p&gt;
-&lt;p&gt;      1.图解TCP/IP&lt;/p&gt;
-&lt;p&gt;         这本书写的相对来说比较简单,主要就是了解下TCP/IP方面的知识，整体上没什么难度，大力推荐阅读下，当然这也是我第一篇开篇博客，有很重大的意义。&lt;/p&gt;
-&lt;p&gt;      2.图解HTTP&lt;/p&gt;
-&lt;p&gt;         这本也是一本入门书籍，如果你是学习Web那必须要读一下这本书，或许能让你对Web的理解更上一层楼，主要讲述HTTP协议常用方法，报文结构，协议格式，状态码等一系列内容总体不错。&lt;/p&gt;
-&lt;p&gt;     3.精通ASP.NET MVC5&lt;/p&gt;
-&lt;p&gt;         这本书写的很好，看完整体上对MVC框架运作会有深入理解，也是大力推荐阅读，另外有兴趣还可以自己搞一个MVC框架玩一玩，这样理解更深刻，看这本书的时候我也写了几篇博客，但是一直没整理好，这是一个遗憾。&lt;/p&gt;
-&lt;p&gt;     4.大话设计模式&lt;/p&gt;
-&lt;p&gt;         这本书以故事的形式去讲解设计模式，写的风趣幽默，大概读了60%左右，有些个设计模式还是没有很融汇贯通，还需在努力一把，当然这本书也是大力推荐之一；&lt;/p&gt;
-&lt;p&gt;     5.代码的整洁之道&lt;/p&gt;
-&lt;p&gt;         这本书看完之后就忘记了，但是你想要写出优秀的代买这本还是必须要读，当然这也是我下一年要读的，到时候会来个一系列博客。&lt;/p&gt;
-&lt;p&gt;     6.Java核心卷I&lt;/p&gt;
-&lt;p&gt;        这是转Java以后的第一本书，除去Swing部分没有读，整本书通读一遍，另外重点部分比如集合，反射，代理和多线程部分又重新温习过一篇。&lt;/p&gt;
-&lt;p&gt;     7.Java核心卷2&lt;/p&gt;
-&lt;p&gt;        这本简单看了几章，基本已经忘光，不推荐买。&lt;/p&gt;
-&lt;p&gt;     8.Spring实战&lt;/p&gt;
-&lt;p&gt;        这本看算是看了50%吧，还是可以的入门级书，Spring部分源码还是需要读一下的。&lt;/p&gt;
-&lt;p&gt;     9.大话数据结构&lt;/p&gt;
-&lt;p&gt;        这本看了80%，讲的很不错，值得入手，数据结构和算法还是很重要的，这是内功需要学习下，当然读了这本书以后，在结合JDK集合源码思考下，那你集合基本上就理解彻底了。&lt;/p&gt;
-&lt;p&gt;     10.深入理解Java虚拟机&lt;/p&gt;
-&lt;p&gt;        这本书看了2遍，主要讲述了JVM相关方面的东西，非常值得读，看完以后感觉有本质的提升，是由内到外的那种感觉。&lt;/p&gt;
-&lt;p&gt;     11.Java并发编程&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;&lt;strong&gt;       &lt;/strong&gt;&lt;/strong&gt;&lt;/strong&gt; 这本书本来计划在过年之前读完的，但是不幸家里有点事，只是读了前几章，但是还是很提推荐大家入手。&lt;/p&gt;
-&lt;p&gt;     以上基本是这一年看过的书籍，不敢说全部理解，反正对我个人来说提升还是很大的，算上是飞跃的一年把，其实过程还是很痛苦的，熟悉C#的我一下转成Java难免会有些不适应，还有很多坑要去踩，还有好多框架需要去学习，理解；所以注定新年里还是奔波，忙碌的一年。&lt;/p&gt;
-&lt;p&gt;     技术上的事谈完了，这里谈一下生活，当然这是我意想不到的事，一手抚养我长大的奶奶去了，遗憾的是没有见上最后一面，懊恼的是老人家一生受苦，为什么在我有能力让他享受天伦之乐的时候要让他换上这种病，当然还有就是我一直没有满足老人家心愿，早点带回去一个女朋友，让老人家带着遗憾走的，我也知道这种事不能强求，但是我还是不能原谅我自己，用一首诗来表达下我的心情：亲人已仙游,未呈儿孙福。游魂于千里,如何度思量。让我想起季老的《我和北大》的第一辑，深深体会到了他的那种遗憾与思念之情。再谈一下工作，在国企上班的这一年里，气氛太安逸，使我不适应，但是不得不说福利是很到位的，但是我又是一个不太想安逸的人，因为现在的安逸是为未来埋雷，怀揣的这样的心态，我这一年里看了上面那些书，做了转行Java的准备，在公司上了一个Java系统，就这样过完2017年。&lt;/p&gt;
-&lt;p&gt;   这里总结一下，2017年我个人的进步还是值得肯定的，看书计划基本完成80%，总体比较满意，工作上领导布置的任务都能按时完成，但是过于安逸的氛围我不太喜欢，因为这样我怕我会懈怠，生活上自己也有几W的存款，这比在山西工作的2年进步的太多了，明年也有购房计划，当然我计划在太原或者郑州买房，估计要啃一把老了，奶奶去世我挺遗憾，但是我依然会前行，我相信她更希望看到进步的我，接下来我们谈一下新年计划吧。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;三、新年计划&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;   &lt;/strong&gt;新年计划计划还是从工作、生活和学习三方面谈起。首先来谈一下工作：工作在2017年的时候基本有个简单计划，2018年是去落实的一年，总体上要实现这几个目标：&lt;/p&gt;
-&lt;p&gt;   1.工作的语言由C#转变为Java；&lt;/p&gt;
-&lt;p&gt;   2.选择金融行业或者电商行业的互联网公司，更偏向于大公司；&lt;/p&gt;
-&lt;p&gt;   3.薪资希望在现在的基础上增加30%；&lt;/p&gt;
-&lt;p&gt;   4.希望在并发和数据处理这块能扩展一下；&lt;/p&gt;
-&lt;p&gt;   接下来谈一下生活：&lt;/p&gt;
-&lt;p&gt;   1.如果有合适的妹子，那么就来谈一下对象吧；&lt;/p&gt;
-&lt;p&gt;   2.房子不知道郑州还是太原，郑州发展更好一点，太原同学都在太原，有点不知道该如何抉择，但是在6-7月份还是要买的；&lt;/p&gt;
-&lt;p&gt;   3.如果时间允许的话，想去趟西藏和云南；&lt;/p&gt;
-&lt;p&gt;   4.继续2017年和Edison Chou的赌约每周10公里，天气转暖开始Keep锻炼；&lt;/p&gt;
-&lt;p&gt;   最后来谈学习:&lt;/p&gt;
-&lt;p&gt;   1.Java并发编程，这本书是重点，也是想搞好并发的基础，必须搞明白；&lt;/p&gt;
-&lt;p&gt;   2.Redis实战，学习下理论知识，现在只是会用，需要对知识做一下系统整理；&lt;/p&gt;
-&lt;p&gt;   3.Java编程思想，此书也是想搞好Java必读精品，阅读的时候对重点部分做一下博客整理；&lt;/p&gt;
-&lt;p&gt;   4.Mysql技术Innodb存储引擎，深入了解下数据库方面的知识，不再是简单盲目的优化和处理；&lt;/p&gt;
-&lt;p&gt;   5.大话数据结构，把剩下的部分阅读完成，这个需要在跳槽之前完成；&lt;/p&gt;
-&lt;p&gt;   6.代码的整洁之道，结合自己代码进行实践；&lt;/p&gt;
-&lt;p&gt;   8.重构-改善既有代码的设计，阅读这本书和代码的整洁之道基本也一样；&lt;/p&gt;
-&lt;p&gt;   9.敏捷软件开发原则、模式和实践，也和上面2本的目标基本一样；&lt;/p&gt;
-&lt;p&gt;   10.Liunx私房菜基础版，扩展下Liunx知识；&lt;/p&gt;
-&lt;p&gt;    需要看的书基本就这些了，然后还需要看下JDK部分源码，还有Spring部分源码需要读一下，另外在学习Spring Cloud玩一下微服务设计，跟上时代步伐；另外学习下新概念的课程，英语好好搞一下，基本规划就这样，愿一切顺利进行。&lt;/p&gt;
-</description>
-<pubDate>Tue, 02 Jan 2018 10:53:00 +0000</pubDate>
-<dc:creator>大魔王先生</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wtzbk/p/8169154.html</dc:identifier>
 </item>
 </channel>
 </rss>
