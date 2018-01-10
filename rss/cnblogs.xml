@@ -9,6 +9,531 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>漫话JavaScript与异步·第三话——Generator：化异步为同步 - 大唐西域都护</title>
+<link>http://www.cnblogs.com/leegent/p/8207246.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/leegent/p/8207246.html</guid>
+<description>&lt;h2&gt;一、Promise并非完美&lt;/h2&gt;
+&lt;p&gt;我在&lt;a href=&quot;http://www.cnblogs.com/leegent/p/6846664.html&quot; target=&quot;_blank&quot;&gt;上一话&lt;/a&gt;中介绍了&lt;strong&gt;Promise&lt;/strong&gt;，这种模式增强了事件订阅机制，很好地解决了控制反转带来的信任问题、硬编码回调执行顺序造成的“回调金字塔”问题，无疑大大提高了前端开发体验。但有了Promise就能完美地解决异步问题了吗？并没有。&lt;/p&gt;
+&lt;p&gt;首先，Promise仍然需要通过then方法注册回调，虽然只有一层，但沿着Promise链一长串写下来，还是有些让人头晕。&lt;/p&gt;
+&lt;p&gt;更大的问题在于Promise的&lt;strong&gt;错误处理&lt;/strong&gt;比较麻烦，因为Promise链中抛出的错误会一直传到链尾，但在链尾捕获的错误却不一定清楚来源。而且，链中抛出的错误会fail掉后面的整个Promise链，如果要在链中及时捕获并处理错误，就需要给每个Promise注册一个错误处理回调。噢，又是一堆回调！&lt;/p&gt;
+&lt;p&gt;那么最理想的异步写法是怎样的呢？像同步语句那样直观地按顺序执行，却又不会阻塞主线程，最好还能用try-catch直接捕捉抛出的错误。也就是说，“化异步为同步”！&lt;/p&gt;
+&lt;p&gt;痴心妄想？&lt;/p&gt;
+&lt;p&gt;我在&lt;a href=&quot;http://www.cnblogs.com/leegent/p/6016403.html&quot; target=&quot;_blank&quot;&gt;第一话&lt;/a&gt;里提到，异步和同步之间的鸿沟在于：同步语句的执行时机是“&lt;strong&gt;现在&lt;/strong&gt;”，而异步语句的执行时机在“&lt;strong&gt;未来&lt;/strong&gt;”。为了填平鸿沟，如果一个异步操作要写成同步的形式，那么同步代码就必须有“&lt;strong&gt;等待&lt;/strong&gt;”的能力，等到“未来”变成“现在”的那一刻，再继续执行后面的语句。&lt;/p&gt;
+&lt;p&gt;在不阻塞主线程的前提下，这可能吗？&lt;/p&gt;
+&lt;p&gt;听起来不太可能。幸好，Generator（生成器）为JS带来了这种超能力！&lt;/p&gt;
+
+&lt;h2&gt;二、“暂停/继续”魔法&lt;/h2&gt;
+&lt;p&gt;ES6引入的新特性中，Generator可能是其中最强大也最难理解的之一，即使看了&lt;a href=&quot;http://es6.ruanyifeng.com/#docs/generator&quot; target=&quot;_blank&quot;&gt;阮一峰老师列举的大量示例代码&lt;/a&gt;，知道了它的全部API，也仍是不得要领，这是因为Generator的行为方式突破了我们所熟知的JS运行规则。可一旦掌握了它，它就能赋予我们巨大的能量，极大地提升代码质量、开发效率，以及FEer的幸福指数。&lt;/p&gt;
+&lt;p&gt;我们先来简单回顾一下，ES6之前的JS运行规则是怎样的呢？&lt;/p&gt;
+&lt;p&gt;1. JS是单线程执行，只有一个主线程&lt;/p&gt;
+&lt;p&gt;2. 宿主环境提供了一个事件队列，随着事件被触发，相应的回调函数被放入队列，排队等待执行 &lt;/p&gt;
+&lt;p&gt;3. 函数内的代码从上到下顺序执行；如果遇到函数调用，就先进入被调用的函数执行，待其返回后，用返回值替代函数调用语句，然后继续顺序执行&lt;/p&gt;
+&lt;p&gt;对于一个FEer来说，日常开发中理解到这个程度已经够用了，直到他尝试使用Generator……&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;function&lt;/span&gt;&lt;span&gt;*&lt;/span&gt;&lt;span&gt; gen() {
+    &lt;span&gt;let&lt;/span&gt; count &lt;/span&gt;= 0&lt;span&gt;;
+    &lt;/span&gt;&lt;span&gt;while&lt;/span&gt;(&lt;span&gt;true&lt;/span&gt;&lt;span&gt;) {
+        &lt;span&gt;let&lt;/span&gt; msg &lt;/span&gt;= &lt;span&gt;yield&lt;/span&gt; ++&lt;span&gt;count;
+        console.log(msg);
+    }
+}
+
+&lt;span&gt;let&lt;/span&gt; iter &lt;/span&gt;=&lt;span&gt; gen();
+console.log(iter.next().value);
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1&lt;/span&gt;
+console.log(iter.next('magic'&lt;span&gt;).value);
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 'magic'&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;等等，gen明明是个function，执行它时却不执行里面的代码，而是返回一个Iterator对象？代码执行到yield处竟然可以暂停？暂停以后，竟然可以恢复继续执行？说好的单线程呢？另外，暂停/恢复执行时，还可以传出/传入数据？怎么肥四？难道ES6对JS做了什么魔改？&lt;/p&gt;
+&lt;p&gt;其实Generator并没有改变JS运行的基本规则，不过套用上面的naive JS观已经不足以解释其实现逻辑了，是时候掏出长年在书架上吃灰的计算机基础，重温那些考完试就忘掉的知识。&lt;/p&gt;
+
+&lt;h2&gt;三、法力的秘密——栈与堆&lt;/h2&gt;
+&lt;p&gt;（注：这个部分包含了大量的个人理解，未必准确，欢迎指教）&lt;/p&gt;
+&lt;p&gt;理解Generator的关键点在于理解&lt;strong&gt;函数执行时，内存里发生了什么&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;一个JS程序的内存分为代码区、栈区、堆区和队列区，从&lt;a href=&quot;https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/EventLoop&quot; target=&quot;_blank&quot;&gt;MDN&lt;/a&gt;借图一张以说明（图中没有画出代码区）：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/900937/201801/900937-20180107212418581-1346513923.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;队列（Queue）就是FEer所熟知的事件循环队列。&lt;/p&gt;
+&lt;p&gt;代码区保存着全部JS源代码被引擎编译成的机器码（以V8为例）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;栈（stack）&lt;/strong&gt;保存着每个函数执行所需的上下文，一个栈元素被称为一个&lt;strong&gt;栈帧&lt;/strong&gt;，一个栈帧对应一个函数。&lt;/p&gt;
+&lt;p&gt;对于引用类型的数据，在栈帧里只保存引用，而真正的数据存放在&lt;strong&gt;堆（Heap）&lt;/strong&gt;里。堆与栈不同的是，栈内存由JS引擎自动管理，入栈时分配空间，出栈时回收，非常清楚明了；而堆是程序员通过new操作符手动向操作系统申请的内存空间（当然，用字面量语法创建对象也算），何时该回收没那么明晰，所以需要一套垃圾收集（GC）算法来专门做这件事。&lt;/p&gt;
+&lt;p&gt;扯了一堆预备知识，终于可以回到Generator的正题了：&lt;/p&gt;
+&lt;p&gt;普通函数在被调用时，JS引擎会创建一个栈帧，在里面准备好&lt;strong&gt;局部变量&lt;/strong&gt;、&lt;strong&gt;函数参数&lt;/strong&gt;、&lt;strong&gt;临时值&lt;/strong&gt;、&lt;strong&gt;代码执行的位置&lt;/strong&gt;（也就是说这个函数的第一行对应到代码区里的第几行机器码），在当前栈帧里设置好返回位置，然后将新帧压入栈顶。待函数执行结束后，这个栈帧将被弹出栈然后销毁，返回值会被传给上一个栈帧。&lt;/p&gt;
+&lt;p&gt;当执行到yield语句时，Generator的栈帧同样会被弹出栈外，但Generator在这里耍了个花招——&lt;strong&gt;它在堆里保存了栈帧的引用（或拷贝）&lt;/strong&gt;！这样当iter.next方法被调用时，JS引擎便不会重新创建一个栈帧，而是把堆里的栈帧直接入栈。因为栈帧里保存了函数执行所需的全部上下文以及当前执行的位置，所以当这一切都被恢复如初之时，就好像程序从原本暂停的地方继续向前执行了。&lt;/p&gt;
+&lt;p&gt;而因为&lt;strong&gt;每次yield和iter.next都对应一次出栈和入栈&lt;/strong&gt;，所以可以直接利用已有的栈机制，实现&lt;strong&gt;值的传出和传入&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;这就是Generator魔法背后的秘密！&lt;/p&gt;
+
+&lt;h2&gt;四、终极方案：Promise+Generator&lt;/h2&gt;
+&lt;p&gt;Generator的这种特性对于异步来说，意味着什么呢？&lt;/p&gt;
+&lt;p&gt;意味着，我们终于获得了一种在不阻塞主线程的前提下实现“同步等待”的方法！&lt;/p&gt;
+&lt;p&gt;为便于说明，先上一段直接使用回调的代码：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;let&lt;/span&gt; it =&lt;span&gt; gen();  &lt;span&gt;// 获得迭代器
+
+&lt;/span&gt;&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; request() {
+    ajax({
+        url: &lt;/span&gt;'www.someurl.com'&lt;span&gt;,
+        onSuccess(res){
+            it.next(res);  &lt;span&gt;// 恢复Generator运行，同时向其中塞入异步返回的结果&lt;/span&gt;
+        }
+    });
+}
+
+&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;*&lt;/span&gt;&lt;span&gt; gen() {
+    &lt;span&gt;let&lt;/span&gt; response &lt;/span&gt;=&lt;span&gt;&lt;span&gt; yield&lt;/span&gt; request();
+    console.log(response.text);
+}
+
+it.next();  &lt;/span&gt;&lt;span&gt;// &lt;/span&gt;&lt;span&gt;启动Generator&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;注意let response = yield request()这行代码，是不是很有同步的感觉？就是这个Feel！&lt;/p&gt;
+&lt;p&gt;我们来仔细分析下这段代码是如何运行的。首先，最后一行it.next()使得Generator内部的代码从头开始执行，执行到yield语句时，暂停，此时可以把yield想象成return，Generator的栈帧需要被弹出，会先计算yield右边的表达式，即执行request函数调用，以获得用于返回给上一级栈帧的值。当然request函数没有返回值，但它发送了一个异步ajax请求，并注册了一个onSuccess回调，表示在请求返回结果时，恢复Generator的栈帧并继续运行代码，并把结果作为参数塞给Generator，准确地说是塞到yield所在的地方，这样response变量就获得了ajax的返回值。&lt;/p&gt;
+&lt;p&gt;可以看出，这里yield的功能设计得非常巧妙，好像它可以“赋值”给response。&lt;/p&gt;
+&lt;p&gt;更妙的是，迭代器不但可以.next，还可以.throw，即&lt;strong&gt;把错误也抛入Generator&lt;/strong&gt;，让后者来处理。也就是说，&lt;strong&gt;在Generator里使用try-catch语句捕获异步错误，不再是梦！&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;先别急着激动，上面的代码还是too young too simple，要真正发挥Generator处理异步的威力，还得结合他的好兄弟——Promise一起上阵。代码如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;function&lt;/span&gt; request() {  &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 此处的request返回的是一个Promise&lt;/span&gt;
+    &lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Promise((resolve, reject) =&amp;gt;&lt;span&gt; {
+        ajax({
+            url: &lt;/span&gt;'www.someurl.com'&lt;span&gt;,
+            onSuccess(res) {
+                resolve(res);
+            },
+            onFail(err) {
+                reject(err);
+            }
+         });
+    });
+}
+
+&lt;span&gt;let&lt;/span&gt; it &lt;/span&gt;=&lt;span&gt; gen();
+&lt;span&gt;let&lt;/span&gt; p &lt;/span&gt;= it.next().value;  &lt;span&gt;//&lt;/span&gt;&lt;span&gt; p是yield返回的Promise&lt;/span&gt;
+p.then(res =&amp;gt;&lt;span&gt; it.next(res),
+    err &lt;/span&gt;=&amp;gt; it.&lt;span&gt;throw&lt;/span&gt;(err)  &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 发生错误时，将错误抛入生成器&lt;/span&gt;
+&lt;span&gt;);
+
+&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;*&lt;/span&gt;&lt;span&gt; gen() {
+    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+        &lt;span&gt;let&lt;/span&gt; response &lt;/span&gt;=&lt;span&gt;&lt;span&gt; yield&lt;/span&gt; request();
+        console.log(response.text);
+    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (error) {
+        console.log(&lt;/span&gt;'Ooops, ', error.message);  &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 可以捕获Promise抛进来的错误！&lt;/span&gt;
+&lt;span&gt;    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这种写法完美结合了Promise和Generator的优点，可以说是FEer们梦寐以求的超级武器。&lt;/p&gt;
+&lt;p&gt;但聪明的你一定看得出来，这种写法套路非常固定，当Promise对象一多时，就需要写许多类似于p.then(res =&amp;gt; ...., err =&amp;gt; ...)这样的重复语句，所以人们为了偷懒，就把这种套路给提炼成了一个更加精简的语法，那就是传说中的&lt;strong&gt;async/await&lt;/strong&gt;：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;async&lt;/span&gt; funtion fetch() {
+    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+        &lt;span&gt;let&lt;/span&gt; response &lt;/span&gt;= &lt;span&gt;await&lt;/span&gt; request();  &lt;span&gt;//&lt;/span&gt;&lt;span&gt; request定义同上一端段示例代码&lt;/span&gt;
+&lt;span&gt;        console.log(response.text);
+    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (error) {
+        console.log(&lt;/span&gt;'Ooops, '&lt;span&gt;, error.message);
+    }
+}&lt;p&gt;fetch();&lt;/p&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这这这。。。就靠拢同步风格的程度而言，我觉得async/await已经到了&lt;strong&gt;登峰造极&lt;/strong&gt;的地步~&lt;/p&gt;
+&lt;p&gt;顺便说一句，著名Node.js框架Koa2正是要求中间件使用这种写法，足见其强大和可爱。&lt;/p&gt;
+&lt;p&gt;前端们，擦亮手中的新锐武器，准备迎接来自异步的高难度挑战吧！&lt;/p&gt;
+
+&lt;h2&gt;写在最后&lt;/h2&gt;
+&lt;p&gt;距离发表&lt;a title=&quot;第二话（Promise）&quot; href=&quot;http://www.cnblogs.com/leegent/p/6846664.html&quot; target=&quot;_blank&quot;&gt;第二话（Promise）&lt;/a&gt;已经过去大半年了，原本设想的终章——第三话（Generator），却迟迟未能动笔，因为笔者一直没能弄懂Generator这个行为怪异的家伙究竟是如何存在于JS世界的，又如何成为“回调地狱”的终极解决方案？直到回头弥补了一些计算机基础知识，才最终突破了理解上的障碍，把Generator的来龙去脉想清楚，从而敢应用到实际工作中。所以说，基础是很重要的，这是永不过时的真理。前端发展非常迅速，框架、工具日新月异，只有基础扎实，才能从容应对，任他风起云涌，我自稳坐钓鱼台。&lt;/p&gt;
+</description>
+<pubDate>Tue, 09 Jan 2018 16:53:00 +0000</pubDate>
+<dc:creator>大唐西域都护</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/leegent/p/8207246.html</dc:identifier>
+</item>
+<item>
+<title>Nginx 反向代理获取真实IP问题 - 简玄冰</title>
+<link>http://www.cnblogs.com/jianxuanbing/p/8254284.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jianxuanbing/p/8254284.html</guid>
+<description>&lt;p&gt;前文 &lt;a href=&quot;http://www.cnblogs.com/jianxuanbing/p/8252252.html&quot;&gt;Nginx 解决WebApi跨域二次请求以及Vue单页面问题&lt;/a&gt; 当中虽然解决了跨域问题带来的二次请求，但也产生了一个新的问题，就是如果需要获取用户IP的时候，获取的IP地址总是本机地址。&lt;/p&gt;
+
+&lt;p&gt;由于&lt;code&gt;Nginx&lt;/code&gt;反向代理后，在应用中取得的&lt;code&gt;IP&lt;/code&gt;都是反向代理服务器的&lt;code&gt;IP&lt;/code&gt;，取得的域名也是反向代理配置的Url的域名。&lt;/p&gt;
+
+&lt;p&gt;解决该问题，需要在&lt;code&gt;Nginx&lt;/code&gt;反向代理配置中添加一些配置信息，目的将客户端的真实IP和域名传递到应用程序中。同时，也要修改获取IP地址的方法。&lt;br/&gt;但是需要注意的是，通过&lt;code&gt;Nginx&lt;/code&gt;反向代理后，如果访问IP通过了几层代理，可能取得的IP地址是这种格式：&lt;code&gt;clientIP,proxy1,proxy2&lt;/code&gt;。&lt;br/&gt;如果需要将IP地址插入到数据库的话，需要做防止注入。因此要对上述的IP地址的格式进行截取。&lt;/p&gt;
+&lt;h2 id=&quot;nginx-配置如下&quot;&gt;3.1 Nginx 配置如下&lt;/h2&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;    server {
+        listen       9461; # 监听端口号
+        server_name  localhost 192.168.88.22; # 访问地址
+        location / {
+            root   项目路径; # 例如：E:/Publish/xxx/;
+            index  index.html;
+            
+            # 此处用于处理 Vue、Angular、React 使用H5 的 History时 重写的问题
+            if (!-e $request_filename) {
+                rewrite ^(.*) /index.html last;
+                break;
+            }
+        }
+        
+        # 代理服务端接口
+        location /api {
+            proxy_pass http://localhost:9460/api;# 代理接口地址
+            # Host配置以及域名传递
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header REMOTE-HOST $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;c代码获取真实ip方法&quot;&gt;3.2 C#代码获取真实IP方法&lt;/h2&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;#region Ip(客户端IP地址)
+
+/// &amp;lt;summary&amp;gt;
+/// 客户端IP地址
+/// &amp;lt;/summary&amp;gt;
+public static string Ip
+{
+    get
+    {
+        var result = string.Empty;
+        if (HttpContext.Current != null)
+        {
+            result = GetWebClientIp();
+        }
+        if (string.IsNullOrWhiteSpace(result))
+        {
+            result = GetLanIp();
+        }
+        return result;
+    }
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 获取Web客户端的IP
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static string GetWebClientIp()
+{
+    var ip = GetWebProxyRealIp() ?? GetWebRemoteIp();
+    foreach (var hostAddress in Dns.GetHostAddresses(ip))
+    {
+        if (hostAddress.AddressFamily == AddressFamily.InterNetwork)
+        {
+            return hostAddress.ToString();
+        }
+    }
+    return string.Empty;
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 获取Web远程IP
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static string GetWebRemoteIp()
+{
+    try
+    {
+        return HttpContext.Current.Request.ServerVariables[&quot;HTTP_X_FORWARDED_FOR&quot;] ??
+               HttpContext.Current.Request.ServerVariables[&quot;REMOTE_ADDR&quot;] ?? &quot;&quot;;
+    }
+    catch (Exception e)
+    {
+        return string.Empty;
+    }
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 获取Web代理真实IP
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static string GetWebProxyRealIp()
+{
+    var request = HttpContext.Current.Request;
+    string ip = request.Headers.Get(&quot;x-forwarded-for&quot;);
+
+    if (string.IsNullOrEmpty(ip) || string.Equals(&quot;unknown&quot;, ip, StringComparison.OrdinalIgnoreCase))
+    {
+        ip = request.Headers.Get(&quot;Proxy-Client-IP&quot;);
+    }
+
+    if (string.IsNullOrEmpty(ip) || string.Equals(&quot;unknown&quot;, ip, StringComparison.OrdinalIgnoreCase))
+    {
+        ip = request.Headers.Get(&quot;WL-Proxy-Client-IP&quot;);
+    }
+
+    if (string.IsNullOrEmpty(ip) || string.Equals(&quot;unknown&quot;, ip, StringComparison.OrdinalIgnoreCase))
+    {
+        ip = request.UserHostAddress;
+    }
+
+    if (string.IsNullOrEmpty(ip))
+    {
+        return string.Empty;
+    }
+    // 可能存在如下格式：X-Forwarded-For: client, proxy1, proxy2
+    if (ip.Contains(&quot;, &quot;))
+    {
+        // 如果存在多个反向代理，获得的IP是一个用逗号分隔的IP集合，取第一个
+        // X-Forwarded-For: client  第一个
+        string[] ips = ip.Split(new string[1] {&quot;, &quot;}, StringSplitOptions.RemoveEmptyEntries);
+        var i = 0;
+        for (i = 0; i &amp;lt; ips.Length; i++)
+        {
+            if (ips[i] != &quot;&quot;)
+            {
+                // 判断是否为内网IP
+                if (false == IsInnerIp(ips[i]))
+                {
+                    IPAddress realIp;
+                    if (IPAddress.TryParse(ips[i], out realIp) &amp;amp;&amp;amp; ips[i].Split('.').Length == 4)
+                    {
+                        //合法IP
+                        return ips[i];
+                    }
+
+                    return &quot;&quot;;
+                }
+            }
+        }
+
+        ip = ips[0];// 默认获取第一个IP地址
+    }
+
+    return ip;
+
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 判断IP地址是否为内网IP地址
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;param name=&quot;ip&quot;&amp;gt;IP地址&amp;lt;/param&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static bool IsInnerIp(string ip)
+{
+    bool isInnerIp = false;
+    ulong ipNum = Ip2Ulong(ip);
+
+    /**
+     * 私有IP
+     * A类：10.0.0.0-10.255.255.255
+     * B类：172.16.0.0-172.31.255.255
+     * C类：192.168.0.0-192.168.255.255
+     * 当然，还有127这个网段是环回地址
+     */
+
+    ulong aBegin = Ip2Ulong(&quot;10.0.0.0&quot;);
+    ulong aEnd = Ip2Ulong(&quot;10.255.255.255&quot;);
+    ulong bBegin = Ip2Ulong(&quot;172.16.0.0&quot;);
+    ulong bEnd = Ip2Ulong(&quot;10.31.255.255&quot;);
+    ulong cBegin = Ip2Ulong(&quot;192.168.0.0&quot;);
+    ulong cEnd = Ip2Ulong(&quot;192.168.255.255&quot;);
+
+    isInnerIp = IsInner(ipNum, aBegin, aEnd) || IsInner(ipNum, bBegin, bEnd) || IsInner(ipNum, cBegin, cEnd) ||
+                ip.Equals(&quot;127.0.0.1&quot;);
+    return isInnerIp;
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 将IP地址转换为Long型数字
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;param name=&quot;ip&quot;&amp;gt;IP地址&amp;lt;/param&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static ulong Ip2Ulong(string ip)
+{
+    byte[] bytes = IPAddress.Parse(ip).GetAddressBytes();
+    ulong ret = 0;
+    foreach (var b in bytes)
+    {
+        ret &amp;lt;&amp;lt;= 8;
+        ret |= b;
+    }
+
+    return ret;
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 判断用户IP地址转换为Long型后是否在内网IP地址所在范围
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;param name=&quot;userIp&quot;&amp;gt;用户IP&amp;lt;/param&amp;gt;
+/// &amp;lt;param name=&quot;begin&quot;&amp;gt;开始范围&amp;lt;/param&amp;gt;
+/// &amp;lt;param name=&quot;end&quot;&amp;gt;结束范围&amp;lt;/param&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static bool IsInner(ulong userIp, ulong begin, ulong end)
+{
+    return (userIp &amp;gt;= begin) &amp;amp;&amp;amp; (userIp &amp;lt;= end);
+}
+
+/// &amp;lt;summary&amp;gt;
+/// 获取局域网IP
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+private static string GetLanIp()
+{
+    foreach (var hostAddress in Dns.GetHostAddresses(Dns.GetHostName()))
+    {
+        if (hostAddress.AddressFamily == AddressFamily.InterNetwork)
+        {
+            return hostAddress.ToString();
+        }
+    }
+    return string.Empty;
+}
+#endregion&lt;/code&gt;
+&lt;/pre&gt;</description>
+<pubDate>Tue, 09 Jan 2018 16:18:00 +0000</pubDate>
+<dc:creator>简玄冰</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jianxuanbing/p/8254284.html</dc:identifier>
+</item>
+<item>
+<title>机器学习笔记3-Tensorflow简介 - 无上@诀</title>
+<link>http://www.cnblogs.com/wushangjue/p/8254232.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/wushangjue/p/8254232.html</guid>
+<description>&lt;p&gt;前面两篇主要写了一些机器学习的基础概念，从本篇开始我们来了解下深度学习。深度学习是机器学习的一个子集，是一种特殊的数学模型。同样是从输入到输出，深度学习在这两者之间会有很多层称为“隐层”（&lt;code&gt;Hidden Layers&lt;/code&gt;）的层，每一层将会将输入内容进行计算并自我调节，最终得到合理模型，这种数学模型非常像人类目前对大脑工作原理的认知，所以也称之为“人工神经网络”。&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/simple_neural_network.jpg&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/simple_neural_network.jpg&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;现在市面上有数十种深度学习框架：&lt;a href=&quot;https://en.wikipedia.org/wiki/Comparison_of_deep_learning_software&quot; target=&quot;_blank&quot;&gt;Wiki传送门&lt;/a&gt;。一个个学过来肯定精力不够，那我们就学综合评分最高的那个：&lt;code&gt;Tensorflow&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;Tensorflow&lt;/code&gt;是由Google团队在2015年11月9日以&lt;code&gt;Apache 2.0开源许可证&lt;/code&gt;开源的，但刚发布的版本有诸多缺陷：bug比较多、性能比较差、使用难度比较高。在2017年2月16日，Google宣布&lt;code&gt;Tensorflow 1.0&lt;/code&gt;正式发布，该版本适用于工业生产场景。所以在该版本发布之后，对深度学习领域产生了极大的影响，其大大简化了编写深度学习的代码难度，并且在Google这面大旗下，被各种专业人员以及机器学习爱好者所推崇（截止2018年1月9日，&lt;code&gt;Tensorflow&lt;/code&gt;在&lt;a href=&quot;https://github.com/tensorflow/tensorflow&quot; target=&quot;_blank&quot;&gt;Github&lt;/a&gt;上已经有7193个Watch，85038个Star和41555个Fork）。&lt;br/&gt;&lt;code&gt;Tensorflow&lt;/code&gt;在短短发布后的一年不到的时间里，已经跃居为综合排名第一的深度学习框架。为什么会如此火爆呢？我个人猜测理由如下：&lt;/p&gt;
+&lt;ul readability=&quot;2&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;深度学习目前是大趋势（所以得抓紧学习，抓住机遇）&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;Google的技术实力太强大，开源过很多项目都非常成功（比如&lt;code&gt;Android&lt;/code&gt;），所以跟着Google走可能不会让我们失望&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;接口丰富易用且支持多种语言（底层是C++实现的，这里指的是客户端调用底层API的语言），如Python、C++、Java、Go&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;易于部署，包括分布式部署&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;如果你的电脑性能还不错，可以考虑直接在本机安装&lt;code&gt;Tensorflow&lt;/code&gt;（&lt;a href=&quot;https://www.tensorflow.org/install/index&quot; target=&quot;_blank&quot;&gt;官方安装文档传送门&lt;/a&gt;），优先考虑使用&lt;code&gt;Anaconda&lt;/code&gt;来安装，按照官方教程一步步执行即可。&lt;/p&gt;
+&lt;p&gt;安装之后，需要在&lt;code&gt;Pycharm&lt;/code&gt;中执行&lt;code&gt;Tensorflow&lt;/code&gt;的代码，我们这里先用简单的输出常量的代码为例（此代码也是后文中&lt;code&gt;demo1.py&lt;/code&gt;中的代码）：&lt;/p&gt;
+&lt;pre class=&quot;python3&quot;&gt;
+&lt;code&gt;import tensorflow as tf
+
+node1 = tf.constant(3.0, dtype=tf.float32)
+node2 = tf.constant(4.0) # also tf.float32 implicitly
+print(node1, node2)
+
+sess = tf.Session()
+print(sess.run([node1, node2]))&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;常见错误汇总&quot;&gt;常见错误汇总&lt;/h2&gt;
+&lt;p&gt;执行代码的时候，你可能会遇到很多错误，我这里整理了一份我在此过程中遇到的错误以及对应的解决方案供大家参考：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;9.0529411764706&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;1.1475409836066&quot;&gt;&lt;td&gt;Anaconda installation is not found&lt;/td&gt;
+&lt;td&gt;&lt;a href=&quot;https://stackoverflow.com/questions/47624777/pycharm-anaconda-installation-is-not-found&quot; class=&quot;uri&quot;&gt;https://stackoverflow.com/questions/47624777/pycharm-anaconda-installation-is-not-found&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;6.3&quot;&gt;&lt;td&gt;ImportError: Could not find 'cudart64_80.dll'. TensorFlow requires that this DLL be installed in a directory that is named in your %PATH% environment variable.&lt;/td&gt;
+&lt;td&gt;由于目前Tensorflow是建立在CUDA 8.0之上的，而NVIDIA官网上默认是下载CUDA最新版本的（比如目前是9.0），所以需要打开如下页面： &lt;a href=&quot;https://developer.nvidia.com/cuda-downloads&quot; class=&quot;uri&quot;&gt;https://developer.nvidia.com/cuda-downloads&lt;/a&gt; 在页面的最下面找到Lagacy Releases并下载CUDA 8.0&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;9.4654088050314&quot;&gt;&lt;td&gt;ImportError: Could not find 'cudnn64_6.dll'. TensorFlow requires that this DLL be installed in a directory that is named in your %PATH% environment variable. Note that installing cuDNN is a separate step from installing CUDA, and this DLL is often found in a different directory from the CUDA DLLs. You may install the necessary DLL by downloading cuDNN 6 from this URL: &lt;a href=&quot;https://developer.nvidia.com/cudnn&quot; class=&quot;uri&quot;&gt;https://developer.nvidia.com/cudnn&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;注册一个NVEDIA的开发者账号，然后下载cudnn64 for cuda8 on windows。 下载下来的文件解压之后，放到cuda目录下对应的地方（cuda比如是在C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0）&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+&lt;p&gt;解决了所有问题之后，如果看到以下输出内容，就表示能正常运行&lt;code&gt;Tensorflow&lt;/code&gt;了：&lt;/p&gt;
+&lt;pre class=&quot;python3&quot;&gt;
+&lt;code&gt;Tensor(&quot;Const:0&quot;, shape=(), dtype=float32) Tensor(&quot;Const_1:0&quot;, shape=(), dtype=float32)
+2018-01-09 16:48:59.940050: I C:\tf_jenkins\home\workspace\rel-win\M\windows\PY\36\tensorflow\core\platform\cpu_feature_guard.cc:137] Your CPU supports instructions that this TensorFlow binary was not compiled to use: AVX AVX2
+[3.0, 4.0]
+
+Process finished with exit code 0&lt;/code&gt;
+&lt;/pre&gt;
+
+
+
+&lt;h2 id=&quot;概述&quot;&gt;概述&lt;/h2&gt;
+&lt;p&gt;因为机器学习的过程非常耗性能，如果在一个比较大的数据集上进行学习，本机CPU使用就会达到99%，而且要持续很久，这个时候就无法干点别的事了。很幸运，阿里云提供了机器学习平台&lt;code&gt;PAI&lt;/code&gt;（Platform for Artificial Intelligence），里面集成了很多主流的算法以及Tensorflow的不同版本（目前是1.0、1.1、1.2），而且目前公测阶段也可以开启2个GPU来加快执行。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;PAI&lt;/code&gt;的优势有：&lt;/p&gt;
+&lt;ul readability=&quot;4&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;不需要本地繁琐的安装和解决各种安装坑&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;可以调用云服务器资源，比起本地性能更好&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;不影响、阻塞本机其他程序的使用，开始执行之后等着执行完毕即可&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;算法、组件都是现成的，而且可以用拖拽的方式编排算法，非常方便、傻瓜化，我们唯一要做的就是提供数据和编写核心执行脚本&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;现成的机器学习案例以及相关文档，可以快速从别人的经验中来帮助自己理解机器学习&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;将实验直接共享到社区&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;公测阶段免费&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&quot;操作概览&quot;&gt;操作概览&lt;/h2&gt;
+&lt;p&gt;开通PAI的过程并不复杂，大致步骤如下：&lt;/p&gt;
+&lt;ul readability=&quot;3.0071301247772&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;首先你要有一个阿里云账号&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;在阿里云后台进入&lt;code&gt;大数据（数加）&lt;/code&gt;-&amp;gt;&lt;code&gt;机器学习&lt;/code&gt;菜单&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;创建一个项目，如： &lt;code&gt;my_project_name&lt;/code&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;在项目管理页面，勾选&lt;code&gt;my_project_name&lt;/code&gt;的&lt;code&gt;开启GPU&lt;/code&gt;选项&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1.5485714285714&quot;&gt;
+&lt;p&gt;为了方便上传本地资源到PAI，建议安装&lt;code&gt;OSS-Browser&lt;/code&gt;工具，下载地址： &lt;a href=&quot;https://help.aliyun.com/document_detail/61872.html?spm=5176.doc31886.2.5.qwodVb&quot; class=&quot;uri&quot;&gt;https://help.aliyun.com/document_detail/61872.html?spm=5176.doc31886.2.5.qwodVb&lt;/a&gt; （以阿里云后台最新下载地址为准），如果是少量文件上传的话，使用web版OSS文件管理系统来管理文件也可以（本例中我们直接使用web版）&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;em&gt;PS:&lt;code&gt;开启GPU&lt;/code&gt;选项示意图：&lt;/em&gt;&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/turn_on_gpu.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/turn_on_gpu.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;目前公测阶段虽然&lt;code&gt;PAI&lt;/code&gt;本身是免费的，但是OSS是收费的，好在费用很低，仅作学习用的话，一天最多几分钱。&lt;/em&gt;&lt;/p&gt;
+
+&lt;h2 id=&quot;详细实验步骤&quot;&gt;详细实验步骤&lt;/h2&gt;
+&lt;ol readability=&quot;3.5&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;在OSS中创建测试目录&lt;code&gt;tensorflowtest&lt;/code&gt;：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/oss1.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/oss1.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;进入&lt;code&gt;tensorflowtest&lt;/code&gt;目录并上传脚本文件&lt;code&gt;demo1.py&lt;/code&gt;（内容详见“本机安装Tensorflow”一节）：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/oss2.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/oss2.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;进入&lt;code&gt;PAI&lt;/code&gt;后台首页，创建空白实验&lt;code&gt;tensorflowdemo&lt;/code&gt;：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/create_tensorflow.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/create_tensorflow.png&quot;/&gt;&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/create_tensorflow_2.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/create_tensorflow_2.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;在空白实验中加入&lt;code&gt;读OSS Bucket&lt;/code&gt;组件和&lt;code&gt;TensorFlow(V1.2)&lt;/code&gt;组件，并选中Tensorflow节点，在右侧的参数设置中，将&lt;code&gt;Python代码&lt;/code&gt;参数选为我们在步骤1、2中上传的&lt;code&gt;demo1.py&lt;/code&gt;文件：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/execute.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/execute.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;点击屏幕最下方的&lt;code&gt;运行&lt;/code&gt;按钮执行实验：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/execute2.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/execute2.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;em&gt;本例中&lt;code&gt;读OSS Bucket&lt;/code&gt;组件并没有什么用，由于PAI实验中必须要数据源节点，因此添加空的&lt;code&gt;读OSS Bucket&lt;/code&gt;组件作为数据源，因此在执行实验的时候，阿里云将检测并提示当前实验室作业实验，将会在24小时内删除。&lt;/em&gt;&lt;/p&gt;
+
+&lt;h2 id=&quot;查看执行结果&quot;&gt;查看执行结果&lt;/h2&gt;
+&lt;ol readability=&quot;3.3121645796064&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;在实验运行后，每个节点右侧出现一个绿色的勾，表示已正确执行完毕，此时右键该节点，选择&lt;code&gt;查看日志&lt;/code&gt;选项：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/view_log_1.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/view_log_1.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;在“查看日志”弹出框中，滚动到中间的位置，找到 &lt;a href=&quot;http://logview.odps.aliyun.com&quot; class=&quot;uri&quot;&gt;http://logview.odps.aliyun.com&lt;/a&gt; 的链接，如图位置：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/logview_1.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/logview_1.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;鼠标左键点击进入之后，点击下图中红色框中的&lt;code&gt;detail&lt;/code&gt;图标：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_detail_1.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_detail_1.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;在弹出的Log Detail页面上，按下图中的1、2、3顺序依次点击：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_detail_2.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_detail_2.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;在弹出的&lt;code&gt;Logview[Stdout]&lt;/code&gt;页面上，可以最终看到脚本的实际输出内容，与在本地IDE中的输出一致：&lt;br/&gt;&lt;a href=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_view_3.png&quot;&gt;&lt;img src=&quot;https://www.fujiabin.com/wp-content/uploads/2018/01/log_view_3.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;我已经用两种不同的方式，执行了第一个基于&lt;code&gt;Tensorflow&lt;/code&gt;的demo，这个demo目前跟深度学习还完全搭不上边，只是能成功运行&lt;code&gt;Tensorflow&lt;/code&gt;而已，后续的博文中，我将进一步深入研究。&lt;/p&gt;
+
+&lt;hr/&gt;&lt;p&gt;本文在&lt;a href=&quot;http://www.cnblogs.com/wushangjue/&quot; target=&quot;_blank&quot;&gt;我的博客园&lt;/a&gt;和&lt;a href=&quot;https://www.fujiabin.com&quot; target=&quot;_blank&quot;&gt;我的个人博客&lt;/a&gt;上同步发布，作者保留版权，转载请注明来源。&lt;/p&gt;
+</description>
+<pubDate>Tue, 09 Jan 2018 16:03:00 +0000</pubDate>
+<dc:creator>无上@诀</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/wushangjue/p/8254232.html</dc:identifier>
+</item>
+<item>
 <title>使用ui-route实现多层嵌套路由 - 孟丽媛</title>
 <link>http://www.cnblogs.com/Anita-meng/p/8254163.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/Anita-meng/p/8254163.html</guid>
@@ -961,276 +1486,6 @@ mysql&amp;gt; &lt;span class=&quot;kw&quot;&gt;select&lt;/span&gt; * &lt;span cl
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/itdragon/p/8194622.html</dc:identifier>
-</item>
-<item>
-<title>不怎么靠谱的腾讯云，客服连价格都能乱来 - Maintell</title>
-<link>http://www.cnblogs.com/maintell/p/8253651.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/maintell/p/8253651.html</guid>
-<description>&lt;p&gt;公司的业务本来全放在阿里云，问题是不管是什么设施都有个可靠性的问题，在阿里云这么久也遇到了不少问题，&lt;/p&gt;
-&lt;p&gt;其中有一类问题是网络问题，比如运营商调整了路由可以让从江苏到上海的路由飙到200ms，提交工单也花了几个小时才解决。&lt;/p&gt;
-&lt;p&gt;但是客户需要24小时都稳定可靠的服务，涉及到生产的事情基本上都是强调HA，好吧，没办法，增加一个冗余节点吧；&lt;/p&gt;
-&lt;p&gt;考虑到品牌效应，除了阿里云，剩下的腾讯、百度、京东等等，小的算了，最后看看还是试试腾讯吧~&lt;/p&gt;
-&lt;p&gt;接着开动前往腾讯云开始查价格，好报预算~~&lt;/p&gt;
-&lt;ul class=&quot;item-descr-list my-selected-info&quot;&gt;&lt;li&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;计费模式&lt;span class=&quot;item-descr-txt&quot;&gt;包年包月&lt;/span&gt;&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;地域&lt;span class=&quot;item-descr-txt&quot;&gt;华东地区（上海）&lt;/span&gt;&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;可用区&lt;span class=&quot;item-descr-txt&quot;&gt;上海二区&lt;/span&gt;&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;机型&lt;span class=&quot;item-descr-txt&quot;&gt;系列2、标准型S2、2核CPU、4G内存&lt;/span&gt;&lt;/span&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class=&quot;cnblogs_code_collapse&quot;&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/157344/201801/157344-20180109201505051-674152768.png&quot; alt=&quot;&quot; width=&quot;598&quot; height=&quot;275&quot;/&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/157344/201801/157344-20180109201421785-1499614831.png&quot; alt=&quot;&quot; width=&quot;612&quot; height=&quot;290&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;&lt;span class=&quot;item-descr-txt&quot;&gt;1Mbps三年的价格是3852，5Mbps三年的价格是5562，看来网络从1Mbps升级到5Mbps价差在1710。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;item-descr-tit&quot;&gt;&lt;span class=&quot;item-descr-txt&quot;&gt;另外特别注意到腾讯云在搞活动：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code_collapse&quot;&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/157344/201801/157344-20180109201617191-1314787114.png&quot; alt=&quot;&quot;/&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/157344/201801/157344-20180109201659004-1999450634.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-&lt;p&gt;貌似活动价格很好啊，三年只要1548，注意到下面活动规则里面第七条：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-7、购买后您可自主升级网络带宽，进入 控制台 &amp;gt; 云主机设置 &amp;gt; 调整网络。
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;由于看不懂百度云的网络价格，然后就打客服电话 4009-100-100，工号1112的男客服做了计算后回复：&lt;/p&gt;
-&lt;p&gt;参与新购特惠的活动后购买的云服务器在3年的服务器内升级网络从1Mbps到5Mbps大约需要1700元人民币。&lt;/p&gt;
-&lt;p&gt;得到客服确定的结果后然后就报预算，立马下单购买，然后依照提示来调整网络，可惜得到的结果与客服说的不一样：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/157344/201801/157344-20180109202400051-1493755811.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-&lt;p&gt; 升级的价格变成了3473.65，和1700左右相差甚远，于是又电话到4009-100-100，询问客服，&lt;/p&gt;
-&lt;p&gt;得到的结果是：所有价格依照网站为准，客服说了不算。&lt;/p&gt;
-&lt;p&gt;要是我个人购买也就算了，忍忍用吧，我这给公司买的，预算都已经走了OA流程，现在就很尴尬了，老板怎么看？&lt;/p&gt;
-&lt;p&gt;那么现在真想问一句不怎么靠谱的腾讯云：&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;如果客服说了都不算，那4009-100-100是你家的客服吗？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;你们的工单系统会不会以后也不靠谱，说了也不算？&lt;/span&gt;&lt;/p&gt;
-
-
-</description>
-<pubDate>Tue, 09 Jan 2018 13:00:00 +0000</pubDate>
-<dc:creator>Maintell</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/maintell/p/8253651.html</dc:identifier>
-</item>
-<item>
-<title>H2Engine游戏服务器设计之属性管理器 - 知然</title>
-<link>http://www.cnblogs.com/zhiranok/p/h2engine_propmgr.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhiranok/p/h2engine_propmgr.html</guid>
-<description>&lt;p&gt;　　游戏中角色拥有的属性值很多，运营多年的游戏，往往会有很多个成长线，每个属性都有可能被N个成长线模块增减数值。举例当角色戴上武器时候hp+100点，卸下武器时HP-100点，这样加减逻辑只有一处还比较好控制，如果某天有个特殊功能当被某技能攻击时，角色武器会被击落，这样就会出现减数值的操作不止一处。如果逻辑处理不当，比如击落的时候没有恰当的减数值，再次穿戴武器就导致属性值加了两边，也就是玩家经常说的刷属性。这种bug对游戏平衡性影响很大，反响很恶劣，bug又很难被测试发现。本文将介绍一种管理属性的思路，最大限度的避免此类bug，如果出现bug，也能够很好的排查。&lt;/p&gt;
-&lt;h2 id=&quot;设计思路&quot;&gt;设计思路&lt;/h2&gt;
-&lt;p&gt;　　刷属性bug的核心原因是某功能的模块数值加了N次，所以各个模块加的属性要被记录，加过了必须不能重复加。设计这样的数据结构。&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;16&quot;&gt;
-&lt;pre class=&quot;sourceCode cpp&quot;&gt;
-&lt;code class=&quot;sourceCode cpp&quot;&gt;&lt;span class=&quot;co&quot;&gt;//!&lt;/span&gt;各个属性对应一个总值
-&lt;span class=&quot;co&quot;&gt;//!&lt;/span&gt;各个属性对应各个模块的分值
-&lt;span class=&quot;kw&quot;&gt;template&lt;/span&gt;&amp;lt;&lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; T&amp;gt;
-&lt;span class=&quot;kw&quot;&gt;class&lt;/span&gt; PropCommonMgr
-{
-&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt;:
-    &lt;span class=&quot;kw&quot;&gt;typedef&lt;/span&gt; T ObjType;
-    &lt;span class=&quot;kw&quot;&gt;typedef&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; (*functorGet)(ObjType);
-    &lt;span class=&quot;kw&quot;&gt;typedef&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; (*functorSet)(ObjType, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;);
-    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; PropGetterSetter
-    {
-        PropGetterSetter():fGet(NULL), fSet(NULL){}        
-        functorGet fGet;
-        functorSet fSet;
-        std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt; moduleRecord;
-    };
-    &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; regGetterSetter(&lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName, functorGet fGet, functorSet fSet){
-        PropGetterSetter info;
-        info.fGet = fGet;
-        info.fSet = fSet;
-        propName2GetterSetter[strName] = info;
-    }
-  &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt;:
-      std::map&amp;lt;std::string, PropGetterSetter&amp;gt;    propName2GetterSetter;
-  };&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;ol&gt;&lt;li&gt;关于数据结构的get和set，我们为每个属性命名一个名字，这样处理数据的时候会非常方便（比如道具配增加属性等等），角色属性有很多种，这里不能一一定义，所以属性管理器只是映射属性，并不创建属性值。通过regGetterSetter接口，注册get和set的操作映射。为什么不需要提供add和sub接口能，因为add和sub可以通过get和set组合实现。get和set的接口实现如下：&lt;/li&gt;
-&lt;/ol&gt;&lt;div class=&quot;sourceCode&quot; readability=&quot;16&quot;&gt;
-&lt;pre class=&quot;sourceCode cpp&quot;&gt;
-&lt;code class=&quot;sourceCode cpp&quot;&gt;&lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; get(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName) {
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fGet){
-            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; it-&amp;gt;second.fGet(obj);
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
-    }
-    &lt;span class=&quot;dt&quot;&gt;bool&lt;/span&gt; set(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; v) {
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fSet){
-            it-&amp;gt;second.fSet(obj, v);
-            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;;
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;false&lt;/span&gt;;
-    }&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;ol&gt;&lt;li&gt;关于add和sub，前面提到要避免刷属性，就必须避免重复加属性。所以每个模块再加属性前必须检查一下是否该模块已经加了属性，如果加过一定要先减后加。因为每次模块加属性都记录在属性管理器中，那么减掉的数值一定是正确的。这样可以避免另外一种常见bug，如加了100，减的时候计算错误减了80，也会积少成多造成刷属性。add和sub的代码如下：&lt;/li&gt;
-&lt;/ol&gt;&lt;div class=&quot;sourceCode&quot; readability=&quot;29&quot;&gt;
-&lt;pre class=&quot;sourceCode cpp&quot;&gt;
-&lt;code class=&quot;sourceCode cpp&quot;&gt;&lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; addByModule(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; moduleName, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; v) {
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fGet &amp;amp;&amp;amp; it-&amp;gt;second.fSet){
-            &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; ret =it-&amp;gt;second.fGet(obj);
-            std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt;::iterator itMod = it-&amp;gt;second.moduleRecord.find(moduleName);
-            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (itMod != it-&amp;gt;second.moduleRecord.end()){
-                ret -= itMod-&amp;gt;second;
-                itMod-&amp;gt;second = v;
-            }
-            &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt;{
-                it-&amp;gt;second.moduleRecord[moduleName] = v;
-            }
-            ret += v;
-            it-&amp;gt;second.fSet(obj, ret);
-            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; ret;
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
-    }
-    &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; subByModule(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; moduleName) {
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fGet &amp;amp;&amp;amp; it-&amp;gt;second.fSet){
-            &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; ret =it-&amp;gt;second.fGet(obj);
-            std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt;::iterator itMod = it-&amp;gt;second.moduleRecord.find(moduleName);
-            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (itMod == it-&amp;gt;second.moduleRecord.end()){
-                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; ret;
-            }
-            ret -= itMod-&amp;gt;second;
-            it-&amp;gt;second.moduleRecord.erase(itMod);
-            it-&amp;gt;second.fSet(obj, ret);
-            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; ret;
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
-    }
-    &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; getByModule(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; moduleName) {
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fGet &amp;amp;&amp;amp; it-&amp;gt;second.fSet){
-            &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt; ret =it-&amp;gt;second.fGet(obj);
-            std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt;::iterator itMod = it-&amp;gt;second.moduleRecord.find(moduleName);
-            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (itMod != it-&amp;gt;second.moduleRecord.end()){
-                &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; itMod-&amp;gt;second;
-            }
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
-    }
-    std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt; getAllModule(ObjType obj, &lt;span class=&quot;dt&quot;&gt;const&lt;/span&gt; std::string&amp;amp; strName) {
-        std::map&amp;lt;std::string, &lt;span class=&quot;dt&quot;&gt;int64_t&lt;/span&gt;&amp;gt; ret;
-        &lt;span class=&quot;kw&quot;&gt;typename&lt;/span&gt; std::map&amp;lt;std::string, PropGetterSetter&amp;gt;::iterator it = propName2GetterSetter.find(strName);
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (it != propName2GetterSetter.end() &amp;amp;&amp;amp; it-&amp;gt;second.fGet &amp;amp;&amp;amp; it-&amp;gt;second.fSet){
-            ret = it-&amp;gt;second.moduleRecord;
-        }
-        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; ret;
-    }&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　如上代码所示，addByModule和subByModule必须提供模块名，比如穿装备的时候加血量:addByModule('HP', 'Weapon', 100)，而卸下武器的时候只要subByModule('HP', 'Weapon'),因为属性管理器知道减多少。&lt;/p&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;ol&gt;&lt;li&gt;属性提供一个名字映射有很多好处，比如装备配属性，buff配属性的，有名字相关联会特别方便&lt;/li&gt;
-&lt;li&gt;提供一个get和set接口的映射，这样属性管理器就和具体的对象的属性字段解耦了。即使是现有的功能模块也可以集成这个属性管理器。&lt;/li&gt;
-&lt;li&gt;属性的add和sub操作，都在属性管理器中留下记录，这样即使出现问题，通过getByModule getAllModule两个接口亦可以辅助查找问题。&lt;/li&gt;
-&lt;li&gt;属性管理已经集成到H2Engine中，github地址: &lt;a href=&quot;https://github.com/fanchy/h2engine&quot; class=&quot;uri&quot;&gt;https://github.com/fanchy/h2engine&lt;/a&gt;&lt;/li&gt;
-&lt;/ol&gt;</description>
-<pubDate>Tue, 09 Jan 2018 11:52:00 +0000</pubDate>
-<dc:creator>知然</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhiranok/p/h2engine_propmgr.html</dc:identifier>
-</item>
-<item>
-<title>见招拆招-PostgreSQL中文全文索引效率优化 - 枕边书</title>
-<link>http://www.cnblogs.com/zhenbianshu/p/8253131.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhenbianshu/p/8253131.html</guid>
-<description>&lt;p&gt;上文 &lt;a href=&quot;http://www.cnblogs.com/zhenbianshu/p/7795247.html&quot;&gt;使用PostgreSQL进行中文全文检索&lt;/a&gt; 中我使用 PostgreSQL 搭建完成了一套中文全文检索系统，对数据库配置和分词都进行了优化，基本的查询完全可以支持，但是在使用过程中还是发现了一些很恼人的问题，包括查询效果和查询效率，万幸都一一解决掉了。&lt;/p&gt;
-&lt;p&gt;其中过程自认为还是很有借鉴意义的，今天来总结分享一下。&lt;/p&gt;
-&lt;p&gt;博客欢迎转载，请带上来源：http://www.cnblogs.com/zhenbianshu/p/8253131.html &lt;/p&gt;
-&lt;hr/&gt;
-&lt;h3 id=&quot;toc_2&quot;&gt;分词问题&lt;/h3&gt;
-&lt;p&gt;一开始是分词效果的问题：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;中文博大精深，&lt;code&gt;乒乓球拍卖啦、南京市长江大桥&lt;/code&gt; 这种歧义句的分词，还没有一个分词插件能够达到 100% 的准确率，当然包括我们正在使用的 &lt;code&gt;scws&lt;/code&gt; 分词库；&lt;/li&gt;
-&lt;li&gt;我们的搜索内容是 Poi 地点名，而很多地点名都缺失语义性，产生歧义词的概率更大；&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;scws 支持更为灵活的分词等级，为了能分出较多的词来尽量包含目标结果，我们将 scws 的分词等级调为了 &lt;code&gt;7&lt;/code&gt;（不了解的可以看上文），但同时也引入了更奇葩的问题： 搜索&lt;code&gt;天安门&lt;/code&gt; 查不到 &lt;code&gt;天安门广场&lt;/code&gt;。。。&lt;/p&gt;
-&lt;p&gt;原因也很另人无语：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;天安门广场&lt;/code&gt; 的分词结果向量 tsv 是 &lt;code&gt;'天安':2 '天安门广场':1 '广场':4 '门广':3&lt;/code&gt;;&lt;/li&gt;
-&lt;li&gt;查询向量 &lt;code&gt;to_tsquery('parser', '天安门')&lt;/code&gt; tsq 的结果是 &lt;code&gt;'天安门' &amp;amp; '天安' &amp;amp; '安门'&lt;/code&gt;;&lt;/li&gt;
-&lt;li&gt;查询语句是 &lt;code&gt;SELECT * FROM table WHERE tsv @@ tsq&lt;/code&gt;， 由于 tsv 里没有 tsq 里的 &lt;code&gt;安门&lt;/code&gt;向量，匹配失败。&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;toc_3&quot;&gt;B树索引&lt;/h3&gt;
-&lt;p&gt;一个常识：大家想搜一个地点时大多会先输入其名称前面的部分，基于此考虑，我向表内引入 B树索引支持前缀查询，配合原来分词的 GIN 索引，解决了此问题。&lt;/p&gt;
-&lt;p&gt;如Mysql一样，PostgreSQL 也支持通过 &lt;code&gt;like '关键词%'&lt;/code&gt; 语句来使用 B树索引。在 name 列上添加了 B树索引，再修改查询语句变为 &lt;code&gt;SELECT * FROM table WHERE tsv @@ tsq OR name LIKE 'keyword%'&lt;/code&gt;，这样结果就完全 OK 啦。&lt;/p&gt;
-&lt;hr/&gt;
-&lt;h3 id=&quot;toc_5&quot;&gt;GIN索引效率问题&lt;/h3&gt;
-&lt;p&gt;紧接着又发现了新的问题：&lt;/p&gt;
-&lt;p&gt;PostgreSQL 的 GIN 索引（Generalized Inverted Index 通用倒排索引）存储的是 &lt;code&gt;(key, posting list)对&lt;/code&gt;， 这里的 posting list 是一组出现键的行ID。如 数据：&lt;/p&gt;
-&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;行ID&lt;/th&gt;
-&lt;th&gt;分词向量&lt;/th&gt;
-&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;1&lt;/td&gt;
-&lt;td&gt;测试 分词&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;2&lt;/td&gt;
-&lt;td&gt;分词 结果&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;则索引的内容就是 &lt;code&gt;测试=&amp;gt;1 分词=&amp;gt;1,2 结果=&amp;gt;2&lt;/code&gt;，在我们要查询分词向量内包含 &lt;code&gt;分词&lt;/code&gt; 的数据时就可以快速查找到第1，2列。&lt;/p&gt;
-&lt;p&gt;但这种设计也带来了另一个问题，当某一个 key 对应的 posting list 过大时，数据操作会很慢，如我们的数据中地点名带有 &lt;code&gt;饭店&lt;/code&gt; 的数据就很多，有几十万，而我们的需求有一项就是要对查询结果按照 &lt;code&gt;评分&lt;/code&gt; 一列倒序排序，这么几十万数据，数据库响应超时会达到 3000 ms。&lt;/p&gt;
-&lt;p&gt;我们期望的响应时间是 90% 50ms 以内，虽然统计结果显示，确实 90% 的请求已经符合要求，但另外的 10% 完全不能用也是不可能接受的。&lt;/p&gt;
-&lt;p&gt;接下来的优化就是针对这些 bad case。&lt;/p&gt;
-&lt;h3 id=&quot;toc_6&quot;&gt;缓存&lt;/h3&gt;
-&lt;p&gt;对于这种响应超时的问题，大家肯定会想到万能的缓存：把响应超时的查询结果放到缓存，查询时先检查缓存。&lt;/p&gt;
-&lt;p&gt;可是超时的毕竟只有很少一部分，&lt;code&gt;缓存的命中率堪忧&lt;/code&gt;。虽然这一小部分查询可用了，但是所有查询语句都会多出一次取缓存的操作。&lt;/p&gt;
-&lt;p&gt;为了能提高缓存命中率，我还特意统计了关键字各长度的搜索数量占比和超时率占比，发现以下情况：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;1字节（1个字母）、3字节（单字）关键词的超时率最高，可是也不超过 30%；&lt;/li&gt;
-&lt;li&gt;1字节、3字节关键词的搜索量占比有30%左右；&lt;/li&gt;
-&lt;li&gt;其他长度关键词的超时率10%左右，非常尴尬。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;这种情况打消了我只针对某些长度的关键词设置缓存的想法。&lt;/p&gt;
-&lt;p&gt;不仅是命中率问题，缓存过期时间和缓存更新等更是大坑，基于以上考虑，缓存方案彻底被放弃。&lt;/p&gt;
-&lt;h3 id=&quot;toc_7&quot;&gt;分表&lt;/h3&gt;
-&lt;p&gt;一个方法不行，那就换一个方向，既然某些关键词的结果集太大，那么我们就将它变小一些，我们一开始采用的策略是分表。&lt;/p&gt;
-&lt;p&gt;由于 Poi 地点都有区域属性，我们以区域 ID 将这些数据分成了多个数据表，原来最大的关键词结果集有几十万，拆分到多个表后，每个表中最大的关键词结果集也就几万，此时的排序性能提高了，基本在 &lt;code&gt;100~200ms&lt;/code&gt; 之间。&lt;/p&gt;
-&lt;p&gt;查询时我们先通过位置将用户定位到区域，根据区域 ID 确定要查询的表，再从对应表内查询结果。&lt;/p&gt;
-&lt;p&gt;这个方案的缺点也非常多：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;对定位很依赖，且定位计算区域也会有耗时；&lt;/li&gt;
-&lt;li&gt;区域边缘点的搜索很蛋疼，明明离得很近，如果被划分到跟用户不同区域了就搜索不到。&lt;/li&gt;
-&lt;li&gt;多个表非常不好维护。&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;toc_8&quot;&gt;子查询&lt;/h3&gt;
-&lt;p&gt;终于灵活考虑了业务需求，引入子查询提出了一种颇为完美的方案：&lt;/p&gt;
-&lt;p&gt;用户在搜索框键入了 &lt;code&gt;饭店、宾馆&lt;/code&gt; 等无意义关键词，不同于搜索 &lt;code&gt;海底捞&lt;/code&gt;，此时用户也不知道他自己需要什么，对搜索结果是没有明确期待的。&lt;/p&gt;
-&lt;p&gt;这时候，我们也并不需要很愣地把全国名字中带有饭店、宾馆的地点都拿出来排序，这样的排序结果用户也不一定满意。 我们可以只取一部分 Poi 地点给用户，如果结果用户不满意，会再完善关键词，而关键词稍有完善，结果集就会极大地减小。&lt;/p&gt;
-&lt;p&gt;子查询用来实现结果集过滤非常有效，如我们可以在极大页码查询分页时使用子查询先过滤掉一大批无用数据。&lt;/p&gt;
-&lt;p&gt;本例中，我们在子查询语句中使用 limit 语句限制取的结果集条数，从而大大减小排序压力，查询语句类似 &lt;code&gt;SELECT id FROM (SELECT * FROM table WHERE tsv @@ tsq OR name LIKE 'keyword%' LIMIT 10000) AS tmp ORDER BY score DESC&lt;/code&gt;。&lt;/p&gt;
-&lt;p&gt;这样优化过后，查询语句的最差性能也可以稳定在 170ms 以下了。&lt;/p&gt;
-&lt;hr/&gt;
-&lt;h3 id=&quot;toc_10&quot;&gt;多索引效率问题&lt;/h3&gt;
-&lt;p&gt;本以为优化到此为止了呢，可是有次在试着查询 &lt;code&gt;中关村&lt;/code&gt; 和 &lt;code&gt;东&lt;/code&gt; 两个关键词时，我明确感觉到了响应时间的差异， 100ms 左右的时间差还是很明显的。&lt;/p&gt;
-&lt;p&gt;子查询语句才是这条 SQL 语句的效率关键，于是我开始分析 &lt;code&gt;东&lt;/code&gt; 这个关键词的 &lt;code&gt;子查询SQL&lt;/code&gt; 语句，首先我试着调整语句中 limit 的限制值，发现即使只取 1000条，响应时间也在 100ms 以上。&lt;/p&gt;
-&lt;p&gt;接着我又尝试改变 SQL 语句的 WHERE 条件，去除 &lt;code&gt;OR name LIKE 'keyword%'&lt;/code&gt; 后， 总条数并没有太大的变动，结果集由 13w 减小到了 11w， 但 添加 limit 后的效率却急剧提升：&lt;/p&gt;
-&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;SQL&lt;/th&gt;
-&lt;th&gt;结果条数&lt;/th&gt;
-&lt;th&gt;响应时间&lt;/th&gt;
-&lt;th&gt;添加 limit 后&lt;/th&gt;
-&lt;th&gt;SQL&lt;/th&gt;
-&lt;th&gt;响应时间&lt;/th&gt;
-&lt;/tr&gt;&lt;/thead&gt;&lt;tbody readability=&quot;3&quot;&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;&lt;code&gt;WHERE tsv @@ tsq OR name LIKE 'keyword%'&lt;/code&gt;&lt;/td&gt;
-&lt;td&gt;13W&lt;/td&gt;
-&lt;td&gt;2400ms&lt;/td&gt;
-&lt;td&gt; &lt;/td&gt;
-&lt;td&gt;&lt;code&gt;WHERE tsv @@ tsq OR name LIKE 'keyword%' LIMIT 10000&lt;/code&gt;&lt;/td&gt;
-&lt;td&gt;170ms&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;code&gt;WHERE tsv @@ tsq&lt;/code&gt;&lt;/td&gt;
-&lt;td&gt;11W&lt;/td&gt;
-&lt;td&gt;1900ms&lt;/td&gt;
-&lt;td&gt; &lt;/td&gt;
-&lt;td&gt;&lt;code&gt;WHERE tsv @@ tsq limit 10000&lt;/code&gt;&lt;/td&gt;
-&lt;td&gt;25ms&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这样对比起来就很明显了， 分词查询的 GIN 索引和前缀词查询的 B树索引之间配合并不完美。&lt;/p&gt;
-&lt;p&gt;想想也是，如果在一个索引上取 1w 条数据，直接取就行了，而如果在两个索引上取 1w 数据，那么还得考虑每个索引上各取多少，取完后还要排重。&lt;/p&gt;
-&lt;h3 id=&quot;toc_11&quot;&gt;替换B树索引&lt;/h3&gt;
-&lt;p&gt;问题分析完，那么就得根据问题寻找解决方案了，怎么能把两个索引并到同一索引上呢？把分词 GIN 索引并到 B树索引显然是不可能的，只能试着使用分词来替代 B树索引。&lt;/p&gt;
-&lt;p&gt;当时有三种方案：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;修改开源分词库 scws，添加一个分前缀词的功能。不过我担心改出 Bug，而且还要改 PostgreSQL 的分词插件 zhparser 以适应 scws 的参数变动。&lt;/li&gt;
-&lt;li&gt;使用 PostgreSQL 的数组类型（&lt;code&gt;text[]&lt;/code&gt;）存储分词结果，后续往此字段内灵活添加前缀词。但填充数组字段需要调用 &lt;code&gt;SELECT to_tsvector('parser', 'nane')&lt;/code&gt; 查询后使用脚本处理结果后再写入数组，比较麻烦。&lt;/li&gt;
-&lt;li&gt;修改 tsvector 分词向量字段，手动向此字段添加前缀词的分词向量。但分词向量不同于文本，不能直接拼接。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最好的方案当然是最后一种，改动最小，于是我就查询了一下 PostgreSQL 向量拼接，还是找到了向量拼接的方法，使用 &lt;code&gt;::tsvector&lt;/code&gt; 将字符串强转成向量，再使用 &lt;code&gt;||&lt;/code&gt; 拼接到原来的分词向量上，SQL 语句类似 &lt;code&gt;SELECT to_tsvector('parser', 'keyword') || 'prefix'::tsvector&lt;/code&gt;。&lt;/p&gt;
-&lt;p&gt;在查询时，就可以直接使用 &lt;code&gt;WHERE tsv @@ to_tsquery('parser', 'keyword')&lt;/code&gt; 查询前缀了。这样，子查询语句的响应时间就可以大大降低了，在 50ms 左右，而且还可以通过减小 LIMIT 值来加快响应。&lt;/p&gt;
-&lt;p&gt;此后，B树索引就可以退休啦~&lt;/p&gt;
-&lt;hr/&gt;
-&lt;p&gt;以上就是我对 PostgreSQL 关键词查询从效果到效率优化的全过程了，效果和效率已经完全达标了。当然，还可以对用户体验进行再优化，比如添加错别字识别、拼音首字母智能识别等，打磨好一款产品当然是非常不容易的，还需要继续努力。&lt;/p&gt;
-&lt;p&gt;顺便吐槽几句周边同事对 PostgreSQL 的态度，理由竟然是认为它是一个开源产品，可能会有各种埋得深的坑，所以不信任。&lt;/p&gt;
-&lt;p&gt;比较想不到比较前沿的互联网公司也会有人对开源抱如此看法，不可否认很多开源产品或工具都有各种各样的坑，但为此因噎废食大可不必，我们一直在用的 Linux/Git 还是开源产品呢，可有多少人离不开它们？而且闭源产品就不会出现问题么？也不可否认 PostgreSQL 小众，但它也有自己的特色，而且近年来它的占有率一率攀升，未来什么样，还未可知。&lt;/p&gt;
-&lt;p&gt;关于本文有什么问题可以在下面留言交流，如果您觉得本文对您有帮助，可以点击下面的 &lt;strong&gt;&lt;code&gt;推荐&lt;/code&gt;&lt;/strong&gt; 支持一下我，博客一直在更新，欢迎 &lt;strong&gt;&lt;code&gt;关注&lt;/code&gt;&lt;/strong&gt; 。&lt;/p&gt;
-</description>
-<pubDate>Tue, 09 Jan 2018 11:34:00 +0000</pubDate>
-<dc:creator>枕边书</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhenbianshu/p/8253131.html</dc:identifier>
 </item>
 </channel>
 </rss>
