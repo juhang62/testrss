@@ -315,6 +315,426 @@
 <dc:identifier>https://web.stanford.edu/class/cs140e/</dc:identifier>
 </item>
 <item>
+<title>DNSFS – Store files in others&amp;#039; DNS resolver caches</title>
+<link>https://blog.benjojo.co.uk/post/dns-filesystem-true-cloud-storage-dnsfs</link>
+<guid isPermaLink="true" >https://blog.benjojo.co.uk/post/dns-filesystem-true-cloud-storage-dnsfs</guid>
+<description>&lt;p&gt;A while ago I did a blog post about how long DNS resolvers hold results in cache for, using RIPE Atlas probes testing against their default resolvers (in a lot of cases, the DNS cache on their modem/router).&lt;/p&gt;&lt;p&gt;That showed that some resolvers will hold DNS cache entries for a whole week if asked to (&lt;a href=&quot;https://blog.benjojo.co.uk/post/dns-resolvers-ttl-lasts-over-one-week&quot;&gt;https://blog.benjojo.co.uk/post/dns-resolvers-ttl-lasts-over-one-week&lt;/a&gt;), and I joked at the end that one could use this for file storage.&lt;/p&gt;
+&lt;p&gt;Well, I could not stop thinking about doing this. There are surely a lot of open DNS resolvers out on the internet, that are just &lt;em&gt;asking&lt;/em&gt; to be used for storing random things in them. Think of it. Possibly tens of gigabytes of cache space that could be used!&lt;/p&gt;
+&lt;p&gt;This is not the first time something like this has been done, Erik Ekman made &lt;a href=&quot;https://github.com/yarrick/pingfs&quot;&gt;PingFS&lt;/a&gt;, a file system that stores data &lt;em&gt;in the internet itself&lt;/em&gt; .&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/guSGLl9mtb&quot; alt=&quot;gif of how pingfs works&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;This works because inside every ping packet is a section of data that must be sent back to the system that sent the ping, called the data payload:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/UMyylK9Z7m&quot; alt=&quot;Wireshark view of a ping packet&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;Because you can put up to 1400-ish bytes in this payload, and pings take time to come back, you can use the speed of light in fiber as actual storage.&lt;/p&gt;
+&lt;p&gt;Now obviously this is not a great idea for long term data storage, since you have to keep transmitting and receiving the same packets over and over again, plus the internet gives no promise that the packet won’t be dropped at any time, and if that happens then the data is lost.&lt;/p&gt;
+&lt;p&gt;However. DNS has caches. It has caches &lt;em&gt;everywhere&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;This means that the DNSFS looks a lot of the same as PingFS, but once a query is sent it should be cached in the resolver, meaning you don’t have to keep sending packets to keep the data alive!&lt;/p&gt;
+
+&lt;p&gt;For this to work we need a lot of open DNS resolvers. Technically DNS resolvers (except the official ones that a ISP gives out) should be firewalled off from the public internet &lt;a href=&quot;https://blog.cloudflare.com/how-the-consumer-product-safety-commission-is-inadvertently-behind-the-internets-largest-ddos-attacks/&quot;&gt;because they are a DDoS reflection risk&lt;/a&gt; , but a lot of devices out there ship with bad default configuration that allows their built in DNS resolvers to be reachable from outside the LAN.&lt;/p&gt;
+&lt;p&gt;The more open DNS resolvers there are, the more redundancy (or storage space) we have.&lt;/p&gt;
+&lt;p&gt;For this, we need to scan the whole internet for resolvers. This is a slightly daunting task, however when you take into account the ranges on the internet that are not routable &lt;a href=&quot;https://github.com/robertdavidgraham/masscan/blob/f04707a891962f8185c4f6b6dab9238bbb9ffb59/data/exclude.conf&quot;&gt;and ranges of those who do not want to be scanned&lt;/a&gt; , it amounts to about 3,969,658,877 IP addresses.&lt;/p&gt;
+&lt;p&gt;In addition to that we are looking for open resolvers, this means that the DNS server on the other end must be able to look up public domain names, most DNS servers are setup to be authoritative for a single domain name, and can’t be used by us for file storage.&lt;/p&gt;
+
+&lt;p&gt;For this, I am using &lt;a href=&quot;https://github.com/robertdavidgraham/masscan/&quot;&gt;Robert Graham’s masscan&lt;/a&gt; to send DNS queries to all applicable IP addresses on the internet.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/NLURvRtYIY&quot; alt=&quot;The massscan config I used&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;However this command has a problem, I am looking for open resolvers, not just things that will reply to port 53 on UDP.&lt;/p&gt;
+&lt;p&gt;My solution is to use a great feature of the linux kernel called BPF filters (&lt;a href=&quot;https://blog.cloudflare.com/bpf-the-forgotten-bytecode/&quot;&gt;you can read a great article about BPF filters and their use to filter traffic on the Cloudflare blog&lt;/a&gt;). You can use them with iptables to drop any traffic you don’t want, but programmatically! One BPF rule can do a whole chain worth of work.&lt;/p&gt;
+&lt;p&gt;I managed to write a tcpdump filter that only matched the DNS responses that I wanted (ones with a single results inside them).&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;tcpdump -ni eth0 port 53 and udp and ip[35] != 0x01 and net 185.230.223.69/32&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;I then compiled it to a raw BPF rule &lt;a href=&quot;https://gist.github.com/benjojo/007b01c74ec300edd0eeb7b060c5025f&quot;&gt;using a small helper program&lt;/a&gt;:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;root@xxxx:~/masscan# ./bpf-gen  RAW 'port 53 and udp and ip[35] != 0x01 and net 185.230.223.69/32'
+25,48 0 0 0,84 0 0 240,21 21 0 96,48 0 0 0,84 0 0 240,21 0 18 64,48 0 0 9,21 16 0 132,21 15 0 6,21 0 14 17,40 0 0 6,69 12 0 8191,177 0 0 0,72 0 0 0,21 2 0 53,72 0 0 2,21 0 7 53,48 0 0 35,21 5 0 1,32 0 0 12,21 2 0 3118915397,32 0 0 16,21 0 1 3118915397,6 0 0 65535,6 0 0 0
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;and then inserted it into IPTables:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;root@xxxx:~/masscan# iptables -I INPUT -m bpf --bytecode &quot;25,48 0 0 0,84 0 0 240,21 21 0 96,48 0 0 0,84 0 0 240,21 0 18 64,48 0 0 9,21 16 0 132,21 15 0 6,21 0 14 17,40 0 0 6,69 12 0 8191,177 0 0 0,72 0 0 0,21 2 0 53,72 0 0 2,21 0 7 53,48 0 0 35,21 5 0 1,32 0 0 12,21 2 0 3118915397,32 0 0 16,21 0 1 3118915397,6 0 0 65535,6 0 0 0&quot; -j DROP
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Now masscan will only see and then log results I am interested in. No need to do a 2nd pass to qualify servers.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/cJTS8Zl4Ua&quot; alt=&quot;gif of masscan running&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;After waiting about 24 hours for the scan to complete I got only two abuse notices! One was automated and very formal, the other not so much:&lt;/p&gt;
+&lt;blockquote class=&quot;twitter-tweet&quot; data-lang=&quot;en&quot; readability=&quot;4.4457831325301&quot;&gt;
+&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot; xml:lang=&quot;en&quot; xml:lang=&quot;en&quot;&gt;I think this guy misunderstands that a NOC abuse contact isn't for sending that kind of abuse to &lt;a href=&quot;https://t.co/t0ZIbgKyai&quot;&gt;pic.twitter.com/t0ZIbgKyai&lt;/a&gt;&lt;/p&gt;
+— Ben Cox (@Benjojo12) &lt;a href=&quot;https://twitter.com/Benjojo12/status/931626850031472646?ref_src=twsrc%5Etfw&quot;&gt;November 17, 2017&lt;/a&gt;&lt;/blockquote&gt;
+&lt;p&gt;At the end I was left with &lt;strong&gt;3,878,086&lt;/strong&gt; open DNS resolvers, from all ranges and places in the world. Visualised nicely from Cloudflare’s DNS traffic analytics:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/WHJwPkD7Uo&quot; alt=&quot;cloudflare dns analytics&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;Basically, where there are Cloudflare data centers, there are open DNS resolvers.&lt;/p&gt;
+&lt;p&gt;The country breakdown for open resolvers is as follows:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;ben@metropolis:~/Documents/dnsfs/bulk-mmlookup$ pv ../uniqiplist.txt | bulk-mmlookup | awk '{$1 = &quot;&quot;; for (i=2; i&amp;lt;NF; i++) printf $i &quot; &quot;; print $NF}' | sort | uniq -c | sort -n | tac
+52.9MiB 0:01:03 [ 850KiB/s] [=======================================&amp;gt;] 100%            
+1498094 China
+ 285749 United States
+ 233549 Republic of Korea
+ 168979 Russia
+ 167145 Brazil
+ 153170 Taiwan
+ 142655 India
+  83581 Italy
+  76894 Turkey
+  69300 Poland
+  62542 Philippines
+  53266 Indonesia
+  46055 Japan
+  43331 Romania
+  40434 Bulgaria
+  39548 Australia
+  36099 Iran
+  32996 Canada
+  29971 South Africa
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;And ISP:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;ben@metropolis:~/Documents/dnsfs/bulk-mmlookup$ pv ../uniqiplist.txt | bulk-mmlookup -type isp | awk '{$1 = &quot;&quot;; for (i=2; i&amp;lt;NF; i++) printf $i &quot; &quot;; print $NF}' | sort | uniq -c | sort -n  | tac
+52.9MiB 0:00:15 [3.37MiB/s] [=======================================&amp;gt;] 100%            
+ 830615 4134 No.31,Jin-rong Street
+ 355713 4837 CHINA UNICOM China169 Backbone
+ 146755 4766 Korea Telecom
+ 140772 3462 Data Communication Business Group
+  86075 4812 China Telecom (Group)
+  67874 9829 National Internet Backbone
+  62325 209 Qwest Communications Company, LLC
+  59514 9121 Turk Telekom
+  56682 3269 Telecom Italia
+  55965 9299 Philippine Long Distance Telephone Company
+  54555 4847 China Networks Inter-Exchange
+  50841 12389 PJSC Rostelecom
+  48674 5617 Orange Polska Spolka Akcyjna
+  47039 4808 China Unicom Beijing Province Network
+  40641 26599 TELEFÔNICA BRASIL S.A
+  35171 8866 Vivacom
+  33075 5650 Frontier Communications of America, Inc.
+  31921 9318 SK Broadband Co Ltd
+  30181 8708 RCS &amp;amp; RDS
+  29821 9808 Guangdong Mobile Communication Co.Ltd.
+  28777 17974 PT Telekomunikasi Indonesia
+  28731 7738 Telemar Norte Leste S.A.
+  25634 701 MCI Communications Services, Inc. d/b/a Verizon Business
+  23598 35819 Bayanat Al-Oula For Network Services
+  23427 26615 Tim Celular S.A.
+  23322 42610 PJSC Rostelecom
+  22488 7018 AT&amp;amp;T Services, Inc.
+  17009 4713 NTT Communications Corporation
+  14707 12880 Information Technology Company (ITC)
+  14259 24560 Bharti Airtel Ltd., Telemedia Services
+  13989 14420 CORPORACION NACIONAL DE TELECOMUNICACIONES - CNT EP
+  13462 7303 Telecom Argentina S.A.
+  12069 6713 Itissalat Al-MAGHRIB
+  11865 13999 Mega Cable, S.A. de C.V.
+  11439 45899 VNPT Corp
+  10711 7922 Comcast Cable Communications, LLC
+  10256 28006 CORPORACION NACIONAL DE TELECOMUNICACIONES - CNT EP
+   9993 45595 Pakistan Telecom Company Limited
+   8896 4739 Internode Pty Ltd
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;However, this data is kind of meaningless. Because all it is really showing is the biggest ISP and countries. So let’s try looking at the open resolvers per internet user in a country:&lt;/p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Country&lt;/th&gt;
+&lt;th&gt;Open Resolvers&lt;/th&gt;
+&lt;th&gt;Internet users&lt;/th&gt;
+&lt;th&gt;People per resolver&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;Saint Kitts and Nevis&lt;/td&gt;
+&lt;td&gt;729&lt;/td&gt;
+&lt;td&gt;37210&lt;/td&gt;
+&lt;td&gt;51.0&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Grenada&lt;/td&gt;
+&lt;td&gt;771&lt;/td&gt;
+&lt;td&gt;41675&lt;/td&gt;
+&lt;td&gt;54.1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Marshall Islands&lt;/td&gt;
+&lt;td&gt;158&lt;/td&gt;
+&lt;td&gt;10709&lt;/td&gt;
+&lt;td&gt;67.8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Bulgaria&lt;/td&gt;
+&lt;td&gt;40434&lt;/td&gt;
+&lt;td&gt;4155050&lt;/td&gt;
+&lt;td&gt;102.8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Belize&lt;/td&gt;
+&lt;td&gt;1063&lt;/td&gt;
+&lt;td&gt;165014&lt;/td&gt;
+&lt;td&gt;155.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Republic of Korea&lt;/td&gt;
+&lt;td&gt;233549&lt;/td&gt;
+&lt;td&gt;43274132&lt;/td&gt;
+&lt;td&gt;185.3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Bermuda&lt;/td&gt;
+&lt;td&gt;308&lt;/td&gt;
+&lt;td&gt;60047&lt;/td&gt;
+&lt;td&gt;195.0&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Maldives&lt;/td&gt;
+&lt;td&gt;968&lt;/td&gt;
+&lt;td&gt;198071&lt;/td&gt;
+&lt;td&gt;204.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Guam&lt;/td&gt;
+&lt;td&gt;601&lt;/td&gt;
+&lt;td&gt;124717&lt;/td&gt;
+&lt;td&gt;207.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Antigua and Barbuda&lt;/td&gt;
+&lt;td&gt;262&lt;/td&gt;
+&lt;td&gt;60306&lt;/td&gt;
+&lt;td&gt;230.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Ecuador&lt;/td&gt;
+&lt;td&gt;28923&lt;/td&gt;
+&lt;td&gt;7055575&lt;/td&gt;
+&lt;td&gt;243.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Romania&lt;/td&gt;
+&lt;td&gt;43331&lt;/td&gt;
+&lt;td&gt;11236186&lt;/td&gt;
+&lt;td&gt;259.3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Hong Kong&lt;/td&gt;
+&lt;td&gt;18698&lt;/td&gt;
+&lt;td&gt;5442101&lt;/td&gt;
+&lt;td&gt;291.1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Barbados&lt;/td&gt;
+&lt;td&gt;739&lt;/td&gt;
+&lt;td&gt;228717&lt;/td&gt;
+&lt;td&gt;309.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Guyana&lt;/td&gt;
+&lt;td&gt;954&lt;/td&gt;
+&lt;td&gt;305007&lt;/td&gt;
+&lt;td&gt;319.7&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Cayman Islands&lt;/td&gt;
+&lt;td&gt;136&lt;/td&gt;
+&lt;td&gt;45038&lt;/td&gt;
+&lt;td&gt;331.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Seychelles&lt;/td&gt;
+&lt;td&gt;158&lt;/td&gt;
+&lt;td&gt;56168&lt;/td&gt;
+&lt;td&gt;355.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Liechtenstein&lt;/td&gt;
+&lt;td&gt;100&lt;/td&gt;
+&lt;td&gt;36183&lt;/td&gt;
+&lt;td&gt;361.8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Tunisia&lt;/td&gt;
+&lt;td&gt;13733&lt;/td&gt;
+&lt;td&gt;5472618&lt;/td&gt;
+&lt;td&gt;398.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Poland&lt;/td&gt;
+&lt;td&gt;69300&lt;/td&gt;
+&lt;td&gt;27922152&lt;/td&gt;
+&lt;td&gt;402.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Georgia&lt;/td&gt;
+&lt;td&gt;5078&lt;/td&gt;
+&lt;td&gt;2104906&lt;/td&gt;
+&lt;td&gt;414.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Malta&lt;/td&gt;
+&lt;td&gt;787&lt;/td&gt;
+&lt;td&gt;334056&lt;/td&gt;
+&lt;td&gt;424.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Andorra&lt;/td&gt;
+&lt;td&gt;155&lt;/td&gt;
+&lt;td&gt;66728&lt;/td&gt;
+&lt;td&gt;430.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Moldova&lt;/td&gt;
+&lt;td&gt;4396&lt;/td&gt;
+&lt;td&gt;1946111&lt;/td&gt;
+&lt;td&gt;442.7&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Italy&lt;/td&gt;
+&lt;td&gt;83581&lt;/td&gt;
+&lt;td&gt;39211518&lt;/td&gt;
+&lt;td&gt;469.1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;China&lt;/td&gt;
+&lt;td&gt;1498094&lt;/td&gt;
+&lt;td&gt;721434547&lt;/td&gt;
+&lt;td&gt;481.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Gabon&lt;/td&gt;
+&lt;td&gt;358&lt;/td&gt;
+&lt;td&gt;182309&lt;/td&gt;
+&lt;td&gt;509.2&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;Or, if we strip the countries with less than 1 million internet users:&lt;/p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Country&lt;/th&gt;
+&lt;th&gt;Open Resolvers&lt;/th&gt;
+&lt;th&gt;Internet users&lt;/th&gt;
+&lt;th&gt;People per resolver&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;Bulgaria&lt;/td&gt;
+&lt;td&gt;40434&lt;/td&gt;
+&lt;td&gt;4155050&lt;/td&gt;
+&lt;td&gt;102.8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Republic of Korea&lt;/td&gt;
+&lt;td&gt;233549&lt;/td&gt;
+&lt;td&gt;43274132&lt;/td&gt;
+&lt;td&gt;185.3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Ecuador&lt;/td&gt;
+&lt;td&gt;28923&lt;/td&gt;
+&lt;td&gt;7055575&lt;/td&gt;
+&lt;td&gt;243.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Romania&lt;/td&gt;
+&lt;td&gt;43331&lt;/td&gt;
+&lt;td&gt;11236186&lt;/td&gt;
+&lt;td&gt;259.3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Hong Kong&lt;/td&gt;
+&lt;td&gt;18698&lt;/td&gt;
+&lt;td&gt;5442101&lt;/td&gt;
+&lt;td&gt;291.1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Tunisia&lt;/td&gt;
+&lt;td&gt;13733&lt;/td&gt;
+&lt;td&gt;5472618&lt;/td&gt;
+&lt;td&gt;398.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Poland&lt;/td&gt;
+&lt;td&gt;69300&lt;/td&gt;
+&lt;td&gt;27922152&lt;/td&gt;
+&lt;td&gt;402.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Georgia&lt;/td&gt;
+&lt;td&gt;5078&lt;/td&gt;
+&lt;td&gt;2104906&lt;/td&gt;
+&lt;td&gt;414.5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Moldova&lt;/td&gt;
+&lt;td&gt;4396&lt;/td&gt;
+&lt;td&gt;1946111&lt;/td&gt;
+&lt;td&gt;442.7&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Italy&lt;/td&gt;
+&lt;td&gt;83581&lt;/td&gt;
+&lt;td&gt;39211518&lt;/td&gt;
+&lt;td&gt;469.1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;China&lt;/td&gt;
+&lt;td&gt;1498094&lt;/td&gt;
+&lt;td&gt;721434547&lt;/td&gt;
+&lt;td&gt;481.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Australia&lt;/td&gt;
+&lt;td&gt;39548&lt;/td&gt;
+&lt;td&gt;20679490&lt;/td&gt;
+&lt;td&gt;522.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Turkey&lt;/td&gt;
+&lt;td&gt;76894&lt;/td&gt;
+&lt;td&gt;46196720&lt;/td&gt;
+&lt;td&gt;600.8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Russia&lt;/td&gt;
+&lt;td&gt;168979&lt;/td&gt;
+&lt;td&gt;102258256&lt;/td&gt;
+&lt;td&gt;605.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Singapore&lt;/td&gt;
+&lt;td&gt;7552&lt;/td&gt;
+&lt;td&gt;4699204&lt;/td&gt;
+&lt;td&gt;622.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Bolivia&lt;/td&gt;
+&lt;td&gt;7184&lt;/td&gt;
+&lt;td&gt;4478400&lt;/td&gt;
+&lt;td&gt;623.4&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Panama&lt;/td&gt;
+&lt;td&gt;2673&lt;/td&gt;
+&lt;td&gt;1803261&lt;/td&gt;
+&lt;td&gt;674.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Ukraine&lt;/td&gt;
+&lt;td&gt;27718&lt;/td&gt;
+&lt;td&gt;19678089&lt;/td&gt;
+&lt;td&gt;709.9&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Philippines&lt;/td&gt;
+&lt;td&gt;62542&lt;/td&gt;
+&lt;td&gt;44478808&lt;/td&gt;
+&lt;td&gt;711.2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Kuwait&lt;/td&gt;
+&lt;td&gt;4493&lt;/td&gt;
+&lt;td&gt;3202110&lt;/td&gt;
+&lt;td&gt;712.7&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Lebanon&lt;/td&gt;
+&lt;td&gt;6333&lt;/td&gt;
+&lt;td&gt;4545007&lt;/td&gt;
+&lt;td&gt;717.7&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Costa Rica&lt;/td&gt;
+&lt;td&gt;3486&lt;/td&gt;
+&lt;td&gt;2738500&lt;/td&gt;
+&lt;td&gt;785.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Saudi Arabia&lt;/td&gt;
+&lt;td&gt;25837&lt;/td&gt;
+&lt;td&gt;20813695&lt;/td&gt;
+&lt;td&gt;805.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Brazil&lt;/td&gt;
+&lt;td&gt;167145&lt;/td&gt;
+&lt;td&gt;139111185&lt;/td&gt;
+&lt;td&gt;832.3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Sweden&lt;/td&gt;
+&lt;td&gt;10872&lt;/td&gt;
+&lt;td&gt;9169705&lt;/td&gt;
+&lt;td&gt;843.4&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Uruguay&lt;/td&gt;
+&lt;td&gt;2654&lt;/td&gt;
+&lt;td&gt;2238991&lt;/td&gt;
+&lt;td&gt;843.6&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Dominican Republic&lt;/td&gt;
+&lt;td&gt;6476&lt;/td&gt;
+&lt;td&gt;5513852&lt;/td&gt;
+&lt;td&gt;851.4&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Morocco&lt;/td&gt;
+&lt;td&gt;23189&lt;/td&gt;
+&lt;td&gt;20068556&lt;/td&gt;
+&lt;td&gt;865.4&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Armenia&lt;/td&gt;
+&lt;td&gt;1743&lt;/td&gt;
+&lt;td&gt;1510906&lt;/td&gt;
+&lt;td&gt;866.8&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;You can find the &lt;a href=&quot;https://docs.google.com/spreadsheets/d/1Qz9p5BK2GzTBcP9W3ewGyWLDCEa6DxRi7TjzPBxD254/edit?usp=sharing&quot;&gt;data yourself here&lt;/a&gt; or &lt;a href=&quot;https://blog.benjojo.co.uk/asset/IGkxo9oEs0&quot;&gt;as a CSV here&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Before testing this, I waited 10 days to allow for all of the resolvers who could be on dynamic IP addresses to change and become unusable. This waiting lost me 37.9% of my IP list.&lt;/p&gt;
+&lt;p&gt;RIPE Atlas did &lt;a href=&quot;https://labs.ripe.net/Members/chris_amin/new-ripe-atlas-probe-stability-system-tags&quot;&gt;a decent amount of work to show&lt;/a&gt; that a non dismissable percentage of Atlas probes (normally on residential connections) change the public IP address once a day:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/p0PU9bvbFz&quot; alt=&quot;Bar chart of how long probes keep the same IP address&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;After that, I replicated the old method, a very long TTL (in this case, 68 years) and a TXT record containing the current unix timestamp of the DNS server.&lt;/p&gt;
+&lt;p&gt;The initial query rate on my DNS server was interesting, showing a large initial “rush”, likely due to some DNS resolvers having multiple levels of caches (and thus those upper caches warming up)&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/p1Yx7NaGsV&quot; alt=&quot;grafana graph of DNS rps&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;I then queried every server in the list every hour for about a few days using a simple tool &lt;a href=&quot;https://github.com/benjojo/dnsfs/tree/master/retention-check&quot;&gt;link&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Then refactored some code on the RIPE atlas post to work with my dataset. This showed that 18% of resolvers can hold items in cache for about a day:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;ben@metropolis:~/Documents/dnsfs$ cat retention.csv | awk -F ',' '{print $1}' | grep -v time | ./mm -p -b 6
+Values min:0.00 avg:470.30 med=56.00 max:1778.00 dev:635.18 count:2387821
+Values:
+ value |-------------------------------------------------- percent
+     0 |************************************************** 45.28%
+     1 |                                                    0.29%
+     6 |                                                **  2.08%
+    36 |                                        **********  9.70%
+   216 |                        ************************** 24.27%
+  1296 |                              ******************** 18.38%
+
+ben@metropolis:~/Documents/dnsfs$ cat retention.csv | awk -F ',' '{print $1}' | grep -v time | ./mm -b 6
+Values min:0.00 avg:470.30 med=56.00 max:1778.00 dev:635.18 count:2387821
+Values:
+ value |-------------------------------------------------- count
+     0 |************************************************** 1081109
+     1 |                                                   6816
+     6 |                                                ** 49721
+    36 |                                        ********** 231737
+   216 |                        ************************** 579613
+  1296 |                              ******************** 438825
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The next task is to make a basic guess on how big the cache is in these 400k open resolvers. To assist in this guesswork, I queried &lt;code&gt;version.bind&lt;/code&gt; on every one of these resolvers, filtered down to the major brands of DNS server, and ended up with the following:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/UlTLEUnNBs&quot; alt=&quot;DNS Server breakdown&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;The default cache configurations for these devices are as follows:&lt;/p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Brand&lt;/th&gt;
+&lt;th align=&quot;center&quot;&gt;Cache Size&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;DNSMasq&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;150 Entries&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;BIND&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;10MB worth&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;PowerDNS&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;2MB worth&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Microsoft&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;Unlimited???&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;ZyWall&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;Unknown&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Nominum&lt;/td&gt;
+&lt;td align=&quot;center&quot;&gt;Unknown&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;At this point I figured a maximum of 9 TXT records, each 250 character base64 string long (187 bytes ish) would be reasonable.&lt;/p&gt;
+&lt;p&gt;This means we get approximately (3 * 438825 * 187) = 250~ MB. Assuming we replicate to 3 different resolvers for each TXT record this should also prove “stable” enough to store files for at least a day.&lt;/p&gt;
+
+&lt;p&gt;As much as I like &lt;a href=&quot;https://en.wikipedia.org/wiki/Filesystem_in_Userspace&quot;&gt;FUSE&lt;/a&gt; I found that due to modern assumptions of desktop linux it’s impractical to use it for high latency backends, which DNSFS would be since its data rate is very low (but still faster than a floppy disk!). So I chose a simple HTTP interface to upload and fetch files to and from the internet.&lt;/p&gt;
+&lt;p&gt;The DNSFS code is a relatively simple system, every file uploaded is split into 180 byte chunks, and those chunks are “set” inside caches by querying the DNSFS node via the public resolver for a TXT record. After a few seconds the data is removed from DNSFS memory and the data is no longer on the client computer.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/qrxK4ZGkR3&quot; alt=&quot;How DNSFS works gif&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;To spread the storage load, the request filename and chunk number is hashed, then modulated over the resolver list to ensure fair (ish) spread.&lt;/p&gt;
+
+&lt;p&gt;For the demo, I will store one of my previous blog posts in the internet itself!&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.benjojo.co.uk/asset/X9m9cwjals&quot; alt=&quot;Demo of DNSFS&quot; /&gt;&lt;/p&gt;
+&lt;p&gt;As you can see, my file has made quite a name for itself.&lt;/p&gt;
+&lt;p&gt;As always, you can find the code to my madness on my github here: &lt;a href=&quot;https://github.com/benjojo/dnsfs&quot;&gt;https://github.com/benjojo/dnsfs&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;And you can follow me on Twitter here for micro doses of madness like this: &lt;a href=&quot;https://twitter.com/benjojo12&quot;&gt;https://twitter.com/benjojo12&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 12 Jan 2018 16:25:53 +0000</pubDate>
+<dc:creator>benjojo12</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.benjojo.co.uk/post/dns-filesystem-true-cloud-storage-dnsfs</dc:identifier>
+</item>
+<item>
 <title>Harvard Study Shows Why Big Telecom Is Terrified of Community-Run Broadband</title>
 <link>https://motherboard.vice.com/en_us/article/d345pv/harvard-study-shows-why-big-telecom-is-terrified-of-community-run-broadband</link>
 <guid isPermaLink="true" >https://motherboard.vice.com/en_us/article/d345pv/harvard-study-shows-why-big-telecom-is-terrified-of-community-run-broadband</guid>
@@ -658,53 +1078,6 @@ mov rbx, qword [rbx + rax] ; read specific entry in rbx
 <dc:language>en-US</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://papersplease.org/wp/2018/01/05/new-dhs-policy-on-demands-for-passwords-to-travelers-electronic-devices/</dc:identifier>
-</item>
-<item>
-<title>MacBook Pro? No</title>
-<link>http://shahidkamal.com/macbook-pro-no/</link>
-<guid isPermaLink="true" >http://shahidkamal.com/macbook-pro-no/</guid>
-<description>&lt;p&gt;Let me count the way my latest MacBook Pro is not suitable for professional use, but before I do that, you should know that I’ve been buying and recommending Macs since 2001. I’ve spent a fortune on them. I love them, but I only &lt;em&gt;like&lt;/em&gt; my latest MacBook Pro (a 2016 model with the Radeon Pro 460). I write this with a heavy heart and a malfunctioning keyboard.  This is a story about unrequited hardware love.&lt;/p&gt;
-
-&lt;p&gt;The keyboard on my MBP has begun to fail, with the ‘b’ key sometimes giving me doubled characters and sometimes none.&lt;/p&gt;
-&lt;p&gt;The cursor keys are in that awful cluster configuration where the up and down arrow keys, the ones I use the most, have half the space they should have and consequently make it next to impossible to navigate using them. Not so much cluster as clusterfuck.&lt;/p&gt;
-&lt;p&gt;They also feel different to the other keys, less responsive, if that were possible.&lt;/p&gt;
-&lt;p&gt;This £2800 laptop has a distinctly unprofessional keyboard. It’s not a whole lot better than the membrane keyboard on the first computer I owned, the Atari 400 back in 1982. I wouldn’t be surprised if the travel was shorter than that on the rubber keyboard of the ZX Spectrum. I don’t mind the feel, but that’s not good enough for a £2800 laptop. I should &lt;em&gt;adore&lt;/em&gt; the keyboard. It doesn’t need much more travel, but it does need it. I don’t expect a Matias Tactile Pro, but I could do with a Magic Keyboard and I’ll take the extra thickness in return for a usable primary input method.&lt;/p&gt;
-&lt;p&gt;Finally, where’s my damned Esc key? I go for that so often, and miss. Putting it on the Touch Bar was a stupid idea.&lt;/p&gt;
-
-&lt;p&gt;Why? The only thing of any use is the TouchID sensor, but you don’t need a whole keyboard-level touch screen for that!&lt;/p&gt;
-&lt;p&gt;For a touch typist, if you’re going to have a touchable surface, it might as well be the screen. I don’t want to look at the keyboard, ever; I want to look at the screen. Looking down at that pointless strip that offers me no feedback when I interact with it and which has no delineated edges is an extra cognitive burden that I just don’t need and therefore, as a professional, never use, unless I’m forced to. You know that a design has failed when you’re forced into using it. The Touch Bar is Apple’s Clippy. An embarrassment.&lt;/p&gt;
-
-&lt;p&gt;It’s too big. I never use all of that space, and I keep accidentally triggering it with my wrists when I don’t want to. Why not give the keyboard some extra height so I can have some proper cursor keys and while you’re at it, make those keys tactile and replaceable? It’s not a Wacom for crying out loud.&lt;/p&gt;
-
-&lt;p&gt;I like USB Type C, I really do, but like many people with a MacBook Pro, I have a camera and like most decent cameras, it has an SD card slot, except that Apple saw fit to remove this slot. Professional photographers have used the MacBook Pro for as long as they’ve been made. Only now, they need an accursed dongle.&lt;/p&gt;
-&lt;p&gt;I’d understand and forgive this on a lesser machine, like one without the “Pro” moniker, but not having an SD card on this £2800 machine strikes me as totally stupid. Rather than use another expensive adapter, I just use the iMac, which makes that the professional machine, and this one just a designer’s wet dream.&lt;/p&gt;
-
-&lt;p&gt;I have a professional laptop, but I can’t tell it’s charging unless I open the lid, gain entry and look at the tiny power indicator in the menu bar. Which genius thought this would be a Pro touch? I know it makes a sound when you plug it in; fine, genius, but what if I didn’t hear the sound? How do I tell when it’s fully charged? You took off the MagSafe, which was a genuinely useful innovation and gave us USB C charging — fine, but add a little adapter that has a charge indicator, and yes, if you must, charge for it, though you really shouldn’t if you want to call this a “Pro”.&lt;/p&gt;
-&lt;p&gt;While we’re on the subject of lights, I miss the glowing Apple logo at the back of the machine. Bring that back please. Why are you cutting costs on a £2800 machine?&lt;/p&gt;
-&lt;p&gt;Also, why don’t we get a power extension cable like we used to? Don’t know about you, but I find it hard to find power sockets near me all the time and this is just another tight move.&lt;/p&gt;
-
-&lt;p&gt;You claim five hours. I can offer you some more realistic benchmarks. Not five. Sometimes not four. It’s a Pro machine, right? Don’t go backwards then. Give me 8 hours or give me death.&lt;/p&gt;
-
-&lt;p&gt;If Apple wants to make a MacBook Pro, they should quit with the design fundamentalism on a machine costing £2800 (£2800 is a &lt;em&gt;ton&lt;/em&gt; of money for an ordinary laptop, which apart from the display, this is) and quit with what seem like cost-cutting measures in the name of power efficiency. This machine is no doubt powerful. It never struggles with software, everything runs at a decent clip (when the power is plugged in) and it’s stable, but it’s not a Pro machine — just about any decent PC laptop at not much more than &lt;em&gt;half the price of my MacBook Pro&lt;/em&gt; will give me “Pro” functionality.&lt;/p&gt;
-&lt;p&gt;I say make it faster, make the battery bigger, make the laptop slightly thicker, make the keyboard decent (heck just make it like the Magic Keyboard), get rid of the Touch Bar, make the display a 16” 4K HDR OLED, bring back some kind of MagSafe, bring the lit Apple logo back, bring back the SD card slot, add three USB 3 slots, make the trackpad smaller, beef up the GPU so that it can handle VR and games, and make it £4000. I’ll buy it. In the meantime, drop the price on this experiment and stop calling it a Pro. It doesn’t feel any more Pro than the standard MacBook.&lt;/p&gt;
-&lt;div class=&quot;sharedaddy sd-sharing-enabled&quot;&gt;
-&lt;div class=&quot;robots-nocontent sd-block sd-social sd-social-icon sd-sharing&quot;&gt;
-&lt;h3 class=&quot;sd-title&quot;&gt;Share this:&lt;/h3&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-
-</description>
-<pubDate>Fri, 12 Jan 2018 06:42:53 +0000</pubDate>
-<dc:creator>IcePenguino</dc:creator>
-<og:type>article</og:type>
-<og:title>MacBook Pro? No</og:title>
-<og:url>http://shahidkamal.com/macbook-pro-no/</og:url>
-<og:description>Let me count the way my latest MacBook Pro is not suitable for professional use, but before I do that, you should know that I’ve been buying and recommending Macs since 2001. I’ve spent a fortune o…</og:description>
-<og:image>https://i2.wp.com/shahidkamal.com/wp-content/uploads/2016/12/cropped-IMG_2418-1.jpg?fit=512%2C512</og:image>
-<dc:language>en-GB</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://shahidkamal.com/macbook-pro-no/</dc:identifier>
 </item>
 </channel>
 </rss>
