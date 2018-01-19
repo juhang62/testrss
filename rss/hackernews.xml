@@ -9,10 +9,743 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>It is not possible to detect and block Chrome headless</title>
+<link>https://intoli.com/blog/not-possible-to-block-chrome-headless/</link>
+<guid isPermaLink="true" >https://intoli.com/blog/not-possible-to-block-chrome-headless/</guid>
+<description>&lt;p&gt;A few months back, I wrote a popular article called &lt;a href=&quot;https://intoli.com/blog/making-chrome-headless-undetectable/&quot;&gt;Making Chrome Headless Undetectable&lt;/a&gt; in response to one called &lt;a rel=&quot;nofollow&quot; href=&quot;https://news.ycombinator.com/item?id=14936025&quot;&gt;Detecting Chrome Headless&lt;/a&gt; by Antione Vastel. The one thing that I was really trying to get across in writing that is that blocking site visitors based on browser fingerprinting is an extremely user-hostile practice. There are simply so many variations in browser configurations that you’re inevitably going to end up blocking non-automated access to your website, and–on top of that–you’re really not accomplishing anything in terms of blocking sophisticated web scrapers. To illustrate this, I showed how to bypass all of the suggested “tests” in Antione’s first post and pointed out that they hadn’t been tested in multiple browser versions and would fail for any users with beta or unstable Chrome builds.&lt;/p&gt;
+&lt;p&gt;Those beta and unstable versions have since become stable versions, and Antione has released an updated version of his blogpost called &lt;a rel=&quot;nofollow&quot; href=&quot;https://news.ycombinator.com/item?id=16175646&quot;&gt;It is possible to detect and block Chrome headless&lt;/a&gt; where he removed the tests that I pointed out as being version dependent and added some new ones. As you might have guessed from the title of &lt;em&gt;this post&lt;/em&gt;, I would tend to disagree with the title of his. To clarify: I don’t think it’s possible to detect browser automation for users who are trying to hide it, and if they &lt;em&gt;aren’t&lt;/em&gt; trying to hide it then it’s trivial.&lt;/p&gt;
+&lt;p&gt;There’s a &lt;code&gt;window.navigator.webdriver&lt;/code&gt; property defined as part of the &lt;a href=&quot;https://w3c.github.io/webdriver/webdriver-spec.html#interface&quot;&gt;WebDriver spec&lt;/a&gt; that’s meant to indicate when WebDriver is being used, but it was implemented in Chrome as an indication of &lt;em&gt;any&lt;/em&gt; browser automation. The summary of the property from the &lt;a href=&quot;https://groups.google.com/a/chromium.org/forum/#!msg/blink-dev/6GysDZCWwB8/rXbGoRohBgAJ&quot;&gt;Chrome Intent to Ship&lt;/a&gt; is the following.&lt;/p&gt;
+&lt;blockquote readability=&quot;9&quot;&gt;
+&lt;p&gt;Add enumerable, non-configurable, readonly property &lt;code&gt;webdriver&lt;/code&gt; to navigator object of a window global object. Property is &lt;code&gt;true&lt;/code&gt; if CommandLine has either “enable-automation“ or “headless“ switch. Otherwise is &lt;code&gt;false&lt;/code&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;So basically, &lt;code&gt;const isAutomated = navigator.webdriver;&lt;/code&gt; is your headless test (OK, that’s really testing for &lt;em&gt;automated&lt;/em&gt; rather than headless browsers, but that’s generally what people are actually trying to do anyway). As soon as you go beyond that, you’re basically indicating that you’re trying to detect users who are actively hiding the fact that their browser is automated. That’s when it becomes impossible. You can come up with whatever tests you want, but any dedicated web scraper can easily get around them.&lt;/p&gt;
+&lt;p&gt;If you’ve read &lt;a href=&quot;https://intoli.com/blog/making-chrome-headless-undetectable/&quot;&gt;Making Chrome Headless Undetectable&lt;/a&gt;, then this article should be pretty familiar. I’ll set up a test page that implements each of Antione’s tests, and then show how it’s fairly trivial to bypass each of them. I used &lt;a href=&quot;http://www.seleniumhq.org/&quot;&gt;Selenium&lt;/a&gt; last time, so this time I’ll use &lt;a href=&quot;https://github.com/GoogleChrome/puppeteer&quot;&gt;Puppeteer&lt;/a&gt; to spice it up. Most of the test bypasses are implemented as injected JavaScript however, so much of the code should be applicable to any browser automation framework that supports JavaScript injection (see: &lt;a href=&quot;https://intoli.com/blog/javascript-injection/&quot;&gt;JavaScript Injection with Selenium, Puppeteer, and Marionette&lt;/a&gt;).&lt;/p&gt;
+
+&lt;p&gt;I implemented each of the tests that Antione proposes in a simple test page called &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/chrome-headless-test.html&quot;&gt;chrome-headless-test.html&lt;/a&gt;. The page renders a simple table like this&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/img/headless-initial-results.png&quot; alt=&quot;The initial headless test results.&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;with the results for each test. The actual tests that are used to populate the table when the page loads are in &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/chrome-headless-test.js&quot;&gt;chrome-headless-test.js&lt;/a&gt;, but I’ll go over the details of each test when I cover bypassing them. The results shown here are what are produced by a headless browser without any attempt at hiding itself.&lt;/p&gt;
+&lt;p&gt;As I mentioned earlier, I’ll use &lt;a href=&quot;https://github.com/GoogleChrome/puppeteer&quot;&gt;Puppeteer&lt;/a&gt; as my automation framework throughout the article. Puppeteer provides a friendly high-level JavaScript API built on top of the &lt;a href=&quot;https://chromedevtools.github.io/devtools-protocol/&quot;&gt;Chrome DevTools Protocol&lt;/a&gt;, and it’s one of my favorite automation frameworks to work with. It can be installed by running &lt;code&gt;yarn install puppeteer&lt;/code&gt; and it will download it’s own Chromium build inside of &lt;code&gt;node_modules&lt;/code&gt; to use during automation.&lt;/p&gt;
+&lt;p&gt;The code to visit the test page and record the test results with Puppeteer is quite simple. We basically just launch the browser in headless mode, visit the test page, take a screenshot of the results table, and exit. The code for doing this is available in &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/test-headless-initial.js&quot;&gt;test-headless-initial.js&lt;/a&gt;, and its contents are as follows.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// We'll use Puppeteer is our browser automation framework.
+const puppeteer = require('puppeteer');
+
+// This is where we'll put the code to get around the tests.
+const preparePageForTests = async (page) =&amp;gt; {
+  // TODO: Not implemented yet.
+}
+
+(async () =&amp;gt; {
+  // Launch the browser in headless mode and set up a page.
+  const browser = await puppeteer.launch({
+    args: ['--no-sandbox'],
+    headless: true,
+  });
+  const page = await browser.newPage();
+
+  // Prepare for the tests (not yet implemented).
+  await preparePageForTests(page);
+
+  // Navigate to the page that will perform the tests.
+  const testUrl = 'https://intoli.com/blog/' +
+    'not-possible-to-block-chrome-headless/chrome-headless-test.html';
+  await page.goto(testUrl);
+
+  // Save a screenshot of the results.
+  await page.screenshot({path: 'headless-test-result.png'});
+
+  // Clean up.
+  await browser.close()
+})();
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This can be run with &lt;code&gt;node test-headless-initial.js&lt;/code&gt; and it will produce a &lt;code&gt;headless-test-results.png&lt;/code&gt; file with the results table that we saw earlier.&lt;/p&gt;
+&lt;p&gt;You’ll notice that there’s a &lt;code&gt;preparePageForTests&lt;/code&gt; method defined at the top of the file that currently does nothing. Throughout the rest of this article, we’ll go through the tests one by one and show how to bypass them. The final result is available in &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/test-headless-final.js&quot;&gt;test-headless-final.js&lt;/a&gt; if you want to take a look at all of the code together at once.&lt;/p&gt;
+&lt;div class=&quot;article-advertisement&quot; readability=&quot;32&quot;&gt;
+&lt;h3&gt;The Intoli Monthly Newsletter&lt;/h3&gt;
+&lt;p&gt;Enjoying this article? Sign up to get monthly updates on our best new content!&lt;/p&gt;
+
+&lt;/div&gt;
+
+&lt;p&gt;Let’s just go through and bypass each of these tests one-by-one now. Keep in mind that all of the code developed in each of these sections is intended to go inside of the &lt;code&gt;preparePageForTests&lt;/code&gt; method that is called before visiting the test page. This means that the &lt;code&gt;page&lt;/code&gt; object is available and we’re inside of an &lt;code&gt;async&lt;/code&gt; function (so we can use &lt;code&gt;await&lt;/code&gt;). If you get confused about how any of the parts fit together, just look inside of &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/test-headless-final.js&quot;&gt;test-headless-final.js&lt;/a&gt;.&lt;/p&gt;
+&lt;h2 id=&quot;the-user-agent-test&quot;&gt;The User-Agent Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// User-Agent Test
+if (/HeadlessChrome/.test(navigator.userAgent)) {
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This is the classic test of automated access which has been around since long before headless browsers or even browser automation frameworks (for server-side checks at least). It has a relatively low false postive rate, but it’s also the most trivial thing to spoof or bypass. Command-line tools like &lt;code&gt;curl&lt;/code&gt; and &lt;code&gt;wget&lt;/code&gt; provide flags to change the &lt;code&gt;User-Agent&lt;/code&gt; header, and Chrome is no different. You can specify the &lt;code&gt;--user-agent&lt;/code&gt; flag when launching Chrome–headless or otherwise–and it will modify both the &lt;code&gt;User-Agent&lt;/code&gt; header and the &lt;code&gt;navigator.userAgent&lt;/code&gt; object.&lt;/p&gt;
+&lt;p&gt;Puppeteer also provides a &lt;a href=&quot;https://github.com/GoogleChrome/puppeteer/blob/master/docs/api.md#pagesetuseragentuseragent&quot;&gt;setUserAgent()&lt;/a&gt; method that can be used to accomplish the same thing. All it takes is adding&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the User-Agent Test.
+const userAgent = 'Mozilla/5.0 (X11; Linux x86_64)' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.39 Safari/537.36';
+await page.setUserAgent(userAgent);
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;to our &lt;code&gt;preparePageForTests()&lt;/code&gt; method and this test is passed.&lt;/p&gt;
+&lt;h2 id=&quot;the-webdriver-test&quot;&gt;The Webdriver Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Webdriver Test
+if (navigator.webdriver) {
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This is an interesting test for a couple of reasons. It’s the only other test that will have a relatively low false positive rate for one thing (although there are accessibility tools which rely on browser automation). Additionally, you see some odd behavior if you attempt to set &lt;code&gt;navigator.webdriver = false&lt;/code&gt; as a way to bypass the test. You don’t get an error during assignment, but &lt;code&gt;navigator.webdriver&lt;/code&gt; will still be &lt;code&gt;true&lt;/code&gt; afterwards.&lt;/p&gt;
+&lt;p&gt;To get around this, we need to use &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineProperty&quot;&gt;&lt;code&gt;Object.defineProperty()&lt;/code&gt;&lt;/a&gt; to redefine the &lt;code&gt;webdriver&lt;/code&gt; property on &lt;code&gt;navigator&lt;/code&gt; using a new getter function. Here’s an example of doing this interactively in the Chrome DevTools.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/img/webdriver-fix.png&quot; alt=&quot;Overwriting Webdriver&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;The relevant bit of code to add to our &lt;code&gt;preparePageForTests()&lt;/code&gt; method is&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the Webdriver Test.
+await page.evaluateOnNewDocument(() =&amp;gt; {
+  Object.defineProperty(navigator, 'webdriver', {
+    get: () =&amp;gt; false,
+  });
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;and it brings us one step closer to straight As on our totally-not-headless exam. Notice that we’re using Puppeteer’s &lt;a href=&quot;https://github.com/GoogleChrome/puppeteer/blob/master/docs/api.md#pageevaluateonnewdocumentpagefunction-args&quot;&gt;evaluateOnNewDocument()&lt;/a&gt; method to ensure that our property is redefined in the page context before any of the page’s JavaScript can running. We’ll be using this same method in all of our other tests as well. You can find more details about it–and similar methods for other browser automation frameworks–in our &lt;a href=&quot;https://intoli.com/blog/javascript-injection/&quot;&gt;JavaScript Injection with Selenium, Puppeteer, and Marionette&lt;/a&gt; article.&lt;/p&gt;
+&lt;h2 id=&quot;the-chrome-test&quot;&gt;The Chrome Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Chrome Test
+if (!window.chrome) {
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This test actually isn’t even implemented correctly (that’s why it was green in our initial results). Antione was correct in stating that headless Chrome &lt;a href=&quot;https://groups.google.com/a/chromium.org/d/msg/headless-dev/nEoeUkoNI0o/9KZ4Os46AQAJ&quot;&gt;doesn’t currently support extensions&lt;/a&gt;, but he is incorrect that the &lt;code&gt;window.chrome&lt;/code&gt; object is undefined in headless mode. It’s an empty object, but it &lt;em&gt;is&lt;/em&gt; present.&lt;/p&gt;
+&lt;p&gt;In a non-headless browser, the &lt;code&gt;window.chrome&lt;/code&gt; object looks something like this (keep in mind that the Web Extensions API is not available in the page context).&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;{
+  app: {
+    isInstalled: false,
+  },
+  webstore: {
+    onInstallStageChanged: {},
+    onDownloadProgress: {},
+  },
+  runtime: {
+    PlatformOs: {
+      MAC: 'mac',
+      WIN: 'win',
+      ANDROID: 'android',
+      CROS: 'cros',
+      LINUX: 'linux',
+      OPENBSD: 'openbsd',
+    },
+    PlatformArch: {
+      ARM: 'arm',
+      X86_32: 'x86-32',
+      X86_64: 'x86-64',
+    },
+    PlatformNaclArch: {
+      ARM: 'arm',
+      X86_32: 'x86-32',
+      X86_64: 'x86-64',
+    },
+    RequestUpdateCheckStatus: {
+      THROTTLED: 'throttled',
+      NO_UPDATE: 'no_update',
+      UPDATE_AVAILABLE: 'update_available',
+    },
+    OnInstalledReason: {
+      INSTALL: 'install',
+      UPDATE: 'update',
+      CHROME_UPDATE: 'chrome_update',
+      SHARED_MODULE_UPDATE: 'shared_module_update',
+    },
+    OnRestartRequiredReason: {
+      APP_UPDATE: 'app_update',
+      OS_UPDATE: 'os_update',
+      PERIODIC: 'periodic',
+    },
+  },
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Based on this, a correctly functioning test might look more like this.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Chrome Test
+if (!window.chrome || !window.chrome.runtime) {
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Of course, this is still trivial to bypass.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the Chrome Test.
+await page.evaluateOnNewDocument(() =&amp;gt; {
+  // We can mock this in as much depth as we need for the test.
+  window.navigator.chrome = {
+    runtime: {},
+    // etc.
+  };
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Pop that in &lt;code&gt;preparePageForTests()&lt;/code&gt; and you’re good to go.&lt;/p&gt;
+&lt;h2 id=&quot;the-permissions-test&quot;&gt;The Permissions Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Permissions Test
+(async () =&amp;gt; {
+  const permissionStatus = await navigator.permissions.query({ name: 'notifications' });
+  if(Notification.permission === 'denied' &amp;amp;&amp;amp; permissionStatus.state === 'prompt') {
+    // Test Failed...
+  }
+})();
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The idea behind this test is that &lt;code&gt;Notification.permission&lt;/code&gt; and the results from &lt;code&gt;navigator.permissions.query&lt;/code&gt; report contradictory values. All we need to do to get around this is to make sure that they are consistent. We can do that by overriding the &lt;code&gt;navigator.permissions.query&lt;/code&gt; method with one that behaves how we want it to.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the Permissions Test.
+await page.evaluateOnNewDocument(() =&amp;gt; {
+  const originalQuery = window.navigator.permissions.query;
+  return window.navigator.permissions.query = (parameters) =&amp;gt; (
+    parameters.name === 'notifications' ?
+      Promise.resolve({ state: Notification.permission }) :
+      originalQuery(parameters)
+  );
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Note that this will pass through to the original &lt;code&gt;navigator.permissions.query&lt;/code&gt; method if the query name isn’t &lt;code&gt;notifications&lt;/code&gt;, but other queries can be handled similarly if the tests are more sophisticated.&lt;/p&gt;
+&lt;h2 id=&quot;the-plugins-length-test&quot;&gt;The Plugins Length Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Plugins Length Test
+if (navigator.plugins.length === 0) {
+  pluginsLengthElement.classList.add('failed');
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This is a particularly user-hostile test because the browser plugins are often concealed as a privacy measure. Firefox does this by default, and there are &lt;a href=&quot;https://github.com/bcaller/plugin-privacy-chrome&quot;&gt;extensions&lt;/a&gt; that provide the same behavior in Chrome. To spoof the plugins, we can simply define another property getter on &lt;code&gt;navigator&lt;/code&gt; like we did for &lt;code&gt;webdriver&lt;/code&gt;.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the Plugins Length Test.
+await page.evaluateOnNewDocument(() =&amp;gt; {
+  // Overwrite the `plugins` property to use a custom getter.
+  Object.defineProperty(navigator, 'plugins', {
+    // This just needs to have `length &amp;gt; 0` for the current test,
+    // but we could mock the plugins too if necessary.
+    get: () =&amp;gt; [1, 2, 3, 4, 5],
+  });
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;the-languages-test&quot;&gt;The Languages Test&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Languages Test
+if (!navigator.languages || navigator.languages.length === 0) {
+  // Test Failed...
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Finally, we get to the languages test. This is another test that vanilla headless Chrome passes without issues for me. Without digging too deeply into this, it likely depends on either the operating system or its configuration.&lt;/p&gt;
+&lt;p&gt;If your configuration doesn’t provide any languages via &lt;code&gt;navigator.languages&lt;/code&gt;, you can again defined a property getter like we did with both &lt;code&gt;plugins&lt;/code&gt; and &lt;code&gt;webdriver&lt;/code&gt;.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;// Pass the Languages Test.
+await page.evaluateOnNewDocument(() =&amp;gt; {
+  // Overwrite the `plugins` property to use a custom getter.
+  Object.defineProperty(navigator, 'languages', {
+    get: () =&amp;gt; ['en-US', 'en'],
+  });
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;That’s the last of the tests, everything should pass at this point. Be sure to check out &lt;a href=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/test-headless-final.js&quot;&gt;test-headless-final.js&lt;/a&gt; to see how everything fits together or to try running it for yourself.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://intoli.com/blog/not-possible-to-block-chrome-headless/img/headless-final-results.png&quot; alt=&quot;The final results after bypassing the test&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;As you can see, we were able to bypass all of these tests without much difficulty at all. The script that we used to bypass these obviously isn’t going to work in all cases, but the techniques are generally applicable and can be customized for any particular set of tests that a site might employ. If somebody wants to conceal the fact that they’re using a browser automation framework on your site, then they’re going to be able to. Blocking users based on browser fingerprinting is generally a bad idea, and one that mostly ends up hurting users.&lt;/p&gt;
+&lt;p&gt;If you found this article because you’re dealing with some browser automation issues of your own, then please do &lt;a href=&quot;https://intoli.com/contact/&quot;&gt;get in touch&lt;/a&gt;. We have a lot of experience with this sort of thing, and we love working on new projects.&lt;/p&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 17:37:26 +0000</pubDate>
+<dc:creator>foob</dc:creator>
+<og:title>It is *not* possible to detect and block Chrome headless</og:title>
+<og:type>website</og:type>
+<og:url>https://intoli.com/blog/not-possible-to-block-chrome-headless/</og:url>
+<og:image>https://intoli.com/blog/not-possible-to-block-chrome-headless/img/webdriver-fix.png</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://intoli.com/blog/not-possible-to-block-chrome-headless/</dc:identifier>
+</item>
+<item>
+<title>Wine 3.0 Released</title>
+<link>https://www.winehq.org/news/2018011801</link>
+<guid isPermaLink="true" >https://www.winehq.org/news/2018011801</guid>
+<description>&lt;p class=&quot;newstitle&quot;&gt;&lt;a href=&quot;https://www.winehq.org/news/2018011801&quot;&gt;Wine 3.0 Released&lt;/a&gt;&lt;/p&gt;
+&lt;p class=&quot;newsdate&quot;&gt;January 18, 2018&lt;/p&gt;
+&lt;div class=&quot;newsblock&quot; readability=&quot;20.81517747858&quot;&gt;
+&lt;p&gt;The Wine team is proud to announce that the stable release Wine 3.0 is now available.&lt;/p&gt;
+&lt;p&gt;This release represents a year of development effort and over 6,000 individual changes. It contains a large number of improvements that are listed in the &lt;a href=&quot;https://www.winehq.org/announce/3.0&quot;&gt;release notes&lt;/a&gt;. The main highlights are:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Direct3D 10 and 11 support.&lt;/li&gt;
+&lt;li&gt;The Direct3D command stream.&lt;/li&gt;
+&lt;li&gt;The Android graphics driver.&lt;/li&gt;
+&lt;li&gt;Improved DirectWrite and Direct2D support.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Once again, because of the annual release schedule, a number of features that are being worked on have been deferred to the next development cycle. This includes in particular Direct3D 12 and Vulkan support, as well as OpenGL ES support to enable Direct3D on Android.&lt;/p&gt;
+&lt;p&gt;The source is &lt;a href=&quot;https://dl.winehq.org/wine/source/3.0/wine-3.0.tar.xz&quot;&gt;available now&lt;/a&gt;. Binary packages are in the process of being built, and will appear soon at their respective &lt;a href=&quot;https://www.winehq.org/download&quot;&gt;download locations&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;hr/&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 16:47:03 +0000</pubDate>
+<dc:creator>etiam</dc:creator>
+<og:title>Wine 3.0 Released</og:title>
+<og:image>https://media.codeweavers.com/pub/crossover/marketing/og/wine-hq-announcement.png</og:image>
+<og:type>article</og:type>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.winehq.org/news/2018011801</dc:identifier>
+</item>
+<item>
+<title>Google, You Creepy Sonofabitch</title>
+<link>http://bradfrost.com/blog/post/google-you-creepy-sonofabitch/</link>
+<guid isPermaLink="true" >http://bradfrost.com/blog/post/google-you-creepy-sonofabitch/</guid>
+<description>&lt;p&gt;I recently wrote a post about &lt;a href=&quot;http://bradfrost.com/blog/post/facebook-you-needy-sonofabitch/&quot;&gt;Facebook being a needy sonofabitch&lt;/a&gt;. They desperately try to get you there, and once they have you they do all they can to keep you there. It’s like a restaurant that bombards your doorstep with flyers until you finally pay it a visit. Once you go there, they lock the doors from the outside and begin force-feeding you from the buffet.&lt;/p&gt;
+&lt;p&gt;But ultimately, Facebook is a place you go to. You can decide whether you want to visit the restaurant, or just continue throwing their flyers in the recycling bin alongside the coupon-stuffed weekly circulars and junk mail.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Google is equally needy, but feels a lot more insidious than Facebook.&lt;/strong&gt; Unlike Facebook, Google isn’t just a place you go. It’s built into the infrastructure of your life. It’s your house. It’s the roads and sidewalks you travel on. Google is a lot more infrastructural than Facebook, which is why breaches of trust feel a lot weirder and scarier.&lt;/p&gt;
+&lt;p&gt;It’s creepy as shit to sit down at a local restaurant and immediately see this:&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-11212 size-medium&quot; src=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-134353-700x158.png&quot; alt=&quot;Google notification: Noodlehead reviews and photos&quot; width=&quot;700&quot; height=&quot;158&quot; srcset=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-134353-700x158.png 700w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-134353-768x173.png 768w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-134353-1024x230.png 1024w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-134353.png 1080w&quot; sizes=&quot;(max-width: 700px) 100vw, 700px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;And then as soon as you depart, see this:&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-11213 size-medium&quot; src=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-154424-700x155.png&quot; alt=&quot;Google notification: Rate your visit, help others visiting Noodlehead know what to expect.&quot; width=&quot;700&quot; height=&quot;155&quot; srcset=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-154424-700x155.png 700w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-154424-768x170.png 768w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-154424-1024x227.png 1024w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180104-154424.png 1080w&quot; sizes=&quot;(max-width: 700px) 100vw, 700px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Take a photo, and immediately see this:&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-11214 size-medium&quot; src=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180106-163920-700x160.png&quot; alt=&quot;Google notification: inspire other travels, add your photos to Google Maps.&quot; width=&quot;700&quot; height=&quot;160&quot; srcset=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180106-163920-700x160.png 700w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180106-163920-768x176.png 768w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180106-163920-1024x234.png 1024w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180106-163920.png 1080w&quot; sizes=&quot;(max-width: 700px) 100vw, 700px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;This behavior makes me want to take my phone and throw it in a river. I’m not alone in this. A few friends made earnest efforts to switch over to Android, only to quickly return their devices after being totally creeped out.&lt;/p&gt;
+&lt;blockquote class=&quot;twitter-tweet&quot; data-lang=&quot;en&quot; readability=&quot;9.3360995850622&quot;&gt;
+&lt;p dir=&quot;ltr&quot; lang=&quot;en&quot;&gt;I will say that the last straw was when I walked by a restaurant and a notification popped up that said, “Do they serve spicy food there? Help us out!” and I was like aw hell no google&lt;/p&gt;
+&lt;p&gt;— Kristina Halvorson (@halvorson) &lt;a href=&quot;https://twitter.com/halvorson/status/951858404003319808?ref_src=twsrc%5Etfw&quot;&gt;January 12, 2018&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;blockquote class=&quot;twitter-tweet&quot; data-lang=&quot;en&quot; readability=&quot;8.2748815165877&quot;&gt;
+&lt;p&gt;Yah. I disabled Google Maps tracking, then Google Search started notifying me about places I was near. I don’t want to play a cat &amp;amp; mouse game with my privacy.&lt;br/&gt;— Dave Rupert (@davatron5000) &lt;a href=&quot;https://twitter.com/davatron5000/status/942833756611674113?ref_src=twsrc%5Etfw&quot;&gt;December 18, 2017&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;I’m not a crazy, paranoid, security nerd kind of person. Although I probably should be. I guess I’m just saying that people shouldn’t feel like their every movement is being tracked by the company that makes the phone’s software. Actually, let me rephrase that: I guess I’m just saying that &lt;strong&gt;people shouldn’t have their every movement tracked by the company that makes the phone’s software.&lt;/strong&gt; That seems like a reasonable request.&lt;/p&gt;
+&lt;p&gt;And holy smokes, Google, if you’re going to keep doing this, maybe try not to sound like complete robots:&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-11211 size-medium&quot; src=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028-700x154.png&quot; alt=&quot;Google notification: answer quick questions about Feng Japanese Steak House, we need some human help&quot; width=&quot;700&quot; height=&quot;154&quot; srcset=&quot;http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028-700x154.png 700w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028-768x169.png 768w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028-1024x225.png 1024w, http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028.png 1080w&quot; sizes=&quot;(max-width: 700px) 100vw, 700px&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Jesus Christ. What’s a better way to aleviate people’s concerns about the forthcoming robot takeover than to say “We need some human help” with some stupid emoji in a feeble attempt to soften the blow.&lt;/p&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 16:27:08 +0000</pubDate>
+<dc:creator>kawera</dc:creator>
+<og:title>Google, You Creepy Sonofabitch</og:title>
+<og:url>http://bradfrost.com/blog/post/google-you-creepy-sonofabitch/</og:url>
+<og:type>article</og:type>
+<og:description>I recently wrote a post about Facebook being a needy sonofabitch. They desperately try to get you there, and once they have you they do all they can to keep you there. It's like a restaurant that bombards your doorstep with flyers until you finally pay it a visit. Once you go there, they lock the do</og:description>
+<og:image>http://bradfrost.com/wp-content/uploads/2018/01/Screenshot_20180101-083028.jpg</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://bradfrost.com/blog/post/google-you-creepy-sonofabitch/</dc:identifier>
+</item>
+<item>
+<title>Walkable Streets Are More Economically Productive</title>
+<link>https://www.strongtowns.org/journal/2018/1/16/why-walkable-streets-are-more-economically-productive</link>
+<guid isPermaLink="true" >https://www.strongtowns.org/journal/2018/1/16/why-walkable-streets-are-more-economically-productive</guid>
+<description>&lt;div class=&quot;sqs-layout sqs-grid-12 columns-12&quot; data-layout-label=&quot;Post Body&quot; data-type=&quot;item&quot; data-updated-on=&quot;1516116415739&quot; id=&quot;item-5a5e174853450ab8996ddb54&quot;&gt;
+&lt;div class=&quot;row sqs-row&quot;&gt;
+&lt;div class=&quot;col sqs-col-12 span-12&quot;&gt;
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-30fb10d1f07a1c6ca4b2&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+
+&lt;p&gt;What is the value of a street where people can walk safely? Why build streets that are constructed with the needs of people in mind, not just the needs of cars? &lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block quote-block sqs-block-quote null sqs-col-6 span-6 float float-right&quot; data-block-type=&quot;31&quot; id=&quot;block-yui_3_17_2_4_1516216264089_12775&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;span&gt;“&lt;/span&gt;Again and again, when we look at streets oriented toward people we find that they are more economically productive than any other style of development.&lt;span&gt;”&lt;/span&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_4_1516216264089_16183&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;Many people concerned with pedestrian safety and &quot;walkability&quot; care about these issues because they feel that walking is good exercise or that walkable places are more attractive or that walking is better for the environment than driving.&lt;/p&gt;
+&lt;p&gt;These are all valid arguments and may convince some of those reading this article that walkability is important. But what I want to talk about today isn’t an argument based on values or aesthetics. It’s an argument based on pure dollars and cents — one that should convince people with a myriad of values and political leanings that people-oriented places must be a priority if we want our communities to be economically prosperous.&lt;/p&gt;
+&lt;p&gt;Again and again, when we look at streets oriented toward people — that is, streets where walking is safe and enjoyable, that people are drawn to visit on foot, and where fast and extensive car traffic is not the #1 priority — we find that they are more economically productive than &lt;em&gt;any other style of development&lt;/em&gt;. This is particularly true when we compare people-oriented places to car-oriented places—think of that stretch of your town that effectively does everything possible to discourage walking and biking, including a street with multiple wide lanes to ensure fast car movement, acres of parking, and minimal (if any) sidewalks, bike lanes and crosswalks. &lt;/p&gt;
+&lt;p&gt;Walkable streets, on the other hand, encourage business activity, generate greater tax revenue per acre and offer a higher return on investment than auto-oriented streets.&lt;/p&gt;
+&lt;h2&gt;People-oriented Streets Encourage Business Activity&lt;/h2&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block image-block sqs-block-image sqs-col-6 span-6 float float-left&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_4_1516211849618_10177&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline&quot;&gt;
+&lt;div class=&quot;intrinsic&quot;&gt;
+&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Source: Andrew Price&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
+&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5f8f8f419202a037fa0981/1516212121471/blog62-9.jpg&quot; alt=&quot;Source: Andrew Price&quot;/&gt;&lt;/p&gt;
+&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; alt=&quot;Source: Andrew Price&quot; data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5f8f8f419202a037fa0981/1516212121471/blog62-9.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5f8f8f419202a037fa0981/1516212121471/blog62-9.jpg&quot; data-image-dimensions=&quot;1000x562&quot; data-image-focal-point=&quot;0.5,0.5&quot; data-load=&quot;false&quot; data-image-id=&quot;5a5f8f8f419202a037fa0981&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div class=&quot;image-caption-wrapper&quot;&gt;
+&lt;div class=&quot;image-caption&quot;&gt;
+&lt;p&gt;Source: Andrew Price&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_4_1516216264089_40224&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;Streets where walking is safe and easy are streets where businesses usually thrive. A number of studies have confirmed this over the last several years.&lt;/p&gt;
+&lt;p&gt;For instance, in &lt;a href=&quot;https://www.heartfoundation.org.au/images/uploads/publications/Good-for-business.pdf&quot;&gt;a 2011 report&lt;/a&gt; for Australia’s Heart Foundation, Dr. Rodney Tolley concludes:&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;Streetscape enhancements add value to an area and are associated with higher rents and the attraction of new businesses. In addition there is good evidence to show that improving walking and cycling environments raises private property values by significant amounts.&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;Indeed, in 2009, our friend Joe Cortright conducted &lt;a href=&quot;http://blog.walkscore.com/wp-content/uploads/2009/08/WalkingTheWalk_CEOsforCities.pdf&quot;&gt;a study&lt;/a&gt; that revealed: “In the typical market, an additional one point increase in Walk Score was associated with between a $500 and $3,000 increase in home values.” (&lt;a href=&quot;https://www.walkscore.com/&quot;&gt;Walk Score&lt;/a&gt; is an online system that ranks how walk-friendly a particular location is.)&lt;/p&gt;
+&lt;p&gt;Furthermore, &lt;a href=&quot;http://www.sfcta.org/sites/default/files/content/Planning/CongestionPricingFeasibilityStudy/PDFs/SF-ModalChoices-SpendingPatterns_RevisedFinal.pdf&quot;&gt;a pivotal report&lt;/a&gt; by Elizabeth Bent and Krute Singha of the San Francisco County Transportation Authority uncovered that “travelers using [transit or walking] spend more per month than those traveling by car.” Interestingly, while the amount that transit users and walkers spent at area businesses &lt;em&gt;on each trip&lt;/em&gt; was less than the average car driver’s spending, the transit users and walkers made more &lt;em&gt;trips&lt;/em&gt; per month, which added up to higher spending overall.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block image-block sqs-block-image sqs-col-6 span-6 float float-right&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_4_1516216264089_35475&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline&quot;&gt;
+&lt;div class=&quot;intrinsic&quot;&gt;
+&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Source: Johnny Sanphillippo&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
+&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fa1e953450ae8751df878/1516216817083/screen-shot-2015-11-18-at-5-34-00-am.jpg&quot; alt=&quot;Source: Johnny Sanphillippo&quot;/&gt;&lt;/p&gt;
+&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; alt=&quot;Source: Johnny Sanphillippo&quot; data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fa1e953450ae8751df878/1516216817083/screen-shot-2015-11-18-at-5-34-00-am.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fa1e953450ae8751df878/1516216817083/screen-shot-2015-11-18-at-5-34-00-am.jpg&quot; data-image-dimensions=&quot;1024x765&quot; data-image-focal-point=&quot;0.5,0.5&quot; data-load=&quot;false&quot; data-image-id=&quot;5a5fa1e953450ae8751df878&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div class=&quot;image-caption-wrapper&quot;&gt;
+&lt;div class=&quot;image-caption&quot;&gt;
+&lt;p&gt;Source: Johnny Sanphillippo&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_4_1516216264089_37997&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;In truth, you don’t really need a study to tell you these things. Visit the most thriving commercial district in any city — the one full of shops and restaurants and people — and I would bet that it’s an area where walking is prioritized.&lt;/p&gt;
+&lt;p&gt;A walkable street ensures that people can safely cross from a clothing store to a coffee shop and spend money at both. It means that people who live in the neighborhood can grab groceries and other necessities easily, so they’ll probably visit nearby establishments more often. Perhaps most importantly, a walkable street is one in which many businesses occupy the bulk of the land, meaning that dozens of destinations can be accessed in a matter of minutes on foot, and that every inch of land is put to economically productive use — not squandered in empty parking lots or unnecessary landscaping.&lt;/p&gt;
+&lt;h2&gt;People-oriented Streets are more Financially Productive per Acre&lt;/h2&gt;
+&lt;p&gt;We’ve got data unequivocally showing that people-oriented streets are more economically productive than auto-oriented streets — from big cities to small towns, from the heartland to the South. Our friends at &lt;a target=&quot;_blank&quot; href=&quot;http://urban-three.com&quot;&gt;Urban3&lt;/a&gt; spend much of their time visiting cities and towns across the nation to analyze their tax productivity, comparing how much tax revenue is produced per acre in different areas. What they’ve consistently found is that compact, walkable places produce far more tax value per acre than auto-oriented places—and that holds true in communities across America. &lt;/p&gt;
+&lt;p&gt;The following images created by Urban3 visually illustrate the tax value per acre of every plot of land in four geographically diverse communities and this pattern is evident in all of them. In these maps, a tall plot means a high tax value per acre while a low plot indicates a low tax value. (In the case of the Lafayette map, taller green plots are revenue positive for the city while taller red plots are revenue negative.)&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_5_1516115384092_14938&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;In every single image, the people-oriented, historic city centers are the ones that rise far above the surrounding auto-oriented land in terms of tax value per acre.&lt;/p&gt;
+&lt;p&gt;Here’s what those city center spikes look like for the average person walking…&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_5_1516115384092_24082&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;What do these places all have in common?&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Streets are fairly narrow with no more than two lanes of traffic and parking on either side — all of which means cars must drive slowly.&lt;/li&gt;
+&lt;li&gt;Sidewalks are present in every image and bump-outs, crosswalks and signals make it easy for people to cross the street.&lt;/li&gt;
+&lt;li&gt;Trees offer shade to people walking (especially important in warmer climates like Louisiana and southern California).&lt;/li&gt;
+&lt;li&gt;Businesses open right onto the sidewalk, easily accessible to passersby on foot and attracting the attention of people driving slowly as well.&lt;/li&gt;
+&lt;li&gt;Residences and offices occupy the second (and in some cases, third, fourth and fifth) floors of these buildings providing additional tax revenue and putting more people within walking distance of the local businesses below.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Meanwhile, here’s what the auto-oriented areas on the edge of each town look like…&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_5_1516115384092_43570&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;In these images, everything is built around the car:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;We see wide roads with multiples lanes of traffic and no on-street parking — all of which induces fast driving.&lt;/li&gt;
+&lt;li&gt;While most of these images do contain a sidewalk (if you look very closely), none of them appear to be inviting places to walk, what with cars whipping by quickly right next to anyone walking.&lt;/li&gt;
+&lt;li&gt;Crosswalks are spaced far apart, if there are any at all. Anyone who wanted to cross the street in these images would have to walk a long way to the nearest stoplight and then sprint across several lanes of traffic in order to get to the other side.&lt;/li&gt;
+&lt;li&gt;The only greenery to be seen are empty lawns that serve no purpose. No trees shade the sidewalk.&lt;/li&gt;
+&lt;li&gt;Businesses on the edge of town require large signage that can be seen from inside a fast-moving vehicle—not small details that a passerby on foot might appreciate. &lt;/li&gt;
+&lt;li&gt;Every single business has a large parking lot in front of it, rather than more buildings that could house more economically productive businesses. &lt;/li&gt;
+&lt;li&gt;Buildings are only one story tall, which means that destinations are more spread out and tax revenue for each plot of land can only come from one business.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;This pattern repeats itself in towns and cities across America. When we build for people, we get economically prosperous places. When we build for cars, we get low-value developments. &lt;a href=&quot;https://www.strongtowns.org/journal/2017/1/9/the-real-reason-your-city-has-no-money&quot;&gt;The result is that the urban core is almost always financially propping up the entire city&lt;/a&gt;.&lt;/p&gt;
+&lt;h2&gt;People-Oriented Streets Provide a Better Return on Investment&lt;/h2&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block image-block sqs-block-image sqs-col-6 span-6 float float-left&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_13_1516216264089_16653&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline&quot;&gt;
+&lt;div class=&quot;intrinsic&quot;&gt;
+&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Source: Johnny Sanphillippo&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
+&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fb63d53450ad3bc23b838/1516222018914/31urbanstreet.jpg&quot; alt=&quot;Source: Johnny Sanphillippo&quot;/&gt;&lt;/p&gt;
+&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; alt=&quot;Source: Johnny Sanphillippo&quot; data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fb63d53450ad3bc23b838/1516222018914/31urbanstreet.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/t/5a5fb63d53450ad3bc23b838/1516222018914/31urbanstreet.jpg&quot; data-image-dimensions=&quot;1024x680&quot; data-image-focal-point=&quot;0.5,0.5&quot; data-load=&quot;false&quot; data-image-id=&quot;5a5fb63d53450ad3bc23b838&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div class=&quot;image-caption-wrapper&quot;&gt;
+&lt;div class=&quot;image-caption&quot;&gt;
+&lt;p&gt;Source: Johnny Sanphillippo&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_13_1516216264089_19265&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;But streets where walking is easy and safe are not just economically significant because of their impact on retail sales or tax values. They are also economically significant because of their incredibly high return on public investment.&lt;/p&gt;
+&lt;p&gt;The cost of paving sidewalks for people is minuscule compared with the cost of paving wide roads for cars, installing traffic signals, paying the salaries of traffic cops, etc. Even the cost of providing enhancements to pedestrian space such as trees and benches pale in comparison to what we spend when we build around cars. &lt;/p&gt;
+&lt;p&gt;Furthermore, the wear and tear caused by foot traffic is also negligible compared with the wear and tear caused by car and truck traffic, meaning that long-term maintenance costs for walk-friendly areas are also much lower than for auto-oriented places. (Ironically, most cities spend exponentially more on their roads while utterly neglecting their sidewalks.)&lt;/p&gt;
+&lt;p&gt;In short, a simple sidewalk could serve millions of people traveling on foot for decades, even centuries, with only a small amount of up-front investment and minimal maintenance costs for the city — yet it would support dozens or hundreds of local businesses. The same length of street designed primarily for cars would cost exponentially more to build and keep up and would only serve a handful of businesses.&lt;/p&gt;
+&lt;p&gt;And if that’s not enough to convince you, remember that it's not just walking infrastructure that's more affordable to build and maintain in and of itself. The businesses and homes that exist in walkable areas &lt;em&gt;also&lt;/em&gt; provide a better return on investment than the buildings in auto-oriented areas. The two streets below— one people-oriented and one auto-oriented — illustrate this clearly.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_19_1516216264089_39341&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;p&gt;In the first photo, we see that &lt;em&gt;just one side&lt;/em&gt; of this walkable block is occupied by more than a dozen businesses, most of which have apartments or offices above them.  Most of the buildings are 100+ years old and have been home to countless businesses and residences since they were constructed. Those initial investments we made a century ago are paying amazing dividends today.&lt;/p&gt;
+&lt;p&gt;In the second photo, we see a similar length of auto-oriented street whose buildings were constructed much more recently and will likely only ever serve on purpose: to house a Perkins restaurant. &lt;/p&gt;
+&lt;p&gt;The businesses in the first photo get to use all of their space for actually conducting business — serving food, selling products, and so on. Meanwhile, the lone Perkins in the second photo has to reserve most of its space for a parking lot and a large sign.&lt;/p&gt;
+&lt;p&gt;Invest in an auto-oriented street and you are temporarily filling a space that will likely be empty in a decade, draining life and tax value from your town.&lt;/p&gt;
+&lt;p&gt;Invest in a people-oriented street and you have created value that will continue to benefit your town for decades and even centuries to come.&lt;/p&gt;
+&lt;p class=&quot;text-align-center&quot;&gt;&lt;a href=&quot;https://www.strongtowns.org/slowthecars/&quot;&gt;&lt;strong&gt;Read more from our #SlowtheCars campaign.&lt;/strong&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;(Top photo source: &lt;a href=&quot;https://www.flickr.com/photos/dewita-soeharjono/&quot;&gt;Dewita Soeharjono&lt;/a&gt;. Thank you to Urban3 for sharing these graphics with us.)&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_5_1516115384092_67394&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;h3&gt;Related stories&lt;/h3&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sqs-block summary-v2-block sqs-block-summary-v2&quot; data-block-json=&quot;{&amp;quot;hSize&amp;quot;:null,&amp;quot;floatDir&amp;quot;:null,&amp;quot;collectionId&amp;quot;:&amp;quot;54b6c509e4b062126976d942&amp;quot;,&amp;quot;design&amp;quot;:&amp;quot;autogrid&amp;quot;,&amp;quot;headerText&amp;quot;:&amp;quot;Featured&amp;quot;,&amp;quot;textSize&amp;quot;:&amp;quot;medium&amp;quot;,&amp;quot;pageSize&amp;quot;:4,&amp;quot;imageAspectRatio&amp;quot;:&amp;quot;1.7777777777777777&amp;quot;,&amp;quot;columnWidth&amp;quot;:230,&amp;quot;gutter&amp;quot;:29,&amp;quot;listImageSize&amp;quot;:30,&amp;quot;listImageAlignment&amp;quot;:&amp;quot;left&amp;quot;,&amp;quot;slidesPerRow&amp;quot;:3,&amp;quot;textAlignment&amp;quot;:&amp;quot;left&amp;quot;,&amp;quot;showTitle&amp;quot;:true,&amp;quot;showThumbnail&amp;quot;:true,&amp;quot;showExcerpt&amp;quot;:true,&amp;quot;showReadMoreLink&amp;quot;:false,&amp;quot;showPrice&amp;quot;:true,&amp;quot;productQuickViewEnabled&amp;quot;:false,&amp;quot;showPastOrUpcomingEvents&amp;quot;:&amp;quot;upcoming&amp;quot;,&amp;quot;metadataPosition&amp;quot;:&amp;quot;below-content&amp;quot;,&amp;quot;primaryMetadata&amp;quot;:&amp;quot;date&amp;quot;,&amp;quot;secondaryMetadata&amp;quot;:&amp;quot;author&amp;quot;,&amp;quot;filter&amp;quot;:{&amp;quot;category&amp;quot;:&amp;quot;Walkability&amp;quot;,&amp;quot;featured&amp;quot;:false,&amp;quot;tag&amp;quot;:&amp;quot;page highlight&amp;quot;},&amp;quot;autoCrop&amp;quot;:true,&amp;quot;lightbox&amp;quot;:false,&amp;quot;mixedContent&amp;quot;:true,&amp;quot;blockId&amp;quot;:&amp;quot;ac55083ccd112e7748ba&amp;quot;}&quot; data-block-type=&quot;55&quot; id=&quot;block-yui_3_17_2_5_1516115384092_67934&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;div class=&quot; summary-block-wrapper summary-block-collection-type-blog summary-block-setting-text-size-medium summary-block-setting-text-align-left summary-block-setting-design-autogrid summary-block-setting-design-list-thumbnail-left summary-block-setting-metadata-position-below-content summary-block-setting-primary-metadata-date summary-block-setting-secondary-metadata-author summary-block-setting-show-thumbnail summary-block-setting-show-title summary-block-setting-show-price summary-block-setting-show-excerpt sqs-gallery-design-autogrid&quot;&gt;
+&lt;div class=&quot;summary-item-list-container sqs-gallery-container&quot;&gt;
+&lt;header class=&quot;summary-block-header&quot;&gt;
+
+&lt;/header&gt;&lt;div class=&quot;summary-item-list sqs-gallery&quot;&gt;
+&lt;div class=&quot; summary-item summary-item-record-type-text sqs-gallery-design-autogrid-slide summary-item-has-thumbnail summary-item-has-excerpt summary-item-has-cats summary-item-has-tags summary-item-has-author summary-item-has-comments-enabled&quot;&gt;
+&lt;div class=&quot;summary-thumbnail-outer-container&quot;&gt;
+&lt;div class=&quot;summary-thumbnail img-wrapper&quot;&gt;&lt;img data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/5965ab22b8a79be5247ffa3c/1502223908080/pedestrian+unfriendly+22.JPG&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/5965ab22b8a79be5247ffa3c/1502223908080/pedestrian+unfriendly+22.JPG&quot; data-image-dimensions=&quot;2500x1072&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;The Invisible Hand That Designed Your City&quot; data-load=&quot;false&quot; class=&quot;summary-thumbnail-image&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;summary-content sqs-gallery-meta-container&quot;&gt;
+
+
+
+&lt;div class=&quot;summary-excerpt&quot;&gt;
+&lt;p&gt;If you don't get involved in the planning of your city, it will be planned for you. Much of it already has been.&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot; summary-item summary-item-record-type-text sqs-gallery-design-autogrid-slide summary-item-has-thumbnail summary-item-has-excerpt summary-item-has-cats summary-item-has-tags summary-item-has-author summary-item-has-comments-enabled&quot;&gt;
+&lt;div class=&quot;summary-thumbnail-outer-container&quot;&gt;
+&lt;div class=&quot;summary-thumbnail img-wrapper&quot;&gt;&lt;img data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/5928634cc534a5c92a28170d/1512063002805/gillette+neighborhood.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/5928634cc534a5c92a28170d/1512063002805/gillette+neighborhood.jpg&quot; data-image-dimensions=&quot;921x415&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Stop Shoehorning Suburbia into Walkable Places&quot; data-load=&quot;false&quot; class=&quot;summary-thumbnail-image&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;summary-content sqs-gallery-meta-container&quot;&gt;
+
+
+
+&lt;div class=&quot;summary-excerpt&quot;&gt;
+&lt;p&gt;It’s pretty easy to destroy a walkable place. We’ve been doing it for so long.&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot; summary-item summary-item-record-type-text sqs-gallery-design-autogrid-slide summary-item-has-thumbnail summary-item-has-excerpt summary-item-has-cats summary-item-has-tags summary-item-has-author summary-item-has-comments-enabled&quot;&gt;
+&lt;div class=&quot;summary-thumbnail-outer-container&quot;&gt;
+&lt;div class=&quot;summary-thumbnail img-wrapper&quot;&gt;&lt;img data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/58f0e250197aea0b0dcaf746/1512685317323/Rollator-Age-Away-Go-Person-Walker-Human-339509.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/58f0e250197aea0b0dcaf746/1512685317323/Rollator-Age-Away-Go-Person-Walker-Human-339509.jpg&quot; data-image-dimensions=&quot;960x593&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;The Isolation of Aging in an Auto-Oriented Place&quot; data-load=&quot;false&quot; class=&quot;summary-thumbnail-image&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;summary-content sqs-gallery-meta-container&quot;&gt;
+
+
+
+&lt;div class=&quot;summary-excerpt&quot;&gt;
+&lt;p&gt;By designing our cities for cars, we have created landscapes that exclude the aging.&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot; summary-item summary-item-record-type-text sqs-gallery-design-autogrid-slide summary-item-has-thumbnail summary-item-has-excerpt summary-item-has-cats summary-item-has-tags summary-item-has-author summary-item-has-comments-enabled&quot;&gt;
+&lt;div class=&quot;summary-thumbnail-outer-container&quot;&gt;
+&lt;div class=&quot;summary-thumbnail img-wrapper&quot;&gt;&lt;img data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/58b5cb1e414fb5adb04c11da/1501266938590/1024px-Lancaster_Ohio_Main_Street.jpg&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/58b5cb1e414fb5adb04c11da/1501266938590/1024px-Lancaster_Ohio_Main_Street.jpg&quot; data-image-dimensions=&quot;1024x544&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Strength Test #1: How's your Main Street doing?&quot; data-load=&quot;false&quot; class=&quot;summary-thumbnail-image&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;summary-content sqs-gallery-meta-container&quot;&gt;
+
+
+
+&lt;div class=&quot;summary-excerpt&quot;&gt;
+&lt;p&gt;We're kicking off a new series going in-depth on the &lt;em&gt;Strong Towns Strength Test&lt;/em&gt; with an exploration of main street health. Today's question: Does your main street have more cars than people? &lt;/p&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;sqs-block summary-v2-block sqs-block-summary-v2&quot; data-block-json=&quot;{&amp;quot;hSize&amp;quot;:null,&amp;quot;floatDir&amp;quot;:null,&amp;quot;collectionId&amp;quot;:&amp;quot;54b6c50ae4b062126976ea98&amp;quot;,&amp;quot;design&amp;quot;:&amp;quot;list&amp;quot;,&amp;quot;headerText&amp;quot;:&amp;quot;Featured&amp;quot;,&amp;quot;textSize&amp;quot;:&amp;quot;medium&amp;quot;,&amp;quot;pageSize&amp;quot;:10,&amp;quot;imageAspectRatio&amp;quot;:&amp;quot;1.5&amp;quot;,&amp;quot;columnWidth&amp;quot;:270,&amp;quot;gutter&amp;quot;:60,&amp;quot;listImageSize&amp;quot;:30,&amp;quot;listImageAlignment&amp;quot;:&amp;quot;left&amp;quot;,&amp;quot;slidesPerRow&amp;quot;:3,&amp;quot;textAlignment&amp;quot;:&amp;quot;left&amp;quot;,&amp;quot;showTitle&amp;quot;:true,&amp;quot;showThumbnail&amp;quot;:true,&amp;quot;showExcerpt&amp;quot;:true,&amp;quot;showReadMoreLink&amp;quot;:false,&amp;quot;showPrice&amp;quot;:true,&amp;quot;productQuickViewEnabled&amp;quot;:false,&amp;quot;showPastOrUpcomingEvents&amp;quot;:&amp;quot;upcoming&amp;quot;,&amp;quot;metadataPosition&amp;quot;:&amp;quot;below-content&amp;quot;,&amp;quot;primaryMetadata&amp;quot;:&amp;quot;none&amp;quot;,&amp;quot;secondaryMetadata&amp;quot;:&amp;quot;none&amp;quot;,&amp;quot;filter&amp;quot;:{&amp;quot;category&amp;quot;:&amp;quot;Quednau&amp;quot;},&amp;quot;autoCrop&amp;quot;:true,&amp;quot;lightbox&amp;quot;:false,&amp;quot;mixedContent&amp;quot;:true,&amp;quot;blockId&amp;quot;:&amp;quot;d4cf75544c5123695585&amp;quot;}&quot; data-block-type=&quot;55&quot; id=&quot;block-yui_3_17_2_5_1516115384092_87836&quot;&gt;
+&lt;div class=&quot;sqs-block-content&quot;&gt;
+&lt;div class=&quot; summary-block-wrapper summary-block-collection-type-blog summary-block-setting-text-size-medium summary-block-setting-text-align-left summary-block-setting-design-list summary-block-setting-design-list-thumbnail-left summary-block-setting-metadata-position-below-content summary-block-setting-primary-metadata-none summary-block-setting-secondary-metadata-none summary-block-setting-show-thumbnail summary-block-setting-show-title summary-block-setting-show-price summary-block-setting-show-excerpt sqs-gallery-design-list&quot;&gt;
+&lt;div class=&quot;summary-item-list-container sqs-gallery-container&quot;&gt;
+&lt;header class=&quot;summary-block-header&quot;&gt;
+
+&lt;/header&gt;&lt;div class=&quot;summary-item-list sqs-gallery&quot;&gt;
+&lt;div class=&quot; summary-item summary-item-record-type-text sqs-gallery-design-list-slide summary-item-has-thumbnail summary-item-has-excerpt summary-item-has-cats summary-item-has-tags summary-item-has-author summary-item-has-comments-enabled&quot;&gt;
+&lt;div class=&quot;summary-thumbnail-outer-container&quot;&gt;
+&lt;div class=&quot;summary-thumbnail img-wrapper&quot;&gt;&lt;img data-src=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c50ae4b062126976ea98/55f883f6e4b03eacc66a6b84/1514307199086/&quot; data-image=&quot;https://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c50ae4b062126976ea98/55f883f6e4b03eacc66a6b84/1514307199086/&quot; data-image-dimensions=&quot;3264x2448&quot; data-image-focal-point=&quot;0.4734848484848485,0.5404040404040404&quot; alt=&quot;Rachel Quednau&quot; data-load=&quot;false&quot; class=&quot;summary-thumbnail-image&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;summary-content sqs-gallery-meta-container&quot;&gt;
+
+
+
+&lt;div class=&quot;summary-excerpt&quot;&gt;
+&lt;p&gt;Rachel Quednau serves as &lt;strong&gt;Communications Director&lt;/strong&gt; for Strong Towns and has been a regular contributor and &lt;a href=&quot;http://www.strongtowns.org/journal/?tag=the+week+ahead&quot;&gt;podcast host&lt;/a&gt; for Strong Towns since 2015. Previously, she worked for several organizations fighting to end homelessness at the federal and local levels. Rachel is a Midwesterner currently living in Milwaukee, WI with her husband, Jack, but draws from her experiences living in New York City, Washington, DC, Walla Walla, WA and Minneapolis, MN to help her build better places &lt;em&gt;wherever&lt;/em&gt; she is. Rachel has a B.A. in Religion from Whitman College. One of her favorite ways to get to know a new city is by going for a run in it. You can find her musings on Twitter &lt;a href=&quot;https://twitter.com/rquednau/&quot;&gt;@rquednau&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Interested in writing for Strong Towns or contacting us with a press inquiry?&lt;/strong&gt; &lt;a href=&quot;mailto:quednau@strongtowns.org&quot;&gt;Please email Rachel&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+</description>
+<pubDate>Thu, 18 Jan 2018 15:43:41 +0000</pubDate>
+<dc:creator>oftenwrong</dc:creator>
+<og:title>Why Walkable Streets are More Economically Productive</og:title>
+<og:url>https://www.strongtowns.org/journal/2018/1/16/why-walkable-streets-are-more-economically-productive</og:url>
+<og:type>article</og:type>
+<og:description>3 dollars and cents arguments that definitively prove the need for people-oriented, walk-friendly places.</og:description>
+<og:image>http://static1.squarespace.com/static/53dd6676e4b0fedfbc26ea91/54b6c509e4b062126976d942/5a5e174853450ab8996ddb54/1516298146574/4558849693_bf779c96ed_b.jpg?format=1000w</og:image>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.strongtowns.org/journal/2018/1/16/why-walkable-streets-are-more-economically-productive</dc:identifier>
+</item>
+<item>
+<title>Amazon announces candidate cities for HQ2</title>
+<link>https://www.amazon.com/b?node=17044620011</link>
+<guid isPermaLink="true" >https://www.amazon.com/b?node=17044620011</guid>
+<description>&lt;p&gt;&lt;img onload=&quot;window.uet &amp;amp;&amp;amp; uet.call &amp;amp;&amp;amp; uet(&amp;quot;af&amp;quot;) &amp;amp;&amp;amp; uet(&amp;quot;cf&amp;quot;);&quot; src=&quot;https://images-na.ssl-images-amazon.com/images/G/01//Anything/test/images/usa/20170607AmazonCampusAerials_js_08._V504517137_.jpg&quot; alt=&quot;Seattle HQ&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img onload=&quot;window.uet &amp;amp;&amp;amp; uet.call &amp;amp;&amp;amp; uet(&amp;quot;af&amp;quot;) &amp;amp;&amp;amp; uet(&amp;quot;cf&amp;quot;);&quot; src=&quot;https://images-na.ssl-images-amazon.com/images/G/01//blank/1x1_b._UR1,10_.gif&quot; alt=&quot;10px-spacer&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt;&lt;strong&gt;What will be the benefits for the city finally selected to host your second headquarters?&lt;/strong&gt;&lt;/h4&gt;
+&lt;p&gt;We expect to invest over $5 billion and grow our second headquarters location to be a full equal to Amazon’s current campus in Seattle, creating as many as 50,000 high-paying jobs. In addition to Amazon’s direct hiring and investment, construction and operation of HQ2 is expected to create tens of thousands of additional jobs and tens of billions of dollars in additional investment in the surrounding community.&lt;/p&gt;
+&lt;p&gt;Amazon estimates its investments in Seattle from 2010 through 2016 resulted in an additional $38 billion to the city’s economy – every dollar invested by Amazon in Seattle generated an additional $1.40 for the city’s economy overall.&lt;/p&gt;
+&lt;p&gt;&lt;img onload=&quot;window.uet &amp;amp;&amp;amp; uet.call &amp;amp;&amp;amp; uet(&amp;quot;af&amp;quot;) &amp;amp;&amp;amp; uet(&amp;quot;cf&amp;quot;);&quot; src=&quot;https://images-na.ssl-images-amazon.com/images/G/01//blank/1x1_b._UR1,10_.gif&quot; alt=&quot;10px-spacer&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt;&lt;strong&gt;Why is Amazon choosing its second headquarters location via a public process?&lt;/strong&gt;&lt;/h4&gt;
+&lt;p&gt;We want to find a city that is excited to work with us and where our customers, employees, and the community can all benefit.&lt;/p&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 14:12:48 +0000</pubDate>
+<dc:creator>uptown</dc:creator>
+<og:title>Amazon announces candidate cities for HQ2</og:title>
+<og:description>Amazon announces candidate cities for HQ2</og:description>
+<og:image>https://m.media-amazon.com/images/G/01/Anything/test/images/usa/social-1200600-hq2candidates._CB487771076_.jpg</og:image>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.amazon.com/b?node=17044620011</dc:identifier>
+</item>
+<item>
+<title>Fuze for Nintendo Switch: An easy-to-learn text-based programming language</title>
+<link>https://www.fuze.co.uk/nintendo-switch.html</link>
+<guid isPermaLink="true" >https://www.fuze.co.uk/nintendo-switch.html</guid>
+<description>&lt;div id=&quot;wsite-content&quot; class=&quot;wsite-elements wsite-not-footer&quot; readability=&quot;10.214285714286&quot;&gt;
+&lt;div&gt;
+&lt;div class=&quot;wsite-image wsite-image-border-none&quot;&gt;&lt;a&gt;&lt;img src=&quot;https://www.fuze.co.uk/uploads/8/0/7/1/80716398/fuze4nintendoswitchpressart_1_orig.png&quot; alt=&quot;Picture&quot;/&gt;&lt;/a&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;FUZE for Nintendo Switch&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;Easy to learn text based programming language&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​No coding experience required&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​Create your own apps and fast 2D - 3D games&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​Access Joycon sensors and controls directly in your programs&lt;br/&gt;&lt;/span&gt;&lt;span&gt;​Use the Dock to show your games on your TV to share with friends and family&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​Programmable synthesizer &amp;amp; Speech engine&lt;br/&gt;&lt;/span&gt;&lt;span&gt;​Use the included game graphics &amp;amp; audio or create your own&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​​Extra  content packs will be available to download&lt;br/&gt;&lt;/span&gt;&lt;span&gt;Use a USB keyboard, the FUZE touch keyboard or the Joycons to enter your code&lt;/span&gt;&lt;br/&gt;&lt;span&gt;​Comes with game graphics and audio and you can create your own&lt;br/&gt;&lt;/span&gt;&lt;span&gt;​Learn to code&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;div readability=&quot;6&quot;&gt;
+&lt;div class=&quot;wsite-image wsite-image-border-none&quot; readability=&quot;7&quot;&gt;&lt;a href=&quot;https://www.fuze.co.uk/uploads/8/0/7/1/80716398/switchfuzeonscreenkeyboard_orig.png&quot; rel=&quot;lightbox&quot; onclick=&quot;if (!lightboxLoaded) return false&quot;&gt;&lt;img src=&quot;https://www.fuze.co.uk/uploads/8/0/7/1/80716398/published/switchfuzeonscreenkeyboard.png?1499170383&quot; alt=&quot;Picture&quot;/&gt;&lt;/a&gt;
+&lt;p&gt;Images are are for illustration only. They are not accurate representations of the final product.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div class=&quot;wsite-image wsite-image-border-none&quot;&gt;&lt;a&gt;&lt;img src=&quot;https://www.fuze.co.uk/uploads/8/0/7/1/80716398/editor/keyboardimage.png?1499170718&quot; alt=&quot;Picture&quot;/&gt;&lt;/a&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div class=&quot;wsite-multicol&quot;&gt;
+&lt;div class=&quot;wsite-multicol-table-wrap&quot;&gt;
+&lt;table class=&quot;wsite-multicol-table&quot;&gt;&lt;tbody class=&quot;wsite-multicol-tbody&quot; readability=&quot;27&quot;&gt;&lt;tr class=&quot;wsite-multicol-tr&quot; readability=&quot;6&quot;&gt;&lt;td class=&quot;wsite-multicol-col&quot;&gt;
+
+&lt;/td&gt;
+&lt;td class=&quot;wsite-multicol-col&quot; readability=&quot;7&quot;&gt;
+&lt;p&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;Hello from teamFUZE&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;​&lt;br/&gt;Please feel free to leave comments or ask questions below. Please note this is an education platform and as such we will keep it moderated. Anything we consider unsuitable or not relevant to FUZE for Nintendo Switch will not be posted.  This is a family show folks!&lt;/span&gt;&lt;/p&gt;
+&lt;/td&gt;
+&lt;td class=&quot;wsite-multicol-col&quot;&gt;
+
+&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 13:02:56 +0000</pubDate>
+<dc:creator>E765</dc:creator>
+<og:title>FUZE for Nintendo Switch</og:title>
+<og:description>Learn to code with FUZE for Nintendo Switch. Create and share your own games. Coming Q2 2018</og:description>
+<og:image>http://www.fuze.co.uk/uploads/8/0/7/1/80716398/fuze4nintendoswitchpressart_1_orig.png</og:image>
+<og:url>http://www.fuze.co.uk/nintendo-switch.html</og:url>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.fuze.co.uk/nintendo-switch.html</dc:identifier>
+</item>
+<item>
+<title>Airbus Handed A380 Lifeline With $16B Emirates Order</title>
+<link>https://www.bloomberg.com/news/articles/2018-01-18/emirates-orders-20-a380s-worth-9-billion-in-vital-program-boost</link>
+<guid isPermaLink="true" >https://www.bloomberg.com/news/articles/2018-01-18/emirates-orders-20-a380s-worth-9-billion-in-vital-program-boost</guid>
+<description>&lt;p&gt;&lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/quote/AIR:FP&quot; title=&quot;Company Overview&quot; rel=&quot;nofollow noopener&quot;&gt;Airbus SE&lt;/a&gt; pulled its flagship A380 superjumbo back from the brink with a follow-up order from &lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/quote/1000Z:UH&quot; title=&quot;Company Overview&quot; rel=&quot;nofollow noopener&quot;&gt;Emirates&lt;/a&gt;, giving the giant jet a new lease of life days after the planemaker floated the possibility of killing it off amid slack demand.&lt;/p&gt;
+
+
+&lt;p&gt;The Dubai-based carrier, already the biggest A380 customer, signed an outline agreement for 20 of the double-deckers with an option to buy 16 more, worth a potential $16 billion at list prices, it said Thursday, handing Airbus the first orders for the model in more than two years.&lt;/p&gt;
+
+
+&lt;p&gt;The purchase will extend A380 production until 2029 if Emirates takes all of the planes, according to Airbus, which as recently as Monday had acknowledged that the program could be &lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/news/articles/2018-01-15/airbus-stakes-future-of-a380-jumbo-on-new-order-from-emirates&quot; title=&quot;Airbus Floats Shutdown of A380 Superjumbo as Orders Stall&quot; target=&quot;_blank&quot;&gt;terminated&lt;/a&gt; without a new sale soon. The carrier had scuttled a deal for the same number of aircraft toward the end of last year amid doubts about the manufacturer’s dedication to improving the plane.&lt;/p&gt;
+
+
+
+&lt;p&gt;“This new order underscores Airbus’s commitment to produce the A380 at least for another 10 years,” John Leahy, the Toulouse, France-based company’s outgoing sales chief, said in a statement. “I’m personally convinced more orders will follow Emirates’s example.”&lt;/p&gt;
+
+
+&lt;div class=&quot;video-player&quot;&gt;
+
+&lt;div class=&quot;video-player__curtain&quot;&gt;&lt;img src=&quot;https://assets.bwbx.io/images/users/iqjWHBFdfxIU/ia2d9KxLVwUg/v5/640x-1.jpg&quot; srcset=&quot;https://assets.bwbx.io/images/users/iqjWHBFdfxIU/ia2d9KxLVwUg/v5/640x-1.jpg 640w, https://assets.bwbx.io/images/users/iqjWHBFdfxIU/ia2d9KxLVwUg/v5/680x-1.jpg 680w, https://assets.bwbx.io/images/users/iqjWHBFdfxIU/ia2d9KxLVwUg/v5/740x-1.jpg 740w&quot; sizes=&quot;(min-width:761px) and (max-width:1020px) 680px, (min-width:1021px) and (max-width:1280px) 640px, (min-width:1281px) 740px, 100vw&quot;/&gt;&lt;div class=&quot;video-player__overlay&quot; data-playerid=&quot;player-3z7DAJ8&quot;&gt;&lt;img class=&quot;video-player__play-icon&quot; src=&quot;https://assets.bwbx.io/s3/javelin/public/javelin/images/play-076012604d.svg&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;news-figure-caption-text&quot; readability=&quot;32&quot;&gt;
+&lt;p&gt;Bloomberg’s Guy Johnson reports on Emirates’ order for 20 Airbus A380 jets.&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;(Source: Bloomberg)&lt;/p&gt;
+&lt;p&gt;The new aircraft will be delivered from 2020, with engine options still under evaluation. Rolls-Royce Holdings Plc is supplying turbines as part of Emirates’s most recent order for 50 A380s, while the Engine Alliance of &lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/quote/GE:US&quot; title=&quot;Company Overview&quot; rel=&quot;nofollow noopener&quot;&gt;General Electric Co.&lt;/a&gt; and Pratt &amp;amp; Whitney powered the previous 90.&lt;/p&gt;
+&lt;p&gt;If Emirates signs off on the full deal it will have committed to a total of 178 A380s, or more than half of all orders for the plane worldwide. The carrier currently has 101 superjumbos in its fleet, and many older aircraft will have been phased out before the new batch arrives.&lt;/p&gt;
+&lt;div class=&quot;chart&quot; data-responsive=&quot;true&quot; readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;chart-js&quot; readability=&quot;10&quot;&gt;
+&lt;h3 class=&quot;chart__title&quot;&gt;Super-Sized Customer&lt;/h3&gt;
+&lt;p class=&quot;chart__subtitle&quot;&gt;Emirates plans to buy 36 more A380s, cementing its position as the jet's main buyer&lt;/p&gt;
+
+&lt;p class=&quot;chart__source&quot;&gt;Note: Figures represent outstanding deliveries; Emirates hasn't firmed latest order&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;noscript&gt;
+&lt;p&gt;&lt;img src=&quot;https://assets.bwbx.io/images/users/iqjWHBFdfxIU/ilYa9xI7VLTs/v1/-1x-1.png&quot;/&gt;&lt;/p&gt;
+&lt;/noscript&gt;&lt;/div&gt;
+&lt;p&gt;Airbus’s failure to land the order in November at the Dubai Air Show left the manufacturer red faced, with Emirates pulling out just minutes before an announcement was due as dignitaries were gathering for the event. Salvaging the deal will be especially important to Leahy, allowing him to deliver a final coup before standing down as sales supremo next week.&lt;/p&gt;
+&lt;p&gt;The planemaker and airline have developed an almost symbiotic relationship around the A380. Emirates has given the superjumbo a public profile it would otherwise have struggled to attain, while the 550-seat jet has enabled the carrier divert a significant proportion of global traffic via what’s a natural global crossroads but which was for so long an aviation backwater.&lt;/p&gt;
+
+&lt;p&gt;For Airbus the deal will avoid an early shutdown of its most prominent program, the oldest examples from which are barely 10 years old. The company is also keen to keep the A380 going in anticipation of the global travel market favoring bigger planes in years to come as the number of people flying climbs and runways become more and more crowded.&lt;/p&gt;
+&lt;p data-tout-type=&quot;story&quot;&gt;&lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/news/articles/2018-01-18/emirates-orders-20-a380s-worth-9-billion-in-vital-program-boost&quot; title=&quot;Click for full story&quot; target=&quot;_blank&quot;&gt;For a recap of the high-tension earlier talks with Emirates, click here&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Emirates Chairman Sheikh Ahmed bin Saeed Al Maktoum, who signed the deal with Leahy in Dubai, said is company will now work with Airbus “to further enhance the aircraft and onboard product.”&lt;/p&gt;
+&lt;aside class=&quot;inline-newsletter&quot; data-state=&quot;ready&quot;/&gt;&lt;p&gt;The option component of the order may give Emirates leverage to press for enhancements possibly up to a re-engined version of the plane, Jefferies International Ltd. analyst Sandy Morris said in a note. The Gulf carrier previously dangled the possibility of as many as 200 orders if Airbus agreed to develop the new engine option or Neo, only for the manufacturer and Rolls-Royce to push back against the proposal.&lt;/p&gt;
+&lt;p&gt;A spokesman for London-based Rolls said it welcomes the opportunity to “be selected again by Emirates,” while declining to comment further.&lt;/p&gt;
+&lt;p&gt;As of the end of last year, Airbus had a total of 95 unfilled A380 orders, though only 48 of those, the vast bulk from Emirates, can be regarded as credible, according to Morris. Orders from carriers including &lt;a itemscope=&quot;itemscope&quot; itemprop=&quot;StoryLink&quot; href=&quot;https://www.bloomberg.com/quote/2588Z:LN&quot; title=&quot;Company Overview&quot; rel=&quot;nofollow noopener&quot;&gt;Virgin Atlantic Airways Ltd.&lt;/a&gt; and sat on the books undelivered for years.&lt;/p&gt;
+&lt;p&gt;Airbus shares rose as much as 3.1 percent and traded 2.6 percent higher as of 12:55 p.m. in Paris.&lt;/p&gt;
+</description>
+<pubDate>Thu, 18 Jan 2018 10:49:24 +0000</pubDate>
+<dc:creator>jamesdgb</dc:creator>
+<og:description>Airbus SE pulled its flagship A380 superjumbo back from the brink with a follow-up order from Emirates, giving the giant jet a new lease of life days after the planemaker floated the possibility of killing it off amid slack demand.</og:description>
+<og:image>https://assets.bwbx.io/s3/javelin/public/javelin/images/social-default-a4f15fa7ee.jpg</og:image>
+<og:title>Airbus Handed A380 Lifeline With $16 Billion Emirates Order</og:title>
+<og:type>article</og:type>
+<og:url>https://www.bloomberg.com/news/articles/2018-01-18/emirates-orders-20-a380s-worth-9-billion-in-vital-program-boost</og:url>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.bloomberg.com/news/articles/2018-01-18/emirates-orders-20-a380s-worth-9-billion-in-vital-program-boost</dc:identifier>
+</item>
+<item>
 <title>JS Paint – A web-based MS Paint remake</title>
 <link>http://jspaint.ml/</link>
 <guid isPermaLink="true" >http://jspaint.ml/</guid>
-<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://jspaint.ml/&quot;&gt;http://jspaint.ml/&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16174478&quot;&gt;https://news.ycombinator.com/item?id=16174478&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 697&lt;/p&gt;&lt;p&gt;# Comments: 189&lt;/p&gt;</description>
+<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://jspaint.ml/&quot;&gt;http://jspaint.ml/&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16174478&quot;&gt;https://news.ycombinator.com/item?id=16174478&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 818&lt;/p&gt;&lt;p&gt;# Comments: 229&lt;/p&gt;</description>
 <pubDate>Thu, 18 Jan 2018 03:35:23 +0000</pubDate>
 <dc:creator>hjek</dc:creator>
 <dc:format>text/html</dc:format>
@@ -92,7 +825,7 @@
 &lt;li&gt;&lt;strong&gt;Humble&lt;/strong&gt; is at least as good as you at most things and already has a bunch of people locked into a fancy little subscription service and they give more money to charity than you.&lt;/li&gt;
 &lt;li&gt;&lt;strong&gt;Itch&lt;/strong&gt; has the best tools and lowest overhead, and also by the way the devotion of all the scrappy small-time indies you thought were free for the taking.&lt;/li&gt;
 &lt;/ul&gt;&lt;p&gt;Good luck out there, and mind the sharks.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://news.ycombinator.com/submitlink?u=http%3A%2F%2Fwww.fortressofdoors.com%2Fso-you-want-to-compete-with-steam%2F&amp;amp;t=So%20You%20Want%20To%20Compete%20With%20Steam&quot;&gt;Discuss this on Hacker News&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=16173199&quot;&gt;Discuss this on Hacker News&lt;/a&gt;&lt;/p&gt;
 </description>
 <pubDate>Wed, 17 Jan 2018 23:46:41 +0000</pubDate>
 <dc:creator>eugenekolo2</dc:creator>
@@ -121,409 +854,6 @@
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://labo.nintendo.com/</dc:identifier>
-</item>
-<item>
-<title>Nintendo Labo: make, play, and discover</title>
-<link>https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html</link>
-<guid isPermaLink="true" >https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html</guid>
-<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html&quot;&gt;https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16172491&quot;&gt;https://news.ycombinator.com/item?id=16172491&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 273&lt;/p&gt;&lt;p&gt;# Comments: 1&lt;/p&gt;</description>
-<pubDate>Wed, 17 Jan 2018 22:09:11 +0000</pubDate>
-<dc:creator>cyanbane</dc:creator>
-<og:type>website</og:type>
-<og:url>https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html</og:url>
-<og:title>Create new ways to play with Nintendo Labo!</og:title>
-<og:description>Nintendo Labo lets anyone easily pick up and enjoy making, playing and discovering. By assembling sheets of cardboard into a variety of shapes called Toy-Con, and combining them with Nintendo Switch, you can bring them to life!</og:description>
-<og:image>http://cdn02.nintendo-europe.com/media/images/10_share_images/systems_11/nintendo_switch_1/nintendo_labo/H2x1_Labo_Generic_enGB_image1280w.jpg</og:image>
-<dc:language>en-GB</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.nintendo.co.uk/Nintendo-Labo/Nintendo-Labo-1328637.html</dc:identifier>
-</item>
-<item>
-<title>Indefinite solitary confinement in Canadian prisons ruled unconstitutional</title>
-<link>http://www.cbc.ca/news/canada/british-columbia/charter-solitary-confinement-bc-ruling-1.4491526</link>
-<guid isPermaLink="true" >http://www.cbc.ca/news/canada/british-columbia/charter-solitary-confinement-bc-ruling-1.4491526</guid>
-<description>&lt;p&gt;A B.C. Supreme Court judge has ruled that the practice of prolonged and indefinite solitary confinement in Canadian prisons is unconstitutional. &lt;/p&gt;
-&lt;p&gt;In a lengthy ruling released Wednesday, Justice Peter Leask found that the laws surrounding what is known as administrative segregation in prison discriminate against Aboriginal and mentally ill inmates.&lt;/p&gt;
-&lt;p&gt;He said the existing rules create a situation in which a warden becomes judge and jury in terms of ordering extended periods of solitary confinement.&lt;/p&gt;
-&lt;p&gt;&quot;I find as a fact that administrative segregation … is a form of solitary confinement that places all Canadian inmates subject to it at significant risk of serious psychological harm, including mental pain and suffering, and increased incidence of self-harm and suicide,&quot; Leask wrote.&lt;/p&gt;
-&lt;h2&gt;'Stunning decision'&lt;/h2&gt;
-&lt;p&gt;The B.C. Civil Liberties Association (BCCLA) and the John Howard Society of Canada (JHSC) brought the challenge against the federal government, arguing that rules regarding administrative segregation, more commonly known as solitary confinement, are inhuman and unconstitutional.&lt;/p&gt;
-&lt;p&gt;Leask said he was prepared to suspend his ruling for 12 months in order to give the government time to craft an appropriate legislative response to his concerns.&lt;/p&gt;
-&lt;p&gt;&quot;This is the most significant prison law decision from a trial court in Canadian history,&quot; said Jay Aubrey, a staff lawyer with the BCCLA.&lt;/p&gt;
-&lt;p&gt;&quot;It is a stunning decision that is grounded in four decades of history, and the best social science and medical evidence on the impact on inmates health of solitary confinement, and alternatives to solitary confinement.&quot;&lt;/p&gt;
-&lt;p&gt;The BCCLA and other intervenors argued that the sections of the Corrections and Conditional Release Act governing the practice of administrative segregation &quot;permit indeterminate and prolonged solitary confinement&quot; which has &quot;significant adverse effects on the physical, psychological and social health of inmates.&quot;&lt;/p&gt;
-&lt;div class=&quot;figure&quot; readability=&quot;8&quot;&gt;&lt;img src=&quot;https://i.cbc.ca/1.2097769.1381990697!/httpImage/image.jpg_gen/derivatives/original_620/tp-ashley-smith-9743048.jpg&quot; alt=&quot;tp-ashley-smith-9743048&quot; width=&quot;100%&quot;/&gt;&lt;p class=&quot;figure-caption&quot;&gt;Ashley Smith took her own life inside a federal prison in 2007 after prolonged time in administrative segregation.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;Public Safety Minister Ralph Goodale said in a statement the government will review the B.C. judgment along with an Ontario ruling which found administrative segregation for longer than five days is unconstitutional.&lt;/p&gt;
-&lt;p&gt;Goodale said the government has new legislation before Parliament to impose time limits and independent oversight on solitary confinement. He also said Ottawa is improving conditions of confinement and investing nearly $60 million toward the treatment of mental illness.&lt;/p&gt;
-&lt;p&gt;&quot;We will identify any further and better ideas that need to be incorporated in our reform package,&quot; Goodale said. &quot;But we have been proactive from the beginning and our work is already well advanced.&quot;&lt;/p&gt;
-&lt;h2&gt;Litany of tragic cases&lt;/h2&gt;
-&lt;p&gt;In his ruling, Leask cited many of the tragic cases which brought the issue of solitary confinement to the forefront in recent years, including that of Ashley Smith, a 19-year-old who died in a segregated prison cell in Kitchener, Ont., in 2007. A coroner's jury ruled Smith's self-inflicted choking death was a homicide.&lt;/p&gt;
-&lt;p&gt;The judge also cites the death of Edward Snowshoe, a 22-year-old who took his own life at the Edmonton Institution in August 2010 after spending more than five months in segregation. A public inquiry concluded he had &quot;fallen through the cracks&quot; and that corrections officials were unaware he had attempted suicide numerous times at a previous facility and that he had been in segregation as long as he had.&lt;/p&gt;
-&lt;p&gt;&quot;On the evidence before this court, the most serious deficiency in dealing with administrative segregation is the inadequacy of the government's processes for dealing with the mentally ill,&quot; Leask wrote.&lt;/p&gt;
-&lt;p&gt;&quot;I am satisfied the law … fails to respond to the actual capacities and needs of mentally ill inmates and instead imposes burdens in a manner that has the effect of reinforcing, perpetuating or exacerbating their disadvantage.&quot;&lt;/p&gt;
-&lt;p&gt;Leask also called on the correctional service to make a concerted effort to improve programs for Aboriginal inmates, who are over-represented in segregation.&lt;/p&gt;
-&lt;p&gt;&quot;Beyond the risk of psychological harm inherent in the segregation experience itself, the fact that Aboriginal inmates are placed in segregation more often, with limited access to programming, impacts their ability to transfer to lower security institutions and to obtain conditional release, as they may not have been able to carry out their correctional plan and may not be perceived as significantly rehabilitated as a result,&quot; Leask wrote.&lt;/p&gt;
-&lt;div class=&quot;figure&quot; readability=&quot;11&quot;&gt;&lt;img src=&quot;https://i.cbc.ca/1.4179732.1498579647!/fileImage/httpImage/image.jpg_gen/derivatives/original_620/edward-snowshoe.jpg&quot; alt=&quot;Edward Snowshoe&quot; width=&quot;100%&quot;/&gt;&lt;p class=&quot;figure-caption&quot;&gt;Edward Snowshoe, top right, with his family from Fort McPherson, N.W.T. Snowshoe took his own life after 162 days in segregation. (CBC News)&lt;/p&gt;
-&lt;/div&gt;
-&lt;h2&gt;'Meaningful human contact'&lt;/h2&gt;
-&lt;p&gt;The Corrections and Conditional Release Act provides for two types of segregation: disciplinary and administrative. Disciplinary segregation is limited to 30 days, whereas the length of administrative segregation is effectively left to the discretion of the warden.&lt;/p&gt;
-&lt;p&gt;The Attorney General of Canada argued that administrative segregation as practised in federal prisons is not solitary confinement, since inmates have &quot;daily opportunity for meaningful human contact.&quot;&lt;/p&gt;
-&lt;p&gt;They also claimed that administrative segregation is a necessary tool and that the length of placements is not indeterminate but calculated by the time needed to eliminate safety or security issues.&lt;/p&gt;
-&lt;p&gt;The Attorney General asked for the 12 month suspension in the event that Leask ruled against them, arguing that the break would give the legislature &quot;sufficient time to craft an appropriate legislative response.&quot;&lt;/p&gt;
-&lt;p&gt;Leask agreed, saying an immediate declaration of invalidity would pose a &quot;potential danger to the public or threaten the rule of law.&quot;&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 20:01:25 +0000</pubDate>
-<dc:creator>joering2</dc:creator>
-<og:title>Indefinite solitary confinement in Canadian prisons ruled unconstitutional by B.C. court</og:title>
-<og:url>http://www.cbc.ca/news/canada/british-columbia/charter-solitary-confinement-bc-ruling-1.4491526</og:url>
-<og:image>https://i.cbc.ca/1.4491532.1516213188!/fileImage/httpImage/image.jpg_gen/derivatives/16x9_1180/segregation-decision.jpg</og:image>
-<og:description>A B.C. Supreme Court judge has ruled that the practice of indefinite solitary confinement in Canadian prisons is unconstitutional.</og:description>
-<og:type>article</og:type>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cbc.ca/news/canada/british-columbia/charter-solitary-confinement-bc-ruling-1.4491526</dc:identifier>
-</item>
-<item>
-<title>Microsoft MakeCode</title>
-<link>https://makecode.com/</link>
-<guid isPermaLink="true" >https://makecode.com/</guid>
-<description>&lt;p&gt;&lt;iframe height=&quot;200&quot; src=&quot;https://www.youtube.com/embed/GYmdTFvxz80?html5=1&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
-&lt;div class=&quot;content&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;Air Guitar&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;micro:bit&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Use the light sensor and accelerometer to make sounds for a homemade cardboard air guitar.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;&lt;iframe height=&quot;200&quot; src=&quot;https://www.youtube.com/embed/VLdWm7LBGjs?html5=1&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
-&lt;div class=&quot;content&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;Mega Jump!&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;Minecraft&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Code a mod that lets you jump super high in Minecraft.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;&lt;iframe height=&quot;200&quot; src=&quot;https://www.youtube.com/embed/Us-tH3SP8XE?html5=1&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
-&lt;div class=&quot;content&quot; readability=&quot;9&quot;&gt;
-&lt;p&gt;Magic Wand&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;Circuit Playground Express&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;A colorful wand that plays a tune when shaken.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class=&quot;image&quot;&gt;&lt;img src=&quot;https://pxt.azureedge.net/blob/714618d6fa1f3befe697c55125e0d4a3b082e326/static/mb/projects/wallet/wallet.jpg&quot; alt=&quot;A micro:bit on a wallet made from duct tape&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;content&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;Duct Tape Wallet&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;micro:bit&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Put a micro:bit on a wallet made from duct tape to count your money.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;&lt;iframe height=&quot;200&quot; src=&quot;https://www.youtube.com/embed/Ah4fEbJtklU?html5=1&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
-&lt;div class=&quot;content&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;Milk Carton Robot&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;micro:bit&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Build a little robot out of a milk carton that moves based on light sensor input.&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class=&quot;image&quot;&gt;&lt;img src=&quot;https://pxt.azureedge.net/blob/61913b89f9fa2d732f9bc6889382245140fb44f8/static/images/circuit_playground_laserTag_IMG_0486_2k.jpg&quot; alt=&quot;A CircuitPlayground laser tag&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;content&quot; readability=&quot;9&quot;&gt;
-&lt;p&gt;Laser Tag&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;ms-fontWeight-semibold&quot;&gt;Circuit Playground Express&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Use infrared IR transmission to blast your targets!&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 19:57:22 +0000</pubDate>
-<dc:creator>mdturnerphys</dc:creator>
-<og:title>Microsoft MakeCode</og:title>
-<og:url>https://www.makecode.com</og:url>
-<og:type>website</og:type>
-<og:description>Microsoft MakeCode is a free, open-source Block and JavaScript learn-to-code editor that promotes a more inclusive approach to computing education.</og:description>
-<og:image>https://pxt.azureedge.net/blob/ee2d103669ba726a97f02df3e0d90d7704adac05/static/logo/logo-card.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://makecode.com/</dc:identifier>
-</item>
-<item>
-<title>Who the Hell Uses Onion Juice?</title>
-<link>http://markbittman.com/who-the-hell-uses-onion-juice/</link>
-<guid isPermaLink="true" >http://markbittman.com/who-the-hell-uses-onion-juice/</guid>
-<description>&lt;div class=&quot;p_embed p_image_embed&quot;&gt;&lt;img alt=&quot;Howards_onion_juice&quot; src=&quot;http://asdoasdiadnsiuhiwuh.files.wordpress.com/2010/05/howards_onion_juice-scaled500.gif&quot; width=&quot;170&quot; height=&quot;504&quot;/&gt;&lt;/div&gt;
-&lt;p&gt;By John Thorne (&lt;a href=&quot;http://www.outlawcook.com/&quot;&gt;http://www.outlawcook.com/&lt;/a&gt;)&lt;/p&gt;
-&lt;p&gt;The other day I was leafing through a vintage edition of The Fannie Farmer Boston Cooking School Cookbook looking for American chop suey (a story for another time), when my eye fell on a recipe with an ingredient list that included a “few drops onion juice” — and suddenly I was a child again, poking around in my grandmother’s kitchen.&lt;/p&gt;
-&lt;p&gt;It was an odd little room. The family lived on the bottom floor of a large duplex, built by my grandfather in the 1920s in Wollaston, on Boston’s South Shore. Long before I came along, my grandmother purchased a piano and turned the dining room into the piano room. Thus, the kitchen became the dining room and the adjoining pantry became the kitchen. It was just wide enough to hold the kitchen sink at one end and the gas stove at the other. (The refrigerator sat in the dining room.) Between them ran a narrow counter and, above and below it, storage shelves for cookware and food. This was the kitchen in which Nana prepared meals for a family of five children (my mother the only girl).&lt;br/&gt;&lt;span id=&quot;more-18837826&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;How she did it I’ll never know, partly because by the time I was old enough to attend to such things, rheumatoid arthritis had laid her low. However, in those days lots of kitchen shelves were not a necessity: a grocery order was a phone call away, and the milkman and the Cushman’s Bakery man came to the back door. (In fact, they came right through it, shouting a welcome as they did.) I do know that Nana was a good cook if a plain Yankee one, proud of her baking and willing to go the extra distance to give plain fare a touch of the special.&lt;/p&gt;
-&lt;p&gt;Even so, she required little in the way of seasonings. I still recall those yellow rectangular tins with the Stickney &amp;amp; Poor brand name spelled out in bright red script: clove, cinnamon, nutmeg, mustard, and black pepper. Apart from a box of Bell’s poultry seasoning and a bottle of vanilla extract, the only other thing I remember is Howard’s Onion Juice, in its oddly elongated bottle.&lt;/p&gt;
-&lt;p&gt;As a child, I had no interest in cooking, and not even a little boy could have fitted in the kitchen when Nana was at work. However, when I learned to read, I found the act so thrilling that I practiced this new skill on every label that came my way. When I parsed out the words “onion juice” I was deeply shocked. These were two words that simply did not belong together. Some juices, like grape juice, were rare treats, other juices — apple, orange, tomato — were a regular part of my life (all, by the way, poured out of cans), but … onion juice?  Did Grampa and Nana secretly drink the stuff? I never dared ask, but I never forgot, either.&lt;/p&gt;
-&lt;p&gt;I put aside the search for American chop suey aside, lost in contemplation. Onion juice. I couldn’t remember it called for in any other cookbook. Do people still cook with it? Can you even buy it? It took but a moment at the keyboard to answer those questions: Howard’s Onion Juice still exists. Amazon.com sells it by the case. And people were attesting to how glad they were to find it, how they needed it for their spaghetti sauce and sloppy joes, their salad dressing.&lt;/p&gt;
-&lt;p&gt;Well, there was no way I was going to order a case. Still, curiosity piqued, I decided to check out likely suspects here in Northampton (MA). First, I drove over to  Big Y, a local supermarket chain that prides itself on its New England roots, and poked around. But where should I look? On the spice shelves? Among the hot sauces? The gravy mixes? I finally asked one of the clerks. The query went up the management chain and came back down: “Never heard of it.”&lt;/p&gt;
-&lt;p&gt;I tried our local grocery, Serios; their next-door competitor, State Street Fruit; then on to Atkin’s Farm Stand (unlikely, you think, but I did leave there with a bottle of Spanish sherry vinegar, a jar of an organic Indian simmer sauce, and a &lt;a href=&quot;http://www.morethangourmet.com/our-products/ready-to-use-sauces/red-wine-sauce&quot;&gt;little carton of red wine foundation sauce&lt;/a&gt; — impulse buying, my middle names). But, as to onion sauce, no, no, and no. I gave up and emailed &lt;a href=&quot;http://www.howardfoods.com/sj.html&quot;&gt;Howard’s Foods&lt;/a&gt; for help. They kindly pointed out that both their onion and garlic juices were sold at our other local supermarket, Stop &amp;amp; Shop. I had, in fact, looked there, but had suffered input overload in front of the dazzling (if mostly meretricious) display of seasonings. I simply failed to see it.&lt;/p&gt;
-&lt;p&gt;Howard’s Onion Juice. The ingredient list is short and impeccable: onion juice, vinegar, salt. Despite a yelp of protest from my inner child, I take a nip straight from the bottle. (I had just finished eating a Greek salad and thought, “How could it hurt?”). It didn’t. Although the bottle claims that one teaspoon is equal to half an onion, Howard’s Onion Juice has none of that sharp-toothed bite of raw onion. In fact, it tastes sort of like onion breath smells — except now it’s in your own mouth and doesn’t go away.&lt;/p&gt;
-&lt;p&gt;A politer way of saying this is that tastes like juice extracted from a boiled onion, plus a zip of vinegar. Unfortunately, my whole goal when cooking onions is to fry out the juice, and with it that hint of skunk cabbage. Not that I mean to diss Howard’s product. I can see adding a splash to anything liquid (soups, stews, broths) that could use a hit of the vegetable’s simultaneously tasty and malodorous vibes. But, really, is that what onion juice is all about? I know old-time cooks held garlic at arms’ length. But they didn’t treat onions like that — and certainly not cooked onions. There had to be something more to the story — and to Nana’s cooking — than this.&lt;/p&gt;
-&lt;p&gt;Back I went to Fannie Farmer. We have twelve editions in our collection — not all of them, but most. Onion juice is there from the first, not poured from a bottle but made as needed right on the spot. In the original volume, you were instructed to get it by working the cut surface with a fine grater, but soon some culinary quick-wit discovered a much simpler method: “Cut a slice from the root end of the onion; scrape the juice with the edge of a teaspoon.”&lt;/p&gt;
-&lt;p&gt;Try it. What you get isn’t so much juice as a thickish pulp, and it’s charged with flavor, right up there (almost) with finely minced raw garlic. As soon as I dipped a finger in it, I had to mix it up with some butter and eat it on toast. I surely breathed fire for an hour afterwards, a small price to pay for something so deliciously potent. This stuff is definitely not for kids.&lt;/p&gt;
-&lt;p&gt;That naked power also explains why it was often added by the drop — and added it surely was. In the 1921 edition of Fannie Farmer, it is used to add savor to a &lt;a href=&quot;http://books.google.com/books?id=Cv-saVsW9G4C&amp;amp;dq=The%20Boston%20Cooking-School%20Cookbook&amp;amp;lr&amp;amp;num=30&amp;amp;as_brr=0&amp;amp;pg=PA188#v=onepage&amp;amp;q&amp;amp;f=false&quot;&gt;lobster and oyster ragout&lt;/a&gt;; a savory of &lt;a href=&quot;http://books.google.com/books?id=Cv-saVsW9G4C&amp;amp;dq=The%20Boston%20Cooking-School%20Cookbook&amp;amp;lr&amp;amp;num=30&amp;amp;as_brr=0&amp;amp;pg=PA103#v=onepage&amp;amp;q&amp;amp;f=false&quot;&gt;chopped chicken liver and hard-boiled egg&lt;/a&gt;; &lt;a href=&quot;http://books.google.com/books?id=Cv-saVsW9G4C&amp;amp;dq=The%20Boston%20Cooking-School%20Cookbook&amp;amp;lr&amp;amp;num=30&amp;amp;as_brr=0&amp;amp;pg=PA200%23v=onepage&amp;amp;q&amp;amp;f=false#v=onepage&amp;amp;q&amp;amp;f=false&quot;&gt;Hamburg steak&lt;/a&gt;; &lt;a href=&quot;http://books.google.com/books?id=Cv-saVsW9G4C&amp;amp;dq=The%20Boston%20Cooking-School%20Cookbook&amp;amp;lr&amp;amp;num=30&amp;amp;as_brr=0&amp;amp;pg=PA558#v=onepage&amp;amp;q&amp;amp;f=false&quot;&gt;Eggs à la Caracas&lt;/a&gt;, scrambled eggs with the odd but tasty sounding addition of tomatoes and smoked chipped beef; a host of stuffings … the list goes on and on. (It is also used uncooked — as see this &lt;a href=&quot;http://books.google.com/books?id=Cv-saVsW9G4C&amp;amp;dq=The%20Boston%20Cooking-School%20Cookbook&amp;amp;lr&amp;amp;num=30&amp;amp;as_brr=0&amp;amp;pg=PA329#v=onepage&amp;amp;q&amp;amp;f=false&quot;&gt;simple corn salad&lt;/a&gt;.) In other words, it was deployed where we today would most likely add a touch of garlic.&lt;/p&gt;
-&lt;p&gt;Howard’s Onion Juice appeared on the market in the early fifties, around the time I was learning to read. Consequently, that bottle, when I first saw it, was a newly offered convenience. But it is the original scraped raw onion pulp that is the revelation. As with garlic, halfway measures can be worse than none at all. I’m already working up ways to put real onion juice to work, from meatballs to clam fritters to onion (as in garlic) bread. Somewhere, Nana is … what? Smiling? Aghast? Whatever it is, it’s nice to be in the kitchen with her.&lt;/p&gt;
-&lt;p&gt;(Copyright © John Thorne 2010)&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.pinterest.com/pin/create/button/&quot; data-pin-do=&quot;buttonBookmark&quot; data-pin-color=&quot;red&quot; data-pin-height=&quot;128&quot;&gt;&lt;img src=&quot;http://assets.pinterest.com/images/pidgets/pinit_fg_en_rect_red_28.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 18:53:23 +0000</pubDate>
-<dc:creator>peterwwillis</dc:creator>
-<og:type>article</og:type>
-<og:title>Who the Hell Uses Onion Juice? - Mark Bittman</og:title>
-<og:description>By John Thorne (http://www.outlawcook.com/) The other day I was leafing through a vintage edition of The Fannie Farmer Boston Cooking School Cookbook looking for American chop suey (a story for another time), when my eye fell on a recipe with an i...</og:description>
-<og:url>http://markbittman.com/who-the-hell-uses-onion-juice/</og:url>
-<og:image>http://asdoasdiadnsiuhiwuh.files.wordpress.com/2010/05/howards_onion_juice-scaled500.gif</og:image>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://markbittman.com/who-the-hell-uses-onion-juice/</dc:identifier>
-</item>
-<item>
-<title>Elixir v1.6 released: code formatter, dynamic supervisors, and more</title>
-<link>https://elixir-lang.org/blog/2018/01/17/elixir-v1-6-0-released/</link>
-<guid isPermaLink="true" >https://elixir-lang.org/blog/2018/01/17/elixir-v1-6-0-released/</guid>
-<description>&lt;p&gt;Elixir v1.6 includes new features, enhancements, and bug fixes. The main feature in this release is a code formatter. Important improvements can also be found in the standard library and in the Mix build tool.&lt;/p&gt;
-&lt;h2 id=&quot;code-formatter&quot;&gt;Code formatter&lt;/h2&gt;
-&lt;p&gt;The big feature in Elixir v1.6 is the addition of &lt;a href=&quot;https://hexdocs.pm/elixir/Code.html#format_string!/2&quot;&gt;a code formatter&lt;/a&gt; and an accompanying &lt;code class=&quot;highlighter-rouge&quot;&gt;mix format&lt;/code&gt; task that adds automatic formatting to your projects.&lt;/p&gt;
-&lt;p&gt;The goal of the formatter is to automate the styling of codebases into a unique and consistent layout used across teams and the whole community. Code is now easier to write, as you no longer need to concern yourself with formatting rules. Code is also easier to read, as you no longer need to convert the styles of other developers in your mind.&lt;/p&gt;
-&lt;p&gt;The formatter also helps new developers to learn the language by giving immediate feedback on code structure, and eases code reviews by allowing teams to focus on business rules and code quality rather than code style.&lt;/p&gt;
-&lt;p&gt;To automatically format your codebase, you can run the &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Format.html&quot;&gt;new &lt;code class=&quot;highlighter-rouge&quot;&gt;mix format&lt;/code&gt; task&lt;/a&gt;. A &lt;code class=&quot;highlighter-rouge&quot;&gt;.formatter.exs&lt;/code&gt; file may be added to your project root for rudimentary formatter configuration. The mix task also supports flags for CI integration. For instance, you can make your build or a Pull Request fail if the code is not formatted accordingly by using the &lt;code class=&quot;highlighter-rouge&quot;&gt;--check-formatted&lt;/code&gt; flag. We also recommend developers to check their favorite editor and see if it already provides key bindings for &lt;code class=&quot;highlighter-rouge&quot;&gt;mix format&lt;/code&gt;, allowing a file or a code snippet to be formatted without hassle.&lt;/p&gt;
-&lt;p&gt;The Elixir codebase itself &lt;a href=&quot;https://github.com/elixir-lang/elixir/issues/6643&quot;&gt;has already been fully formatted&lt;/a&gt; and all further contributions are expected to contain formatted code. We recommend existing codebases to be formatted in steps. While the formatter will correctly handle long lines and complex expressions, refactoring the code by breaking those into variables or smaller functions as you format them will lead to overall cleaner and more readable codebases.&lt;/p&gt;
-&lt;h2 id=&quot;dynamic-supervisor&quot;&gt;Dynamic Supervisor&lt;/h2&gt;
-&lt;p&gt;Supervisors in Elixir are responsible for starting, shutting down, and restarting child processes when things go wrong. Most of the interaction with supervisors happens through &lt;a href=&quot;https://hexdocs.pm/elixir/Supervisor.html&quot;&gt;the &lt;code class=&quot;highlighter-rouge&quot;&gt;Supervisor&lt;/code&gt; module&lt;/a&gt; and it provides three main strategies: &lt;code class=&quot;highlighter-rouge&quot;&gt;:one_for_one&lt;/code&gt;, &lt;code class=&quot;highlighter-rouge&quot;&gt;:rest_for_one&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;:one_for_all&lt;/code&gt;.&lt;/p&gt;
-&lt;p&gt;However, sometimes the children of a supervisor are not known upfront and are rather started dynamically. For example, if you are building a web server, you have each request being handled by a separate supervised process. Those cases were handled in the Supervisor module under a special strategy called &lt;code class=&quot;highlighter-rouge&quot;&gt;:simple_one_for_one&lt;/code&gt;.&lt;/p&gt;
-&lt;p&gt;Unfortunately, this special strategy changed the semantics of the supervisor in regards to initialization and shutdown. Plus some APIs expected different inputs or would be completely unavailable depending on the supervision strategy.&lt;/p&gt;
-&lt;p&gt;Elixir v1.6 addresses this issue by introducing &lt;a href=&quot;https://hexdocs.pm/elixir/DynamicSupervisor.html&quot;&gt;a new &lt;code class=&quot;highlighter-rouge&quot;&gt;DynamicSupervisor&lt;/code&gt; module&lt;/a&gt;, which encapsulates the old &lt;code class=&quot;highlighter-rouge&quot;&gt;:simple_one_for_one&lt;/code&gt; strategy and APIs in a proper module while allowing the documentation and API of the &lt;code class=&quot;highlighter-rouge&quot;&gt;Supervisor&lt;/code&gt; module to focus on its main use cases. Having a separate &lt;code class=&quot;highlighter-rouge&quot;&gt;DynamicSupervisor&lt;/code&gt; module also makes it simpler to add new features to the dynamic supervisor, such as the new &lt;code class=&quot;highlighter-rouge&quot;&gt;:max_children&lt;/code&gt; option that limits the maximum number of children supervised dynamically.&lt;/p&gt;
-&lt;h2 id=&quot;deprecated-and-since-attributes&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;@deprecated&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;@since&lt;/code&gt; attributes&lt;/h2&gt;
-&lt;p&gt;This release also introduces two new attributes associated with function definitions: &lt;code class=&quot;highlighter-rouge&quot;&gt;@deprecated&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;@since&lt;/code&gt;. The former marks if a function or macro is deprecated, the latter annotates the version the API was introduced:&lt;/p&gt;
-&lt;div class=&quot;language-elixir highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;&lt;span class=&quot;nv&quot;&gt;@doc&lt;/span&gt; &lt;span class=&quot;sd&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;Breaks a collection into chunks&quot;&lt;/span&gt;
-&lt;span class=&quot;nv&quot;&gt;@since&lt;/span&gt; &lt;span class=&quot;sd&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;1.0.0&quot;&lt;/span&gt;
-&lt;span class=&quot;nv&quot;&gt;@deprecated&lt;/span&gt; &lt;span class=&quot;sd&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;Use chunk_every/2 instead&quot;&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;chunk&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;collection&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;chunk_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;do&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;chunk_every&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;collection&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;chunk_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;end&lt;/span&gt;
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;The &lt;code class=&quot;highlighter-rouge&quot;&gt;mix xref&lt;/code&gt; task was also updated to warn if your project calls deprecated code. So if a definition is marked as &lt;code class=&quot;highlighter-rouge&quot;&gt;@deprecated&lt;/code&gt; and a module invokes it, a warning will be emitted during compilation. This effectively provides libraries and frameworks a mechanism to deprecate code without causing multiple warnings to be printed in runtime and without impacting performance.&lt;/p&gt;
-&lt;p&gt;Note those attributes are not yet available to tools that generate documentation. Such functionality will be added in Elixir v1.7 once &lt;a href=&quot;https://github.com/elixir-lang/elixir/issues/7198&quot;&gt;Elixir adopts EEP-48&lt;/a&gt;. We still recommend developers to start annotating their APIs so the information is already available when the tooling is updated.&lt;/p&gt;
-&lt;h2 id=&quot;defguard-and-defguardp&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;defguard&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;defguardp&lt;/code&gt;&lt;/h2&gt;
-&lt;p&gt;Elixir provides the concepts of guards: expressions used alongside pattern matching to select a matching clause. Let’s see an example straight from &lt;a href=&quot;https://elixir-lang.org&quot;&gt;Elixir’s home page&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&quot;language-elixir highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;serve_drinks&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(%&lt;/span&gt;&lt;span class=&quot;no&quot;&gt;User&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;ss&quot;&gt;age:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;when&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;age&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;=&lt;/span&gt; &lt;span class=&quot;m&quot;&gt;21&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;do&lt;/span&gt;
-  &lt;span class=&quot;c1&quot;&gt;# Code that serves drinks!&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;end&lt;/span&gt;
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;%User{age: age}&lt;/code&gt; is matching on a &lt;code class=&quot;highlighter-rouge&quot;&gt;User&lt;/code&gt; struct with an age field and &lt;code class=&quot;highlighter-rouge&quot;&gt;when age &amp;gt;= 21&lt;/code&gt; is the guard.&lt;/p&gt;
-&lt;p&gt;Since only a handful of constructs are &lt;a href=&quot;https://hexdocs.pm/elixir/guards.html#content&quot;&gt;allowed in guards&lt;/a&gt;, if you were in a situation where you had to check the age to be more than or equal to 21 in multiple places, extracting the guard to a separate function would be &lt;a href=&quot;https://github.com/elixir-lang/elixir/issues/2469&quot;&gt;less than obvious and error prone&lt;/a&gt;. To address those issues, &lt;a href=&quot;https://hexdocs.pm/elixir/Kernel.html#defguard/1&quot;&gt;this release introduces &lt;code class=&quot;highlighter-rouge&quot;&gt;defguard/1&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;defguardp/1&lt;/code&gt;&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&quot;language-elixir highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;&lt;span class=&quot;n&quot;&gt;defguard&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;is_drinking_age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;when&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;age&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;=&lt;/span&gt; &lt;span class=&quot;m&quot;&gt;21&lt;/span&gt;
-
-&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;serve_drinks&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(%&lt;/span&gt;&lt;span class=&quot;no&quot;&gt;User&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;ss&quot;&gt;age:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;when&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;is_drinking_age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;age&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;do&lt;/span&gt;
-  &lt;span class=&quot;c1&quot;&gt;# Code that serves drinks!&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;end&lt;/span&gt;
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;h2 id=&quot;iex-improvements&quot;&gt;IEx improvements&lt;/h2&gt;
-&lt;p&gt;IEx also got its share of improvements. The new code formatter allows us to pretty print code snippets, types and specifications, improving the overall experience when exploring code through the terminal.&lt;/p&gt;
-&lt;p&gt;The autocomplete mechanism also got smarter, being able to provide context autocompletion. For example, typing &lt;code class=&quot;highlighter-rouge&quot;&gt;t Enum.&lt;/code&gt; and hitting TAB will autocomplete only the types in Enum (in contrast to all functions). Typing &lt;code class=&quot;highlighter-rouge&quot;&gt;b GenServer.&lt;/code&gt; and hitting TAB will autocomplete only the behaviour callbacks.&lt;/p&gt;
-&lt;p&gt;Finally, the breakpoint functionality added &lt;a href=&quot;https://elixir-lang.org/blog/2017/07/25/elixir-v1-5-0-released/&quot;&gt;in Elixir v1.5&lt;/a&gt; has been improved to support pattern matching and guards. For example, to pattern match on a function call when the first argument is the atom &lt;code class=&quot;highlighter-rouge&quot;&gt;:foo&lt;/code&gt;, you may do:&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;iex&amp;gt; break! SomeFunction.call(:foo, _, _)
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;For more information, see &lt;a href=&quot;https://hexdocs.pm/iex/IEx.html#break!/4&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;IEx.break!/4&lt;/code&gt;&lt;/a&gt;.&lt;/p&gt;
-&lt;h2 id=&quot;mix-xref&quot;&gt;mix xref&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Xref.html&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;mix xref&lt;/code&gt;&lt;/a&gt; is a task added in Elixir v1.3 which provides general information about how modules and files in an application depend on each other. This release brings many improvements to &lt;code class=&quot;highlighter-rouge&quot;&gt;xref&lt;/code&gt;, extending the reach of the analysis and helping developers digest the vast amount of data it produces.&lt;/p&gt;
-&lt;p&gt;One of such additions is the &lt;code class=&quot;highlighter-rouge&quot;&gt;--include-siblings&lt;/code&gt; option that can be given to all &lt;code class=&quot;highlighter-rouge&quot;&gt;xref&lt;/code&gt; commands inside umbrella projects. For example, to find all of the callers of a given module or function of an application in an umbrella:&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;$ mix xref callers SomeModule --include-siblings
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;The &lt;code class=&quot;highlighter-rouge&quot;&gt;graph&lt;/code&gt; command in &lt;code class=&quot;highlighter-rouge&quot;&gt;mix xref&lt;/code&gt; now can also output general statistics about the graph. In &lt;a href=&quot;https://github.com/hexpm/hexpm&quot;&gt;the hexpm project&lt;/a&gt;, you would get:&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;$ mix xref graph --format stats
-Tracked files: 129 (nodes)
-Compile dependencies: 256 (edges)
-Structs dependencies: 46 (edges)
-Runtime dependencies: 266 (edges)
-
-Top 10 files with most outgoing dependencies:
-  * test/support/factory.ex (18)
-  * lib/hexpm/accounts/user.ex (13)
-  * lib/hexpm/accounts/audit_log.ex (12)
-  * lib/hexpm/web/controllers/dashboard_controller.ex (12)
-  * lib/hexpm/repository/package.ex (12)
-  * lib/hexpm/repository/releases.ex (11)
-  * lib/hexpm/repository/release.ex (10)
-  * lib/hexpm/web/controllers/package_controller.ex (10)
-  * lib/mix/tasks/hexpm.stats.ex (9)
-  * lib/hexpm/repository/registry_builder.ex (9)
-
-Top 10 files with most incoming dependencies:
-  * lib/hexpm/web/web.ex (84)
-  * lib/hexpm/web/router.ex (29)
-  * lib/hexpm/web/controllers/controller_helpers.ex (29)
-  * lib/hexpm/web/controllers/auth_helpers.ex (28)
-  * lib/hexpm/web/views/view_helpers.ex (27)
-  * lib/hexpm/web/views/icons.ex (27)
-  * lib/hexpm/web/endpoint.ex (23)
-  * lib/hexpm/ecto/changeset.ex (22)
-  * lib/hexpm/accounts/user.ex (19)
-  * lib/hexpm/repo.ex (19)
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;mix xref graph&lt;/code&gt; also got the &lt;code class=&quot;highlighter-rouge&quot;&gt;--only-nodes&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;--label&lt;/code&gt; options. The former asks Mix to only output file names (nodes) without the edges. The latter allows you to focus on certain relationships:&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot;&gt;
-&lt;div class=&quot;highlight&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;# To get all files that depend on lib/foo.ex
-mix xref graph --sink lib/foo.ex --only-nodes
-
-# To get all files that depend on lib/foo.ex at compile time
-mix xref graph --label compile --sink lib/foo.ex --only-nodes
-
-# To get all files lib/foo.ex depends on
-mix xref graph --source lib/foo.ex --only-nodes
-
-# To limit statistics only to compile time dependencies
-mix xref graph --format stats --label compile
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;Those improvements will help developers better understand the relationship between files and reveal potentially complex parts of their systems.&lt;/p&gt;
-&lt;p&gt;Other improvements in Mix include &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Task.Compiler.html&quot;&gt;better compiler diagnostics&lt;/a&gt; for editor integration, support for &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Test.html&quot;&gt;the &lt;code class=&quot;highlighter-rouge&quot;&gt;--slowest N&lt;/code&gt; flag in &lt;code class=&quot;highlighter-rouge&quot;&gt;mix test&lt;/code&gt;&lt;/a&gt; that shows the slowest tests in your suite, and a new &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Eprof.html&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;mix profile.eprof&lt;/code&gt; task&lt;/a&gt; that provides time based profiling, complementing the existing &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Profile.Cprof.html&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;mix profile.cprof&lt;/code&gt; (count based)&lt;/a&gt; and &lt;a href=&quot;https://hexdocs.pm/mix/Mix.Tasks.Profile.Fprof.html&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;mix profile.fprof&lt;/code&gt; (flame based)&lt;/a&gt;.&lt;/p&gt;
-&lt;h2 id=&quot;summing-up&quot;&gt;Summing up&lt;/h2&gt;
-&lt;p&gt;The full list of changes is available in our &lt;a href=&quot;https://github.com/elixir-lang/elixir/releases/tag/v1.6.0&quot;&gt;release notes&lt;/a&gt;. There are many other exciting changes, such as compiler enhancements to better track dependencies, leading to less files being recompiled whenever there are changes in project, and overall faster compilation.&lt;/p&gt;
-&lt;p&gt;Work on Elixir v1.7 has already started. We still welcome developers to try out the &lt;a href=&quot;https://elixir-lang.org/blog/2017/10/31/stream-data-property-based-testing-and-data-generation-for-elixir/&quot;&gt;previously announced StreamData library&lt;/a&gt;, that aims to bring data generation and property-based testing to Elixir. The other &lt;a href=&quot;https://github.com/elixir-lang/elixir/issues&quot;&gt;features scheduled for v1.7 can be found in the issues tracker&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;Don’t forget to check &lt;a href=&quot;https://elixir-lang.org/install.html&quot;&gt;the Install section&lt;/a&gt; to get Elixir installed and our &lt;a href=&quot;http://elixir-lang.org/getting-started/introduction.html&quot;&gt;Getting Started guide&lt;/a&gt; to learn more.&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 18:47:29 +0000</pubDate>
-<dc:creator>josevalim</dc:creator>
-<og:title>Elixir v1.6 released</og:title>
-<og:description>Elixir v1.6 includes a code formatter, defguard, dynamic supervision and new module attributes that improves code quality and the developer experience</og:description>
-<og:url>https://elixir-lang.org/blog/2018/01/17/elixir-v1-6-0-released/</og:url>
-<og:type>article</og:type>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://elixir-lang.org/blog/2018/01/17/elixir-v1-6-0-released/</dc:identifier>
-</item>
-<item>
-<title>Apple plans new U.S. campus, to pay $38B in foreign cash taxes</title>
-<link>https://www.reuters.com/article/us-apple-tax/apple-plans-new-u-s-campus-to-pay-38-billion-in-foreign-cash-taxes-idUSKBN1F62FJ</link>
-<guid isPermaLink="true" >https://www.reuters.com/article/us-apple-tax/apple-plans-new-u-s-campus-to-pay-38-billion-in-foreign-cash-taxes-idUSKBN1F62FJ</guid>
-<description>&lt;p&gt;(Reuters) - Apple Inc (&lt;span id=&quot;“symbol_AAPL.O_0”&quot;&gt;&lt;a href=&quot;https://www.reuters.com/finance/stocks/overview?symbol=AAPL.O&quot;&gt;AAPL.O&lt;/a&gt;&lt;/span&gt;) will open a new campus as part of a five-year, $30 billion U.S. investment plan and will make about $38 billion in one-time tax payments on its overseas cash, one of the largest corporate spending plans announced since the passage of a tax cut signed by U.S. President Donald Trump.&lt;/p&gt;
-&lt;p&gt;The company has been under increasing pressure to make U.S. investments since the 2016 presidential campaign, when Trump targeted the iPhone maker for making products in Asian factories.&lt;/p&gt;
-&lt;p&gt;While Apple has announced no plans to change that practice and experts say it would be economically impractical to make iPhones in the United States, the company has begun to emphasize its U.S. economic impact, from developers who sell software on its App Store to the tens of billions of dollars per year it spends with U.S. suppliers.&lt;/p&gt;
-&lt;p&gt;Between the spending plan, hiring 20,000 people, tax payments and business with U.S.-based suppliers, Apple on Wednesday estimated it would spend $350 billion in the United States over the next five years.&lt;/p&gt;
-&lt;p&gt;It did not, however, say how much of the plan was new or how much of its $252.3 billion in cash abroad - the largest of any U.S. corporation - it would bring home. In addition to the $38 billion in taxes it must pay, Apple has run up $97 billion in U.S.-issued debt to pay for previous share buybacks and dividends.&lt;/p&gt;
-&lt;p&gt;Some investors said the U.S. investments would give the company room to make more stock buybacks or pay dividends without criticism. Apple shares on Wednesday closed up 1.7 percent to $179.10.&lt;/p&gt;
-&lt;p&gt;Walter Piecyk, managing director for TMT Research at BTIG Research, said he could not yet tell whether the U.S. expansion was an increase from a previous plan or meant investment abroad was being refocused in the United States. Reuters Breakingviews estimated that Apple could have increased U.S. headcount by 24,000 in the last five years.&lt;/p&gt;
-&lt;p&gt;Trump described the move by Apple as a victory for his efforts.&lt;/p&gt;
-&lt;p&gt;“I promised that my policies would allow companies like Apple to bring massive amounts of money back to the United States. Great to see Apple follow through as a result of TAX CUTS,” Trump wrote on Twitter.&lt;/p&gt;
-&lt;p&gt;Asked in an interview with ABC News whether the job creation announcements were directly related to the Republican tax plan, Apple Chief Executive Officer Tim Cook gave a measured response.&lt;/p&gt;
-&lt;p&gt;“Let me be clear: There are large parts of this that are a result of the tax reform, and there’s large parts of this we would have done in any situation,” Cook said in the interview.&lt;/p&gt;
-&lt;h3&gt;APPLE SERVICES PUSH&lt;/h3&gt;
-&lt;p&gt;About a third of Apple’s new spending will be on data centers to house its iCloud, App Store and Apple Music services, a sign of the rising importance of subscription services to a company known for its computers and gadgets. Apple has data centers in seven states.&lt;/p&gt;
-&lt;div class=&quot;Image_container_1tVQo&quot; tabindex=&quot;-1&quot;&gt;
-
-
-&lt;span class=&quot;Image_caption_KoNH1&quot;&gt;FILE PHOTO: The Apple Campus 2 is seen under construction in Cupertino, California in this aerial photo taken January 13, 2017. REUTERS/Noah Berger/File Photo&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt;The announced U.S spending would be a significant part of Apple’s overall capital expenditures. Globally, the company spent $14.9 billion in 2017 and expects to spend $16 billion in 2018, figures that include both U.S.-based investments in data centers and other projects and Asian investments in tooling for its contract manufacturers.&lt;/p&gt;
-&lt;p&gt;If Apple’s overall capital expenditures continue to expand at the same rate expected this year, the $30 billion investment in the United States could represent about a third of its capital expenditures over the next five years.&lt;/p&gt;
-&lt;p&gt;The announced tax payment was roughly in line with expectations, said Cross Research analyst Shannon Cross. The tax bill requires companies to pay a one-time 15.5 percent tax on foreign-held earnings whether they intend to bring them back to the United States or not.&lt;/p&gt;
-&lt;p&gt;Apple had set aside $36.3 billion in anticipation of tax payments on its foreign cash, meaning the payment would not represent a major impact on its cash flow this quarter.&lt;/p&gt;
-
-&lt;p&gt;James Cordwell of Atlantic Equities said Apple’s U.S. investment plan could make it easier for the company to give more cash to shareholders.&lt;/p&gt;
-&lt;p&gt;“Being seen to just hand the cash back to shareholders could spark some political sensitivities,” and the spending announcement could be part of Apple’s efforts to manage this issue, Cordwell said.&lt;/p&gt;
-&lt;p&gt;Apple also said it would boost its advanced manufacturing fund, used to provide capital and support to suppliers such as Finisar Corp (&lt;span id=&quot;“symbol_FNSR.O_1”&quot;&gt;&lt;a href=&quot;https://www.reuters.com/finance/stocks/overview?symbol=FNSR.O&quot;&gt;FNSR.O&lt;/a&gt;&lt;/span&gt;) and Corning Inc (&lt;span id=&quot;“symbol_GLW.N_2”&quot;&gt;&lt;a href=&quot;https://www.reuters.com/finance/stocks/overview?symbol=GLW.N&quot;&gt;GLW.N&lt;/a&gt;&lt;/span&gt;), from $1 billion to $5 billion. Apple said it planned to spend $55 billion with U.S.-based suppliers in 2018, up from $50 billion last year.&lt;/p&gt;
-&lt;h3&gt;AMAZON VS APPLE&lt;/h3&gt;
-&lt;p&gt;Apple joins Amazon.com Inc (&lt;span id=&quot;“symbol_AMZN.O_3”&quot;&gt;&lt;a href=&quot;https://www.reuters.com/finance/stocks/overview?symbol=AMZN.O&quot;&gt;AMZN.O&lt;/a&gt;&lt;/span&gt;) in scouting for a location for a new campus. Amazon finished taking applications from cities in October for its second headquarters.&lt;/p&gt;
-&lt;p&gt;Amazon set off a scramble between cities across the nation to host the headquarters, and Apple’s announcement stirred broad interest. Chicago Mayor Rahm Emanuel told reporters on Wednesday, “We’re going to go compete and we’re going to put our best foot forward” to compete for an Apple campus. A Philadelphia Department of Commerce spokeswoman said the city would submit a proposal if Apple opened the process for bids.&lt;/p&gt;
-&lt;p&gt;Apple has not said whether it had settled on a new campus location yet, and it did not make any commitments on the size of new spending or hiring specific to the campus. It did say it would initially house technical support for customers and would announce the location later this year.&lt;/p&gt;
-&lt;p&gt;The facility would be in addition to its “spaceship” Apple Park headquarters in Cupertino, California; a campus in Austin, Texas, that houses customer service agents and some manufacturing; and an Elk Grove, California, unit with several thousand customer service agents and iPhones refurbishing technicians.&lt;/p&gt;
-&lt;p&gt;Apple also has built its own data centers in North Carolina, Oregon, Nevada, Arizona and a recently announced project in Iowa, and leases data center space in other states.&lt;/p&gt;
-&lt;div class=&quot;Attribution_attribution_o4ojT&quot; readability=&quot;13&quot;&gt;
-&lt;p class=&quot;Attribution_content_27_rw&quot;&gt;Additional reporting by Sonam Rai, Pushkala Aripaka, Muvija M. and Laharee Chatterjee in Bengaluru, Karen Pierog in Chicago and Nick Brown in New York; Editing by Peter Henderson, Richard Chang and Leslie Adler&lt;/p&gt;
-&lt;/div&gt;
-&lt;div class=&quot;StandardArticleBody_trustBadgeContainer_1gqgJ&quot;&gt;&lt;span class=&quot;StandardArticleBody_trustBadgeTitle_7sKLj&quot;&gt;Our Standards:&lt;/span&gt;&lt;span class=&quot;trustBadgeUrl&quot;&gt;&lt;a href=&quot;http://thomsonreuters.com/en/about-us/trust-principles.html&quot;&gt;The Thomson Reuters Trust Principles.&lt;/a&gt;&lt;/span&gt;&lt;/div&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 18:13:13 +0000</pubDate>
-<dc:creator>chollida1</dc:creator>
-<og:title>Apple plans new U.S. campus, to pay $38 billion in foreign cash taxes</og:title>
-<og:url>https://www.reuters.com/article/us-apple-tax/apple-to-pay-38-billion-in-repatriation-tax-idUSKBN1F62FJ</og:url>
-<og:type>article</og:type>
-<og:description>Apple Inc will open a new campus as part of a five-year, $30 billion U.S. investment plan and will make about $38 billion in one-time tax payments on its overseas cash, one of the largest corporate spending plans announced since the passage of a tax cut signed by U.S. President Donald Trump.</og:description>
-<og:image>https://s4.reutersmedia.net/resources/r/?m=02&amp;d=20180117&amp;t=2&amp;i=1222820612&amp;w=1200&amp;r=LYNXMPEE0G1PV</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.reuters.com/article/us-apple-tax/apple-plans-new-u-s-campus-to-pay-38-billion-in-foreign-cash-taxes-idUSKBN1F62FJ</dc:identifier>
-</item>
-<item>
-<title>Turning Soybeans into Diesel Fuel Is Costing Billions</title>
-<link>https://www.npr.org/sections/thesalt/2018/01/16/577649838/turning-soybeans-into-diesel-fuel-is-costing-us-billions</link>
-<guid isPermaLink="true" >https://www.npr.org/sections/thesalt/2018/01/16/577649838/turning-soybeans-into-diesel-fuel-is-costing-us-billions</guid>
-<description>&lt;div id=&quot;res578449678&quot; class=&quot;bucketwrap image large&quot;&gt;
-&lt;div class=&quot;imagewrap&quot; data-crop-type=&quot;&quot;&gt;&lt;img src=&quot;https://media.npr.org/assets/img/2018/01/16/gettyimages-8497759121_custom-403f041b019f2f4eba7eeec808ec668d0cb9b0ed-s1100-c15.jpg&quot; data-original=&quot;https://media.npr.org/assets/img/2018/01/16/gettyimages-8497759121_custom-403f041b019f2f4eba7eeec808ec668d0cb9b0ed-s1100.jpg&quot; class=&quot;img lazyOnLoad&quot; alt=&quot;&quot;/&gt;
-&lt;/div&gt;
-&lt;div class=&quot;credit-caption&quot;&gt;
-&lt;div class=&quot;caption-wrap&quot; readability=&quot;8.5&quot;&gt;
-&lt;div class=&quot;caption&quot; aria-label=&quot;Image caption&quot; readability=&quot;12&quot;&gt;
-&lt;p&gt;An engineer shows a sample of biodiesel at an industrial complex in General Lagos, Santa Fe province, Argentina. The United States recently imposed duties on Argentine biodiesel, blocking it from the U.S. market. &lt;strong class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Eitan Abramovich/AFP/Getty Images&lt;/strong&gt; &lt;strong class=&quot;hide-caption&quot;&gt;hide caption&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;strong class=&quot;toggle-caption&quot;&gt;toggle caption&lt;/strong&gt;&lt;/div&gt;
-&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Eitan Abramovich/AFP/Getty Images&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;enlarge_measure&quot;&gt;
-&lt;div class=&quot;img_wrap&quot;&gt;&lt;img data-original=&quot;https://media.npr.org/assets/img/2018/01/16/gettyimages-8497759121_custom-403f041b019f2f4eba7eeec808ec668d0cb9b0ed-s1200.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;enlarge_html&quot; readability=&quot;8.5&quot;&gt;
-&lt;div class=&quot;image_data&quot; readability=&quot;12&quot;&gt;
-&lt;p class=&quot;caption&quot;&gt;An engineer shows a sample of biodiesel at an industrial complex in General Lagos, Santa Fe province, Argentina. The United States recently imposed duties on Argentine biodiesel, blocking it from the U.S. market.&lt;/p&gt;
-&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Eitan Abramovich/AFP/Getty Images&lt;/span&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;This year, trucks and other heavy-duty motors in America will burn some 3 billion gallons of diesel fuel that was made from soybean oil. They're doing it, though, not because it's cheaper or better, but because they're required to, by law.&lt;/p&gt;
-&lt;p&gt;The law is the Renewable Fuel Standard, or RFS. For some, especially Midwestern farmers, it's the key to creating clean energy from American soil and sun. For others — like many economists — it's a wasteful misuse of resources.&lt;/p&gt;
-&lt;p&gt;And the most wasteful part of the RFS, according to some, is biodiesel. It's different from ethanol, a fuel that's made from corn and mixed into gasoline, also as required by the RFS. In fact, gasoline companies &lt;a href=&quot;https://www.npr.org/sections/thesalt/2016/02/10/466010209/the-shocking-truth-about-americas-ethanol-law-it-doesnt-matter-for-now&quot;&gt;probably&lt;/a&gt; would use ethanol even if there were no law requiring it, because ethanol is a useful fuel additive — at least up to a point. That's not true of biodiesel.&lt;/p&gt;
-&lt;p&gt;&quot;This is an easy one, economically. Biodiesel is very expensive, relative to petroleum diesel,&quot; says Scott Irwin, an economist at the University of Illinois, who follows biofuel markets closely. He calculates that the extra cost for biodiesel comes to about $1.80 per gallon right now, meaning that the biofuel law is costing Americans about $5.4 billion a year.&lt;/p&gt;
-&lt;aside id=&quot;ad-backstage-wrap&quot; aria-label=&quot;advertisement&quot;&gt;
-&lt;/aside&gt;&lt;aside id=&quot;ad-mobilebackfill-wrap&quot; aria-label=&quot;advertisement&quot;&gt;
-&lt;/aside&gt;&lt;p&gt;Irwin explains that use of biodiesel is driven by three different parts of the Renewable Fuel Standard. The law includes a quota for biodiesel use, but in addition to that, biodiesel also is used in order to meet the law's demand for &quot;advanced biofuels.&quot; Finally, there's an overall quota for biofuels of all sorts, and companies are using biodiesel to meet that quota as well because they've run into limits on their ability to blend ethanol into gasoline.&lt;/p&gt;
-&lt;p&gt;Defenders of biodiesel &lt;a href=&quot;https://unitedsoybean.org/media-center/issue-briefs/biodiesel/&quot;&gt;insist&lt;/a&gt; that it's a much cleaner fuel than regular diesel, because it doesn't come from the ground, but from soybean plants that capture carbon dioxide from the air as they grow. In fact, by the EPA's calculations, replacing petroleum-based fuel with biodiesel will cut greenhouse emissions at least in half.&lt;/p&gt;
-&lt;p&gt;A growing number of environmentalists, however, say that this calculation is dead wrong. They say that if more soybeans are needed to make fuel in addition to food, it inevitably means that people somewhere on Earth will have to plow up grasslands or cut down forests in order to grow that additional supply — and clearing such land releases huge amounts of carbon dioxide into the atmosphere.&lt;/p&gt;
-&lt;p&gt;Two environmental groups — ActionAid USA and Mighty Earth — just released a &lt;a href=&quot;https://www.actionaidusa.org/wp-content/uploads/2018/01/AAUSA_MightyEarth_Burned_FINAL_web.pdf&quot;&gt;report&lt;/a&gt; connecting America's biodiesel demands directly to deforestation in Argentina.&lt;/p&gt;
-&lt;p&gt;Investigators from the two groups documented widespread clearing of Argentine forests in order to expand cultivation of soybeans. Simultaneously, Argentina expanded its exports of soybean-derived biodiesel to the United States. In 2016, in fact, Argentina shipped more than 400 million gallons of biodiesel to the U.S., equivalent to almost 15 percent of all the biodiesel that Americans consumed.&lt;/p&gt;
-&lt;p&gt;The story, however, is more complicated than it seems. For one thing, that boom in Argentine biodiesel exports is over, at least for now. Last summer, the United States accused Argentina of subsidizing its biodiesel producers and &quot;dumping&quot; cheap biodiesel on the world market. In retaliation, the U.S. &lt;a href=&quot;https://enforcement.trade.gov/download/factsheets/factsheet-multiple-biodiesel-cvd-prelim-082217.pdf&quot;&gt;imposed&lt;/a&gt; hefty taxes on all biodiesel from Argentina. Overnight, those imports ceased. Americans now will have to rely on biodiesel produced here in the U.S. — which also is more expensive. (In a way, Argentina was doing the U.S. a favor, helping it satisfy its biodiesel demands more cheaply.)&lt;/p&gt;
-&lt;p&gt;In addition, the most powerful factor driving demand for soybeans these days is China's appetite for soy meal, to feed its pigs and chickens, rather than America's need for soy oil to make fuel.&lt;/p&gt;
-&lt;p&gt;&quot;The big story is China's demand,&quot; says Irwin of the University of Illinois. &quot;If anything is related to tearing up pastures in Argentina to grow soybeans, it's China and not biodiesel.&quot;&lt;/p&gt;
-&lt;p&gt;In fact, China wants so much soy meal that it's boosted global supplies of soy oil, because soybeans, when they're crushed, yield both meal and oil. By satisfying China's demand for meal, soy processors inevitably end up with plenty of oil to sell, too. (Interestingly, this is a reversal of the situation a century ago, when soybeans were mainly grown for their oil, and producers struggled to find uses for the meal.)&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Jan 2018 17:12:37 +0000</pubDate>
-<dc:creator>happy-go-lucky</dc:creator>
-<og:title>Turning Soybeans Into Diesel Fuel Is Costing Us Billions</og:title>
-<og:url>https://www.npr.org/sections/thesalt/2018/01/16/577649838/turning-soybeans-into-diesel-fuel-is-costing-us-billions</og:url>
-<og:type>article</og:type>
-<og:description>The law that requires America to turn some of its soybeans into diesel fuel for trucks has created a new industry. But it's costing American consumers about $5 billion each year.</og:description>
-<og:image>https://media.npr.org/assets/img/2018/01/16/gettyimages-8497759121_wide-ec8df8b5d4aa328c733bf5f95761ec286c73b90d.jpg?s=1400</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.npr.org/sections/thesalt/2018/01/16/577649838/turning-soybeans-into-diesel-fuel-is-costing-us-billions</dc:identifier>
 </item>
 </channel>
 </rss>
