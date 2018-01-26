@@ -57,7 +57,7 @@
 
 &lt;/div&gt;
 &lt;/div&gt;
-&lt;div class=&quot;sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded&quot; id=&quot;like-post-wrapper-141190471-32-5a6ae05bd9f2f&quot; data-src=&quot;//widgets.wp.com/likes/#blog_id=141190471&amp;amp;post_id=32&amp;amp;origin=skyriddles.wordpress.com&amp;amp;obj_id=141190471-32-5a6ae05bd9f2f&quot; data-name=&quot;like-post-frame-141190471-32-5a6ae05bd9f2f&quot;&gt;
+&lt;div class=&quot;sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded&quot; id=&quot;like-post-wrapper-141190471-32-5a6b50dd76206&quot; data-src=&quot;//widgets.wp.com/likes/#blog_id=141190471&amp;amp;post_id=32&amp;amp;origin=skyriddles.wordpress.com&amp;amp;obj_id=141190471-32-5a6b50dd76206&quot; data-name=&quot;like-post-frame-141190471-32-5a6b50dd76206&quot;&gt;
 &lt;h3 class=&quot;sd-title&quot;&gt;Like this:&lt;/h3&gt;
 &lt;div class=&quot;likes-widget-placeholder post-likes-widget-placeholder&quot;&gt;&lt;span class=&quot;button&quot;&gt;&lt;span&gt;Like&lt;/span&gt;&lt;/span&gt; &lt;span class=&quot;loading&quot;&gt;Loading...&lt;/span&gt;&lt;/div&gt;
 &lt;/div&gt;
@@ -532,16 +532,92 @@ int main() {
 <dc:identifier>https://mort.coffee/home/obscure-c-features/</dc:identifier>
 </item>
 <item>
+<title>How a fix in Go 1.9 sped up our Gitaly service by 30x</title>
+<link>https://about.gitlab.com/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/</link>
+<guid isPermaLink="true" >https://about.gitlab.com/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/</guid>
+<description>&lt;p&gt;&lt;a href=&quot;https://gitlab.com/gitlab-org/gitaly&quot;&gt;Gitaly&lt;/a&gt; is a Git RPC service that we are currently rolling out across GitLab.com, to replace our legacy NFS-based file-sharing solution. We expect it to be faster, more stable and the basis for amazing new features in future.&lt;/p&gt;
+&lt;p&gt;We're still in the process of porting Git operations to Gitaly, but the service has been running in production on GitLab.com for about nine months, and currently peaks at about 1,000 &lt;a href=&quot;https://grpc.io/&quot;&gt;gRPC&lt;/a&gt; requests per second. We expect the migration effort to be completed by the beginning of April at which point all Git operations in the GitLab application will use the service and we'll be able to decommission NFS infrastructure.&lt;/p&gt;
+&lt;h2 id=&quot;worrying-performance-improvements&quot;&gt;Worrying performance improvements&lt;/h2&gt;
+&lt;p&gt;The first time we realized that something might be wrong was shortly after we'd finished deploying a new release.&lt;/p&gt;
+&lt;p&gt;We were monitoring the performance of one of the gRPC endpoints for the Gitaly service and noticed that the 99th percentile performance of the endpoint had dropped from 400ms down to 100ms.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-01.png&quot; alt=&quot;400ms to 100ms latency drop&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;Latencies drop from 400ms to 100ms after a deploy, for no good reason&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;This should have been fantastic news, but it wasn't. There were no changes that should have led to faster response times. We hadn't optimized anything in that release; we hadn't changed the runtime and the new release was using the same version of Git.&lt;/p&gt;
+&lt;p&gt;Everything &lt;em&gt;should have&lt;/em&gt; been exactly the same.&lt;/p&gt;
+&lt;p&gt;We started digging into the data a little more and quickly realised that 400ms is a very high latency for an operation that simply confirms the existence of a &lt;a href=&quot;https://git-scm.com/book/en/v2/Git-Internals-Git-References&quot;&gt;Git reference&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;How long had it been this way? Well it started about 24 hours after the previous deployment.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-02.png&quot; alt=&quot;100ms to 400ms latency hike&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;Latencies rising over a 24 hour period following a deployment, for no good reason&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;When browsing our Prometheus performance data, it quickly became apparent that this pattern was being repeated with each deployment: things would start fast and gradually slow down. This was occurring across all endpoints. It had been this way for a while.&lt;/p&gt;
+&lt;p&gt;The first assumption was that there was some sort of resource leak in the application, causing the host to slow down over time. Unfortunately the data didn't back this up. CPU usage of the Gitaly service did increase, but the hosts still had lots of capacity.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-03.png&quot; alt=&quot;Gitaly CPU charts&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;Gitaly CPU increasing with process age, but not enough to explain the problem&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;At this point, we still didn't have any good leads as to the cause of the problem, so we decided to further improve the observability of the application by adding &lt;a href=&quot;https://golang.org/pkg/net/http/pprof/&quot;&gt;pprof profiling support&lt;/a&gt; and &lt;a href=&quot;https://github.com/google/cadvisor&quot;&gt;cAdvisor&lt;/a&gt; metrics.&lt;/p&gt;
+&lt;h2 id=&quot;profiling&quot;&gt;Profiling&lt;/h2&gt;
+&lt;p&gt;Adding pprof support to a Go process is &lt;a href=&quot;https://gitlab.com/gitlab-org/gitaly/merge_requests/442&quot;&gt;very easy&lt;/a&gt;. The process already has a Prometheus listener and we added a pprof handler on the same listener.&lt;/p&gt;
+&lt;p&gt;Since production teams would need to be able to perform the profiling without our assistance, we also &lt;a href=&quot;https://gitlab.com/gitlab-com/runbooks/blob/master/howto/gitaly-profiling.md&quot;&gt;added a runbook&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Go's pprof support is easy to use and in our testing, we found that the overhead it added to production workloads was negligible, meaning we could use it in production without concern about the impact it would have on site performance.&lt;/p&gt;
+&lt;h2 id=&quot;cadvisor&quot;&gt;cAdvisor&lt;/h2&gt;
+&lt;p&gt;The Gitaly service spawns Git child processes for many of its endpoints. Unfortunately these Git child processes don't have the same instrumentation as the parent process so it was difficult to tell if they were contributing to the problem. (Note: we record &lt;a href=&quot;http://man7.org/linux/man-pages/man2/getrlimit.2.html&quot;&gt;&lt;code&gt;getrlimit(2)&lt;/code&gt;&lt;/a&gt; metrics for Git processes but cannot observe grandchild processes spawned by Git, which often do much of the heavy lifting)&lt;/p&gt;
+&lt;p&gt;On GitLab.com, Gitaly is managed through systemd, which will automatically create a cgroup for each service it manages.&lt;/p&gt;
+&lt;p&gt;This means that Gitaly and its child processes are contained within a single cgroup, which we could monitor with &lt;a href=&quot;https://github.com/google/cadvisor&quot;&gt;cAdvisor&lt;/a&gt;, a Google monitoring tool which supports cgroups and is compatible with Prometheus.&lt;/p&gt;
+&lt;p&gt;Although we didn't have direct metrics to determine the behavior of the Git processes, we could infer it using the cgroup metrics and the Gitaly process metrics: the difference between the two would tell us the resources (CPU, memory, etc) being consumed by the Git child processes.&lt;/p&gt;
+&lt;p&gt;At our request, the production team &lt;a href=&quot;https://gitlab.com/gitlab-com/infrastructure/issues/3307&quot;&gt;added cAdvisor to the Gitaly servers&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Having cAdvisor gives us the ability to know what the Gitaly service, including all its child processes, is doing.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-04.png&quot; alt=&quot;cAdvisor graphs for the Gitaly cgroup&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;cAdvisor graphs of the Gitaly cgroup&lt;/em&gt;&lt;/p&gt;
+&lt;h2 id=&quot;from-bad-to-worse-much-much-worse&quot;&gt;From bad to worse. Much, much worse…&lt;/h2&gt;
+&lt;p&gt;In the meantime, &lt;strong&gt;&lt;a href=&quot;https://gitlab.com/gitlab-org/gitaly/issues/823&quot;&gt;the situation had got far worse&lt;/a&gt;&lt;/strong&gt;. Instead of only seeing gradual latency increases over time, we were now seeing far more serious lockups.&lt;/p&gt;
+&lt;p&gt;Individual Gitaly server instances would grind to a halt, to the point where all new incoming TCP connections were not being accepted. This proved to be a problem to using pprof: during the lockup the connection would time out when attempting to profile the process. Since the reason we added pprof was to observe the process under duress, that approach was a bust.&lt;/p&gt;
+&lt;p&gt;Interestingly, during a lock-up, CPU would actually decrease – the system was not overloaded, but actually &lt;em&gt;idled&lt;/em&gt;. Iops, iowait and CPU would all drop way down.&lt;/p&gt;
+&lt;p&gt;Eventually, after a few minutes the service would recover and there would be a surge in backlogged requests. Usually though, as soon as the state was detected, the production team would restart the service manually.&lt;/p&gt;
+&lt;p&gt;The team spent a significant amount of time trying to recreate the problem locally, with little success.&lt;/p&gt;
+&lt;h2 id=&quot;forking-locks&quot;&gt;Forking locks&lt;/h2&gt;
+&lt;p&gt;Without pprof, we fell back to &lt;a href=&quot;http://pro-tips-dot-com.tumblr.com/post/47677612115/kill-a-hung-go-process-and-print-stack-traces&quot;&gt;SIGABRT thread dumps&lt;/a&gt; of hung processes. Using these, we determined that the process had a large amount of contention around &lt;a href=&quot;https://gitlab.com/gitlab-org/gitaly/issues/823#note_50951140&quot;&gt;&lt;code&gt;syscall.ForkLock&lt;/code&gt;&lt;/a&gt; during the lockups. In one dump, 1,400 goroutines were blocked waiting on &lt;code&gt;ForkLock&lt;/code&gt; – most for several minutes.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;syscall.ForkLock&lt;/code&gt; has &lt;a href=&quot;https://github.com/golang/go/blob/release-branch.go1.8/src/syscall/exec_unix.go#L17&quot;&gt;the following documentation&lt;/a&gt;:&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;Lock synchronizing creation of new file descriptors with fork.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;Each Gitaly server instance was &lt;code&gt;fork/exec&lt;/code&gt;'ing Git processes about 20 times per second so we seemed to finally have a very promising lead.&lt;/p&gt;
+&lt;h2 id=&quot;serendipity&quot;&gt;Serendipity&lt;/h2&gt;
+&lt;p&gt;&lt;a href=&quot;https://gitlab.com/gitlab-com/www-gitlab-com/merge_requests/9365#note_54342481&quot;&gt;Researching ForkLock&lt;/a&gt; led us to an issue on the Go repository, opened in 2013, about switching from &lt;code&gt;fork/exec&lt;/code&gt; to &lt;a href=&quot;https://about.gitlab.com/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/man7.org/linux/man-pages/man2/clone.2.html&quot;&gt;&lt;code&gt;clone(2)&lt;/code&gt;&lt;/a&gt; with &lt;code&gt;CLONE_VFORK&lt;/code&gt; and &lt;code&gt;CLONE_VM&lt;/code&gt; on systems that support it: &lt;a href=&quot;https://github.com/golang/go/issues/5838&quot;&gt;golang/go#5838&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;The &lt;code&gt;clone(2)&lt;/code&gt; syscall with &lt;code&gt;CLONE_VFORK&lt;/code&gt; and &lt;code&gt;CLONE_VM&lt;/code&gt; is the same as the &lt;a href=&quot;http://man7.org/linux/man-pages/man3/posix_spawn.3.html&quot;&gt;&lt;code&gt;posix_spawn(3)&lt;/code&gt;&lt;/a&gt; c function, but the latter is easier to refer to, so let's use that.&lt;/p&gt;
+&lt;p&gt;When using &lt;code&gt;fork&lt;/code&gt;, the child process will start with a copy of the parent processes' memory. Unfortunately this process takes longer the larger the virtual memory footprint the process has. Even with copy-on-write, it can take several hundred milliseconds in a memory-intensive process. &lt;code&gt;posix_spawn&lt;/code&gt; doesn't copy the parent processes' memory space and has a roughly constant time.&lt;/p&gt;
+&lt;p&gt;Some good benchmarks of &lt;code&gt;fork/exec&lt;/code&gt; vs. &lt;code&gt;posix_spawn&lt;/code&gt; can be found here: &lt;a href=&quot;https://github.com/rtomayko/posix-spawn#benchmarks&quot;&gt;https://github.com/rtomayko/posix-spawn#benchmarks&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;This seemed like a possible explanation. Over time, the virtual memory size (VMM) of the Gitaly process would increase. As VMM increased, each &lt;a href=&quot;http://man7.org/linux/man-pages/man2/fork.2.html&quot;&gt;&lt;code&gt;fork(2)&lt;/code&gt;&lt;/a&gt; syscall would take longer. As fork latency increased, &lt;code&gt;syscall.ForkLock&lt;/code&gt; contention would increase. If &lt;code&gt;fork&lt;/code&gt; time exceeded the frequency of &lt;code&gt;fork&lt;/code&gt; requests, the system could temporarily lock up entirely.&lt;/p&gt;
+&lt;p&gt;(Interestingly, &lt;a href=&quot;https://golang.org/pkg/net/#TCPListener.Accept&quot;&gt;&lt;code&gt;TCPListener.Accept&lt;/code&gt;&lt;/a&gt; &lt;a href=&quot;https://github.com/golang/go/blob/2ea7d3461bb41d0ae12b56ee52d43314bcdb97f9/src/net/sock_cloexec.go#L20&quot;&gt;also interacts&lt;/a&gt; with &lt;code&gt;syscall.ForkLock&lt;/code&gt;, although only on older versions of Linux. Could this be the cause of our failure to connect to the pprof listener during a lockup?)&lt;/p&gt;
+&lt;p&gt;By some incredibly good luck, &lt;a href=&quot;https://github.com/golang/go/issues/5838&quot;&gt;golang/go#5838&lt;/a&gt;, the switch from &lt;code&gt;fork&lt;/code&gt; to &lt;code&gt;posix_spawn&lt;/code&gt;, had, after several years' delay, recently landed in Go 1.9, just in time for us. Gitaly had been compiled with Go 1.8. We quickly built and tested a new binary with Go 1.9 and manually deployed this on one of our production servers.&lt;/p&gt;
+&lt;h3 id=&quot;spectacular-results&quot;&gt;Spectacular results&lt;/h3&gt;
+&lt;p&gt;Here's the CPU usage of Gitaly processes across the fleet:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-05.png&quot; alt=&quot;CPU after Go 1.9&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;CPU after recompiling with Go 1.9&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;Here's the 99th percentile latency figures. This chart is using a logarithmic scale, so we're talking about two orders of magnitude faster!&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/graph-06.png&quot; alt=&quot;30x latency drops with Go 1.9&quot; class=&quot;shadow&quot;/&gt;&lt;em&gt;Endpoint latency after recompiling with Go 1.9 (log scale)&lt;/em&gt;&lt;/p&gt;
+&lt;h2 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;Recompiling with Go 1.9 solved the problem, thanks to the switch to &lt;code&gt;posix_spawn&lt;/code&gt;. We learnt several other lessons in the process too:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Having solid application monitoring in place allowed us to detect this issue, and start investigating it, far earlier than we otherwise would have been able to.&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://blog.golang.org/profiling-go-programs&quot;&gt;pprof&lt;/a&gt; can be really helpful, but may not help when a process has locked up and won't accept new connections. pprof is lightweight enough that you should consider adding it to your application &lt;em&gt;before&lt;/em&gt; you need it.&lt;/li&gt;
+&lt;li&gt;When all else fails, &lt;a href=&quot;http://pro-tips-dot-com.tumblr.com/post/47677612115/kill-a-hung-go-process-and-print-stack-traces&quot;&gt;&lt;code&gt;SIGABRT thread dumps&lt;/code&gt;&lt;/a&gt; might help.&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/google/cadvisor&quot;&gt;&lt;code&gt;cAdvisor&lt;/code&gt;&lt;/a&gt; is great for monitoring cgroups. Systemd services each run in their own cgroup, so &lt;code&gt;cAdvisor&lt;/code&gt; is an easy way of monitoring a service and all its child processes, together.&lt;/li&gt;
+&lt;/ol&gt;&lt;p class=&quot;note&quot;&gt;&lt;a href=&quot;https://unsplash.com/photos/jJbQBP_yh68?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText&quot;&gt;Photo&lt;/a&gt; by Javier García on &lt;a href=&quot;https://unsplash.com/search/photos/slow?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText&quot;&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Thu, 25 Jan 2018 20:01:37 +0000</pubDate>
+<dc:creator>rfks</dc:creator>
+<og:title>How a fix in Go 1.9 sped up our Gitaly service by 30x</og:title>
+<og:type>article</og:type>
+<og:url>https://about.gitlab.com/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/</og:url>
+<og:image>https://about.gitlab.com/images/blogimages/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/cover.jpg</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://about.gitlab.com/2018/01/23/how-a-fix-in-go-19-sped-up-our-gitaly-service-by-30x/</dc:identifier>
+</item>
+<item>
 <title>DNA seen through the eyes of a coder (2017)</title>
 <link>https://ds9a.nl/amazing-dna/</link>
 <guid isPermaLink="true" >https://ds9a.nl/amazing-dna/</guid>
-<description>&lt;head&gt;&lt;meta http-equiv=&quot;Content-Type&quot; content=&quot;text/html; charset=UTF-8&quot; /&gt;&lt;title&gt;DNA seen through the eyes of a coder&lt;/title&gt;&lt;/head&gt;&lt;body bgcolor=&quot;#FFFFFF&quot; id=&quot;readabilityBody&quot; readability=&quot;410.41166170548&quot;&gt;
+<description>&lt;head&gt;&lt;meta http-equiv=&quot;Content-Type&quot; content=&quot;text/html; charset=UTF-8&quot; /&gt;&lt;title&gt;DNA seen through the eyes of a coder&lt;/title&gt;&lt;/head&gt;&lt;body bgcolor=&quot;#FFFFFF&quot; id=&quot;readabilityBody&quot; readability=&quot;411.06792175526&quot;&gt;
 &lt;center readability=&quot;3&quot;&gt;&lt;big&gt;DNA seen through the eyes of a coder&lt;/big&gt;
 &lt;p&gt;&lt;small&gt;or&lt;/small&gt;&lt;/p&gt;
 &lt;p&gt;&lt;big&gt;If you are a hammer, everything looks like a nail&lt;/big&gt;&lt;/p&gt;
 &lt;/center&gt;
 &lt;table width=&quot;100%&quot; readability=&quot;0.953125&quot;&gt;&lt;tr readability=&quot;1.90625&quot;&gt;&lt;td align=&quot;right&quot;&gt;&lt;small&gt;`This is one of the coolest things I've read in a while.' -- &lt;a href=&quot;http://www.livejournal.com/users/jwz/&quot;&gt;jwz&lt;/a&gt;&lt;/small&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;p&gt;This is just some rambling by a computer programmer about DNA. I'm not a molecular geneticist. If you spot the inevitable mistakes, please mail me (&lt;a href=&quot;http://ds9a.nl&quot;&gt;bert hubert&lt;/a&gt;) at &lt;a href=&quot;mailto:ahu@ds9a.nl&quot;&gt;ahu@ds9a.nl&lt;/a&gt;.&lt;/p&gt;
+&lt;/tr&gt;&lt;/table&gt;&lt;p&gt;This is just some rambling by a computer programmer about DNA. I'm not a molecular geneticist. If you spot the inevitable mistakes, please mail me (&lt;a href=&quot;http://ds9a.nl&quot;&gt;bert hubert&lt;/a&gt;, &lt;a href=&quot;https://twitter.com/PowerDNS_Bert&quot;&gt;@PowerDNS_Bert&lt;/a&gt;) at &lt;a href=&quot;mailto:bert@hubertnet.nl&quot;&gt;bert@hubertnet.nl&lt;/a&gt;.&lt;/p&gt;
 &lt;p&gt;I'm not trying to force my view unto the DNA - each observation here is quite 'uncramped'. To see where I got all this from, head to the &lt;a href=&quot;https://ds9a.nl/amazing-dna/#bibliography&quot;&gt;bibliography&lt;/a&gt;.&lt;/p&gt;
 &lt;p&gt;&lt;small&gt;Quick links: &lt;a href=&quot;https://ds9a.nl/amazing-dna/#source&quot;&gt;The source code&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#pic&quot;&gt;Position Independent Code&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#conditional&quot;&gt;Conditional compilation&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#epigenetics&quot;&gt;Epigenetics&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#dead-code&quot;&gt;Dead code, bloat, comments ('junk dna')&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#fork&quot;&gt;fork() and fork bombs ('tumors')&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#mirroring&quot;&gt;Mirroring, failover&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#apis&quot;&gt;Cluttered APIs, dependency hell&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#viruses&quot;&gt;Viruses, worms&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#central-dogma&quot;&gt;Central Dogma&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#binpatch&quot;&gt;Binary patching aka 'Gene therapy'&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#regression&quot;&gt;Bug Regression&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#rss&quot;&gt;Reed-Solomon codes: 'Forward Error Correction'&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#holy&quot;&gt;Holy Code&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#framing&quot;&gt;Framing errors: start and stop bits&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#smp&quot;&gt;Massive multiprocessing: each cell is a universe&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#bootstrapping&quot;&gt;Self hosting &amp;amp; bootstrapping&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#makefile&quot;&gt;The Makefile&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#Plugins&quot;&gt;Plugins&lt;/a&gt;, &lt;a href=&quot;https://ds9a.nl/amazing-dna/#bibliography&quot;&gt;Further reading&lt;/a&gt;&lt;/small&gt;.&lt;/p&gt;
 &lt;h3&gt;Updates&lt;/h3&gt;
@@ -892,7 +968,7 @@ Christopher Wray prepares to testify during his confirmation hearing before the 
 <title>Why I left Google (HN search results)</title>
 <link>https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story</link>
 <guid isPermaLink="true" >https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story</guid>
-<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story&quot;&gt;https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16231658&quot;&gt;https://news.ycombinator.com/item?id=16231658&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 309&lt;/p&gt;&lt;p&gt;# Comments: 187&lt;/p&gt;</description>
+<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story&quot;&gt;https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16231658&quot;&gt;https://news.ycombinator.com/item?id=16231658&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 311&lt;/p&gt;&lt;p&gt;# Comments: 188&lt;/p&gt;</description>
 <pubDate>Thu, 25 Jan 2018 15:52:38 +0000</pubDate>
 <dc:creator>kelukelugames</dc:creator>
 <og:url>https://hn.algolia.com/?query=why%20i%20left%20google&amp;sort=byPopularity&amp;prefix&amp;page=0&amp;dateRange=all&amp;type=story</og:url>
@@ -929,22 +1005,6 @@ Christopher Wray prepares to testify during his confirmation hearing before the 
 <og:type>article</og:type>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://medium.com/@steve.yegge/google-doesnt-necessarily-need-innovation-95cea96d0eeb?r=1</dc:identifier>
-</item>
-<item>
-<title>Waze Carpool</title>
-<link>https://www.waze.com/carpool/</link>
-<guid isPermaLink="true" >https://www.waze.com/carpool/</guid>
-<description>&lt;p data-reactid=&quot;194&quot;&gt;Every day, millions of drivers in thousands of cities use Waze to get around. So what if, instead of working together to outsmart traffic, we found a way for them to just get rid of it?&lt;/p&gt;
-&lt;p data-reactid=&quot;195&quot;&gt;People created traffic. People can end it. So, what are we waiting for? Let’s put those extra seats to work, and get everyone unstuck.&lt;/p&gt;
-</description>
-<pubDate>Thu, 25 Jan 2018 14:29:02 +0000</pubDate>
-<dc:creator>artsandsci</dc:creator>
-<og:type>website</og:type>
-<og:image>/carpool/c9f48a27d89438a9eba77d31e0a2a8fe.png</og:image>
-<og:description>Too many cars. So many empty seats. Let's fix that.</og:description>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.waze.com/carpool/</dc:identifier>
 </item>
 </channel>
 </rss>
