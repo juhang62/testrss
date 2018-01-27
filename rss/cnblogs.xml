@@ -9,6 +9,812 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>线程池定制初探 - Secondworld</title>
+<link>http://www.cnblogs.com/Kidezyq/p/8362732.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/Kidezyq/p/8362732.html</guid>
+<description>&lt;p&gt;​ 我在的公司虽然是移动支付领域的公司。但是我做的业务类似于管理系统，所以一开始写代码的时候没有考虑到数据的量的问题。开始有一个统计页面，大概要统计的数据分为十多个维度，然后每个维度需要考虑十个左右的方面。也就是统计页面轻轻地点击一个查询按钮，要进行100次左右的数据库查询。开始数据量小的时候，查询还能够使用，页面不会超时。到后面数据量越来越大，最大的一张表数据量已经超过1亿。这时候悲催的事情发生了--- &lt;strong&gt;页面点击查询直接未响应&lt;/strong&gt;.....&lt;/p&gt;
+&lt;hr/&gt;
+&lt;p&gt;​ 其实当时的方案我想了两种：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;ol&gt;&lt;li&gt;优化业务实现逻辑，其实在查询的时候一个表的多个维度的查询可以传一个维度列表进去。查出来结果之后，后台在进行分组计算。&lt;/li&gt;
+&lt;li&gt;采用多线程，对每一个维度采用一个线程去执行。这样其实每个线程的查询次数在10次左右，总的时间差不多可以缩短10倍。&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+&lt;p&gt;​ 当然，当时我知道最好的方案是混合使用1和2。但当时1的实现存在以下问题，最终让我决定选择方案2：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;ol&gt;&lt;li&gt;因为每个维度涉及多张表, 不同的表归属于不同的模块。如果某张表的查询条件不支持维度列表，那么需要提需求给对应模块开发...... (何年何月能完)&lt;/li&gt;
+&lt;li&gt;方案1的改动涉及代码变动较多，且不好封装每个线程任务，写出来的代码逻辑有点绕，后台存在大量的重新分维度统计的代码。简而言之就是&lt;strong&gt;不优雅&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+&lt;hr/&gt;
+&lt;p&gt;​ 既然最终选定方案2的话，那么自然考虑到选择线程池。那么选啥线程池呢？Single？Schedule肯定不用想直接PASS。Cached？其实当前来说是可行的，因为当前线上的维度也就十多个。以Cached线程池的特性，只要同时并发的线程数量不至于太大，也不至于给系统太大压力导致系统瘫痪。但是因为维度会随着业务的增长而越来越多，如果后续维度增加到20甚至30，那么对系统的压力就无法预估了。&lt;/p&gt;
+&lt;p&gt;​ 思前想后，我最终决定选择Fix线程池，将线程池固化大小为10个。但这时候我又想，其实统计页面一天查询的次数并不多。可能就每天早上点击查询一次，后面可能就不再点查询。那么这时候又出现了两种蛋疼的选择:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;ol&gt;&lt;li&gt;直接在查询的方法内部初始化线程池&lt;/li&gt;
+&lt;li&gt;在类的属性中初始化线程池&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+&lt;p&gt;​ 第1种方案的话，每次查询都要重新初始化线程池，造成很大的资源消耗。如果连续查询多次，并不会后面比前面快，反而可能由于不停的线程池销毁创建导致越来越慢。最终我选择了第2种方案，当然我并没有选择&lt;strong&gt;饿汉模式&lt;/strong&gt;直接初始化，而是选择了&lt;strong&gt;懒汉模式&lt;/strong&gt;在方法中进行线程池初始化，且通过锁保证只初始化一次。&lt;/p&gt;
+&lt;hr/&gt;
+&lt;p&gt;​ 到这里你如果觉得我的定制初探就完了，那你就too young too naive。我不追求可行，只追求完美~&lt;/p&gt;
+&lt;p&gt;这时候我就在想，其实根据用户的操作习惯，统计页面的查询按钮，要么就隔着几个小时不按，要么就可能一时心血来潮，连续查询几天或者同一天分多个维度查询多次。而大家都知道Fix线程池固化了线程池的大小，即使后面连续几个小时没有任务来，仍然会一直保持着初始大小的线程数。那么能不能实现即能够控制线程数量Fix，又可以在空闲的时候销毁核心线程呢？答案当然是有的，关键点在于:&lt;strong&gt;ThreadPoolExecutor的allowCoreThreadTimeOut方法&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;15&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;/**&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * Sets the policy governing whether core threads may time out and&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * terminate if no tasks arrive within the keep-alive time, being&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * replaced if needed when new tasks arrive. When false, core&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * threads are never terminated due to lack of incoming&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * tasks. When true, the same keep-alive policy applying to&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * non-core threads applies also to core threads. To avoid&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * continual thread replacement, the keep-alive time must be&lt;/span&gt;
+&lt;span class=&quot;er&quot;&gt;     * greater than zero when setting &amp;lt;tt&amp;gt;true&amp;lt;/tt&amp;gt;. This method&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * should in general be called before the pool is actively used.&lt;/span&gt;
+&lt;span class=&quot;er&quot;&gt;     * @param value &amp;lt;tt&amp;gt;true&amp;lt;/tt&amp;gt; if should time out, else &amp;lt;tt&amp;gt;false&amp;lt;/tt&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;er&quot;&gt;     * @throws IllegalArgumentException if value is &amp;lt;tt&amp;gt;true&amp;lt;/tt&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * and the current keep-alive time is not greater than zero.&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     *&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * &lt;/span&gt;&lt;span class=&quot;kw&quot;&gt;@since &lt;/span&gt;&lt;span class=&quot;co&quot;&gt;1.6&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     */&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;allowCoreThreadTimeOut&lt;/span&gt;(&lt;span class=&quot;dt&quot;&gt;boolean&lt;/span&gt; value) {
+        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (value &amp;amp;&amp;amp; keepAliveTime &amp;lt;= &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;)
+            &lt;span class=&quot;kw&quot;&gt;throw&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; IllegalArgumentException(&lt;span class=&quot;st&quot;&gt;&quot;Core threads must have nonzero keep alive times&quot;&lt;/span&gt;);
+
+        allowCoreThreadTimeOut = value;
+    }&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;​ 从源码的注释来看，该方法可以支持线程池的keep-alive time的设置同时对核心线程和非核心线程生效。具体为啥，后面我分析线程池源码的时候会讲到，现在我们只需要看看用到该处的源码(在&lt;strong&gt;ThreadPoolExecutor的getTask方法&lt;/strong&gt;中):&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;16&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;co&quot;&gt;/**&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * Gets the next task for a worker thread to run.  The general&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * approach is similar to execute() in that worker threads trying&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * to get a task to run do so on the basis of prevailing state&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * accessed outside of locks.  This may cause them to choose the&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * &quot;wrong&quot; action, such as trying to exit because no tasks&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * appear to be available, or entering a take when the pool is in&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * the process of being shut down.  These potential problems are&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * countered by (1) rechecking pool state (in workerCanExit)&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * before giving up, and (2) interrupting other workers upon&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * shutdown, so they can recheck state. All other user-based state&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * changes (to allowCoreThreadTimeOut etc) are OK even when&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * performed asynchronously wrt getTask.&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     *&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * &lt;/span&gt;&lt;span class=&quot;kw&quot;&gt;@return &lt;/span&gt;&lt;span class=&quot;co&quot;&gt;the task&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     */&lt;/span&gt;
+    Runnable &lt;span class=&quot;fu&quot;&gt;getTask&lt;/span&gt;() {
+        &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (;;) {
+            &lt;span class=&quot;kw&quot;&gt;try&lt;/span&gt; {
+                &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; state = runState;
+                &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (state &amp;gt; SHUTDOWN)
+                    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;;
+                Runnable r;
+                &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (state == SHUTDOWN)  &lt;span class=&quot;co&quot;&gt;// Help drain queue&lt;/span&gt;
+                    r = workQueue.&lt;span class=&quot;fu&quot;&gt;poll&lt;/span&gt;();
+                &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (poolSize &amp;gt; corePoolSize || allowCoreThreadTimeOut)
+                    r = workQueue.&lt;span class=&quot;fu&quot;&gt;poll&lt;/span&gt;(keepAliveTime, TimeUnit.&lt;span class=&quot;fu&quot;&gt;NANOSECONDS&lt;/span&gt;);
+                &lt;span class=&quot;kw&quot;&gt;else&lt;/span&gt;
+                    r = workQueue.&lt;span class=&quot;fu&quot;&gt;take&lt;/span&gt;();
+                &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (r != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;)
+                    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; r;
+                &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (&lt;span class=&quot;fu&quot;&gt;workerCanExit&lt;/span&gt;()) {
+                    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (runState &amp;gt;= SHUTDOWN) &lt;span class=&quot;co&quot;&gt;// Wake up others&lt;/span&gt;
+                        &lt;span class=&quot;fu&quot;&gt;interruptIdleWorkers&lt;/span&gt;();
+                    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;;
+                }
+                &lt;span class=&quot;co&quot;&gt;// Else retry&lt;/span&gt;
+            } &lt;span class=&quot;kw&quot;&gt;catch&lt;/span&gt; (InterruptedException ie) {
+                &lt;span class=&quot;co&quot;&gt;// On interruption, re-check runState&lt;/span&gt;
+            }
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;​ 关键在于&lt;code&gt;workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS)&lt;/code&gt;,该方法表示尝试从等待队列中获取任务，如果超过keepAlive time，则直接返回null。如果返回null的话，work线程就会被终止。&lt;/p&gt;
+&lt;p&gt;​ 好了这些都是后话，在我看了线程池的源码之后才能够清楚地知道为啥这个参数有这个作用。那么在之前，我是怎么测试验证我的想法的呢？其实很简单：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;我先参照线程池的默认的&lt;code&gt;DefaultThreadFactory&lt;/code&gt;定义自己的线程工厂，目的是为了获取线程工厂内的&lt;code&gt;ThreadGroup&lt;/code&gt;属性，因为&lt;code&gt;ThreadGroup&lt;/code&gt;类有一个&lt;code&gt;activeCount&lt;/code&gt;方法，该方法可以获取线程组内活跃的线程个数。&lt;/li&gt;
+&lt;/ol&gt;&lt;div class=&quot;sourceCode&quot; readability=&quot;13&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;kw&quot;&gt;class&lt;/span&gt; MyThreadFactory &lt;span class=&quot;kw&quot;&gt;implements&lt;/span&gt; ThreadFactory {
+        &lt;span class=&quot;dt&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; AtomicInteger poolNumber = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; AtomicInteger(&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;);
+        &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; ThreadGroup group;
+        &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; AtomicInteger threadNumber = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; AtomicInteger(&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;);
+        &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; String namePrefix;
+
+        &lt;span class=&quot;fu&quot;&gt;MyThreadFactory&lt;/span&gt;() {
+            SecurityManager s = System.&lt;span class=&quot;fu&quot;&gt;getSecurityManager&lt;/span&gt;();
+            group = (s != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) ? s.&lt;span class=&quot;fu&quot;&gt;getThreadGroup&lt;/span&gt;() : Thread.&lt;span class=&quot;fu&quot;&gt;currentThread&lt;/span&gt;().&lt;span class=&quot;fu&quot;&gt;getThreadGroup&lt;/span&gt;();
+            namePrefix = &lt;span class=&quot;st&quot;&gt;&quot;pool-&quot;&lt;/span&gt; + poolNumber.&lt;span class=&quot;fu&quot;&gt;getAndIncrement&lt;/span&gt;() + &lt;span class=&quot;st&quot;&gt;&quot;-thread-&quot;&lt;/span&gt;;
+        }
+
+        &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; Thread &lt;span class=&quot;fu&quot;&gt;newThread&lt;/span&gt;(Runnable r) {
+            Thread t = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; Thread(group, r, namePrefix + threadNumber.&lt;span class=&quot;fu&quot;&gt;getAndIncrement&lt;/span&gt;(), &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;);
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (t.&lt;span class=&quot;fu&quot;&gt;isDaemon&lt;/span&gt;())
+                t.&lt;span class=&quot;fu&quot;&gt;setDaemon&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;false&lt;/span&gt;);
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (t.&lt;span class=&quot;fu&quot;&gt;getPriority&lt;/span&gt;() != Thread.&lt;span class=&quot;fu&quot;&gt;NORM_PRIORITY&lt;/span&gt;)
+                t.&lt;span class=&quot;fu&quot;&gt;setPriority&lt;/span&gt;(Thread.&lt;span class=&quot;fu&quot;&gt;NORM_PRIORITY&lt;/span&gt;);
+            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; t;
+        }
+        
+        &lt;span class=&quot;co&quot;&gt;// 我所增加的方法，为了获取线程组&lt;/span&gt;
+        &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; ThreadGroup &lt;span class=&quot;fu&quot;&gt;getThreadGroup&lt;/span&gt;() {
+            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;group&lt;/span&gt;;
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;ol&gt;&lt;li&gt;万事俱备，只欠东风了，我只需要构造两种不同的情况验证我的猜想即可！&lt;/li&gt;
+&lt;/ol&gt;&lt;div class=&quot;sourceCode&quot; readability=&quot;16&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;MyThreadFactory myThreadFactory = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;MyThreadFactory&lt;/span&gt;();
+ThreadPoolExecutor executor = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ThreadPoolExecutor(&lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;, TimeUnit.&lt;span class=&quot;fu&quot;&gt;SECONDS&lt;/span&gt;,
+                                &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; LinkedBlockingQueue&amp;lt;Runnable&amp;gt;(), myThreadFactory); 
+&lt;span class=&quot;co&quot;&gt;// executor.allowCoreThreadTimeOut(true);&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; i = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt;= &lt;span class=&quot;dv&quot;&gt;20&lt;/span&gt;; i++) {
+  executor.&lt;span class=&quot;fu&quot;&gt;submit&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;MyRunnable&lt;/span&gt;());
+}
+System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(myThreadFactory.&lt;span class=&quot;fu&quot;&gt;getThreadGroup&lt;/span&gt;().&lt;span class=&quot;fu&quot;&gt;activeCount&lt;/span&gt;());     &lt;span class=&quot;co&quot;&gt;// 6 &lt;/span&gt;
+Thread.&lt;span class=&quot;fu&quot;&gt;sleep&lt;/span&gt;(&lt;span class=&quot;dv&quot;&gt;20000&lt;/span&gt;);
+System.&lt;span class=&quot;fu&quot;&gt;out&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;println&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;After destroy, active thread count:&quot;&lt;/span&gt; + myThreadFactory.&lt;span class=&quot;fu&quot;&gt;getThreadGroup&lt;/span&gt;().&lt;span class=&quot;fu&quot;&gt;activeCount&lt;/span&gt;());             &lt;span class=&quot;co&quot;&gt;// 6/1&lt;/span&gt;
+executor.&lt;span class=&quot;fu&quot;&gt;shutdown&lt;/span&gt;();&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;​ 运行的结果:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;ol&gt;&lt;li&gt;如果不执行&lt;code&gt;executor.allowCoreThreadTimeOut(true);&lt;/code&gt;两个activeCount的结果都是6&lt;/li&gt;
+&lt;li&gt;如果执行&lt;code&gt;executor.allowCoreThreadTimeOut(true);&lt;/code&gt;第一个activeCount的结果为6，第二个activeCount的结果为1&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+&lt;hr/&gt;
+&lt;p&gt;​ 好了，终于到最终定制实现了。我的代码实现如下(类为Spring管理的类，最终线程池shutdown在PreDestroy的时候):&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;15&quot;&gt;
+&lt;pre class=&quot;sourceCode java&quot;&gt;
+&lt;code class=&quot;sourceCode java&quot;&gt;    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;volatile&lt;/span&gt; ThreadPoolExecutor searchExecutors; 
+    
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;final&lt;/span&gt; Object lock = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; Object();
+    
+    &lt;span class=&quot;co&quot;&gt;/**&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     * 初始化线程池，开始不进行初始化，免得浪费系统资源&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;     */&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;initExecutor&lt;/span&gt;() {
+        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (searchExecutors != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+            &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt;;
+        }
+        
+        &lt;span class=&quot;kw&quot;&gt;synchronized&lt;/span&gt; (lock) {
+            &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (searchExecutors == &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+                 &lt;span class=&quot;co&quot;&gt;// 设置一个固定大小为10，核心线程如果超过10分钟空闲也可销毁的线程池&lt;/span&gt;
+                ThreadPoolExecutor tempExecutor = &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; ThreadPoolExecutor(&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;, TimeUnit.&lt;span class=&quot;fu&quot;&gt;MINUTES&lt;/span&gt;, &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; LinkedBlockingQueue&amp;lt;Runnable&amp;gt;(), Executors.&lt;span class=&quot;fu&quot;&gt;defaultThreadFactory&lt;/span&gt;());
+                tempExecutor.&lt;span class=&quot;fu&quot;&gt;allowCoreThreadTimeOut&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;);
+                &lt;span class=&quot;kw&quot;&gt;this&lt;/span&gt;.&lt;span class=&quot;fu&quot;&gt;searchExecutors&lt;/span&gt; = tempExecutor;
+            }
+        }
+    }
+
+    &lt;span class=&quot;fu&quot;&gt;@PreDestroy&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;destroy&lt;/span&gt;() {
+        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; (searchExecutors != &lt;span class=&quot;kw&quot;&gt;null&lt;/span&gt;) {
+            searchExecutors.&lt;span class=&quot;fu&quot;&gt;shutdown&lt;/span&gt;();
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;blockquote&gt;
+&lt;p&gt;这里再说两点&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;这个初始化方法采用了double-check-lock的方式，来保证多线程并发获取到的是同一个线程池实例&lt;/li&gt;
+&lt;li&gt;注意到在设置属性searchExecutors之前借助了一个tempExecutor。这样也是为了防止ThreadPoolExecutor对象已经被初始化，但是allowCoreThreadTimeOut还未被执行的问题。（对象过早逃逸导致属性与预期不符）。&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+&lt;hr/&gt;
+&lt;p&gt;​ 通过这次线程池定制初探，发现其实看起来再没有技术含量的工作，如果细细想下去还是会有很多可以深入研究的东西。而做软件其实也要像做艺术品一样，多考虑不同的实现可能，尽量选择最完美的解决方案。&lt;/p&gt;
+</description>
+<pubDate>Fri, 26 Jan 2018 17:20:00 +0000</pubDate>
+<dc:creator>Secondworld</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/Kidezyq/p/8362732.html</dc:identifier>
+</item>
+<item>
+<title>Binlog的三个业务应用场景 - kingszelda</title>
+<link>http://www.cnblogs.com/kingszelda/p/8362612.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/kingszelda/p/8362612.html</guid>
+<description>&lt;p&gt;  binlog是mysql的一种二进制日志文件，用来记录数据的变化。mysql使用binlog进行主从复制，如图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1196330/201801/1196330-20180126234342865-81329095.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;客户端向master的mysql sever写入数据&lt;/li&gt;
+&lt;li&gt;当数据发生变化时，master将变更的数据记录写入到二进制文件中，即binlog。&lt;/li&gt;
+&lt;li&gt;slave订阅了master的binlog，所以会通过一个I/O THREAD与master的DUMP THREAD进行通信，同步binlog&lt;/li&gt;
+&lt;li&gt;I/O THREAD读取到binlog后会吸入到relay log中，准备重放。&lt;/li&gt;
+&lt;li&gt;slave会通过SQL THREAD读取relay log，重放数据的改动并执行相应的改动。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;这里有几点需要注意：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;主从复制不是强一致性，只能保证最终一致&lt;/li&gt;
+&lt;li&gt;master配合binlog复制会影响性能，所以尽量不要在master上挂太多的slave，如果对时间要求不高，可以在slave上挂slave&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;  上面介绍了mysql中应用binlog的场景，而我们的业务可以伪装成master的slave节点，感知数据的变化，这就给了我们很多的业务运用空间。&lt;/p&gt;
+&lt;h2&gt;2.1 数据异构&lt;/h2&gt;
+&lt;p&gt;  经常有这样一个场景：&lt;/p&gt;
+&lt;p&gt;  原来业务是一个很单一的系统，所以表也在一起。随着业务的发展，系统开始拆分，总有一些表是各个业务都关注的表，但是对相关的字段的运用场景不同，所以这样一份元数据怎样更好的为各个系统服务就成了问题。当然，多写或者读写分离可以从物理节点上减少对数据服务器的压力，但是对业务并没有做到足够的支持，因为这些表都是一样的。因此我们可以通过binlog进行数据异构。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1196330/201801/1196330-20180127001323834-1717216490.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如图所示，订单系统生成订单后，通过binlog可以解析生成用户维度的订单信息供用户中心查询、商户维度订单表供运营管理，以及搜索系统的搜索数据，提供全文搜索功能。&lt;/p&gt;
+&lt;p&gt;这样，我们就通过原始的订单数据异构到三个系统中，提供了丰富的数据访问功能。不仅从节点上降低了数据服务器的压力，数据表现形式也更贴近自己的服务，减少不必要的字段冗余。&lt;/p&gt;
+&lt;h2&gt;2.2 缓存数据的补充&lt;/h2&gt;
+&lt;p&gt;对于高并发的系统，数据库往往是系统性能的瓶颈，毕竟IO响应速度是远远小于电子的运算速度的。因此，很多查询类服务都会在CPU与数据库之间加上一层缓存。即现从缓存获取，命中后直接返回，否则从DB中获取并存入缓存后返回。而如果原始数据变化了但缓存尚未超时，则缓存中的数据就是过时的数据了。当数据有变更的时候主动修改缓存数据。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1196330/201801/1196330-20180127004316631-1162452138.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当客户端更改了数据之后，中间件系统通过binlog获得数据变更，并同步到缓存中。这样就保证了缓存中数据有效性，减少了对数据库的调用，从而提高整体性能。&lt;/p&gt;
+&lt;h2&gt;2.3 基于数据的任务分发&lt;/h2&gt;
+&lt;p&gt;有这样一个场景：&lt;/p&gt;
+&lt;p&gt;  很多系统依赖同一块重要数据，当这些数据发生变化的时候，需要调用其他相关系统的通知接口同步数据变化，或者mq消息告知变化并等待其主动同步。这两种情况都对原始系统造成了侵入，原始系统改一块数据，并不想做这么多其他的事情。所以这时候可以通过binlog进行任务分发。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1196330/201801/1196330-20180127010616631-1751665561.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当原始业务系统修改数据后，不需要进行其他的业务关联。由调度系统读取binlog进行相应的任务分发、消息发送以及同步其他业务状态。这样可以将其他业务与原始业务系统解耦，并从数据的角度将所有管理功能放在了同一个调度系统中，责任清晰。&lt;/p&gt;
+
+&lt;p&gt;  binlog是mysql提供的数据同步机制，很好的解决了主从分离、读写库分离等业务。而我们可以构建一个中间件系统，“伪造”成master的一个slave。当读取了binlog中的数据变化后，根据相应的业务场景做各种业务处理。而目前我接触到的最常见的就是第一个场景——数据异构，可以异构到其他表中，也可以异构到其他数据引擎中，比如Elastic Search。&lt;/p&gt;
+</description>
+<pubDate>Fri, 26 Jan 2018 17:13:00 +0000</pubDate>
+<dc:creator>kingszelda</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/kingszelda/p/8362612.html</dc:identifier>
+</item>
+<item>
+<title>30分钟学玩转RabbitMQ - 冷豪</title>
+<link>http://www.cnblogs.com/learnhow/p/8362289.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/learnhow/p/8362289.html</guid>
+<description>&lt;p&gt;最近在学习RabbitMQ，在网上找了不少资料发现都特高端。动辄集群部署，分布式架构什么的，对于一个初学者实在不够友好。心想求人不如求自己，为什么不自己整理一套资料呢？于是《30分钟学玩转RabbitMQ》诞生。&lt;/p&gt;
+&lt;p&gt;一、准备工作&lt;/p&gt;
+&lt;p&gt;据说RabbitMQ是可以部署到Windows环境的，不过作为一个专业级的开发人员怎么能够让这样的事情发生呢？自然我们的准备工作从Linux开始。首先在虚拟机中安装CentOS 7，选择英文，最小安装，默认开启网络以及创建一个root用户：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126215415147-616136809.png&quot; alt=&quot;&quot; width=&quot;439&quot; height=&quot;373&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126215534787-2017835205.png&quot; alt=&quot;&quot; width=&quot;441&quot; height=&quot;374&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126215704975-818299634.png&quot; alt=&quot;&quot; width=&quot;442&quot; height=&quot;374&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;完成以后进入系统，由于最小安装有一些基本的命令无法使用，因此在进入一下步之前先将ifconfig、vim以及基本的编译环境准备好：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 安装ifconfig &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+yum install net-tools
+
+&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 安装vim &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+yum install yum
+
+&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 准备基础编译环境 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+yum install gcc glibc-devel make ncurses-devel openssl-devel xmlto&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;接下来我们从官网下载安装包rabbitmq-server-3.7.2-1.el7.noarch.rpm和otp_src_19.3.tar.gz（&lt;span&gt;千万别问我Erlang是什么，我也是第一次知道这门语言&lt;/span&gt;）。上传到虚拟机后执行命令：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 解压包 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+[root@MiWiFi-R3-srv ~]# tar -xvf otp_src_19.3.tar.gz
+[root@MiWiFi-R3-srv ~]# ll&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126230218240-970655391.png&quot; alt=&quot;&quot; width=&quot;478&quot; height=&quot;268&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv ~]# mkdir /usr/local/erlang
+[root@MiWiFi-R3-srv ~]# cd otp_src_19.3
+[root@MiWiFi-R3-srv otp_src_19.3]# ./configure --prefix=/usr/local/erlang --without-javac
+[root@MiWiFi-R3-srv otp_src_19.3]# make &amp;amp;&amp;amp; make install&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;编译&amp;amp;安装完成以后配置Erlang环境变量：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv otp_src_19.3]# vim /etc/profile
+
+#追加环境变量到文件末尾
+ERL_HOME=/usr/local/erlang
+PATH=$ERL_HOME/bin:$PATH
+export ERL_HOME PATH
+
+[root@MiWiFi-R3-srv otp_src_19.3]# source /etc/profile&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;接下来可以正式安装RabbitMQ：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv otp_src_19.3]# cd ..
+[root@MiWiFi-R3-srv ~]# rpm -ivh --nodeps rabbitmq-server-3.7.2-1.el7.noarch.rpm&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;运行RabbitMQ需要首先开放15672和5672端口：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv ~]# firewall-cmd --zone=public --add-port=15672/tcp --permanent
+[root@MiWiFi-R3-srv ~]# firewall-cmd --zone=public --add-port=5672/tcp --permanent
+[root@MiWiFi-R3-srv ~]# firewall-cmd --reload&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;正常情况下RabbitMQ已经安装完成，最后测试一下：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv ~]# rabbitmq-plugins enable rabbitmq_management
+[root@MiWiFi-R3-srv ~]# rabbitmq-server&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126232942662-1490935331.png&quot; alt=&quot;&quot; width=&quot;479&quot; height=&quot;268&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;正常启动以后，我们可以在本地使用浏览器中访问管理页面：http://&amp;lt;虚拟机IP&amp;gt;:15672/&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126233425428-517890344.png&quot; alt=&quot;&quot; width=&quot;291&quot; height=&quot;137&quot;/&gt;  大功告成...&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;至此，我们的准备工作已经完成了80%。接下来我们需要为RabbitMQ创建用户并赋权。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;[root@MiWiFi-R3-srv ~]# rabbitmqctl add_user root root
+[root@MiWiFi-R3-srv ~]# rabbitmqctl set_user_tags root administrator
+[root@MiWiFi-R3-srv ~]# rabbitmqctl  set_permissions -p / root '.*' '.*' '.*'
+&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 后台启动 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+[root@MiWiFi-R3-srv ~]# rabbitmq-server -detached&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;重新通过在本地浏览器访问管理页面，输入用户名和密码。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180126234722365-1587136573.png&quot; alt=&quot;&quot; width=&quot;668&quot; height=&quot;247&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;二、简单开发指南&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;深入的开发案例网上很多，我就不在这里重复的发明轮子了。作为一个指南，这里主要介绍两种开发方式，更加具体的用例我可能会在以后的文章中专门介绍。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.单独使用——一个简单的消息生产者&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;通过maven引入依赖&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;com.rabbitmq&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;amqp-client&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;5.1.1&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;创建生产者：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.learnhow.rabbitmq;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.IOException;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.concurrent.TimeoutException;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.rabbitmq.client.Channel;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.rabbitmq.client.Connection;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.rabbitmq.client.ConnectionFactory;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; App {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 队列名称&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; String QUEUE_NAME = &quot;Hello.rabbitMQ&quot;&lt;span&gt;;
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; IOException, TimeoutException {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 连接工厂&lt;/span&gt;
+        ConnectionFactory factory = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ConnectionFactory();
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 配置连接属性&lt;/span&gt;
+        factory.setHost(&quot;192.168.31.244&quot;); &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 虚拟机地址&lt;/span&gt;
+        factory.setPort(5672); &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 端口号&lt;/span&gt;
+        factory.setUsername(&quot;root&quot;); &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 用户名&lt;/span&gt;
+        factory.setPassword(&quot;root&quot;); &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 密码
+        
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 得到连接，创建通道&lt;/span&gt;
+        Connection connection =&lt;span&gt; factory.newConnection();
+        Channel channel &lt;/span&gt;=&lt;span&gt; connection.createChannel();
+        
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 声明一个叫Hello.rabbitMQ的队列&lt;/span&gt;
+        channel.queueDeclare(QUEUE_NAME, &lt;span&gt;false&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;, &lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+
+        String message &lt;/span&gt;= &quot;Hello RabbitMQ&quot;&lt;span&gt;;
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 发送消息&lt;/span&gt;
+        channel.basicPublish(&quot;&quot;, QUEUE_NAME, &lt;span&gt;null&lt;/span&gt;, message.getBytes(&quot;UTF-8&quot;&lt;span&gt;));
+        
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 关闭通道和连接&lt;/span&gt;
+&lt;span&gt;        channel.close();
+        connection.close();
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;执行完成以后切换到浏览器的管理页面：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180127000407006-967387756.png&quot; alt=&quot;&quot; width=&quot;668&quot; height=&quot;195&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;我们发现刚才在main函数中声明的QUEUE NAME已经出现了。&lt;/p&gt;
+&lt;p&gt;2.Spring AMQP——与Spring Boot集成&lt;/p&gt;
+&lt;p&gt;Maven依赖：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;parent&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.springframework.boot&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;spring-boot-starter-parent&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;1.5.9.RELEASE&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;parent&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;dependencies&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.springframework.boot&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;spring-boot-starter-web&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.springframework.boot&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;spring-boot-starter-amqp&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;dependencies&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;Spring Boot启动项，声明测试队列：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; org.dispatcher;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.amqp.core.Queue;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.boot.SpringApplication;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.boot.autoconfigure.SpringBootApplication;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.context.annotation.Bean;
+
+@SpringBootApplication
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DispatcherApplication {
+    @Bean
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; Queue helloQueue() {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Queue(&quot;helloQueue&quot;&lt;span&gt;);
+    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+        SpringApplication.run(DispatcherApplication.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;消息生产者：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; org.dispatcher.controller;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.Date;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.amqp.core.AmqpTemplate;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.beans.factory.annotation.Autowired;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.stereotype.Component;
+
+@Component
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Producer {
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; AmqpTemplate rabbitTemplate;
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; send() {
+        String sendMsg &lt;/span&gt;= &quot;Hi~ &quot; + &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Date();
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.rabbitTemplate.convertAndSend(&quot;helloQueue&quot;&lt;span&gt;, sendMsg);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; &lt;span&gt;消息接收者：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; org.dispatcher.controller;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.amqp.rabbit.annotation.RabbitHandler;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.amqp.rabbit.annotation.RabbitListener;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.stereotype.Component;
+
+@Component
+@RabbitListener(queues &lt;/span&gt;= &quot;helloQueue&quot;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Receiver {
+    @RabbitHandler
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process(String msg) {
+        System.out.println(&lt;/span&gt;&quot;Receiver: &quot; +&lt;span&gt; msg);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;Restful接口：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; org.dispatcher.controller;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.beans.factory.annotation.Autowired;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.GetMapping;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.RequestMapping;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping(&lt;/span&gt;&quot;/rabbitmq&quot;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; RabbitMqController {
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; String SUCCESS = &quot;SUCCESS&quot;&lt;span&gt;;
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; String FAILURE = &quot;FAILURE&quot;&lt;span&gt;;
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Producer producer;
+
+    @GetMapping(&lt;/span&gt;&quot;/push&quot;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; String push() {
+        producer.send();
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; SUCCESS;
+    }
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; &lt;span&gt;配置文件application.yml：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+server:
+  port: 8081
+spring:
+  rabbitmq:
+    host: 192.168.31.244
+    port: 5672
+    username: root
+    password: root
+    virtual-host: /
+    publisher-confirms: true
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; &lt;span&gt;启动Spring Boot，访问：http://localhost:8081/rabbitmq/push，再切换到管理页面：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/871676/201801/871676-20180127002750912-221119420.png&quot; alt=&quot;&quot; width=&quot;668&quot; height=&quot;262&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;新的QUEUE NAME证明Spring Boot与RabbitMQ整合成功。&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 26 Jan 2018 16:34:00 +0000</pubDate>
+<dc:creator>冷豪</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/learnhow/p/8362289.html</dc:identifier>
+</item>
+<item>
+<title>关于IDE与环境变量的一点说明 - Utb</title>
+<link>http://www.cnblogs.com/zd540/p/8362255.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zd540/p/8362255.html</guid>
+<description>&lt;p&gt;环境变量就是当计算机要执行操作时，在环境变量所制定的范围内查找该操作。&lt;/p&gt;
+&lt;p&gt;比如linux的ls命令，计算机就需要在$PATH规定的目录中寻找该ls的可执行文件。&lt;/p&gt;
+&lt;p&gt;java的classpath,在该规定的目录中寻找class文件。&lt;/p&gt;
+&lt;p&gt;JAVA_HOME,在该目录中寻找java命令。&lt;/p&gt;
+
+&lt;p&gt;在Intellij idea中添加新的jar包，明明已经添加进去了，代码都可以编写，但是编译的时候提示了ClassNotFound&lt;/p&gt;
+
+&lt;p&gt;尝试添加 libraries和jar还是无果后，将classpath指向了jar包目录，编译成功&lt;/p&gt;
+&lt;p&gt;因为编译器需要环境变量的帮助才可以正常工作？？&lt;/p&gt;
+</description>
+<pubDate>Fri, 26 Jan 2018 16:29:00 +0000</pubDate>
+<dc:creator>Utb</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zd540/p/8362255.html</dc:identifier>
+</item>
+<item>
+<title>2017华为编程大赛总结 - 王若伊_恩赐解脱</title>
+<link>http://www.cnblogs.com/jilodream/p/8362135.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jilodream/p/8362135.html</guid>
+<description>&lt;p&gt;&lt;span&gt;      华为研发部门，每年都会在部门内部举办一届编程大赛。旨在让开发人员在工作之余，通过游戏编程的切磋，提高技术和协作能力&lt;span&gt;。&lt;span&gt;&lt;span&gt;在入职华为的第四个年头，我终于如愿拿到了部门编程大赛的冠军。之前的每一年也都会参加，其中两次抱大腿拿到了亚军，一次因为太忙弃权了。这一届终于带队拿到了冠军，了却了一桩心事。在此，对之前的参赛经验和感悟总结一下，做一个纪念。至于下一届？应该不会再参加了。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1、比赛报名阶段&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;      首先说说自己的感受，由于报名时是要确认队友的。而这里的队友不要求技术多精湛，但是一定要有责任心，也就是把这个比赛当回事。你忙的时候，他能帮你分担事情。你不忙的时候，大家可以一起讨论比赛算法和思路，互相勉励。有时候即使忙到很晚，但是作为一个团队，大家都没什么怨言。所以个人认为挑选队友是最最重要的事情。根据这几年的比赛经验来看，一个队伍要想拿到好成绩，真的不是一个高手带着一堆酱油就可以完成的。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2、参赛事宜&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;    一般组织者会把比赛队伍的队长拉到一个群里。群里往往会第一时间发出框架bug，赛程变更，比赛规则安排等等事宜。所以在群里的队长一定要第一时间把群里获取到的消息，通知给组内的成员。先不说队友能做什么，至少做起事情来可以胸中有成竹。很多人只管问下自己想要知道的事情，对于其他人交流的话题往往不太关心，这是个很大的失误。。(防盗连接：本文首发自http://www.cnblogs.com/jilodream/ )比如比赛开发进度有人快，有人慢，往往可以通过群里的交流信息得到一些思路或者是提前知道比赛bug信息等。所以就算是在群里打酱油的人，也请把酱油打满。这或许就是所谓的情报工作吧。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;3、代码编程&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;    其实代码的算法并不是需要使用多么高效多么复杂的算法。但是一定要对整个的算法过程，在心中有一个思路。知道第一步做什么，第二步算什么，第三步解决什么，后续还需要做什么。比赛给的信息有什么，什么东西我们不能直接拿到，需要自己进行数据的生成。（如比赛地图的信息）。很多人往往在这一步就畏难而止步，其实大可不必。只要你写下第一行代码，后续的代码就可以渐渐的隐现出来，你需要做的就是一层层的拂去尘埃，看到潜意识中的算法思路。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;4、算法思路的补齐&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;    这个阶段主要是核心算法已经大概完成。但是细节处理起来往往不尽如人意。大部分时间，参赛选手的基本算法其实都差不多，真正分出排名高低的原因就是这一步。而这一步又是最考验人耐心的阶段。需要队员主要是反复的测试model，也就是比赛官方提供的默认AI，不断的进行比赛，翻出查看录像解决问题。如：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;（1）为什么会死，死之前有没有出现重大失误。如果有的话迅速找出问题原因并且修复。如果没有重大失误是不是最初的基本算法思路就是有问题的。该怎么避免这种问题。重写还是优化。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;（2）为什么会死的这么早，虽然说已经进入死胡同了，能不能用贪心思路多坚持一下，或许再坚持一下，往前边走就是柳暗花明了呢？千万不要这么早就放弃。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;（3）为什么没有死，但是却输了比赛。是不是对分数的获取不够敏感。如何调整权重，如何能使优势最大化，甚至动态的调整策略权重。这些都对实战有重大的影响。当时我们在小组赛的时候输了一场。赛后反思原因，其中的一个重要原因是在下半场分数领先的情况下（而且是必胜的情况下）没有考虑上半场的分数落后了多少，从而出现了，明明可以赢，却输了的结果。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;     其它的思路还有很多，比如如何使代码跑的更快一点，虚拟机能否再优化下，内存会不会溢出，jvm会不会挂，如果抛出异常怎么办，如果处理异常时又有异常怎么办。如果自己的“棋子”两败俱伤，如何止损，达到伤害最小化，利益最大化。如果必死，如何玉石俱焚，使对手的伤害最大化。（oh my god 越想越多，想想自己当初的思路也是够疯狂的）总之这一步是整个比赛阶段拉开排名的重要环节。也就是查漏补缺阶段。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;5、关于参赛事宜&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;       自己的感觉是队伍内部最好有多次参加比赛经验的队友。往往某些忽略的比赛细节，以及赛前需要注意的事情，都可能最终会影响到比赛的走势。还有编程大赛中可能会有一些灰度的事情，这些该如何应对。所以不要完全忽略掉代码以外的事情。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;6、比赛情况安排&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;      在这届比赛中，我被项目组安排为其他小组的比赛裁判。所以一边在主持比赛，一边还要观察自己队伍的比赛情况（时间、地点、赛况等）。这里其实也是有重大失误的。虽然我赛前已经安排了队友去跟着观看比赛，以免有任何环境脚本等意外事故，但是比赛当时事情太多，完全无暇顾及。而我又是队长，队友完全不知道比赛的实际情况，导致很晚了，队友才给我打电话咨询比赛情况。幸好当时我们队伍所在组的裁判因为工作上的事情，开始比赛较晚，影响并不大，但是无论怎么样，这个错误很严重。关于这件事请看下文。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;7、比赛临场工作&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;      我们队伍所在的小组是H组，但是H组的环境有问题，应该是使用jre较老，导致虚拟机始终拉不起我们编的jar包。当时我已经主持完其他小组的比赛，急匆匆的赶来。我一方面让队友排查脚本问题，一方面跟H组的裁判解释，因为根据比赛规程，如果比赛时初选类似问题，只可以修改启动脚本，不可以再修复代码包括编包。最终在我们的要求下换了一台电脑，我们提交的jar包终于可以正常运行了。当时真的是十万火急，如果不是对赛制的了解，再加上之前的比赛经验，很可能直接就弃权了。因为当时的比赛已经只剩下和我们队伍相关的比赛了。其他队伍都在等比赛结果，而H组的裁判又在死命的催，这种时候来自外界的声音往往比平常会更大。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;8、注意心态&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;    在小组循环赛中，我们队伍的程序是最后运行起来的。而H组是公认的死亡之组，观看其他队伍的比赛，感觉他们的算法很完善，而我们的程序却死活不能启动。在和队友陆续尝试各种方法未果，猜测可能是环境问题，要求换电脑，最终看到程序正常启动时，真的是欲哭无泪。在和裁判的解释过程中，双发也发生了矛盾，我反复解释我们的要求是满足赛制规则的。这一点赛后我觉得非常重要，正是因为站在满足比赛规则的基础上，你的所作所为才能被称之为合理。。(防盗连接：本文首发自http://www.cnblogs.com/jilodream/ )弃权和冠军真的是一念之差，如果当时就放弃比赛了，觉得是生成的jar的问题，觉得是代码的问题，如果当时没派人跟队冷静的分析原因，可能结果完全不一样。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;     另外一个让人啼笑皆非的事情是，程序正常启动后，我们第一场比赛就输了。就是我在前文算法思路补齐阶段所说的问题。当时没有想到是分数计算的原因，只觉得自己的程序指令出现了“死循环”了。操作的“棋子”在绕一个很大的圈，一圈圈的走。当时心想这还比个毛线啊。还好后续的比赛地图不会再出现一些“特殊”的地形，导致我们的算法在临界点的判断上可能互相影响，综合起来造成一些很奇怪的现象。最终在16强中，我们队伍与H组的第一再次相遇，凭借对手算法一次重大失误（也有人说是算法超时）最终赢得了比赛，剑指总冠军。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;比赛所能想到的事情就是这些了，谢谢你，2017；&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;谢谢你，我的队友们；&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;也谢谢你，我的对手们。&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 26 Jan 2018 16:13:00 +0000</pubDate>
+<dc:creator>王若伊_恩赐解脱</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jilodream/p/8362135.html</dc:identifier>
+</item>
+<item>
+<title>libevent--快速入门 - 风起_Wake</title>
+<link>http://www.cnblogs.com/pz-Feng/p/8362020.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/pz-Feng/p/8362020.html</guid>
+<description>&lt;h2 id=&quot;一简介&quot;&gt;一．简介&lt;/h2&gt;
+&lt;p&gt;libevent是一个c语言写的事件驱动库，轻量级，专注于网络，跨平台特性好，支持多种 I/O 多路复用．支持I/O,定时器和信号等事件，允许设置注册事件优先级．&lt;/p&gt;
+&lt;h2 id=&quot;二基本使用场景和事件流程&quot;&gt;二．基本使用场景和事件流程&lt;/h2&gt;
+&lt;h3 id=&quot;初始化事件根基槽&quot;&gt;(1)初始化事件根基（槽）&lt;/h3&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;7&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *event_base_new(&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;);
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *event_init(&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;);&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;ul&gt;&lt;li&gt;event_base_new()函数分配并且返回一个新的具有默认设置的event_base.&lt;/li&gt;
+&lt;li&gt;event_init() 会调用event_base_new()创建一个event_base,并以此初始化一个全局的变量current_base .&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;例：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;7&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *base = event_init();&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3 id=&quot;初始化事件event设置回调函数和关注的事件并关联对应的事件根基槽event_base&quot;&gt;(2)初始化事件event，设置回调函数和关注的事件，并关联对应的事件根基（槽）event_base&lt;/h3&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;26&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;kw&quot;&gt;typedef&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; (*event_callback_fn)(evutil_socket_t, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt;, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;*);
+
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *event_new(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *, evutil_socket_t, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt;, 
+                        event_callback_fn, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *);
+
+&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; event_assign(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *, &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *, evutil_socket_t, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt;, event_callback_fn, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *);
+
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; event_set(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *ev, &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; events, 
+               event_callback_fn, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg);
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; event_base_set(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *,&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event*);&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;ul readability=&quot;4.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;event_assign（）的作用就是把给定的event类型对象的每一个成员赋予一个指定的值。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;event_new（）的实现其实是间接的调用的event_assign（），首先调用mm_malloc分配一块内存，然后调用event_assign来给event类型的对象各个成员赋值。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;event_set()　使用指定的句柄、关注的事件、事件发生时的回调函数、回调函数的额外参数，初始化设置struct event结构对象，绑定到全局current_base，设置此event结构对象的优先级，默认为current_base中总有限级数的一半&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;2&quot;&gt;
+&lt;p&gt;event_base_set() 将事件绑定到事件根基,即设置event从属的event_base,指明event注册到哪个event_base实例上&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;例：&lt;/p&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;24&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;co&quot;&gt;//SIGINT 信号事件初始化&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//假定已创建事件根基struct event_base *base　&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//方式一：&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event sigint_ev;
+event_assign(&amp;amp;sigint_ev,base,SIGINT, EV_SIGNAL | EV_PERSIST,sigint_cb,NULL);
+&lt;span class=&quot;co&quot;&gt;//方式二：&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event sigint_ev ;
+event_set(&amp;amp;sigint_ev, SIGINT, EV_SIGNAL | EV_PERSIST, sigint_cb, NULL);
+event_base_set(base, &amp;amp;sigint_ev);
+&lt;span class=&quot;co&quot;&gt;//方式三：&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *sigint_ev;
+sigint_ev = event_new(base,SIGINT,EV_SIGNAL | EV_PERSIST, sigint_cb, NULL);
+&lt;span class=&quot;co&quot;&gt;//方式四：&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event* sigint_ev = (&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event*)malloc(&lt;span class=&quot;kw&quot;&gt;sizeof&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event));
+&lt;span class=&quot;co&quot;&gt;//sigint_ev检测非空和置零后，用event_assign 或者event_set + event_base_set 初始化事件．&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h4 id=&quot;定时器事件&quot;&gt;定时器事件：&lt;/h4&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;13&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;ot&quot;&gt;#define evtimer_set(ev, cb, arg)    event_set(ev, -1, 0, cb, arg)&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h4 id=&quot;信号事件&quot;&gt;信号事件：&lt;/h4&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;14&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;ot&quot;&gt;#define evsignal_new(base,signum,cb,arg) \&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;    event_new(base,signum,EV_SIGNAL|EV_PERSIST,cb,arg)&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3 id=&quot;添加事件将事件变成未决态即将event加入到event_base中等待监听&quot;&gt;(3)添加事件，将事件变成未决态，即，将event加入到event_base中，等待监听&lt;/h3&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; event_add(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event* ,&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; timeval *);&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3 id=&quot;程序进入无限循环事件根基event_base开始工作对注册的event进行监听若注册的事件的对应事件类型触发或者超时会自动触发event对应的回调函数执行&quot;&gt;(4)程序进入无限循环，事件根基event_base开始工作，对注册的event进行监听．若注册的事件的对应事件类型触发，或者超时，会自动触发event对应的回调函数执行&lt;/h3&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; event_base_dispatch(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *);
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; event_base_loop(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *,&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; );&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2 id=&quot;三入门例子&quot;&gt;三．入门例子：&lt;/h2&gt;
+&lt;h4 id=&quot;文件test.c&quot;&gt;文件：test.c&lt;/h4&gt;
+&lt;h4 id=&quot;编译&quot;&gt;编译：&lt;/h4&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;gcc -o test test.c -levent&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h4 id=&quot;代码&quot;&gt;代码：&lt;/h4&gt;
+&lt;div class=&quot;sourceCode&quot; readability=&quot;89&quot;&gt;
+&lt;pre class=&quot;sourceCode c&quot;&gt;
+&lt;code class=&quot;sourceCode c&quot;&gt;&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;stdio.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;stdlib.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;unistd.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;malloc.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;event.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;sys/time.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;signal.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#include &amp;lt;string.h&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;ot&quot;&gt;#define BUF_SIZE 1024&lt;/span&gt;
+
+&lt;span class=&quot;kw&quot;&gt;typedef&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *ev;
+    &lt;span class=&quot;dt&quot;&gt;char&lt;/span&gt; *buf;
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; timeval *tv;
+}rw_st;
+
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; wr_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg);
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; rd_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg);
+
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event_base *base = NULL;
+&lt;span class=&quot;co&quot;&gt;//定时事件&lt;/span&gt;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; timeval tv;
+&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event time_ev;
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; time_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg)
+{
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;time_cb : 5s timer wakeup&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;);
+    event_add(&amp;amp;time_ev,&amp;amp;tv);
+}
+
+&lt;span class=&quot;co&quot;&gt;//标准输入 读事件&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//输入一行，把读事件删掉,添加写事件&lt;/span&gt;
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; rd_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd,&lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg)
+{
+    &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt;(event &amp;amp; EV_TIMEOUT){
+        printf(&lt;span class=&quot;st&quot;&gt;&quot;io read time out(2s)!&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;);
+        &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; ;
+    }
+    rw_st* rd_st = (rw_st*)arg;
+    &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; len = read(fd, rd_st-&amp;gt;buf, BUF_SIZE);
+    rd_st-&amp;gt;buf[len&lt;span class=&quot;dv&quot;&gt;-1&lt;/span&gt;] = '\&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;';
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;rd_cb (stdin): %s &lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;,rd_st-&amp;gt;buf);
+    
+    event_del(rd_st-&amp;gt;ev);
+    event_set(rd_st-&amp;gt;ev, STDOUT_FILENO,  EV_WRITE | EV_PERSIST,
+                    wr_cb,(&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;*)rd_st);
+    event_add(rd_st-&amp;gt;ev,NULL);
+}
+
+&lt;span class=&quot;co&quot;&gt;//标准输出 写事件&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//输出,把写事件删掉,添加读事件,边写边读&lt;/span&gt;
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; wr_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg)
+{
+    rw_st *wr_st = (rw_st*)arg;
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;wr_cb (stdout): %s&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;,wr_st-&amp;gt;buf);
+    memset(wr_st-&amp;gt;buf,&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;,BUF_SIZE);
+    event_del(wr_st-&amp;gt;ev);
+    event_set(wr_st-&amp;gt;ev, STDIN_FILENO, EV_READ | EV_PERSIST,
+                    rd_cb, (&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;*)wr_st);
+    event_add(wr_st-&amp;gt;ev,wr_st-&amp;gt;tv);
+}
+
+&lt;span class=&quot;co&quot;&gt;//SIGINT 信号事件&lt;/span&gt;
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; sigint_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg)
+{
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; timeval tv_1s = {&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;,&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;};
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;SIGINT : EXIT IN 1s&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;);
+    event_base_loopexit(base,&amp;amp;tv_1s);
+}
+
+&lt;span class=&quot;co&quot;&gt;//SIGHUB 信号事件&lt;/span&gt;
+&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; sighup_cb(&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; fd, &lt;span class=&quot;dt&quot;&gt;short&lt;/span&gt; event, &lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt; *arg)
+{
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;SIGHUP: EXIT AT ONCE&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;);
+    event_base_loopbreak(base);
+}
+
+&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; main()
+{
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;pid = %ld&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;,getpid());
+    base = event_init();
+    &lt;span class=&quot;co&quot;&gt;//定时器&lt;/span&gt;
+    tv.tv_sec = &lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;;
+    tv.tv_usec = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
+    evtimer_set(&amp;amp;time_ev, time_cb, NULL);&lt;span class=&quot;co&quot;&gt;//一次性,默认全局的current_base&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//　event_set(&amp;amp;time_ev,-1,0,time_cb,NULL);&lt;/span&gt;
+
+&lt;span class=&quot;co&quot;&gt;//  event_base_set(base, &amp;amp;time_ev);  //可省，在这里current_base等同base&lt;/span&gt;
+    event_add(&amp;amp;time_ev,&amp;amp;tv);
+
+    &lt;span class=&quot;co&quot;&gt;//io 读事件  指针 event_new&lt;/span&gt;
+    &lt;span class=&quot;dt&quot;&gt;char&lt;/span&gt; buf[&lt;span class=&quot;dv&quot;&gt;1024&lt;/span&gt;] = {&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;};
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; timeval io_tv = {&lt;span class=&quot;dv&quot;&gt;2&lt;/span&gt;,&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;};
+    rw_st *rd_st = (rw_st*)malloc(&lt;span class=&quot;kw&quot;&gt;sizeof&lt;/span&gt;(rw_st));
+    memset(rd_st,&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;,&lt;span class=&quot;kw&quot;&gt;sizeof&lt;/span&gt;(rw_st));
+
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *io_ev = (&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event*)malloc(&lt;span class=&quot;kw&quot;&gt;sizeof&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event));
+    memset(io_ev,&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;,&lt;span class=&quot;kw&quot;&gt;sizeof&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event));
+    
+    rd_st-&amp;gt;ev = io_ev;
+    rd_st-&amp;gt;buf = buf;
+    rd_st-&amp;gt;tv = &amp;amp;io_tv;
+    event_assign(rd_st-&amp;gt;ev,base,STDIN_FILENO,
+                    EV_TIMEOUT | EV_READ | EV_PERSIST,rd_cb,(&lt;span class=&quot;dt&quot;&gt;void&lt;/span&gt;*)rd_st);
+    event_add(rd_st-&amp;gt;ev,rd_st-&amp;gt;tv);
+
+    &lt;span class=&quot;co&quot;&gt;//SIGINT 信号事件&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event sigint_ev;
+
+    event_assign(&amp;amp;sigint_ev,base,SIGINT, EV_SIGNAL | EV_PERSIST,sigint_cb,NULL);
+&lt;span class=&quot;co&quot;&gt;//  event_set(&amp;amp;sigint_ev, SIGINT, EV_SIGNAL | EV_PERSIST, &lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//                                          sigint_cb, NULL);&lt;/span&gt;
+    &lt;span class=&quot;co&quot;&gt;//event_base_set(base, &amp;amp;sigint_ev);&lt;/span&gt;
+    event_add(&amp;amp;sigint_ev,NULL);
+  
+&lt;span class=&quot;co&quot;&gt;//  struct event *sigint_ev = event_new(base,SIGINT,&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//           EV_SIGNAL | EV_PERSIST, sigint_cb, NULL);&lt;/span&gt;
+&lt;span class=&quot;co&quot;&gt;//  event_add(sigint_ev,NULL);&lt;/span&gt;
+
+    &lt;span class=&quot;co&quot;&gt;//SIGHUP 信号事件  &lt;/span&gt;
+    &lt;span class=&quot;co&quot;&gt;//测试: $ kill -SIGHUP pid&lt;/span&gt;
+    &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; event *sighup_ev;
+    sighup_ev = evsignal_new(base, SIGHUP, sighup_cb, NULL);    
+    event_add(sighup_ev,NULL);
+
+    event_base_dispatch(base);
+    &lt;span class=&quot;co&quot;&gt;//event_base_loop(base,0);&lt;/span&gt;
+    
+    event_free(sighup_ev);
+    event_base_free(base);
+    free(rd_st);
+
+    printf(&lt;span class=&quot;st&quot;&gt;&quot;EXIT&lt;/span&gt;&lt;span class=&quot;ch&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;&lt;/span&gt;);
+    &lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;
+}&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3 id=&quot;原创所有转载注明原文出处若有错误欢迎指正共同学习谢谢&quot;&gt;原创所有，转载注明原文出处．若有错误，欢迎指正，共同学习，谢谢！&lt;/h3&gt;
+</description>
+<pubDate>Fri, 26 Jan 2018 15:56:00 +0000</pubDate>
+<dc:creator>风起_Wake</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/pz-Feng/p/8362020.html</dc:identifier>
+</item>
+<item>
 <title>Rootkit 核心技术——利用 nt!_MDL（内存描述符链表）突破 SSDT（系统服务描述符表）的只读访问限制 Part I - f1yin9_0x5hark</title>
 <link>http://www.cnblogs.com/flying-shark/p/8361964.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/flying-shark/p/8361964.html</guid>
@@ -1050,1095 +1856,6 @@ SRecord项目：各种image文件格式互转的小工具合集，详见网页ht
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/henjay724/p/8361693.html</dc:identifier>
-</item>
-<item>
-<title>kafka和storm集群的环境安装 - 虚无境</title>
-<link>http://www.cnblogs.com/xuwujing/p/8361629.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/xuwujing/p/8361629.html</guid>
-<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
-&lt;p&gt;storm和kafka集群安装是没有必然联系的，我将这两个写在一起，是因为他们都是由zookeeper进行管理的，也都依赖于JDK的环境，为了不重复再写一遍配置，所以我将这两个写在一起。若只需一个，只需挑选自己选择的阅读即可。&lt;/p&gt;
-&lt;p&gt;这两者的依赖如下:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;Storm集群&lt;/strong&gt;：JDK1.8 , Zookeeper3.4，Storm1.1.1；&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Kafa集群&lt;/strong&gt; : JDK1.8 ，Zookeeper3.4 ，Kafka2.12；&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;说明&lt;/strong&gt;: Storm1.0 和Kafka2.0对JDK要求是1.7以上，Zookeeper3.0以上。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;下载地址:&lt;/strong&gt;&lt;br/&gt;Zookeeper：&lt;a href=&quot;https://zookeeper.apache.org/releases.html#download&quot; class=&quot;uri&quot;&gt;https://zookeeper.apache.org/releases.html#download&lt;/a&gt;&lt;br/&gt;Storm: &lt;a href=&quot;http://storm.apache.org/downloads.html&quot; class=&quot;uri&quot;&gt;http://storm.apache.org/downloads.html&lt;/a&gt;&lt;br/&gt;Kafka: &lt;a href=&quot;http://kafka.apache.org/downloads&quot; class=&quot;uri&quot;&gt;http://kafka.apache.org/downloads&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;jdk安装&quot;&gt;JDK安装&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;每台机器都要安装JDK！！！&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;说明&lt;/strong&gt;: 一般CentOS自带了openjdk，但是我们这里使用的是oracle的JDK。所以要写卸载openjdk，然后再安装在oracle下载好的JDK。如果已经卸载，可以跳过此步骤。&lt;br/&gt;首先输入 java -version&lt;br/&gt;查看是否安装了JDK，如果安装了，但版本不适合的话，就卸载&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230151037761?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;输入&lt;br/&gt;rpm -qa | grep java&lt;br/&gt;查看信息&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230151047319?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;br/&gt;然后输入:&lt;br/&gt;rpm -e --nodeps “你要卸载JDK的信息”&lt;br/&gt;如: rpm -e --nodeps java-1.7.0-openjdk-1.7.0.99-2.6.5.1.el6.x86_64&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230151054538?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;确认没有了之后，解压下载下来的JDK&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;tar  -xvf   jdk-8u144-linux-x64.tar.gz&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;移动到opt/java文件夹中，没有就新建，然后将文件夹重命名为jdk1.8。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mv  jdk1.8.0_144 /opt/java
-mv  jdk1.8.0_144  jdk1.8&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后编辑 profile 文件，添加如下配置&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;vim /etc/profile&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;添加:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;export JAVA_HOME=/opt/java/jdk1.8
-export JRE_HOME=/opt/java/jdk1.8/jre
-export CLASSPATH=.:$JAVA_HOME/lib/dt.jar:$JAVA_HOME/lib/tools.jar:$JRE_HOME/lib
-export PATH=.:${JAVA_HOME}/bin:$PATH&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;添加成功之后，输入&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;source /etc/profile
-java  -version &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;查看是否配置成功&lt;/p&gt;
-&lt;h2 id=&quot;zookeeper-环境安装&quot;&gt;Zookeeper 环境安装&lt;/h2&gt;
-&lt;h3 id=&quot;文件准备&quot;&gt;1，文件准备&lt;/h3&gt;
-&lt;p&gt;将下载下来的Zookeeper 的配置文件进行解压&lt;br/&gt;在linux上输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; tar  -xvf   zookeeper-3.4.10.tar.gz&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后移动到/opt/zookeeper里面，没有就新建，然后将文件夹重命名为zookeeper3.4&lt;br/&gt;输入&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mv  zookeeper-3.4.10  /opt/zookeeper
-mv  zookeeper-3.4.10  zookeeper3.4&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;环境配置&quot;&gt;2，环境配置&lt;/h3&gt;
-&lt;p&gt;编辑 /etc/profile 文件&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;export  ZK_HOME=/opt/zookeeper/zookeeper3.4 
-export PATH=.:${JAVA_HOME}/bin:${ZK_HOME}/bin:$PATH&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;source  /etc/profile&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;使配置生效&lt;/p&gt;
-&lt;h3 id=&quot;修改配置文件&quot;&gt;3，修改配置文件&lt;/h3&gt;
-&lt;h4 id=&quot;创建文件和目录&quot;&gt;3.3.1 创建文件和目录&lt;/h4&gt;
-&lt;p&gt;在集群的服务器上都创建这些目录&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mkdir   /opt/zookeeper/data  
-mkdir   /opt/zookeeper/dataLog&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;并且在/opt/zookeeper/data目录下创建myid文件&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;touch  myid&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;创建成功之后，更改myid文件。&lt;br/&gt;我这边为了方便，将master、slave1、slave2的myid文件内容改为1,2,3&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230152536678?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h4 id=&quot;新建zoo.cfg&quot;&gt;3.3.2 新建zoo.cfg&lt;/h4&gt;
-&lt;p&gt;切换到/opt/zookeeper/zookeeper3.4/conf 目录下&lt;br/&gt;如果没有 zoo.cfg 该文件，就复制zoo_sample.cfg文件并重命名为zoo.cfg。&lt;br/&gt;修改这个新建的zoo.cfg文件&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;dataDir=/opt/zookeeper/data
-dataLogDir=/opt/zookeeper/dataLog
-server.1=master:2888:3888
-server.2=slave1:2888:3888
-server.3=slave2:2888:3888&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230152800716?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;说明&lt;/strong&gt;：client port，顾名思义，就是客户端连接zookeeper服务的端口。这是一个TCP port。dataLogDir里是放到的顺序日志(WAL)。而dataDir里放的是内存数据结构的snapshot，便于快速恢复。为了达到性能最大化，一般建议把dataDir和dataLogDir分到不同的磁盘上，这样就可以充分利用磁盘顺序写的特性。dataDir和dataLogDir需要自己创建，目录可以自己制定，对应即可。server.1中的这个1需要和master这个机器上的dataDir目录中的myid文件中的数值对应。server.2中的这个2需要和slave1这个机器上的dataDir目录中的myid文件中的数值对应。server.3中的这个3需要和slave2这个机器上的dataDir目录中的myid文件中的数值对应。当然，数值你可以随便用，只要对应即可。2888和3888的端口号也可以随便用，因为在不同机器上，用成一样也无所谓。&lt;br/&gt;1.tickTime：CS通信心跳数&lt;br/&gt;Zookeeper 服务器之间或客户端与服务器之间维持心跳的时间间隔，也就是每个 tickTime 时间就会发送一个心跳。tickTime以毫秒为单位。&lt;br/&gt;tickTime=2000&lt;br/&gt;2.initLimit：LF初始通信时限&lt;br/&gt;集群中的follower服务器(F)与leader服务器(L)之间初始连接时能容忍的最多心跳数（tickTime的数量）。&lt;br/&gt;initLimit=10&lt;br/&gt;3.syncLimit：LF同步通信时限&lt;br/&gt;集群中的follower服务器与leader服务器之间请求和应答之间能容忍的最多心跳数（tickTime的数量）。&lt;br/&gt;syncLimit=5&lt;/p&gt;
-&lt;p&gt;依旧将zookeeper传输到其他的机器上，记得更改 /opt/zookeeper/data 下的myid，这个不能一致。&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;scp -r /opt/zookeeper root@slave1:/opt
-scp -r /opt/zookeeper root@slave2:/opt&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;启动zookeeper&quot;&gt;4，启动zookeeper&lt;/h3&gt;
-&lt;p&gt;因为zookeeper是选举制，它的主从关系并不是像hadoop那样指定的，具体可以看官方的文档说明。&lt;br/&gt;成功配置zookeeper之后，在每台机器上启动zookeeper。&lt;br/&gt;切换到zookeeper目录下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cd /opt/zookeeper/zookeeper3.4/bin&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;zkServer.sh start&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;成功启动之后&lt;br/&gt;查看状态输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; zkServer.sh status&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可以查看各个机器上zookeeper的leader和follower&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20171230152823369?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;storm-环境安装&quot;&gt;Storm 环境安装&lt;/h2&gt;
-&lt;h3 id=&quot;文件准备-1&quot;&gt;1，文件准备&lt;/h3&gt;
-&lt;p&gt;将下载下来的storm的配置文件进行解压&lt;br/&gt;在linux上输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; tar  -xvf   apache-storm-1.1.1.tar.gz&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后移动到/opt/storm里面，没有就新建，然后将文件夹重命名为storm1.1&lt;br/&gt;输入&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mv  apache-storm-1.1.1  /opt/storm
- mv  apache-storm-1.1.1  storm1.1&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;环境配置-1&quot;&gt;2，环境配置&lt;/h3&gt;
-&lt;p&gt;编辑 /etc/profile 文件&lt;br/&gt;添加：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;export STORM_HOME=/opt/storm/storm1.1
-export PATH=.:${JAVA_HOME}/bin:${ZK_HOME}/bin:${STORM_HOME}/bin:$PATH   &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输入 storm version 查看版本信息&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126203955725?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;修改配置文件-1&quot;&gt;3，修改配置文件&lt;/h3&gt;
-&lt;p&gt;编辑 storm/conf 的 storm.yarm。&lt;/p&gt;
-&lt;p&gt;进行如下编辑:&lt;br/&gt;输入:&lt;br/&gt;vim storm.yarm&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;storm.zookeeper.servers:
-     - &quot;master&quot;
-     - &quot;slave1&quot;
-     - &quot;slave2&quot;
-
-storm.local.dir: &quot;/root/storm&quot;
-
-nimbus.seeds: [&quot;master&quot;]
-
-supervisor.slots.ports:
-    - 6700
-    - 6701
-    - 6702
-    - 6703&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126204334259?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;br/&gt;&lt;strong&gt;说明:&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;storm.zookeeper.servers是指定zookeeper的服务地址。&lt;br/&gt;因为storm的存储信息在zookeeper上，所以要配置zookeeper的服务地址。如果zookeeper是单机就只用指定一个！&lt;/li&gt;
-&lt;li&gt;storm.local.dir 表示存储目录。&lt;br/&gt;Nimbus和Supervisor守护进程需要在本地磁盘上存储一个目录来存储少量的状态（比如jar，confs等等）。可以在每台机器创建，并给于权限。&lt;br/&gt;3.nimbus.seeds 表示候选的主机。&lt;br/&gt;worker需要知道那一台机器是主机候选(zookeeper集群是选举制)，从而可以下载 topology jars 和confs。&lt;br/&gt;4.supervisor.slots.ports 表示worker 端口。&lt;br/&gt;对于每一个supervisor机器，我们可以通过这项来配置运行多少worker在这台机器上。每一个worker使用一个单独的port来接受消息，这个端口同样定义了那些端口是开放使用的。如果你在这里定义了5个端口，就意味着这个supervisor节点上最多可以运行5个worker。如果定义3个端口，则意味着最多可以运行3个worker。在默认情况下(即配置在defaults.yaml中)，会有有四个workers运行在 6700, 6701, 6702, and 6703端口。&lt;br/&gt;supervisor并不会在启动时就立即启动这四个worker。而是接受到分配的任务时，才会启动，具体启动几个worker也要根据我们Topology在这个supervisor需要几个worker来确定。如果指定Topology只会由一个worker执行，那么supervisor就启动一个worker，并不会启动所有。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;&lt;strong&gt;注&lt;/strong&gt;: 这些配置前面不要有空格！！！，不然会报错。 这里使用的是主机名(做了映射)，也可以使用IP。实际的以自己的为准。&lt;/p&gt;
-&lt;p&gt;可以使用scp命令或者ftp软件将storm复制到其他机器上&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126204325034?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;成功配置之后，然后就可以启动Storm了，不过要确保JDK、Zookeeper已经正确安装，并且Zookeeper已经成功启动。&lt;/p&gt;
-&lt;h3 id=&quot;启动storm&quot;&gt;4，启动Storm&lt;/h3&gt;
-&lt;p&gt;切换到 storm/bin 目录下&lt;br/&gt;在主节点(master)启动输入：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;storm nimbus &amp;gt;/dev/null 2&amp;gt;&amp;amp;1 &amp;amp;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;访问web界面(master)输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;storm ui &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;从节点(slave1，slave2)输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;storm supervisor &amp;gt;/dev/null 2&amp;gt;&amp;amp;1 &amp;amp;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在浏览器界面输入: 8080端口&lt;br/&gt;成功打开该界面，表示环境配置成功:&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126204703636?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;kafka的环境安装&quot;&gt;kafka的环境安装&lt;/h2&gt;
-&lt;h3 id=&quot;文件准备-2&quot;&gt;1，文件准备&lt;/h3&gt;
-&lt;p&gt;将下载下来的Kafka的配置文件进行解压&lt;br/&gt;在linux上输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; tar  -xvf   kafka_2.12-1.0.0.tgz&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后移动到/opt/kafka里面，没有就新建，然后将文件夹重命名为kafka2.12&lt;br/&gt;输入&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mv  kafka_2.12-1.0.0  /opt/kafka
- mv  kafka_2.12-1.0.0  kafka2.12&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;环境配置-2&quot;&gt;2，环境配置&lt;/h3&gt;
-&lt;p&gt;编辑 /etc/profile 文件&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;export  KAFKA_HOME=/opt/kafka/kafka2.12 
-export PATH=.:${JAVA_HOME}/bin:${KAFKA_HOME}/bin:${ZK_HOME}/bin:$PATH&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;source  /etc/profile&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;使配置生效&lt;/p&gt;
-&lt;h3 id=&quot;修改配置文件-2&quot;&gt;3，修改配置文件&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;注&lt;/strong&gt;:其实要说的话，如果是单机的话，kafka的配置文件可以不用修改，直接到bin目录下启动就可以了。但是我们这里是集群，所以稍微改下就可以了。&lt;/p&gt;
-&lt;p&gt;切换到kafka/config 目录下&lt;br/&gt;编辑&lt;strong&gt;server.properties&lt;/strong&gt; 文件&lt;br/&gt;需要更改的是Zookeeper的地址:&lt;br/&gt;找到Zookeeper的配置，指定Zookeeper集群的地址，设置如下修改就可以了&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;zookeeper.connect=master:2181,slave1:2181,slave2:2181
-zookeeper.connection.timeout.ms=6000&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;其它可以选择更改的有&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;1 ，num.partitions 表示指定的分区，默认为1&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;2，log.dirs kafka的日志路径，这个按照个人需求更改就行&lt;/strong&gt;&lt;br/&gt;...&lt;br/&gt;&lt;strong&gt;注&lt;/strong&gt;:还有其它的配置，可以查看官方文档，如果没有特别要求，使用默认的就可以了。&lt;/p&gt;
-&lt;p&gt;配置好之后，记得使用scp 命令传输到其它的集群上！&lt;/p&gt;
-&lt;h3 id=&quot;启动kafka&quot;&gt;4，启动kafka&lt;/h3&gt;
-&lt;p&gt;集群每台集群都需要操作！&lt;/p&gt;
-&lt;p&gt;切换到kafka/bin 目录下&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-server-start.sh&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后输入jps名称查看是否成功启动:&lt;br/&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126205434422?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;成功启动之后，可以进行简单的测试下&lt;br/&gt;首先创建个topic&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-topics.sh --zookeeper master:2181 --create --topic t_test --partitions 5  --replication-factor 2&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;说明:&lt;/strong&gt; 这里是创建了一个名为 t_test 的topic，并且指定了5个分区，每个分区指定了2个副本数。如果不指定分区，默认的分区就是配置文件配置的。&lt;/p&gt;
-&lt;p&gt;然后进行生产数据&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-console-producer.sh --broker-list master:9092 --topic t_test&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126210106287?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以使用进行Ctrl+D 退出&lt;/p&gt;
-&lt;p&gt;然后我们再打开一个xshell窗口&lt;br/&gt;进行消费&lt;br/&gt;输入:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-console-consumer.sh  --zookeeper master:2181  --topic t_test --from-beginning&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20180126210233242?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcWF6d3N4cGNt/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;br/&gt;可以使用进行Ctrl+C 退出&lt;/p&gt;
-&lt;p&gt;可以看到数据已经正常消费了。&lt;/p&gt;
-&lt;h3 id=&quot;kafka的一些常用命令&quot;&gt;5，kafka的一些常用命令&lt;/h3&gt;
-&lt;p&gt;1.启动和关闭kafka&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;bin/kafka-server-start.sh config/server.properties &amp;gt;&amp;gt;/dev/null 2&amp;gt;&amp;amp;1 &amp;amp;
-bin/kafka-server-stop.sh&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;2.查看kafka集群中的消息队列和具体队列&lt;br/&gt;查看集群所有的topic&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; kafka-topics.sh --zookeeper master:2181,slave1:2181,slave2:2181 --list&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;查看一个topic的信息&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; kafka-topics.sh --zookeeper master:2181 --describe --topic t_test  &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;3.创建Topic&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-topics.sh --zookeeper master:2181 --create --topic t_test --partitions 5  --replication-factor 2&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;4.生产数据和消费数据&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-console-producer.sh --broker-list master:9092 --topic t_test&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Ctrl+D 退出&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-console-consumer.sh  --zookeeper master:2181  --topic t_test --from-beginning&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Ctrl+C 退出&lt;/p&gt;
-&lt;p&gt;5.kafka的删除命令&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-topics.sh --delete --zookeeper master:2181 --topic t_test&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;6,添加分区&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;kafka-topics.sh --alter --topict_test --zookeeper master:2181 --partitions 10&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;其它&quot;&gt;其它&lt;/h2&gt;
-&lt;p&gt;Storm环境搭建参考官方文档:&lt;br/&gt;&lt;a href=&quot;http://storm.apache.org/releases/1.1.1/Setting-up-a-Storm-cluster.html&quot; class=&quot;uri&quot;&gt;http://storm.apache.org/releases/1.1.1/Setting-up-a-Storm-cluster.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Kafka环境搭建参考官方文档:&lt;br/&gt;&lt;a href=&quot;http://kafka.apache.org/quickstart&quot; class=&quot;uri&quot;&gt;http://kafka.apache.org/quickstart&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;到此，本文结束，谢谢阅读！&lt;/p&gt;
-</description>
-<pubDate>Fri, 26 Jan 2018 13:09:00 +0000</pubDate>
-<dc:creator>虚无境</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/xuwujing/p/8361629.html</dc:identifier>
-</item>
-<item>
-<title>ASP.NET网络爬虫小研究 HtmlAgilityPack基础，爬取数据保存在数据库中再显示再自己的网页中 - 魏杨杨</title>
-<link>http://www.cnblogs.com/w5942066/p/8361585.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/w5942066/p/8361585.html</guid>
-<description>&lt;h2&gt;1、什么是网络爬虫&lt;/h2&gt;
-&lt;p&gt;  关于爬虫百度百科这样定义的：网络爬虫（又被称为网页蜘蛛，网络机器人，在FOAF社区中间，更经常的称为网页追逐者），是一种按照一定的规则，自动地抓取万维网信息的程序或者脚本。另外一些不常使用的名字还有蚂蚁、自动索引、模拟程序或者蠕虫。从搜索引擎开始，爬虫应该就出现了，爬虫所做的事情就是分析URL、下载WebServer返回的HTML、分析HTML内容、构建HTTP请求的模拟、在爬虫过程中存储有用的信息等等。简单点说，就是把别人网站上的东西爬下来，至于爬做什么用就看你自己了。&lt;/p&gt;
-&lt;p&gt;  写网络爬虫很多语言都可以写，比如众所周知的Python以及、PHP、C、Java等等。今天我就基于.Net中的HtmlAgilityPack类写一个简单的爬虫。&lt;/p&gt;
-
-&lt;h2&gt;2、HtmlAgilityPack类&lt;/h2&gt;
-&lt;p&gt;  HtmlAgilityPack 是 .NET 下的一个 HTML 解析类库。支持用 XPath 来解析 HTML 。命名空间： HtmlAgilityPack，下载地址：http://htmlagilitypack.codeplex.com/releases/view/90925&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126201036084-1278012833.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h3&gt;&lt;strong&gt;2.1基本属性&lt;/strong&gt;&lt;/h3&gt;
-
-&lt;p&gt;Attributes 　　　　　　　　　　　　获取节点的属性集合&lt;br/&gt;ChildNodes　　　　　　　　　　　　获取子节点集合(包括文本节点)&lt;br/&gt;Closed　　　　　　　　　　　　　　该节点是否已关闭(&amp;lt;/xxx&amp;gt;)&lt;br/&gt;ClosingAttributes　　　　　　　　 在关闭标签的属性集合&lt;br/&gt;FirstChild　　　　　　　　　　　　 获取第一个子节点&lt;br/&gt;HasAttributes　　　　　　　　　　 判断该节点是否含有属性&lt;br/&gt;HasChildNodes　　　　　　　　　　判断该节点是否含有子节点&lt;br/&gt;HasClosingAttributes　　　　　　 判断该节点的关闭标签是否含有属性(&amp;lt;/xxx class=&quot;xxx&quot;&amp;gt;)&lt;br/&gt;Id　　　　　　　　　　　　　　　　 获取该节点的Id属性&lt;br/&gt;InnerHtml　　　　　　　　　　　　 获取该节点的Html代码&lt;br/&gt;InnerText　　　　　　　　　　　　 获取该节点的内容，与InnerHtml不同的地方在于它会过滤掉Html代码，而InnerHtml是连Html代码一起输出&lt;br/&gt;LastChild　　　　　　　　　　　　 获取最后一个子节点&lt;br/&gt;Line　　　　　　　　　　　　　　　 获取该节点的开始标签或开始代码位于整个HTML源代码的第几行(行号)&lt;br/&gt;LinePosition　　　　　　　　　　　 获取该节点位于第几列&lt;br/&gt;Name　　　　　　　　　　　　　　 Html元素名&lt;br/&gt;NextSibling　　　　　　　　　　　　获取下一个兄弟节点&lt;br/&gt;NodeType　　　　　　　　　　　　 获取该节点的节点类型&lt;br/&gt;OriginalName　　　　　　　　　　　获取原始的未经更改的元素名&lt;br/&gt;OuterHtml　　　　　　　　　　　　 整个节点的代码&lt;br/&gt;OwnerDocument　　　　　　　　　节点所在的HtmlDocument文档&lt;br/&gt;ParentNode　　　　　　　　　　　　获取该节点的父节点&lt;br/&gt;PreviousSibling　　　　　　　　　　获取前一个兄弟节点&lt;br/&gt;StreamPosition　　　　　　　　　　该节点位于整个Html文档的字符位置&lt;br/&gt;XPath　　　　　　　　　　　　　　 根据节点返回该节点的XPath&lt;/p&gt;
-&lt;h3&gt;2.2方法&lt;/h3&gt;
-
-&lt;p&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; Ancestors(); 　　　　　　　　　　　　　　返回此元素的所有上级节点的集合。&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; Ancestors(string name); 　　　　 　　　  返回此元素参数名字匹配的所有上级节点的集合。&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; AncestorsAndSelf(); 　　　　　　 　　　　返回此元素的所有上级节点和自身的集合。&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; AncestorsAndSelf(string name); 　　　　 返回此元素的名字匹配的所有上级节点和自身的集合。&lt;br/&gt;HtmlNode AppendChild(HtmlNode newChild); 　　　　　　 　　　　  将参数元素追加到为调用元素的子元素(追加在最后)&lt;br/&gt;void AppendChildren(HtmlNodeCollection newChildren);　　　　　　 将参数集合中的元素追加为调用元素的子元素(追加在最后)&lt;br/&gt;HtmlNode PrependChild(HtmlNode newChild); 　　　　　　　　　　   将参数中的元素作为子元素，放在调用元素的最前面&lt;br/&gt;void PrependChildren(HtmlNodeCollection newChildren); 　　　　　　将参数集合中的所有元素作为子元素，放在调用元素前面&lt;br/&gt;static bool CanOverlapElement(string name); 　　　　　　　　　　　 确定是否可以保存重复的元素&lt;br/&gt;IEnumerable&amp;lt;HtmlAttribute&amp;gt; ChildAttributes(string name); 　　　　获取所有子元素的属性(参数名要与元素名匹配)&lt;br/&gt;HtmlNode Clone(); 　　　　　　　　　　　　　　　　　　　　　　　　 本节点克隆到一个新的节点&lt;br/&gt;HtmlNode CloneNode(bool deep); 　　　　　　　　　　　　　　　　　节点克隆到一个新的几点，参数确定是否连子元素一起克隆&lt;br/&gt;HtmlNode CloneNode(string newName); 　　　　　　　　　　　　　　克隆的同时更改元素名&lt;br/&gt;HtmlNode CloneNode(string newName, bool deep);　　　　　　　　  克隆的同时更改元素名。参数确定是否连子元素一起克隆&lt;br/&gt;void CopyFrom(HtmlNode node); 　　　　　　　　　　　　　　　　　 创建重复的节点和其下的子树。&lt;br/&gt;void CopyFrom(HtmlNode node, bool deep); 　　　　　　　　　　　 创建节点的副本。&lt;br/&gt;XPathNavigator CreateNavigator(); 　　　　　　　　　　　　　　　　 返回的一个对于此文档的XPathNavigator &lt;br/&gt;static HtmlNode CreateNode(string html); 　　　　　　　　　　　　  静态方法，允许用字符串创建一个新节点&lt;br/&gt;XPathNavigator CreateRootNavigator(); 　　　　　　　　　　　　　　创建一个根路径的XPathNavigator &lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; DescendantNodes(); 　　　　　　　　　　 获取所有子代节点&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; DescendantNodesAndSelf(); 　　　　　　 获取所有的子代节点以及自身&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; Descendants(); 　　　　　　　　　　　　　获取枚举列表中的所有子代节点&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; Descendants(string name); 　　　　　　　获取枚举列表中的所有子代节点，注意元素名要与参数匹配&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; DescendantsAndSelf(); 　　　　　　　　　获取枚举列表中的所有子代节点以及自身&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; DescendantsAndSelf(string name);　　　 获取枚举列表中的所有子代节点以及自身，注意元素名要与参数匹配&lt;br/&gt;HtmlNode Element(string name); 　　　　　　　　　　　　　　　　　 根据参数名获取一个元素&lt;br/&gt;IEnumerable&amp;lt;HtmlNode&amp;gt; Elements(string name); 　　　　　　　　　根据参数名获取匹配的元素集合&lt;br/&gt;bool GetAttributeValue(string name, bool def); 　　　　　　　　　　 帮助方法，用来获取此节点的属性的值(布尔类型)。如果未找到该属性，则将返回默认值。&lt;br/&gt;int GetAttributeValue(string name, int def); 　　　　　　　　　　　　 帮助方法，用来获取此节点的属性的值(整型)。如果未找到该属性，则将返回默认值。&lt;br/&gt;string GetAttributeValue(string name, string def); 　　　　　　　　　帮助方法，用来获取此节点的属性的值(字符串类型)。如果未找到该属性，则将返回默认值。&lt;br/&gt;HtmlNode InsertAfter(HtmlNode newChild, HtmlNode refChild); 　　  将一个节点插入到第二个参数节点的后面，与第二个参数是兄弟关系&lt;br/&gt;HtmlNode InsertBefore(HtmlNode newChild, HtmlNode refChild); 　　讲一个节点插入到第二个参数节点的后面，与第二个参数是兄弟关系&lt;br/&gt;static bool IsCDataElement(string name); 　　　　　　　　　　　　　 确定是否一个元素节点是一个 CDATA 元素节点。&lt;br/&gt;static bool IsClosedElement(string name); 　　　　　　　　　　　　　确定是否封闭的元素节点&lt;br/&gt;static bool IsEmptyElement(string name); 　　　　　　　　　　　　   确定是否一个空的元素节点。&lt;br/&gt;static bool IsOverlappedClosingElement(string text); 　　　　　　　  确定是否文本对应于一个节点可以保留重叠的结束标记。&lt;br/&gt;void Remove(); 　　　　　　　　　　　　　　　　　　　　　　　　　　 从父集合中移除调用节点&lt;br/&gt;void RemoveAll(); 　　　　　　　　　　　　　　　　　　　　　　　　　 移除调用节点的所有子节点以及属性&lt;br/&gt;void RemoveAllChildren(); 　　　　　　　　　　　　　　　　　　　　　 移除调用节点的所有子节点&lt;br/&gt;HtmlNode RemoveChild(HtmlNode oldChild); 　　　　　　　　　　　　 移除调用节点的指定名字的子节点&lt;br/&gt;HtmlNode RemoveChild(HtmlNode oldChild, bool keepGrandChildren);移除调用节点调用名字的子节点，第二个参数确定是否连孙子节点一起移除&lt;br/&gt;HtmlNode ReplaceChild(HtmlNode newChild, HtmlNode oldChild);　　 将调用节点原有的一个子节点替换为一个新的节点，第二个参数是旧节点&lt;br/&gt;HtmlNodeCollection SelectNodes(string xpath);　　　　　　　　　　　根据XPath获取一个节点集合&lt;br/&gt;HtmlNode SelectSingleNode(string xpath); 　　　　　　　　　　　　　根据XPath获取唯一的一个节点&lt;br/&gt;HtmlAttribute SetAttributeValue(string name, string value); 　　　　 设置调用节点的属性&lt;br/&gt;string WriteContentTo(); 　　　　　　　　　　　　　　　　　　　　　  将该节点的所有子级都保存到一个字符串中。&lt;br/&gt;void WriteContentTo(TextWriter outText); 　　　　　　　　　　　　　将该节点的所有子级都保存到指定的 TextWriter。&lt;br/&gt;string WriteTo(); 　　　　　　　　　　　　　　　　　　　　　　　　　　将当前节点保存到一个字符串中。&lt;br/&gt;void WriteTo(TextWriter outText); 　　　　　　　　　　　　　　　　　将当前节点保存到指定的 TextWriter。&lt;br/&gt;void WriteTo(XmlWriter writer);&lt;/p&gt;
-
-&lt;h2&gt;3、第一个爬虫程序&lt;/h2&gt;
-&lt;h3&gt;3.1在VS2017中建立一个web项目拖个服务器控件按钮上去（我VS是用2017的）&lt;/h3&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126201157537-545966555.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;h3&gt;3.2后台代码及解释&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;54&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 博客园精华单机按钮
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;param name=&quot;sender&quot;&amp;gt;&amp;lt;/param&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;param name=&quot;e&quot;&amp;gt;&amp;lt;/param&amp;gt;&lt;/span&gt;
-        &lt;span&gt;protected&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; btntwo_Click(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, EventArgs e)
-        {
-            &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; sum = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = &lt;span&gt;1&lt;/span&gt;; i &amp;lt; &lt;span&gt;2&lt;/span&gt;; i++&lt;span&gt;)
-            {
-               
-
-                SqlDB sb &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlDB();
-                HtmlWeb wb &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; HtmlWeb();
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; webaddress= &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;;
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (i==&lt;span&gt;1&lt;/span&gt;&lt;span&gt;)
-                {
-                    webaddress&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://www.cnblogs.com/pick/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;为啥http:&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;www.cnblogs.com/pick/#p10进去还是第一页&lt;/span&gt;
-                    &lt;span&gt;string&lt;/span&gt; webbbb =&lt;span&gt; GetHTML(webaddress);
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                {
-                    webaddress &lt;/span&gt;= &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://www.cnblogs.com/pick/{0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, (&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;#p&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+&lt;span&gt;i.ToString()).ToString());
-                    &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; webbbb =&lt;span&gt; GetHTML(webaddress);
-                }
-                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-                {
-                    HtmlDocument doc &lt;/span&gt;=&lt;span&gt; wb.Load(webaddress);
-               
-                HtmlNode node &lt;/span&gt;= doc.GetElementbyId(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;post_list&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (node != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                {
-                    &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt; (HtmlNode hnode &lt;span&gt;in&lt;/span&gt;&lt;span&gt; node.ChildNodes)
-                    {
-                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (hnode.Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;] == &lt;span&gt;null&lt;/span&gt; || hnode.Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;].Value != &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;post_item&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-                            &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
-                        HtmlNode hn &lt;/span&gt;=&lt;span&gt; HtmlNode.CreateNode(hnode.OuterHtml);
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;推荐&lt;/span&gt;
-                        &lt;span&gt;int&lt;/span&gt; recommend = Convert.ToInt32((hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;diggnum\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText).Trim());
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;标题&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt; title = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;网址&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt; webhref = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;].Value.ToString();
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;介绍&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt; introduce = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_summary\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                        &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; articletimetest = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_foot\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;发表时间（陈树义  发布于 2017 - 11 - 15 10:13  评论(41)阅读(7372)&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; articletime = ((hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_foot\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText).Trim()).Replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;+&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;分割字符串&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt;[] st = articletime.Split(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;+&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;取出（发布于 2017 - 11 - 15 10:13）&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt; pp = (st[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;].ToString()).Trim();
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;分割字符串&lt;/span&gt;
-                        &lt;span&gt;string&lt;/span&gt;[] qq = pp.Split(&lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;取出（2017/11/15 10 :13）&lt;/span&gt;
-                        DateTime gg = Convert.ToDateTime(qq[&lt;span&gt;1&lt;/span&gt;].ToString() + &lt;span&gt;&quot;&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt; + qq[&lt;span&gt;2&lt;/span&gt;&lt;span&gt;].ToString());
-                        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-                        {
-                            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;insert into CnblogsList( Recommend, Title,Contents, Introduce, WebHref, ArticleTime) values({0},'{1}','{2}','{3}','{4}','{5}')&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, recommend, title, GetContentsString(webhref), introduce, webhref, gg);
-                            sb.ExecuteNonQuery(sql);
-                            sum&lt;/span&gt;++&lt;span&gt;;
-                        }
-                        &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception ex)
-                        {
-                            Response.Write(ex.Message);
-                        }
-
-                            Response.Write(GetContentsString(webhref)&lt;/span&gt;+&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;hr /&amp;gt; &amp;lt;hr /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 陈树义  发布于 2017 - 11 - 15 10:13  评论(41)阅读(7372)&lt;/span&gt;
-                        Response.Write(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;推荐：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + (hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;diggnum\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText)+&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                         Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;标题：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + (hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                        Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;标题对应的网址：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + (hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;].Value.ToString()) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                         Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;介绍：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + (hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_summary\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                         Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;时间：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + (hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_foot\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;&amp;lt;hr /&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                    }
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                {
-                    Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;节点为空  +++++  出错节点Iiiii是：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + i.ToString() + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;  网址：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + webaddress.ToString() + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;  插入数据：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+ sum +&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;条&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-                }
-                }
-                &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception esz)
-                {
-                    Response.Write(esz.Message);
-                }
-&lt;/span&gt;&lt;span&gt;
-            }
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;这是获取网页源码的代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 获取网页源码
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;param name=&quot;url&quot;&amp;gt;&amp;lt;/param&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; GetHTML(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; url)
-        {
-            WebClient web &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; WebClient();
-            web.Encoding &lt;/span&gt;=&lt;span&gt; Encoding.UTF8;
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;  buffer =&lt;span&gt; web.DownloadString(url);
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; buffer;
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;上面的for循环目的是获取精华区后面页数的内容，但是效果并不是这样的&lt;/p&gt;
-
-
-
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126202152209-668472455.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;我早谷歌上F12调试发现并不是这样的额  请求地址不对。为以为在后面加?PageIndex= XX就可以实现  还是不可以 因为这是经过处理的，在Header上面有地址https://www.cnblogs.com/mvc/AggSite/PostList.aspx你们仔细就可以看到。这样做了如果页数写多了就会重复出现第一页的内容 数据库中是保存的  数据库的表结构我上图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126202642272-851544313.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;我一弄才发现原来这个地址是博客园里面的内容时刻更新的。经过处理取出精华区的。一次去可以取出2天的内容  不管是发布在博客园首页的还是没有发布在首页的都有。我就爬虫爬了一次 试试看 这是第二个按钮的源码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;54&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 博客园数据最近大约2天
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;param name=&quot;sender&quot;&amp;gt;&amp;lt;/param&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;param name=&quot;e&quot;&amp;gt;&amp;lt;/param&amp;gt;&lt;/span&gt;
-        &lt;span&gt;protected&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; BtnNowTowDay_Click(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, EventArgs e)
-        {
-            &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; sum = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = &lt;span&gt;1&lt;/span&gt;; i &amp;lt; &lt;span&gt;200&lt;/span&gt;; i++&lt;span&gt;)
-            {
-
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这是SqlDB类&lt;/span&gt;
-                SqlDB sb = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlDB();
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;实例HtmlWdb&lt;/span&gt;
-                HtmlWeb wb = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; HtmlWeb();
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;网址&lt;/span&gt;
-                &lt;span&gt;string&lt;/span&gt; webaddress = &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;;
-                    webaddress &lt;/span&gt;= &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://www.cnblogs.com/mvc/AggSite/PostList.aspx?PageIndex={0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, +&lt;span&gt; i);
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;网页源码 有html的&lt;/span&gt;
-                    &lt;span&gt;string&lt;/span&gt; webbbb =&lt;span&gt; GetHTML(webaddress);
-                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-                {
-                    HtmlDocument doc &lt;/span&gt;=&lt;span&gt; wb.Load(webaddress);
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取div[@class='post_item的上级目录
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个可以根据节点 ID选择 建议多看一下Xpath 就好理解了&lt;/span&gt;
-                    HtmlNode node = doc.DocumentNode.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//div[@class='post_item']&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;..&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;HtmlNode node = doc.GetElementbyId(&quot;#id&quot;);&lt;/span&gt;
-                    
-                    &lt;span&gt;if&lt;/span&gt; (node != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                    {
-                        &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt; (HtmlNode hnode &lt;span&gt;in&lt;/span&gt;&lt;span&gt; node.ChildNodes)
-                        {
-                            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (hnode.Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;] == &lt;span&gt;null&lt;/span&gt; || hnode.Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;].Value != &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;post_item&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-                                &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
-                            HtmlNode hn &lt;/span&gt;=&lt;span&gt; HtmlNode.CreateNode(hnode.OuterHtml);
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;推荐&lt;/span&gt;
-                            &lt;span&gt;int&lt;/span&gt; recommend = Convert.ToInt32((hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;diggnum\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText).Trim());
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;标题&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; title = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;网址&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; webhref = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;titlelnk\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).Attributes[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;].Value.ToString();
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;介绍&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; introduce = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_summary\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; articletimetest = hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_foot\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).InnerText;
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;发表时间（陈树义  发布于 2017 - 11 - 15 10:13  评论(41)阅读(7372)&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; articletime = ((hn.SelectSingleNode(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;//*[@class=\&quot;post_item_foot\&quot;]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).InnerText).Trim()).Replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;+&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;分割字符串&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt;[] st = articletime.Split(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;+&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;取出（发布于 2017 - 11 - 15 10:13）&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt; pp = (st[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;].ToString()).Trim();
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;分割字符串&lt;/span&gt;
-                            &lt;span&gt;string&lt;/span&gt;[] qq = pp.Split(&lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
-                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;取出（2017/11/15 10 :13）&lt;/span&gt;
-                            DateTime gg = Convert.ToDateTime(qq[&lt;span&gt;1&lt;/span&gt;].ToString() + &lt;span&gt;&quot;&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt; + qq[&lt;span&gt;2&lt;/span&gt;&lt;span&gt;].ToString());
-                            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-                            {
-                                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;insert into CnblogsList( Recommend, Title,Contents, Introduce, WebHref, ArticleTime) values({0},'{1}','{2}','{3}','{4}','{5}')&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, recommend, title, GetContentsString(webhref), introduce, webhref, gg);
-                                sb.ExecuteNonQuery(sql);
-                                sum&lt;/span&gt;++&lt;span&gt;;
-                            }
-                            &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception ex)
-                            {
-                                Response.Write(ex.Message);
-                            }
-                        }
-                    }
-                    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                    {
-                        Response.Write(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;节点为空  +++++  出错节点Iiiii是：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + i.ToString() + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;  网址：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + webaddress.ToString() + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;br /&amp;gt;  插入数据：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + sum + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;条&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-                    }
-                }
-                &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception esz)
-                {
-                    Response.Write(esz.Message);
-                }
-            }
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;下面是住区自己博客园的后台&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;54&quot;&gt;
-&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
-/// &amp;lt;summary&amp;gt;
-        /// 抓取自己博客园的
-        /// &amp;lt;/summary&amp;gt;
-        /// &amp;lt;param name=&quot;sender&quot;&amp;gt;&amp;lt;/param&amp;gt;
-        /// &amp;lt;param name=&quot;e&quot;&amp;gt;&amp;lt;/param&amp;gt;
-        protected void btnWY_Click(object sender, EventArgs e)
-        {
-            SqlDB sb = new SqlDB();
-            HtmlWeb wh = new HtmlWeb();
-            HtmlDocument doc = wh.Load(&quot;http://www.cnblogs.com/w5942066/&quot;);
-            HtmlNode node = doc.DocumentNode.SelectSingleNode(&quot;//div[@class='day']&quot;).SelectSingleNode(&quot;..&quot;);
-            if(node !=null)
-            {
-                foreach(HtmlNode hn in node.ChildNodes)
-                {
-                    if(hn.Attributes[&quot;class&quot;] == null || hn.Attributes[&quot;class&quot;].Value!=&quot;day&quot;)
-                    {
-                        continue;
-                    }
-                    HtmlNode hnn = HtmlNode.CreateNode(hn.OuterHtml);
-                    //shijian
-                    string  recommend = hnn.SelectSingleNode(&quot;//*[@class=\&quot;dayTitle\&quot;]&quot;).InnerText;
-                    //标题
-                    string title = hnn.SelectSingleNode(&quot;//*[@class=\&quot;postTitle\&quot;]&quot;).InnerText;
-                    //网址
-                    string webhref = hnn.SelectSingleNode(&quot;//*[@class=\&quot;postTitle2\&quot;]&quot;).Attributes[&quot;href&quot;].Value.ToString();
-                    //介绍
-                    string introduce = hnn.SelectSingleNode(&quot;//*[@class=\&quot;c_b_p_desc\&quot;]&quot;).InnerText;
-                    //时间
-                    //  string articletimetest = hn.SelectSingleNode(&quot;//*[@class=\&quot;postDesc\&quot;]&quot;).InnerText;
-                    //发表时间（陈树义  发布于 2017 - 11 - 15 10:13  评论(41)阅读(7372)
-                    // string articletime = ((hn.SelectSingleNode(&quot;//*[@class=\&quot;postDesc\&quot;]&quot;).InnerText).Trim()).Replace(&quot;\r\n&quot;, &quot;+&quot;);
-                    //分割字符串
-                    //string[] st = articletime.Split('+');
-                    //取出（发布于 2017 - 11 - 15 10:13）
-                    //string pp = (st[1].ToString()).Trim();
-                    //分割字符串
-                    //string[] qq = pp.Split(' ');
-                    //取出（2017/11/15 10 :13）
-                    DateTimeFormatInfo dtFormat = new DateTimeFormatInfo();
-                    dtFormat.ShortDatePattern = &quot;yyyy年MM月dd日&quot;;
-                    DateTime dt = Convert.ToDateTime(recommend, dtFormat);
-                    try
-                    {
-                        string sql = string.Format(@&quot;insert into CnblogsList( Recommend, Title,Contents, Introduce, WebHref, ArticleTime) values({0},'{1}','{2}','{3}','{4}','{5}')&quot;, 520, title, GetContentsString(webhref), introduce, webhref, dt);
-                        sb.ExecuteNonQuery(sql);
-                    }
-                    catch (Exception ex)
-                    {
-                        Response.Write(ex.Message);
-                    }
-
-                }
-            }
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h3&gt;3.3列表显示出来&lt;/h3&gt;
-&lt;p&gt;这里我用的是一个原始的GridView前台页面代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;45&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;form &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;form1&quot;&lt;/span&gt;&lt;span&gt; runat&lt;/span&gt;&lt;span&gt;=&quot;server&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;main&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1 &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;height:35px;line-height:30px;text-align:center;padding-top:50px;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;博客园文章列表&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;br &lt;/span&gt;&lt;span&gt;/&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;hr &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:GridView &lt;/span&gt;&lt;span&gt;ID&lt;/span&gt;&lt;span&gt;=&quot;gdMain&quot;&lt;/span&gt;&lt;span&gt;  runat&lt;/span&gt;&lt;span&gt;=&quot;server&quot;&lt;/span&gt;&lt;span&gt; Width&lt;/span&gt;&lt;span&gt;=&quot;100%&quot;&lt;/span&gt;&lt;span&gt; AllowPaging&lt;/span&gt;&lt;span&gt;=&quot;True&quot;&lt;/span&gt;&lt;span&gt; AutoGenerateColumns&lt;/span&gt;&lt;span&gt;=&quot;False&quot;&lt;/span&gt;&lt;span&gt; DataKeyNames&lt;/span&gt;&lt;span&gt;=&quot;ID&quot;&lt;/span&gt;&lt;span&gt; DataSourceID&lt;/span&gt;&lt;span&gt;=&quot;SqlDataSource1&quot;&lt;/span&gt;&lt;span&gt; CellPadding&lt;/span&gt;&lt;span&gt;=&quot;4&quot;&lt;/span&gt;&lt;span&gt; ForeColor&lt;/span&gt;&lt;span&gt;=&quot;#333333&quot;&lt;/span&gt;&lt;span&gt; GridLines&lt;/span&gt;&lt;span&gt;=&quot;None&quot;&lt;/span&gt;&lt;span&gt; PageSize&lt;/span&gt;&lt;span&gt;=&quot;30&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;AlternatingRowStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;White&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Columns&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:BoundField &lt;/span&gt;&lt;span&gt;HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;3%&quot;&lt;/span&gt;&lt;span&gt; ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;  DataField&lt;/span&gt;&lt;span&gt;=&quot;ID&quot;&lt;/span&gt;&lt;span&gt; HeaderText&lt;/span&gt;&lt;span&gt;=&quot;编号&quot;&lt;/span&gt;&lt;span&gt; InsertVisible&lt;/span&gt;&lt;span&gt;=&quot;False&quot;&lt;/span&gt;&lt;span&gt; ReadOnly&lt;/span&gt;&lt;span&gt;=&quot;True&quot;&lt;/span&gt;&lt;span&gt; SortExpression&lt;/span&gt;&lt;span&gt;=&quot;ID&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-                    
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;Width&lt;/span&gt;&lt;span&gt;=&quot;10%&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;HeaderStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;ItemStyle &lt;/span&gt;&lt;span&gt;HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;ItemStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:BoundField&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:BoundField &lt;/span&gt;&lt;span&gt;ItemStyle-Wrap&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt; HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;10%&quot;&lt;/span&gt;&lt;span&gt; ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Left&quot;&lt;/span&gt;&lt;span&gt; DataField&lt;/span&gt;&lt;span&gt;=&quot;Title&quot;&lt;/span&gt;&lt;span&gt; HeaderText&lt;/span&gt;&lt;span&gt;=&quot;标题&quot;&lt;/span&gt;&lt;span&gt; SortExpression&lt;/span&gt;&lt;span&gt;=&quot;Title&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;Width&lt;/span&gt;&lt;span&gt;=&quot;10%&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;HeaderStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;ItemStyle &lt;/span&gt;&lt;span&gt;HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;ItemStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:BoundField&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:BoundField &lt;/span&gt;&lt;span&gt;ItemStyle-Wrap&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;  HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;30%&quot;&lt;/span&gt;&lt;span&gt;  ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;left&quot;&lt;/span&gt;&lt;span&gt; DataField&lt;/span&gt;&lt;span&gt;=&quot;Contents&quot;&lt;/span&gt;&lt;span&gt; HeaderText&lt;/span&gt;&lt;span&gt;=&quot;内容&quot;&lt;/span&gt;&lt;span&gt; SortExpression&lt;/span&gt;&lt;span&gt;=&quot;Contents&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;Width&lt;/span&gt;&lt;span&gt;=&quot;30%&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;HeaderStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;ItemStyle &lt;/span&gt;&lt;span&gt;HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;ItemStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:BoundField&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:BoundField &lt;/span&gt;&lt;span&gt;ItemStyle-Wrap&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;  HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;20%&quot;&lt;/span&gt;&lt;span&gt; ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;left&quot;&lt;/span&gt;&lt;span&gt;  DataField&lt;/span&gt;&lt;span&gt;=&quot;WebHref&quot;&lt;/span&gt;&lt;span&gt; HeaderText&lt;/span&gt;&lt;span&gt;=&quot;原文网址&quot;&lt;/span&gt;&lt;span&gt; SortExpression&lt;/span&gt;&lt;span&gt;=&quot;WebHref&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;Width&lt;/span&gt;&lt;span&gt;=&quot;20%&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;HeaderStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;ItemStyle &lt;/span&gt;&lt;span&gt;HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;ItemStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:BoundField&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:BoundField  &lt;/span&gt;&lt;span&gt;ItemStyle-Wrap&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;  HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;10%&quot;&lt;/span&gt;&lt;span&gt;  ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt; DataField&lt;/span&gt;&lt;span&gt;=&quot;ArticleTime&quot;&lt;/span&gt;&lt;span&gt; HeaderText&lt;/span&gt;&lt;span&gt;=&quot;时间&quot;&lt;/span&gt;&lt;span&gt; SortExpression&lt;/span&gt;&lt;span&gt;=&quot;ArticleTime&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;Width&lt;/span&gt;&lt;span&gt;=&quot;10%&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;HeaderStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;ItemStyle &lt;/span&gt;&lt;span&gt;HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;ItemStyle&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:BoundField&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:HyperLinkField &lt;/span&gt;&lt;span&gt;DataNavigateUrlFields&lt;/span&gt;&lt;span&gt;=&quot;ID&quot;&lt;/span&gt;&lt;span&gt; 
-     DataNavigateUrlFormatString&lt;/span&gt;&lt;span&gt;=&quot;PageInfo.aspx?ID={0}&quot;&lt;/span&gt;&lt;span&gt; HeaderStyle-Width&lt;/span&gt;&lt;span&gt;=&quot;5%&quot;&lt;/span&gt;&lt;span&gt;  ItemStyle-HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;
-     Text&lt;/span&gt;&lt;span&gt;=&quot;详细&quot;&lt;/span&gt;&lt;span&gt; DataTextFormatString&lt;/span&gt;&lt;span&gt;=&quot;详细&quot;&lt;/span&gt;&lt;span&gt;  Target&lt;/span&gt;&lt;span&gt;=&quot;_blank&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Columns&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;EditRowStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#2461BF&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;FooterStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#507CD1&quot;&lt;/span&gt;&lt;span&gt; Font-Bold&lt;/span&gt;&lt;span&gt;=&quot;True&quot;&lt;/span&gt;&lt;span&gt; ForeColor&lt;/span&gt;&lt;span&gt;=&quot;White&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;HeaderStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#507CD1&quot;&lt;/span&gt;&lt;span&gt; Font-Bold&lt;/span&gt;&lt;span&gt;=&quot;True&quot;&lt;/span&gt;&lt;span&gt; ForeColor&lt;/span&gt;&lt;span&gt;=&quot;White&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;PagerSettings &lt;/span&gt;&lt;span&gt;PageButtonCount&lt;/span&gt;&lt;span&gt;=&quot;30&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;PagerStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#2461BF&quot;&lt;/span&gt;&lt;span&gt; ForeColor&lt;/span&gt;&lt;span&gt;=&quot;White&quot;&lt;/span&gt;&lt;span&gt; HorizontalAlign&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;RowStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#EFF3FB&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;SelectedRowStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#D1DDF1&quot;&lt;/span&gt;&lt;span&gt; Font-Bold&lt;/span&gt;&lt;span&gt;=&quot;True&quot;&lt;/span&gt;&lt;span&gt; ForeColor&lt;/span&gt;&lt;span&gt;=&quot;#333333&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;SortedAscendingCellStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#F5F7FB&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;SortedAscendingHeaderStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#6D95E1&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;SortedDescendingCellStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#E9EBEF&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;SortedDescendingHeaderStyle &lt;/span&gt;&lt;span&gt;BackColor&lt;/span&gt;&lt;span&gt;=&quot;#4870BE&quot;&lt;/span&gt;&lt;span&gt; Wrap&lt;/span&gt;&lt;span&gt;=&quot;False&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:GridView&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;asp:SqlDataSource &lt;/span&gt;&lt;span&gt;ID&lt;/span&gt;&lt;span&gt;=&quot;SqlDataSource1&quot;&lt;/span&gt;&lt;span&gt; runat&lt;/span&gt;&lt;span&gt;=&quot;server&quot;&lt;/span&gt;&lt;span&gt; ConnectionString&lt;/span&gt;&lt;span&gt;=&quot;&amp;lt;%$ ConnectionStrings:TestBaseConnectionString %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; SelectCommand&lt;/span&gt;&lt;span&gt;=&quot;select ID,SUBSTRING(Title,0,30)AS Title,SUBSTRING(Contents,0,30)AS Contents ,SUBSTRING(Webhref,0,20)AS WebHref , ArticleTime from CnblogsList&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;asp:SqlDataSource&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;form&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;后台部分&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;46&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt; NetCrawlerTest.Winfrom
-{
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;partial&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; CnblogListData : System.Web.UI.Page
-    {
-        &lt;/span&gt;&lt;span&gt;protected&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Page_Load(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, EventArgs e)
-        {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;if(!IsPostBack)
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;{
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;    GetData();
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;}&lt;/span&gt;
-&lt;span&gt;        }
-        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; GetData()
-        {
-            SqlDB sb &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlDB();
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _Sql = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;select ID,SUBSTRING(Title,0,50)AS Title,SUBSTRING(Contents,0,60)AS Contents ,SUBSTRING(Webhref,0,50)AS WebHref , ArticleTime from CnblogsList&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-                gdMain.DataSource &lt;/span&gt;= sb.ExecuteDataSet(_Sql).Tables[&lt;span&gt;0&lt;/span&gt;&lt;span&gt;];
-                gdMain.DataBind();
-        }
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;好了来看看效果&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126203842647-495075748.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;h3&gt;3.4具体的博客显示&lt;/h3&gt;
-&lt;p&gt;前台代码就是上面图片中的PageInfo页面&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;form &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;form1&quot;&lt;/span&gt;&lt;span&gt; runat&lt;/span&gt;&lt;span&gt;=&quot;server&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;main&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1 &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;height:35px;line-height:30px;text-align:center; padding-top:50px&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;%&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;GetTitle() &lt;/span&gt;&lt;span&gt;%&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;br &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;text-align:right;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                 &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;CnblogListData.aspx&quot;&lt;/span&gt;&lt;span&gt; target&lt;/span&gt;&lt;span&gt;=&quot;_parent&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;返回列表&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; 
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;PageInfo.aspx?ID=&amp;lt;%=UpIDS() %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; style&lt;/span&gt;&lt;span&gt;=&quot;width:100px; &quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;上一条&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; | &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;PageInfo.aspx?ID=&amp;lt;%=UpIDX() %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; style&lt;/span&gt;&lt;span&gt;=&quot;width:100px;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;下一条&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt;
-
-            &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;hr &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;text-align:center;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;发表时间：&lt;span&gt;&amp;lt;%&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;GetTime() &lt;/span&gt;&lt;span&gt;%&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;br &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;margin:10px 10px 30px 10px&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;%&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;GetContens() &lt;/span&gt;&lt;span&gt;%&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;br &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;text-align:right&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;&amp;lt;%= GetWebhref() %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; target&lt;/span&gt;&lt;span&gt;=&quot;_blank&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;原文链接：&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;%&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; GetWebhref() &lt;/span&gt;&lt;span&gt;%&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;br &lt;/span&gt;&lt;span&gt;/&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;hr &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;text-align:right;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;CnblogListData.aspx&quot;&lt;/span&gt;&lt;span&gt; target&lt;/span&gt;&lt;span&gt;=&quot;_parent&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;返回列表&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; 
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;PageInfo.aspx?ID=&amp;lt;%=UpIDS() %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; style&lt;/span&gt;&lt;span&gt;=&quot;width:100px; &quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;上一条&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; | &lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt;
-                &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;a &lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;=&quot;PageInfo.aspx?ID=&amp;lt;%=UpIDX() %&amp;gt;&quot;&lt;/span&gt;&lt;span&gt; style&lt;/span&gt;&lt;span&gt;=&quot;width:100px;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;下一条&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;amp;nbsp&lt;/span&gt; &lt;span&gt;&amp;amp;nbsp&lt;/span&gt;
-
-            &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div  &lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;=&quot;height:50px;text-align:center;color:#fbe8e8;background-color:#000000;width:100%;line-height:50px;font-weight:600; position:fixed; border-bottom:2px #ffffff solid; bottom:0px;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;行到水穷处，坐看云起时！转载声明：技术需要共享，欢迎转载！但请注明版权及出处！
-            &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;form&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;后台代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
-&lt;pre&gt;
-  &lt;span&gt;public&lt;/span&gt; &lt;span&gt;partial&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; PageInfo : System.Web.UI.Page
-    {
-        &lt;/span&gt;&lt;span&gt;protected&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Page_Load(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, EventArgs e)
-        {
-
-        }
-        SqlDB sb &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlDB();
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;public int Sum = 0;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 获取标题
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetTitle()
-        {
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT TITLE FROM CNBLOGSLIST WHERE ID={0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;&lt;span&gt;].ToString();
-             
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 接收ID
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt;  &lt;span&gt;int&lt;/span&gt;&lt;span&gt; GetID()
-        {
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Convert.ToInt32(Request.QueryString[&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ID&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;].ToString());
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 获取时间
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&lt;/span&gt;&lt;span&gt;时间&lt;/span&gt;&lt;span&gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetTime()
-        {
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT ARTICLETIME FROM CNBLOGSLIST WHERE ID={0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;&lt;span&gt;].ToString();
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 获取内容
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&lt;/span&gt;&lt;span&gt;内容&lt;/span&gt;&lt;span&gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetContens()
-        {
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT CONTENTS FROM CNBLOGSLIST WHERE ID={0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;].ToString()).Replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;amp;prime&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;) ;
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 获取原网址
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&lt;/span&gt;&lt;span&gt;网址&lt;/span&gt;&lt;span&gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetWebhref()
-        {
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT WEBHREF FROM CNBLOGSLIST WHERE ID={0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;&lt;span&gt;].ToString();
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 上一条
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&lt;/span&gt;&lt;span&gt;上一条信息的ID&lt;/span&gt;&lt;span&gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt; UpIDS()
-        {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-            {
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT top 1 ID FROM CNBLOGSLIST AS n WHERE n.ID &amp;lt; {0} ORDER BY n.ID DESC &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;].ToString() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                {
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Convert.ToInt32(sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;&lt;span&gt;].ToString());
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                {
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; GetID();
-                }
-            }
-            &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt;(Exception)
-            {
-                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; GetID();
-            }
-            
-        }
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; 下一条
-        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-        &lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;returns&amp;gt;&lt;/span&gt;&lt;span&gt;下一条信息的ID&lt;/span&gt;&lt;span&gt;&amp;lt;/returns&amp;gt;&lt;/span&gt;
-        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt; UpIDX()
-        {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-            {
-
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; _sql = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT top 1 ID FROM CNBLOGSLIST AS n WHERE n.ID &amp;gt; {0} ORDER BY n.ID ASC &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, GetID());
-
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;].ToString() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                {
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Convert.ToInt32(sb.ExecuteDataTable(_sql).Rows[&lt;span&gt;0&lt;/span&gt;][&lt;span&gt;0&lt;/span&gt;&lt;span&gt;].ToString());
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                {
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; GetID();
-                }
-            }
-            &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt;(Exception)
-            {
-                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; GetID();
-            }
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;这些代码都很基础就不一一解释了 实现的效果还是可以的，文字都在 ，大部分的图片都显示不出来&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/787521/201801/787521-20180126204419428-2029331516.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;希望看到的朋友能有所收获，别拿去干坏事  也干不了啥坏事，其他的网站维护你就弄不到了还要研究的。对此感谢博客园提供平台让我学有所获。初学者，大神勿喷谢谢！有兴趣的朋友不懂的可以留言。&lt;/p&gt;
-
-</description>
-<pubDate>Fri, 26 Jan 2018 12:48:00 +0000</pubDate>
-<dc:creator>魏杨杨</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/w5942066/p/8361585.html</dc:identifier>
-</item>
-<item>
-<title>基于FPGA的HDMI高清显示接口驱动 - NingHeChuan</title>
-<link>http://www.cnblogs.com/ninghechuan/p/8353827.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ninghechuan/p/8353827.html</guid>
-<description>&lt;p&gt;　　HDMI是（High Definition Multimedia Interface）的缩写，意思是高清晰度多媒体接口，是一种数字化视频/音频接口技术，适合影像传输的专用型数字化接口，可同时传送音频和影像信号，最高数据传输速度为48Gbps（2.1版），HDMI相较于VGA接口，它传输的信息量大，色彩度高，传输速度快等显著优点。&lt;/p&gt;
-&lt;p&gt;　　一般来说驱动HDMI有两种方法，有些开发板是用一颗专用的HDMI芯片ADV7511做HDMI的输出使用，ADV7511 是一款高速高清晰度多媒体接口(High Definition Multimedia Interface HDMI)发送器。 能够处理的数据速率高达165MHz(1080p @60H, UXGA @60Hz)， 输出数据速率高达 225MHz。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001215537-1273395872.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　Digilent官方出品的ZYBO开发板，上面一个双向的HDMI端口，直接连接在PL的引脚上，所以这次博主分享的工程是用ZYBO PL端的IO口模拟HDMI接口，首先先来讲一下HDMI的显示原理主要是TMDS，该部分摘自博客：http://blog.sina.com.cn/s/blog_679686370100vgg1.html&lt;/p&gt;
-&lt;p&gt;　　HDMI 采用和 DVI 相同癿传输原理——TMDS（Transition Minimized Differential &lt;em id=&quot;__mceDel&quot;&gt;signal），最小化传输差分信号。&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;　　TMDS 传输系统分为两个部分：发送端和接收端。 TMDS 发送端收到HDMI 接口传来的表示 RGB 信号的24 位并行数据（TMDS 对每个像素的 RGB 三原色分别按 8bit 编码，即 R信号有 8 位，G 信号有 8 位，B 信号有 8 位），然后对这些数据进行编码和并/串转换，再将表示 3 个 RGB 信号的数据分别分配到独立的传输通道发送出去。接收端接收来自发送端的串行信号，对其进行解码和串/并转换，然后发送到显示器的控制端。与此同时也接收时钟信号，以实现同步。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;TMDS&lt;/strong&gt;&lt;strong&gt;的原理&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       每一个 TMDS 链路都包括 3 个传输 RGB 信号的数据通道和 1 个传输时钟信号的通道。每一个数据通道都通过编码算法，将 8 位的视、音频数据转换成最小化传输、直流平衡的 10 位数据。这使得数据的传输和恢复更加可靠。最小化传输差分信号是通过异或及异或非等逡、逻辑算法将原始 8 位信号数据转换成 10 位，前 8 为数据由原始信号经运算后获得，第 9 位指示运算的方式，第 10 位用来对应直流平衡。&lt;/p&gt;
-&lt;p&gt;　　一般来说，HDMI 传输癿编码格式中要包含视频数据、控制数据和数据包（数据包中包吨音频数据和附加信息数据，例如纠错码等）。 TMDS 每个通道在传输时要包含一个 2bit 的控制数据、 8bit 的视频数据或者 4bit 的数据包即可。在 HDMI 信息传输过程中，可以分为三个阶段：视频数据传输周期、控制数据传输周期和数据岛传输周期，分别对应上述的三种数据类型。&lt;/p&gt;
-&lt;p&gt;下面介绍 TMDS 中采用的技术：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;传输最小化&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;       8 位数据经过编码和直流平衡得到 10 位最小化数据，这仿佛增加了冗余位，对传输链路的带宽要求更高，但事实上，通过这种算法得到的 10 位数据在更长的同轴电缆中传输的可靠性增强了。下图是一个例子，说明对一个 8 位的并行 RED 数据编码、并/串转换。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001240131-1640587131.png&quot; alt=&quot;&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;　　第一步：将 8 位并行 RED 数据发送到 TMDS 収送端。&lt;br/&gt;　　第二步：并/串转换.&lt;br/&gt;　　第三步：进行最小化传输处理，加上第 9 位，即编码过程。第 9 位数据称为编码位。&lt;/p&gt;
-&lt;p&gt;　　2. 直流平衡&lt;/p&gt;
-&lt;p&gt;　　直流平衡（DC-balanced）就是指在编码过程中保证信道中直流偏移为零。方法是在原来的 9 位数据癿后面加上第 10 位数据，返样，传输的数据趋于直流平衡，使信号对传输线的电磁干扰减少，提高信号传输的可靠性。&lt;/p&gt;
-&lt;p&gt;　　3. 差分信号&lt;/p&gt;
-&lt;p&gt;　　TMDS差分传动技术是一种利用2个引脚间电压差来传送信号的技术。传输数据的数值（“0”或者“1”）由两脚间电压正负极性和大小决定。即，采用 2 根线来传输信号，一根线上传输原来的信号，另一根线上传输与原来信号相反的信号。这样接收端就可以通过让一根线上的信号减去另一根线上的信号的方式来屏蔽电磁干扰，从而得到正确的信号。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001358444-50059982.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　另外，还有一个显示数据通道（DDC），是用于读取表示接收端显示器的清晰度等显示能力的扩展显示标识数据(EDID)的信号线。搭载 HDCP（High-bandwidth Digital Content Protection，高带宽数字内容保护技术）的发送、接收设备之间也利用 DDC 线进行密码键的认证。&lt;/p&gt;
-&lt;p&gt;       接下来是电路设计部分，HDMI驱动部分追寻原始出处应该是迪芝伦官方，该部分代码用VHDL语言描述，为了方便移植，我将该部分代码封装成自定义IP Core，由上文可知，我们需要产生RGB888三路数据，输入给该模块，然后经过解码、串/并转换，差分输出。还需要两个时钟输入，一个是当前显示分辨率的像素时钟，一个是当前显示分辨率的像素时钟的五倍。还有一个行同步信号和场同步信号，这两个信号的产生方法和VGA是一样的，简单来说就是先产生VGA的信号，行同步信号、场同步信号RGB888的数据输入给HDMI驱动模块就可以显示了，我们要修改显示的数据，还是只需要修改VGA时序即可。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001405569-540101957.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;  　　该工程经过测试，可以实现720p（1280x720）的分辨率显示，1080p（1920×1080）的分辨率没有测试出来，原因我觉得可能是官方的zybo的晶振是125Mhz的，这个时钟很尴尬，直接用Clocking wizard锁不出来HDMI所需要的精确时钟，如下图。我试过先分频出100Mhz，然后在调用一个IP Core分频和倍频，但是综合总会报错。所以直接这样进行PLL虽然有误差但是还是可以显示出720p的。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001411397-292914677.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;       而且根据迪芝伦的官方手册上描述，有这样一段，Resolution up to 720p(1280x720) have been teste。我的英文不是很好，那既然这样说了，没准它还真达不到1080p，好吧不管了，就暂且认为它最高只能达到720p吧。逃~&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001434772-2084459047.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;       打开工程后，需要重新添加HDMI自定义IP的路径，就在工程中，rgb2dvi_v1_2文件夹中。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001442615-1651853290.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　然后在IP Catalog中搜索hdmi_disp就可以得到对应的IP Core了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001452178-1696426735.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　双击打开这四个需要定义的参数，已经定义好在IP中了，直接点击OK——Generate生成&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001503678-1329415684.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　直接可以在如下图所示中找到例化文件，直接实例化即可。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001509740-1728482237.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　关于引脚约束，需要说的是，引脚约束必须为TMDS_33电平标准&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001515272-576676410.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　最后附上一张720p彩条测试图。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1057546/201801/1057546-20180126001525162-1380740337.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;       最后欢迎关注一亿人都想要关注的微信订阅号【开源FPGA】，总结记录自己的学习过程，一个FPGA工程师的养成之路。欢迎加入开源FPGA-交流群-I进行讨论，群号码：677163633。如果您需要本工程的源码，欢迎关注博主微信订阅号【开源FPGA】，在后台回复，开源FPGA，即可获得工程源码哦！&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/1057546/201706/1057546-20170611114905559-478053885.jpg&quot; alt=&quot;&quot; width=&quot;289&quot; height=&quot;289&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;转载请注明出处：NingHeChuan（宁河川）&lt;/p&gt;
-&lt;p&gt;个人微信订阅号：开源FPGA&lt;/p&gt;
-&lt;p&gt;如果你想及时收到个人撰写的博文推送，可以扫描左边二维码（或者长按识别二维码）关注个人微信订阅号&lt;/p&gt;
-&lt;p&gt;知乎ID：&lt;a href=&quot;https://www.zhihu.com/people/zhu-he-chuan/activities&quot; target=&quot;_blank&quot;&gt;NingHeChuan&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;微博ID：&lt;a href=&quot;http://weibo.com/6059461073/profile?rightmod=1&amp;amp;wvr=6&amp;amp;mod=personinfo&amp;amp;is_all=1&quot; target=&quot;_blank&quot;&gt;NingHeChuan&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;原文地址：&lt;a id=&quot;Editor_Edit_hlEntryLink&quot; title=&quot;view: 基于FPGA的HDMI高清显示接口驱动&quot; href=&quot;http://www.cnblogs.com/ninghechuan/p/8353827.html&quot; target=&quot;_blank&quot;&gt;http://www.cnblogs.com/ninghechuan/p/8353827.html&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 26 Jan 2018 11:02:00 +0000</pubDate>
-<dc:creator>NingHeChuan</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ninghechuan/p/8353827.html</dc:identifier>
-</item>
-<item>
-<title>一步步部署基于Windows系统的Jenkins持续集成环境 - pandaphinex</title>
-<link>http://www.cnblogs.com/babygirl/p/jenkins_ci_windows.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/babygirl/p/jenkins_ci_windows.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;如题&lt;/strong&gt;：本文将介绍如何在Windows环境下运用Jenkins部署持续集成环境。之所以写本文，是因为在最近工作当中，学习使用Jenkins时，确实遇到了一些问题，而大多数教程文档都是基于Mac或是Linux平台。为此很是头疼，经过一番摸索，终于走通了Windows平台下的一条路。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;本CI系统流程&lt;/strong&gt;：Dev提交代码，并merge到master分支--&amp;gt;Jenkns获取最新代码，开始构建（解析git触发响应，build solution，run automation，get result都在此步内完成）--&amp;gt;构建完成发送邮件。&lt;/p&gt;
-&lt;p&gt;首先，下载安装Jenkins：https://jenkins.io/&lt;/p&gt;
-&lt;p&gt;安装完成之后可以通过访问 http://hostname:8080 进入管理页面。选择:Manage Jenkins&quot;。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126164639584-904682778.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;在右侧列表中选中&quot;Configure Global Secuity&quot;，选中&quot;Allow user to sign up&quot;，然后就可以提前注册好要赋权限的账户。若以后不允许新管理账户的注册，在取消此选中项。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126165403397-711664759.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;接下来，在代理项下，展开代理协议，并全部选中。此处选中之后，会启用&quot;Java Web Start Agent&quot;，否则其在创建slave时处于不可见状态。（使用此代理，还需提前安装Java，到Java官网下载一个安装即可）&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126165659600-1434060757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;再回到&quot;Manage Jenkins&quot;界面，选择&quot;Manage Node&quot;，点击&quot;New Node&quot;创建一个新的slave，这里我们选择&quot;Permanent Agent&quot;，也可以选择从已有的slave复制出新的节点。填写名称，远程根目录和标签，启动方法选择如图。这里的远程目录用于存储Jenkins客户端运行文件。其他设置默认值就可以了：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126170805209-1656460060.png&quot; alt=&quot;&quot; width=&quot;482&quot; height=&quot;226&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;好了，到这里一个node就创建好了。我们可以回到Node管理界面，此时新建的node是未连接状态，可以在你的另外一台server，或本机上访问你的Jenkins页面，并点击&quot;Launch&quot;连接node，并将之安装为本地service。如果你是Win10系统，会出现安装错误，这时别急，先将你的IE或这Edge以管理员的方式重新启动，再次访问Jenkins尝试连接和安装。当你觉得要启用这个安装的service时，先停止服务，然后再cmd命令窗口输入“sc delete servicename&quot;就可以删除此服务了。servicename可以再service的右键属性中查看。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126171550740-393991871.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;创建好了node，我们就和某一台server连接上了，接下来我们需要去创建job，去完成我们需要做的工作。&lt;/p&gt;
-&lt;p&gt;回到Jenkins主页面，点击&quot;New Item&quot;，这里我选择使用&quot;Freestyle Project&quot;。编辑好项目名称，描述之后，我们可以定义清楚过时的build。这里我定义为保留7天以内的build，并规定最多只保留10个build。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126172022490-404189314.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;前面介绍过，本CI系统响应git返回的触发条件，因此需要设置一个参数接收返回的响应，并在此设置在哪个node上执行此次构建任务，即填写创建node时设置的Label：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126172934569-493105607.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;除了在创建node时的默认设置，我们也可以在此处设置自定义的workspace，获取的代码将存储在此处：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126173310865-1361572785.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;在源代码管理项中，我们选用Git，设置好相应的git项目url和访问的用户名和密码，分支选默认的master：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126173801037-1317529911.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;获取了代码之后，选择触发方式，如果时定时轮询的方式，选择&quot;Poll SCM&quot;，设置间隔时间即可。需要每次提交都响应，这里我选择远程触发&quot;Trigger builds remotely&quot;，设置一个token值待用。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126174105350-881263216.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这时，我们需要到Git网站代码管理设置页面，添加一个&quot;Hooks &amp;amp; services&quot;，并启用&quot;Pull request&quot;。Payload URL的格式按照上面设置的token下提示的格式设置：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126174436444-24391427.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;完成以上步骤之后，Job的运行环境基本上就已经设置成功了，接下来就是构建自动化运行脚本了。&lt;/p&gt;
-&lt;p&gt;回到刚才的Job编辑页面，继续往下走，点击&quot;Add build step&quot;，在下拉框中可以看到，Jenkins支持的脚本语言十分丰富。这里我们会用到Window batch和Widows PowerShell。在这里写入你的业务处理脚本，保存一下。比如输出&quot;Jenkins CI&quot;，在Windows batch框中输入&quot;echo Jenkins CI&quot;，保存，就可以了。&lt;/p&gt;
-&lt;p&gt;最后，需要在脚本完成之后自动发送邮件。来看看是如何配置的：&lt;/p&gt;
-&lt;p&gt;配置邮件通知之前，我们需要到&quot;Configure System&quot;中设置一下邮件系统的基本配置。&lt;/p&gt;
-&lt;p&gt;首先，填写好Jenkins访问地址和发件人邮箱地址。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126181142100-1522756323.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;接下来，设置SMTP邮件服务器和一些默认值，包括接收对象，主题，内容等等。如此，最简单的邮件发送配置就完成了。后面来设置具体的邮件通知。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126181453522-2065814487.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;还是回到Job编辑页面，找到&quot;Post-build Actions&quot;并选择&quot;Editable Email Notification&quot;。设置实际的接收人，内容格式和默认主题。并设置默认内容，可以配合环境变量（此处不做详解）参数化、格式化内容文体。&lt;/p&gt;
-&lt;p&gt;需要发送附件的，还可以对附件的路径、名称进行设置。最后设置好邮件发送触发条件就OK了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://images2017.cnblogs.com/blog/1137111/201801/1137111-20180126182424194-1465747908.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这样，一个完整的Windows平台下的CI系统就建立起来了。&lt;/p&gt;
-
-</description>
-<pubDate>Fri, 26 Jan 2018 10:29:00 +0000</pubDate>
-<dc:creator>pandaphinex</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/babygirl/p/jenkins_ci_windows.html</dc:identifier>
-</item>
-<item>
-<title>UWP: 通过命令行启动 UWP 应用 - WPInfo</title>
-<link>http://www.cnblogs.com/wpinfo/p/uwp_commandline_launch.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wpinfo/p/uwp_commandline_launch.html</guid>
-<description>&lt;p&gt;最近在开发应用的过程中，我遇到了如标题所述的需求，其实主要是为了能够快捷启动应用，正像我们可以在“运行”对话框中可以输入一些可执行程序的名称后，就能够直接启动它；这样做，可以增加 App 的易用性。在查了一些文档后，得知在 Windows Build 16266 之后，就加入相关的 API，因此要实现以及使用这一功能，Window 系统和 SDK 的版本都要大于 16266，Fall Creators Update (Build 16299) 则完全满足这一条件。&lt;/p&gt;
-&lt;h2&gt;实现&lt;/h2&gt;
-&lt;p&gt;要使用命令行启动 UWP 应用，其实非常简单，只需要两步：首先，在 Package.appxmanifest 中添加 appExecutionAlias 扩展；然后，在 App.OnActived 事件中做相应的处理。&lt;/p&gt;
-&lt;h3&gt;&lt;strong&gt;1. 修改Package.appxmanifest&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;右击项目中的 Package.appxmanifest 文件，在快捷菜单中选择“打开方式“-&amp;gt;”XML 文本编辑器“。打开后，对它的内容按以下修改：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Package
-  &lt;/span&gt;&lt;span&gt;xmlns&lt;/span&gt;&lt;span&gt;=&quot;http://schemas.microsoft.com/appx/manifest/foundation/windows10&quot;&lt;/span&gt;&lt;span&gt;
-  xmlns:mp&lt;/span&gt;&lt;span&gt;=&quot;http://schemas.microsoft.com/appx/2014/phone/manifest&quot;&lt;/span&gt;&lt;span&gt;
-  xmlns:uap&lt;/span&gt;&lt;span&gt;=&quot;http://schemas.microsoft.com/appx/manifest/uap/windows10&quot;&lt;/span&gt;&lt;strong&gt;&lt;span&gt;
-  xmlns:uap5&lt;/span&gt;&lt;span&gt;=&quot;http://schemas.microsoft.com/appx/manifest/uap/windows10/5&quot;&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;
-  IgnorableNamespaces&lt;/span&gt;&lt;span&gt;=&quot;uap mp &lt;strong&gt;uap5&lt;/strong&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-  ...
-  &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Applications&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Application
-        &lt;/span&gt;&lt;span&gt;...
-&lt;strong&gt;      &amp;lt;Extensions&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;        
-        &lt;strong&gt;  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;uap5:Extension
-            &lt;/span&gt;&lt;span&gt;Category&lt;/span&gt;&lt;span&gt;=&quot;windows.appExecutionAlias&quot;&lt;/span&gt;&lt;span&gt;
-            Executable&lt;/span&gt;&lt;span&gt;=&quot;TestCmdLineApp.exe&quot;&lt;/span&gt;&lt;span&gt;
-            EntryPoint&lt;/span&gt;&lt;span&gt;=&quot;TestCmdLineApp.App&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;uap5:AppExecutionAlias&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-              &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;uap5:ExecutionAlias &lt;/span&gt;&lt;span&gt;Alias&lt;/span&gt;&lt;span&gt;=&quot;App.exe&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;uap5:AppExecutionAlias&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;uap5:Extension&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;     &lt;/strong&gt;   
-   &lt;strong&gt;   &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Extensions&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/strong&gt;    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Application&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Applications&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-  ...
-&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Pakage&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;其中加粗部分是我们需要补充的内容。可以看到，我们添加了一个名为 appExecutionAlias  的扩展 (Extension)。在 Extension 节点中包括了几个属性，它们的意义分别如下：&lt;/p&gt;
-&lt;p&gt;1) Category 属性指明 Extension 的类别，对于我们当前的需求，它的值固定为 windows.appExecutionAlias，即为应用的运行提供别名；&lt;br/&gt;2) Executable 属性指明当前应用的 exe 名称，也即：程序集名称 ＋ &quot;.exe&quot;；&lt;br/&gt;3) EntryPoint 属性指明当前应用的入口点，也即 App 类的完整名称（包含其所在的命名空间）；&lt;br/&gt;4) 在 AppExecutionAlias\ExecutionAlias  节点中的 Alias 属性，就是我们为要为当前应用定义的命令行启动名称；这里需要说明三点：&lt;/p&gt;
-&lt;p&gt;a) 它可以与前面 Executable 属性值相同，也可以不同，比如更简短一些，便于用户记住与输入；&lt;br/&gt;b) 如果定义的别名，已经被当前机器上安装的其它应用占用了，那么它就不会生效，也即，谁先占用就对谁有效（当然，如果先前占用的应用被卸载了，那么这个别名就可以被你的应用使用）；&lt;br/&gt;c) 可以添加多个 ExecutionAlias  节点，为应用指定多个别名。通过为应用提供更多的别名，可以解决别名被占用的问题（如果确实存在这个问题）。&lt;/p&gt;
-&lt;h3&gt;2. 处理 OnActivated 事件&lt;/h3&gt;
-&lt;p&gt;在 App.OnActived 事件中，我们对 IActivatedEventArgs 参数类型判断，如果其 Kind 属性为 CommandLineLaunch，则认为是命令行启动，接下来所做的就像在 OnLaunched 事件中一样，对 Frame 初始化并导航到应用的主页，如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-        &lt;span&gt;protected&lt;/span&gt; &lt;span&gt;override&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; OnActivated(IActivatedEventArgs args)
-        {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (args.Kind ==&lt;span&gt; ActivationKind.CommandLineLaunch)
-            {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ...&lt;/span&gt;
-&lt;span&gt;            }
-
-            Frame rootFrame &lt;/span&gt;= Window.Current.Content &lt;span&gt;as&lt;/span&gt;&lt;span&gt; Frame;
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (rootFrame == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-            {
-                rootFrame &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Frame();
-                rootFrame.NavigationFailed &lt;/span&gt;+=&lt;span&gt; OnNavigationFailed;
-                Window.Current.Content &lt;/span&gt;=&lt;span&gt; rootFrame;
-            }
-
-            rootFrame.Navigate(&lt;/span&gt;&lt;span&gt;typeof&lt;/span&gt;&lt;span&gt;(MainPage));
-
-            Window.Current.Activate();
-            &lt;/span&gt;&lt;span&gt;base&lt;/span&gt;&lt;span&gt;.OnActivated(args);
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h3&gt;3. 参数处理&lt;/h3&gt;
-&lt;p&gt;使用命令行启动应用有一个很大的好处，用户在启动时可以携带参数，如： app.exe a, app.exe a b, app.exe /type:a 等，而应用则根据用户提供的参数作相应的处理。要得到用户传递的参数，只要将 IActivatedEventArgs 类型的参数转换为  CommandLineActivatedEventArgs，通过它的  Operation.Arguments 属性即可得到，剩下的就是对参数进行分析并根据参数进行相应的处理。除了参数，我们也能够得到用户是从哪个目录启动 App 的，这是通过 Operation.CurrentDirectoryPath 属性得到的。完整代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-        &lt;span&gt;protected&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; &lt;span&gt;override&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; OnActivated(IActivatedEventArgs args)
-        {
-            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; arugment = &lt;span&gt;string&lt;/span&gt;&lt;span&gt;.Empty;
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (args.Kind ==&lt;span&gt; ActivationKind.CommandLineLaunch)
-            {
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; cmdArgs = args &lt;span&gt;as&lt;/span&gt;&lt;span&gt; CommandLineActivatedEventArgs;
-                StringBuilder sb &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; StringBuilder();
-                sb.AppendLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Argument: {cmdArgs.Operation.Arguments}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                sb.AppendLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;CurrentDirectoryPath: {cmdArgs.Operation.CurrentDirectoryPath}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                &lt;/span&gt;&lt;span&gt;await&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; MessageDialog(sb.ToString()).ShowAsync();
-            }
-
-            Frame rootFrame &lt;/span&gt;= Window.Current.Content &lt;span&gt;as&lt;/span&gt;&lt;span&gt; Frame;
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (rootFrame == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-            {
-                rootFrame &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Frame();
-                rootFrame.NavigationFailed &lt;/span&gt;+=&lt;span&gt; OnNavigationFailed;
-                Window.Current.Content &lt;/span&gt;=&lt;span&gt; rootFrame;
-            }
-
-            rootFrame.Navigate(&lt;/span&gt;&lt;span&gt;typeof&lt;/span&gt;&lt;span&gt;(MainPage), arugment);
-
-            Window.Current.Activate();
-            &lt;/span&gt;&lt;span&gt;base&lt;/span&gt;&lt;span&gt;.OnActivated(args);
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;最后，要测试效果，需要部署(Deploy)应用。&lt;/p&gt;
-&lt;p&gt;部署完成后，在“运行”(Win + R)对话框中输入上面定义的别名（和参数），即可。当然，在“命令提示符”窗口甚至在“资源管理器”窗口的地址栏中，你都可以输入别名来启动应用。&lt;/p&gt;
-&lt;h2&gt;背后原理&lt;/h2&gt;
-&lt;p&gt;为什么在上述这些位置我们输入别名后，就可以运行应用呢？为了解决这个问题，首先我们使用 where 命令得看看对应的命令究竟在哪里。在“命令提示符”窗口中，输入： where 别名，得到这样的结果：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-C:\Users\Admin&amp;gt;&lt;span&gt;where app
-&lt;span&gt;C:\Users\Admin\AppData\Local\Microsoft\WindowsApps\App.exe&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;在“资源管理器”中打开对应的路径，会看到在这个目录下存放了当前机器中所有那些使用别名的应用，其实这里的文件可以认为是一个快捷方式。&lt;/p&gt;
-&lt;p&gt;不仅如此，这个目录也在 PATH 环境变量中（可在“命令提示符”中使用 path 命令查看或在“系统属性”的“环境变量”对话框中查看），因此，我们才可以在任何位置都能启动应用。&lt;/p&gt;
-&lt;p&gt;除此以外，作为用户，我们还可以在桌面（或其它任何目录）为应用创建快捷方式，右击桌面-&amp;gt;创建快捷方式，然后输入别名 和参数（可选）。通过双击快捷方式图标，也可以启动应用。这一点类似于创建磁贴，不过，它要比磁贴更灵活。我们甚至还可以为不同的参数创建多个快捷方式，也可以为每个快捷方式指定不同的图标。这样，是不是感觉更像 Win32 应用了呢？&lt;/p&gt;
-&lt;h2&gt;总结&lt;/h2&gt;
-&lt;p&gt;本文主要提到了如何使用命令行来启动 UWP 应用，为应用提供这一特性可以为其增加易用性以及灵活性。作为 App 的使用者，可以更便利、更灵活地打开、使用应用。这样，使得 UWP 应用和 Win32 程序的行为更加一致。&lt;/p&gt;
-&lt;p&gt;参考资料：&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;&lt;a href=&quot;https://blogs.windows.com/buildingapps/2017/07/05/command-line-activation-universal-windows-apps/&quot; target=&quot;_blank&quot;&gt;Command-Line Activation of Universal Windows Apps&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 26 Jan 2018 09:43:00 +0000</pubDate>
-<dc:creator>WPInfo</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wpinfo/p/uwp_commandline_launch.html</dc:identifier>
-</item>
-<item>
-<title>解决spring定时任务执行两次和tomcat部署缓慢的问题 - Sinte-Beuve</title>
-<link>http://www.cnblogs.com/Sinte-Beuve/p/8360321.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Sinte-Beuve/p/8360321.html</guid>
-<description>&lt;h2 id=&quot;spring定时任务执行两次&quot;&gt;spring定时任务执行两次&lt;/h2&gt;
-&lt;h3 id=&quot;问题重现和解析&quot;&gt;问题重现和解析&lt;/h3&gt;
-&lt;p&gt;最近使用quartz定时任务框架，结果发现开发环境执行无任何问题，部署到服务器上后，发现同一时间任务执行了多次。经过搜索发现是服务器上tomcat的配置文件出现了问题。&lt;br/&gt;原来的配置文件——&lt;strong&gt;server.xml&lt;/strong&gt;如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;Host name=&quot;localhost&quot; appBase=&quot;webapps&quot; unpackWARs=&quot;true&quot; autoDeploy=&quot;true&quot;&amp;gt;
-    &amp;lt;Valve className=&quot;org.apache.catalina.valves.AccessLogValve&quot; directory=&quot;logs&quot;
-           prefix=&quot;localhost_access_log&quot; suffix=&quot;.txt&quot;
-           pattern=&quot;%h %l %u %t &amp;amp;quot;%r&amp;amp;quot; %s %b&quot; /&amp;gt;
-&amp;lt;/Host&amp;gt;
-&amp;lt;Host name=&quot;www.xxx.com&quot; appBase=&quot;webapps&quot; unpackWARs=&quot;true&quot; autoDeploy=&quot;true&quot; xmlValidation=&quot;false&quot; xmlNamespaceAware=&quot;false&quot;&amp;gt;
-    &amp;lt;Context path=&quot;&quot; docBase=&quot;/usr/local/tomcat/apache-tomcat-8.5.9/webapps/xxxindex&quot;  reloadable=&quot;true&quot;&amp;gt;&amp;lt;/Context&amp;gt;  
-&amp;lt;/Host&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;一个Host表示一个容器，里面可以包含若干个Context（应用）。上面这段配置文件意思就是：在tomcat中配置了两个容器，一个&lt;strong&gt;name=localhost&lt;/strong&gt;，应用的根目录为&lt;strong&gt;webapps&lt;/strong&gt;，并且会自动解压war包和自动部署。没有指定context，会把根目录下的所有web应用都部署，部署成功后，外网可以通过服务器IP+项目名来访问；另一个&lt;strong&gt;name=www.xxx.com&lt;/strong&gt;，和第一个host不同在于，配置了主页web应用，且不需要跟项目名就可以访问。部署成功后可以通过域名+项目名访问，主页所在项目可以直接通过根域名访问。&lt;/p&gt;
-&lt;p&gt;这个时候问题就来了，包含定时任务的项目部署在webapps目录下，tomcat中两个独立的容器都部署了一遍，相当于项目在服务器上的tomcat上部署了两次，两边同时会运行定时任务，指定的是同一个数据库。&lt;/p&gt;
-&lt;h3 id=&quot;问题解决&quot;&gt;问题解决&lt;/h3&gt;
-&lt;p&gt;因此，为了尽可能不影响其他项目的正常访问，我做了折中，讲需要执行定时任务的项目单独部署在另一个文件夹中，例如&lt;strong&gt;webroot&lt;/strong&gt; ，然后只使用域名那个host，配置文件修改后如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;Host name=&quot;localhost&quot; appBase=&quot;webapps&quot; unpackWARs=&quot;true&quot; autoDeploy=&quot;true&quot;&amp;gt;
-    &amp;lt;Valve className=&quot;org.apache.catalina.valves.AccessLogValve&quot; directory=&quot;logs&quot;
-           prefix=&quot;localhost_access_log&quot; suffix=&quot;.txt&quot;
-           pattern=&quot;%h %l %u %t &amp;amp;quot;%r&amp;amp;quot; %s %b&quot; /&amp;gt;
-&amp;lt;/Host&amp;gt;
-
-&amp;lt;Host name=&quot;www.xxx.com&quot; appBase=&quot;&quot; unpackWARs=&quot;true&quot; autoDeploy=&quot;true&quot; xmlValidation=&quot;false&quot; xmlNamespaceAware=&quot;false&quot;&amp;gt;
-    &amp;lt;Context path=&quot;&quot; docBase=&quot;/usr/local/tomcat/apache-tomcat-8.5.9/webapps/xxxindex&quot;  reloadable=&quot;true&quot;&amp;gt;&amp;lt;/Context&amp;gt;  
-    &amp;lt;Context path=&quot;/projectA&quot; docBase=&quot;/usr/local/tomcat/apache-tomcat-8.5.9/webapps/projectA&quot;  reloadable=&quot;true&quot;&amp;gt;&amp;lt;/Context&amp;gt;  
-    &amp;lt;Context path=&quot;/projectB&quot; docBase=&quot;/usr/local/tomcat/apache-tomcat-8.5.9/webapps/projectB&quot;  reloadable=&quot;true&quot;&amp;gt;&amp;lt;/Context&amp;gt;  
-    &amp;lt;Context path=&quot;/projectC&quot; docBase=&quot;/usr/local/tomcat/apache-tomcat-8.5.9/webroot/projectC&quot;  reloadable=&quot;true&quot;&amp;gt;&amp;lt;/Context&amp;gt;  
-&amp;lt;/Host&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可以看到projectC是包含定时任务的项目。这样部署成功后，除了该项目只能通过域名访问之外，其余项目的访问方式和之前保持不变。同时问题解决，定时任务只执行一次。&lt;/p&gt;
-&lt;h3 id=&quot;网上的另一种说法&quot;&gt;网上的另一种说法&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;Host name=&quot;localhost&quot;  appBase=&quot;webapps&quot; unpackWARs=&quot;true&quot; autoDeploy=&quot;true&quot;&amp;gt;  
-    &amp;lt;Context docBase=&quot;projectA&quot; path=&quot;&quot; reloadable=&quot;true&quot; /&amp;gt;  
-&amp;lt;/Host&amp;gt;  &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;只有一个host，tomcat在启动时，会部署一次根目录下的所有项目，然后Context又会单独部署一次，所以也会导致定时任务执行2次。&lt;br/&gt;对于这种问题，解决的方案也有多种：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;将huost的appBase设为空，将Context的Context 指向项目部署位置的绝对路径。&lt;/li&gt;
-&lt;li&gt;删除Context节点。&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;tomcat部署缓慢的问题&quot;&gt;tomcat部署缓慢的问题&lt;/h2&gt;
-&lt;p&gt;用的阿里云服务器，部署tomcat时速度非常慢，但是后来买的新阿里云又没有这个问题。部署项目后一直会在&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;INFO [localhost-startStop-1] org.apache.catalina.startup.HostConfig.deployDirectory Deploying web application directory /opt/apache-tomcat-8.0.15-server/webapps/ROOT&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里卡好几分钟才会继续下去。之前一直以为是服务器配置原因，后来无意中发现是jre的配置原因。参考了几篇博客，发现oracle在WebLogic的文档下&lt;a href=&quot;https://docs.oracle.com/cd/E13209_01/wlcp/wlss30/configwlss/jvmrand.html&quot;&gt;Avoiding JVM Delays Caused by Random Number Generation&lt;/a&gt;给了原因和解决方案。&lt;/p&gt;
-&lt;blockquote readability=&quot;9&quot;&gt;
-&lt;p&gt;The library used for random number generation in Sun's JVM relies on /dev/random by default for UNIX platforms. This can potentially block the WebLogic SIP Server process because on some operating systems /dev/random waits for a certain amount of &quot;noise&quot; to be generated on the host machine before returning a result. Although /dev/random is more secure, BEA recommends using /dev/urandom if the default JVM configuration delays WebLogic SIP Server startup.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;strong&gt;意思就是：&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;JVM上产生随机数的策略有两种：/dev/random 和/dev/urandom。&lt;/li&gt;
-&lt;li&gt;tomcat或者WebLogic等web服务器在部署时需要等待若一段随机数产生的时间。unix平台下JVM默认采用的是安全性更好的/dev/random，但是潜在的会阻塞服务进程。&lt;/li&gt;
-&lt;li&gt;推荐使用/dev/urandom，产生随机数速度快，/dev/random需要时间间隔生成随机数，部署时间长。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;&lt;strong&gt;修改方式：&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;打开&lt;code&gt;$JAVA_HOME/jre/lib/security/java.security&lt;/code&gt;文件。&lt;/li&gt;
-&lt;li&gt;将&lt;code&gt;securerandom.source=file:/dev/random&lt;/code&gt; 修改为&lt;code&gt;securerandom.source=file:/dev/urandom&lt;/code&gt;&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;重启tomcat，三十秒部署成功，solve it&lt;/p&gt;
-&lt;h2 id=&quot;参考文献&quot;&gt;参考文献&lt;/h2&gt;
-</description>
-<pubDate>Fri, 26 Jan 2018 08:50:00 +0000</pubDate>
-<dc:creator>Sinte-Beuve</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Sinte-Beuve/p/8360321.html</dc:identifier>
 </item>
 </channel>
 </rss>
