@@ -9,7 +9,81 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
-<title>Home Chip Fabrication in 66 Steps</title>
+<title>How to speed up the Rust compiler in 2018</title>
+<link>https://blog.mozilla.org/nnethercote/2018/04/30/how-to-speed-up-the-rust-compiler-in-2018/</link>
+<guid isPermaLink="true" >https://blog.mozilla.org/nnethercote/2018/04/30/how-to-speed-up-the-rust-compiler-in-2018/</guid>
+<description>&lt;p&gt;18 months ago I &lt;a href=&quot;https://blog.mozilla.org/nnethercote/2016/10/14/how-to-speed-up-the-rust-compiler/&quot;&gt;wrote about&lt;/a&gt; &lt;a href=&quot;https://blog.mozilla.org/nnethercote/2016/11/23/how-to-speed-up-the-rust-compiler-some-more/&quot;&gt;some work&lt;/a&gt; I did to speed up the Rust compiler (rustc). I’ve recently taken this work up again. Also, in the meantime rustc’s build system has been replaced and its benchmark suite has been overhauled. So it’s a good time for an update.&lt;/p&gt;
+&lt;h3&gt;Getting the code&lt;/h3&gt;
+&lt;p&gt;The steps for getting the rustc code haven’t changed. First, I fork the &lt;a href=&quot;https://github.com/rust-lang/rust/&quot;&gt;main Rust repository&lt;/a&gt; on GitHub. Then I make two local clones: a base clone that I won’t modify, which serves as a stable comparison point (rust0), and a second clone where I make my modifications (rust1). I use commands something like this:&lt;/p&gt;
+&lt;pre&gt;
+user=nnethercote
+for r in rust0 rust1 ; do
+  git clone https://github.com/$user/rust $r
+  cd $r
+  git remote add upstream https://github.com/rust-lang/rust
+  git remote set-url origin git@github.com:$user/rust
+done
+&lt;/pre&gt;
+&lt;h3&gt;Building the Rust compiler&lt;/h3&gt;
+&lt;p&gt;The compiler’s build system is &lt;a href=&quot;https://forge.rust-lang.org/x-py.html&quot;&gt;complex&lt;/a&gt; with many possible invocations and configurations. I’ll cover the absolute minimum information required to understand how I’ve been using it.&lt;/p&gt;
+&lt;p&gt;First, you need a &lt;code&gt;config.toml&lt;/code&gt; file, which sits at the root of the repository and dictates the compiler’s configuration. I used the provided &lt;code&gt;config.toml.example&lt;/code&gt; as a starting point, cut it down a lot, and ended up with the following.&lt;/p&gt;
+&lt;pre&gt;
+[llvm]
+optimize = true
+release-debuginfo = true
+assertions = false
+
+[rust]
+optimize = true
+codegen-units = 1
+debug-assertions = false
+debuginfo = true
+debuginfo-lines = true
+use-jemalloc = false
+&lt;/pre&gt;
+&lt;p&gt;It’s possible that some of these lines just restate defaults, but I figure it doesn’t hurt to be explicit. This configuration has the following characteristics.&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;It results in the production of a fully optimized rustc, which is important for profiling. The exception to this is that I disable jemalloc, because &lt;a href=&quot;http://www.valgrind.org/docs/manual/dh-manual.html&quot;&gt;DHAT&lt;/a&gt; doesn’t work when jemalloc is enabled.&lt;/li&gt;
+&lt;li&gt;It has maximal debug info present, which ensures that profiles are as detailed as possible.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Building rustc can be confusing, particularly because of the multiple compiler stages and the terminology around them. Here is the command I use.&lt;/p&gt;
+&lt;pre&gt;
+./x.py build --stage 2 src/rustc
+&lt;/pre&gt;
+&lt;p&gt;This produces a stage 2 compiler that can handle procedural macros and so is suitable for profiling the benchmark suite.&lt;/p&gt;
+&lt;h3&gt;The benchmark suite&lt;/h3&gt;
+&lt;p&gt;rustc’s benchmark suite is called &lt;a href=&quot;https://github.com/rust-lang-nursery/rustc-perf&quot;&gt;rustc-perf&lt;/a&gt;. It consists of two parts:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;collector: The 24 benchmark programs, 14 of which are “real” code (i.e. crates used in real applications), and 10 of which are toy programs or stress test microbenchmarks. Also, the harness code that runs and measures them.&lt;/li&gt;
+&lt;li&gt;site: Code for displaying measurements as a website.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;The test harness is very thorough. For each benchmark, it measures Debug, Opt, and Check (no code generation) invocations. Furthermore, within each of those categories, it does five or more runs, including a normal build and various kinds of incremental builds. A full benchmarking run measures over 400 invocations of rustc. Note however that only the compilation of the final crate is measured in each benchmark; compilation of dependent crates is not included.&lt;/p&gt;
+&lt;p&gt;rustc-perf was created primarily for the &lt;a href=&quot;http://perf.rust-lang.org/&quot;&gt;perf.rust-lang.org&lt;/a&gt; site, which tracks rustc’s performance over time. I recently &lt;a href=&quot;https://github.com/rust-lang-nursery/rustc-perf/pull/207&quot;&gt;modified&lt;/a&gt; it so it could be used to &lt;a href=&quot;https://github.com/rust-lang-nursery/rustc-perf/tree/master/collector&quot;&gt;compare two builds of rustc on a local machine&lt;/a&gt;, which is a fundamental operation when optimizing. This can be done by running the suite and site locally and navigating to the local &lt;a href=&quot;http://perf.rust-lang.org/compare.html&quot;&gt;“compare” page&lt;/a&gt;, which looks like this:&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;http://blog.mozilla.org/nnethercote/2018/04/30/how-to-speed-up-the-rust-compiler-in-2018/compare/&quot; rel=&quot;attachment wp-att-3176&quot;&gt;&lt;img class=&quot;alignnone size-full wp-image-3176&quot; src=&quot;https://ffp4g1ylyit3jdyti1hqcvtb-wpengine.netdna-ssl.com/nnethercote/files/2018/04/compare.png&quot; alt=&quot;Screenshot of rustc-perf's compare page&quot; width=&quot;667&quot; height=&quot;526&quot; srcset=&quot;https://blog.mozilla.org/nnethercote/files/2018/04/compare.png 667w, https://blog.mozilla.org/nnethercote/files/2018/04/compare-252x199.png 252w, https://blog.mozilla.org/nnethercote/files/2018/04/compare-600x473.png 600w&quot; sizes=&quot;(max-width: 667px) 100vw, 667px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Note that rustc-perf uses perf-stat for its measurements, so the benchmarking functionality currently only works on Linux.&lt;/p&gt;
+&lt;p&gt;I also &lt;a href=&quot;https://github.com/rust-lang-nursery/rustc-perf/pull/209&quot;&gt;extended&lt;/a&gt; rustc-perf so the benchmarks can be run under a profiler. I implemented support for perf-record, Cachegrind, and DHAT, because they are the profilers that I am most familiar with; it isn’t hard to add support for other profilers (including non-Linux ones). The advantage of integrating support for a profiler intto rustc-perf is that it gets the profiler invocations underneath the Cargo invocations, ensuring that the right rustc invocations are measured.&lt;/p&gt;
+&lt;h3&gt;Wins&lt;/h3&gt;
+&lt;p&gt;Here are the improvements I’ve made to rustc over the past few weeks.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/49993&quot;&gt;#49993&lt;/a&gt;: Cachegrind’s output showed that derived methods for the &lt;code&gt;Token&lt;/code&gt; type were taking up significant time. This PR changed the ‘#’ counts in raw &lt;code&gt;Lit&lt;/code&gt; variants from &lt;code&gt;usize&lt;/code&gt; to &lt;code&gt;u16&lt;/code&gt;, which reduced the size of &lt;code&gt;Token&lt;/code&gt; from 32 to 24 bytes, speeding up some of the runs for coercions and html5ever by 1%.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50051&quot;&gt;#50051&lt;/a&gt;: Rust’s &lt;code&gt;Option::ok_or&lt;/code&gt; function transforms an &lt;code&gt;Option&amp;lt;T&amp;gt;&lt;/code&gt; value into a &lt;code&gt;Result&amp;lt;T, E&amp;gt;&lt;/code&gt;. It’s a bit of a footgun… as the &lt;a href=&quot;https://doc.rust-lang.org/std/option/enum.Option.html#method.ok_or&quot;&gt;docs say&lt;/a&gt;:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Arguments passed to &lt;code&gt;ok_or&lt;/code&gt; are eagerly evaluated; if you are passing the result of a function call, it is recommended to use &lt;a href=&quot;https://doc.rust-lang.org/std/option/enum.Option.html#method.ok_or_else&quot;&gt;&lt;code&gt;ok_or_else&lt;/code&gt;&lt;/a&gt;, which is lazily evaluated.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;DHAT’s output showed that one hot allocation site involved the creation of a &lt;code&gt;String&lt;/code&gt; while getting the value of the &lt;code&gt;MIRI_BACKTRACE&lt;/code&gt; environment variable. This seemed to me like a strange thing to be happening frequently, and it turns out that it was at the end of a chain of calls that were only needed in the (rare) error case of an &lt;code&gt;ok_or&lt;/code&gt; call. This PR changed the code to use a trivial closure with &lt;code&gt;ok_or_else&lt;/code&gt;, speeding up runs for a lot of benchmarks, the best by 6%.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50052&quot;&gt;#50052&lt;/a&gt;: DHAT’s output showed that the &lt;code&gt;char_lit&lt;/code&gt; function, which parses “\u{…}” literals, was doing a lot of allocations while stripping out ‘_’ chars. This PR avoided that allocation, speeding up various runs — particularly ones for regex, futures, clap, coercions, hyper, and encoding — the best by 6%.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50106&quot;&gt;#50106&lt;/a&gt;: Cachegrind’s output showed that the &lt;code&gt;nearest_common_ancestor&lt;/code&gt; function, which computes the &lt;a href=&quot;https://en.wikipedia.org/wiki/Lowest_common_ancestor&quot;&gt;lowest common ancestor&lt;/a&gt; of two nodes in a scope tree, was very hot. The algorithm in use constructed the full scope chain for each node, and then worked backward from the end of the two scope chains until a difference was found. This is a reasonable algorithm in many circumstances, but some ad hoc instrumentation (&lt;code&gt;eprintln!&lt;/code&gt; statements plus some simple post-processing) showed that the scope chains usually only differ by a handful of elements at the front and then have very long common tails, with dozens or even hundreds of elements. This PR switched to a different algorithm that looks for differences from the front of the scope chain, speeding up runs for many benchmarks, the best by 8%.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50174&quot;&gt;#50174&lt;/a&gt;: By default, Rust’s &lt;code&gt;HashSet&lt;/code&gt; and &lt;code&gt;HashMap&lt;/code&gt; use a hash function that is very high quality but also very slow. Therefore, the Rust compiler internally uses different types, &lt;code&gt;FxHashSet&lt;/code&gt; and &lt;code&gt;FxHashMap&lt;/code&gt;, which are identical to the standard ones except they use a much faster hash function. Unfortunately, it’s easy to forget about them and use the standard hash tables instead. Cachegrind’s output showed that the default hash function code (SipHash) was executed a lot, and that one particularly hot hash table (the symbol interner) was using &lt;code&gt;HashMap&lt;/code&gt;. This PR (trivially) changed that table to an &lt;code&gt;FxHashMap&lt;/code&gt;, speeding up runs for numerous benchmarks, the best by 5%.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50240&quot;&gt;#50240&lt;/a&gt;: Some of Rust’s standard containers, such as &lt;code&gt;Vec&lt;/code&gt;, &lt;code&gt;HashSet&lt;/code&gt;, and &lt;code&gt;HashMap&lt;/code&gt;, have the nice property that by default they don’t allocate until an element is inserted. This is good because it’s surprising how often such containers are created but never inserted into. DHAT’s output showed that such behaviour would also help with a couple of the compiler’s uses of BTreeMap. I tried and failed to implement this behaviour directly in BTreeMap; according to Gankro, “BTreeMap is some of the &lt;a href=&quot;https://github.com/rust-lang/rust/blob/7f3444e1baf0d335b4bf379f845dbc28cdd0509c/src/liballoc/btree/node.rs#L257-L280&quot;&gt;most complex unsafe code in libstd” &lt;/a&gt;and “&lt;a href=&quot;https://twitter.com/Gankro/status/989683166658121728&quot;&gt;I just scared off a grizzled firefox dev explaining it&lt;/a&gt;“! Instead this PR introduced a thin wrapper type (&lt;code&gt;LazyBTreeMap)&lt;/code&gt; around &lt;code&gt;BTreeMap&lt;/code&gt; and used it in the handful of relevant places within the compiler, speeding up the runs for several benchmarks, the best by 3%. &lt;a href=&quot;https://github.com/rust-lang/rust/issues/50266&quot;&gt;#50266&lt;/a&gt; is open to do the general fix for &lt;code&gt;BTreeMap&lt;/code&gt;, whereupon &lt;code&gt;LazyBTreeMap&lt;/code&gt; will be able to be removed.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/rust-lang/rust/pull/50246&quot;&gt;#50246&lt;/a&gt;: Cachegrind’s output showed that a function named &lt;code&gt;dump_allocs&lt;/code&gt; was hot for some benchmarks. This sounded to me like a logging or debugging function of some kind, and investigation confirmed that it was traversing data structures in order to build up strings that went unused in the standard case where logging is disabled. This PR (trivially) changed this function and a couple of related ones to be no-ops if logging is disabled, speeding up runs for coercions, tuple-stress, html5ever, and encoding, the best by almost 15%! This shows how &lt;em&gt;not doing unclever things&lt;/em&gt; is often as important as &lt;em&gt;doing clever things&lt;/em&gt; when it comes to optimizing software.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Update:&lt;/strong&gt; It’s worth noting that I also made three or four optimization attempts that didn’t work out — where I made a change that seemed like it should help, based on profiling data, but the effect was negligible. Success isn’t guaranteed!&lt;/p&gt;
+&lt;h3&gt;Future work&lt;/h3&gt;
+&lt;p&gt;All of the PRs mentioned above (except for the aborted &lt;code&gt;BTreeMap&lt;/code&gt; change) involved small, simple changes to the Rust compiler’s code. I’m not a rustc expert, but I do know how to use a couple of profilers well, and I’ve been able to make a difference. I’m sure there are more improvements of this nature to be made, and I encourage other people to try profiling rustc with their favourite profilers to see what they can find. This is valuable because rustc’s speed is something that Rust users often complain about. And it’s fun, if you like that sort of thing 🙂  I’m happy to help people, and the members of the #rustc IRC channel are very friendly and helpful.&lt;/p&gt;
+&lt;p&gt;Having said that, in a lot of cases, especially for opt builds, the majority of execution time is within LLVM, which rustc uses for code generation. Speeding up LLVM itself may be difficult, but I hope/suspect there is room for improvement in the way that rustc interacts with LLVM. If anyone has ideas on that front I’d love to hear about them.&lt;/p&gt;
+</description>
+<pubDate>Mon, 30 Apr 2018 05:02:38 +0000</pubDate>
+<dc:creator>nnethercote</dc:creator>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.mozilla.org/nnethercote/2018/04/30/how-to-speed-up-the-rust-compiler-in-2018/</dc:identifier>
+</item>
+<item>
+<title>A home-made lithographically-fabricated integrated circuit</title>
 <link>http://sam.zeloof.xyz/first-ic/#</link>
 <guid isPermaLink="true" >http://sam.zeloof.xyz/first-ic/#</guid>
 <description>&lt;h3&gt;Preface&lt;/h3&gt;
@@ -104,6 +178,31 @@ IV curve&lt;/div&gt;
 <dc:identifier>http://sam.zeloof.xyz/first-ic/</dc:identifier>
 </item>
 <item>
+<title>Thinking of yourself as an insomniac may be a major part of the problem</title>
+<link>https://www.theguardian.com/lifeandstyle/2018/apr/20/cant-sleep-insomnia-identity</link>
+<guid isPermaLink="true" >https://www.theguardian.com/lifeandstyle/2018/apr/20/cant-sleep-insomnia-identity</guid>
+<description>&lt;p&gt;&lt;span class=&quot;drop-cap&quot;&gt;&lt;span class=&quot;drop-cap__inner&quot;&gt;N&lt;/span&gt;&lt;/span&gt;ote to publishers: in my view, there’s an unfilled gap in the “wellness” market for a book on how sleep isn’t really that important. In contrast to &lt;a href=&quot;https://www.ted.com/talks/arianna_huffington_how_to_succeed_get_more_sleep&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;the message relentlessly promoted&lt;/a&gt; by lifestyle gurus these days, this book would argue that four hours a night is probably fine, that caffeine before bed is no big deal, and that even severe sleep deprivation poses no real risk of poor performance, health troubles or early death. Admittedly, this might raise certain ethical issues, since &lt;a href=&quot;https://www.nhs.uk/Livewell/tiredness-and-fatigue/Pages/lack-of-sleep-health-risks.aspx&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;that’s not what the science says&lt;/a&gt;. But you know what? Unlike all those other books, this one would &lt;em&gt;help people sleep&lt;/em&gt;. Because take it from an intermittent bad sleeper: there’s nothing more likely to keep an insomniac up at night, or turn a good sleeper into an insomniac, than being told it’s completely essential they drift off.&lt;/p&gt;
+&lt;p&gt;Actually, the ironies of insomnia are even worse than that, because there’s growing evidence that thinking of yourself as an insomniac – having an &lt;a href=&quot;https://digest.bps.org.uk/2017/10/26/insomnia-identity-misbelieving-youve-got-sleep-problems-can-be-more-harmful-than-actual-lack-of-sleep/&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;“insomnia identity”&lt;/a&gt;, in the coinage of the &lt;a href=&quot;http://sleepresearchproject.ua.edu/about-the-director.html&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;sleep researcher Kenneth Lichstein&lt;/a&gt; – is a major part of the problem. It’s not just that such a self-image makes it harder to sleep, though doubtless that’s the case. It’s that having an insomnia identity makes life terrible even if, in reality, you’re getting sufficient sleep. In a review of the research published last year, &lt;a href=&quot;https://www.sciencedirect.com/science/article/pii/S0005796717301638&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;Lichstein concluded&lt;/a&gt; that “non-complaining poor sleepers” – who sleep badly but don’t define themselves as insomniacs – don’t suffer the high blood pressure commonly associated with severe sleeplessness. Meanwhile, “complaining good sleepers” – who get enough shut-eye, but are heavily invested in their alleged insomnia – were essentially as tired, anxious and depressed as those who genuinely didn’t sleep.&lt;/p&gt;
+&lt;aside class=&quot;element element-rich-link element--thumbnail element-rich-link--not-upgraded&quot; data-component=&quot;rich-link&quot; data-link-name=&quot;rich-link-1 | 1&quot;&gt;
+&lt;/aside&gt;&lt;p&gt;And the worst part, arguably, is this: with an insomnia identity, seeking help is liable to make things worse. Drag your weary bones to the doctor and she may be willing to prescribe sleeping pills. But apart from the fact that they’re not very effective, and often very addictive, the benefits are likely to be outweighed by the very act of visiting the doctor: by doing so, you’ve doubled down on your insomnia identity, signalling to your subconscious mind that you have an intransigent problem, requiring medical intervention. Reading all this, some chronic insomniacs may protest that I’m making light of their own, far more serious condition, which really &lt;em&gt;is&lt;/em&gt; intransigent. Perhaps. But do bear in mind that’s exactly what someone with a strong insomnia identity would say.&lt;/p&gt;
+&lt;p&gt;The root of the problem, as Sasha Stephens explains in her book &lt;a href=&quot;https://psychcentral.com/lib/the-effortless-sleep-method/&quot; data-link-name=&quot;in body link&quot; class=&quot;u-underline&quot;&gt;The Effortless Sleep Method&lt;/a&gt;, is that any external crutch on which you lean – not just pills, but herbal remedies and elaborate bedtime rituals, too – risks further eroding your trust in your ability to fall asleep on your own, and it’s that lack of self-trust that is insomnia’s main cause. (Obviously, don’t stop taking prescription drugs without consulting a doctor.) Few things have helped me as much as following one of Stephens’ many recommendations and training myself to remember, upon waking at 2am, that when I have a terrible night, the next day usually isn’t so bad. Once I’m OK with not getting back to sleep, it’s surprisingly hard to stay awake.&lt;/p&gt;
+&lt;h2&gt;Read this&lt;/h2&gt;
+&lt;p&gt;A Roger Ekirch’s endlessly fascinating 2005 book At Day’s Close, a social history of night-time, argues that pre-industrial people slept in two phases, with an hour awake in between.&lt;/p&gt;
+
+
+</description>
+<pubDate>Mon, 30 Apr 2018 03:23:52 +0000</pubDate>
+<dc:creator>prostoalex</dc:creator>
+<og:url>http://www.theguardian.com/lifeandstyle/2018/apr/20/cant-sleep-insomnia-identity</og:url>
+<og:description>There’s growing evidence that thinking of yourself as an insomniac is a major part of the problem</og:description>
+<og:image>https://i.guim.co.uk/img/media/3b59ce9cae3173f5eec9bd1fc971dcdf49672194/0_19_1450_870/master/1450.jpg?w=1200&amp;h=630&amp;q=55&amp;auto=format&amp;usm=12&amp;fit=crop&amp;crop=faces%2Centropy&amp;bm=normal&amp;ba=bottom%2Cleft&amp;blend64=aHR0cHM6Ly91cGxvYWRzLmd1aW0uY28udWsvMjAxOC8wMS8zMS9mYWNlYm9va19kZWZhdWx0LnBuZw&amp;s=08da9998431e6c4ef843f60d267e3ccd</og:image>
+<og:type>article</og:type>
+<og:title>Can’t sleep? Tell yourself it’s not a big deal | Oliver Burkeman</og:title>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.theguardian.com/lifeandstyle/2018/apr/20/cant-sleep-insomnia-identity</dc:identifier>
+</item>
+<item>
 <title>StreetLend.com shuts down, citing GDPR regulations</title>
 <link>https://streetlend.com</link>
 <guid isPermaLink="true" >https://streetlend.com</guid>
@@ -143,10 +242,101 @@ IV curve&lt;/div&gt;
 <dc:identifier>https://www.streetlend.com/</dc:identifier>
 </item>
 <item>
+<title>Health dangers of sleep deprivation</title>
+<link>https://www.independent.co.uk/life-style/health-and-families/how-much-sleep-is-enough-sleep-deprivation-health-dangers-a8328126.html</link>
+<guid isPermaLink="true" >https://www.independent.co.uk/life-style/health-and-families/how-much-sleep-is-enough-sleep-deprivation-health-dangers-a8328126.html</guid>
+<description>&lt;p&gt;Rocker Warren Zevon is often credited with coining the mantra that’s been embraced by everyone from partying college kids to early-morning exercise evangelists: “You can sleep when you’re dead.”&lt;/p&gt;
+&lt;p&gt;Or as Bon Jovi put it, “Gonna live while I'm alive, I'll sleep when I'm dead.”&lt;/p&gt;
+&lt;p&gt;It’s an intoxicating thought, but the truth is that not getting enough sleep is literally killing us.&lt;/p&gt;
+&lt;p&gt;That’s what neuroscientist Matthew Walker, who directs the sleep and neuroimaging lab at UC Berkeley, says in his book, ‘Why We Sleep,’ which was published in October 2017.&lt;/p&gt;
+
+&lt;p&gt;Walker has dolled out sleep advice to the NBA, NFL and Pixar, among others. His first book is a deep dive into the latest research on the importance of sleep, as well as a how-to guide for getting better sleep. &lt;/p&gt;
+&lt;p&gt;He succinctly summed up his overall stance on snoozing for Business Insider: “The shorter your sleep, the shorter your life,” Walker said.&lt;/p&gt;
+&lt;p&gt;It’s estimated that two thirds of adults around the world aren’t getting enough sleep. The World Health Organisation and Walker both recommend about eight hours a night as a good baseline.&lt;/p&gt;
+&lt;p&gt;Walker argues that routinely getting only six or seven hours of shut-eye per night can do serious long-term damage to your health, and in some cases even kill you. He insists on a strict eight hours of &quot;sleep opportunity&quot; for himself. That means he's in bed for at least eight hours a night, even if he spends a portion of that time falling asleep and waking up. He says that schedule helps keep him productive, as well as emotionally and physically fit.&lt;/p&gt;
+&lt;p&gt;Here are three of the key ways Walker says a lack of sleep can hurt your body and brain.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Lack of sleep puts the immune system at a disadvantage&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;When you haven't slept enough, it’s harder for the body to fight off illnesses ranging from the common cold to cancer. Sleep deprivation depletes stores of your “natural killer cells,” a type of lymphocyte (white blood cell) that nix tumor and virus cells. A single 4- or 5-hour night of sleep could lower your body’s &quot;natural killer&quot; cell count by around 70%, Walker says.&lt;/p&gt;
+
+&lt;p&gt;Missing sleep can also put your body on a crash course for chronic disease. Insufficient sleep has been linked to increased instances of Alzheimer's, obesity, stroke, and diabetes. Lack of sleep changes how insulin operates in your body and how quickly your cells absorb sugar. After a week of short sleep nights (say, five or six hours), your doctor could diagnose you with pre-diabetes, Walker says. That means your blood sugar levels are elevated enough that you're on track to become a diabetic. Long-term damage to your heart, blood vessels, and kidneys could already be in motion in such circumstances.  &lt;/p&gt;
+&lt;p&gt;It's true that some people, a &quot;sleepless elite&quot; as Walker calls them, are built to survive on less sleep and will sleep just six hours, even in laboratory sleep conditions. Such lucky individuals make up just a fraction of one percent of the population, Walker says, and share a gene (BHLHE41) that's incredibly rare. (If you think you have it, you probably don't.)&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Just an hour of lost sleep can kill&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Walker likes to say that &quot;there is a global experiment performed on 1.6 billion people, twice a year.&quot; You probably call it Daylight Saving Time.&lt;/p&gt;
+&lt;p&gt;After we lose an hour of sleep every spring when the clocks get pushed forward, car accident rates jump. Walker's seen this play out in the lab too — after study participants spent two weeks sleeping for seven hours instead of nine, their reaction times slowed by half a second. That's a long lapse if you're cruising at 60 mph. The AAA Foundation for Traffic Safety has studied car crashes in the US, and found that tired drivers kill about 6,400 people a year. &lt;/p&gt;
+&lt;p&gt;Heart attacks also spike 25% around Daylight Saving Time, since sleep deprivation puts more stress on the heart. Researchers have found that men in Japan who sleep less than six hours a night are 400-500% likelier to have a heart attack than their better-rested counterparts. &lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Sleep debt is carcinogenic&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Insufficient sleep makes the body a better breeding ground for cancer. Sleepiness is now being blamed for cases of colon cancer, breast cancer, and prostate cancer. An off-kilter sleep schedule may also give rise to cancer, since it causes melatonin to be suppressed. The World Health Organisation calls night work a &quot;probable carcinogen.&quot; &lt;/p&gt;
+&lt;p&gt;Because of all these factors, scientists warn that hanging on to the idea that you'll sleep when your dead is truly deadly advice. &lt;/p&gt;
+&lt;p&gt;If you're not sleeping enough, &quot;you will be both dead sooner, and the quality of your (now shorter) life will be significantly worse,&quot;  Walker told Business Insider.&lt;/p&gt;
+&lt;div class=&quot;dnd-widget-wrapper context-sdl_editor_representation type-image atom-align-right&quot;&gt;
+&lt;div class=&quot;dnd-atom-rendered&quot;&gt;
+&lt;div class=&quot;image&quot;&gt;&lt;img alt=&quot;business-insider.jpg&quot; src=&quot;https://static.independent.co.uk/s3fs-public/styles/story_medium/public/thumbnails/image/2017/10/02/15/20139715-2336967726528924-4176845524975551137-n.png&quot; title=&quot;business-insider.jpg&quot; width=&quot;100&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;a href=&quot;http://www.independent.co.uk/news/business/how-much-the-best-paid-workers-in-20-professions-earn-money-income-finance-jobs-a7868996.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;• How much the best paid workers in 20 professions earn&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://www.independent.co.uk/life-style/seven-outdated-men-style-rules-you-can-ignore-fashion-tips-belts-shoes-a7867406.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;• Seven outdated men’s style ‘rules’ that you can now ignore&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://www.independent.co.uk/life-style/16-skills-hard-to-learn-but-will-pay-off-forever-sleep-honesty-empathy-a7867251.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;• 16 skills that are hard to learn but will pay off forever&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;Read the original article on &lt;a href=&quot;http://uk.businessinsider.com/how-much-sleep-is-enough-health-risks-dangers-of-sleep-deprivation-2017-11&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;Business Insider UK&lt;/a&gt;. © 2016. Follow Business Insider UK on &lt;a href=&quot;https://twitter.com/BIUK&quot; target=&quot;_blank&quot;&gt;Twitter&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
+
+&lt;a href=&quot;/syndication/reuse-permission-form?url=http://www.independent.co.uk/life-style/health-and-families/how-much-sleep-is-enough-sleep-deprivation-health-dangers-a8328126.html&quot; target=&quot;_blank&quot; class=&quot;syndication-btn&quot;&gt;&lt;img src=&quot;https://www.independent.co.uk/sites/all/themes/ines_themes/independent_theme/img/reuse.png&quot; width=&quot;25&quot;/&gt;Reuse content&lt;/a&gt;</description>
+<pubDate>Sun, 29 Apr 2018 21:46:21 +0000</pubDate>
+<dc:creator>pmoriarty</dc:creator>
+<og:type>article</og:type>
+<og:title>You are probably not getting enough sleep, and it is killing you</og:title>
+<og:url>http://www.independent.co.uk/life-style/health-and-families/how-much-sleep-is-enough-sleep-deprivation-health-dangers-a8328126.html</og:url>
+<og:description>Rocker Warren Zevon is often credited with coining the mantra that’s been embraced by everyone from partying college kids to early-morning exercise evangelists: “You can sleep when you’re dead.” Or as Bon Jovi put it, “Gonna live while I'm alive, I'll sleep when I'm dead.” It’s an intoxicating thought, but the truth is that not getting enough sleep is literally killing us. That’s what neuroscientist Matthew Walker, who directs the sleep and neuroimaging lab at UC Berkeley, says in his book, ‘Why We Sleep,’ which was published in October 2017.</og:description>
+<og:image>https://static.independent.co.uk/s3fs-public/thumbnails/image/2018/04/05/17/istock-628507194.jpg</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.independent.co.uk/life-style/health-and-families/how-much-sleep-is-enough-sleep-deprivation-health-dangers-a8328126.html</dc:identifier>
+</item>
+<item>
+<title>9,096 Stars in the Sky – Is That All?</title>
+<link>http://www.skyandtelescope.com/astronomy-resources/how-many-stars-night-sky-09172014/</link>
+<guid isPermaLink="true" >http://www.skyandtelescope.com/astronomy-resources/how-many-stars-night-sky-09172014/</guid>
+<description>&lt;p&gt;&lt;strong&gt;&lt;em&gt;Ten thousand stars bedazzle the eye on a dark night. Wait, how many stars in the sky?&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;div id=&quot;attachment_255427944&quot; class=&quot;wp-caption alignright&quot;&gt;&lt;a href=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Stars-ST.jpg&quot;&gt;&lt;img class=&quot;size-medium wp-image-255427944&quot; src=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Stars-ST-242x190.jpg&quot; alt=&quot;How many stars in the sky can you see from a pitch black sky? Bob King explores this in his informative article.&quot; width=&quot;242&quot; height=&quot;190&quot; srcset=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Stars-ST-242x190.jpg 242w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Stars-ST.jpg 411w&quot; sizes=&quot;(max-width: 242px) 100vw, 242px&quot;/&gt;&lt;/a&gt;
+&lt;p class=&quot;wp-caption-text&quot;&gt;How many stars in the sky can you see?&lt;br/&gt;&lt;em&gt;Bob King&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;Go out on a dark night and you'd swear there are thousands of stars in the sky. Too many to count. 10,000 at least. But why guess when someone has already done the counting for you? Astronomer &lt;a href=&quot;http://www.skyandtelescope.com/astronomy-news/dorrit-hoffleit-19072007/?showAll=y&amp;amp;c=y&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;Dorrit Hoffleit&lt;/strong&gt;&lt;/a&gt; of Yale University, well known for her work with variable stars, compiled the &lt;a href=&quot;http://cdsarc.u-strasbg.fr/viz-bin/Cat?V/50&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;Yale Bright Star Catalog&lt;/strong&gt;&lt;/a&gt; decades ago. It tabulates every star visible from Earth to magnitude 6.5, the naked eye limit for most of humanity.&lt;/p&gt;
+&lt;p&gt;You might be in for a surprise when you read it, though. To answer the question, &quot;How many stars in the sky?&quot; The total comes to 9,096 stars visible across the entire sky. Both hemispheres. Since we can only see half the celestial sphere at any moment, we necessarily divide that number by two to arrive at 4,548 stars (give or take depending on the season). And that's from the darkest sky you can imagine. I don't know about you, but that number seems paltry to one's impression of an inky night in the backcountry.&lt;/p&gt;
+&lt;p&gt;At the poles, where the north and south polestars are pinned to the zenith and no stars rise or set, the same ~4,500 stars are visible every single clear night of the year. At northern mid-latitudes, the pole star is halfway up in the northern sky, allowing us to peer deeper into the southern realms of the celestial sphere. During the course of a year from latitude 45° north, we see roughly half again as many stars as we do at a particular time on a given evening. That tallies up to approximately 6,800 stars. Still pretty lean, but apparently enough to convey the impression of an intensely starry sky.&lt;/p&gt;
+&lt;div id=&quot;attachment_255427903&quot; class=&quot;wp-caption alignleft&quot;&gt;&lt;img class=&quot;size-full wp-image-255427903&quot; src=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Magnitude-scale-mini-ST.jpg&quot; alt=&quot;Fifty-eight magnitudes of apparent brightness encompass the things that astronomers study, from the glaring Sun to the faintest objects detected with the Hubble Space Telescope. This range is equivalent to a brightness ratio of some 200 billion trillion. -&quot; width=&quot;275&quot; height=&quot;275&quot; srcset=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Magnitude-scale-mini-ST.jpg 275w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Magnitude-scale-mini-ST-113x113.jpg 113w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Magnitude-scale-mini-ST-190x190.jpg 190w&quot; sizes=&quot;(max-width: 275px) 100vw, 275px&quot;/&gt;&lt;p class=&quot;wp-caption-text&quot;&gt;Why stop at the naked eye? 50-mm binoculars increase the number of stars to about 100,000 while observers using a 3-inch telescope can spy about 5 million.&lt;br/&gt;&lt;em&gt;Sky and Telescope&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;Astronomers use the &lt;a href=&quot;http://www.icq.eps.harvard.edu/MagScale.html&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;magnitude scale&lt;/strong&gt;&lt;/a&gt; to measure star and planet brightness. Each magnitude is 2.5 times brighter than the one below it. Altair, in Aquila the Eagle, shines at about magnitude +1 which is 2.5 times brighter than a 2nd magnitude star, which is 2.5 times brighter than a 3rd magnitude star, and so on.&lt;/p&gt;
+&lt;p&gt;A first magnitude star is 2.5 x 2.5 x 2.5 x 2.5 x 2.5 (about 100) times brighter than a 6th magnitude star.&lt;/p&gt;
+&lt;p&gt;The bigger the magnitude number, the fainter the star. If an object is &lt;em&gt;really&lt;/em&gt; bright, it’s assigned a negative magnitude. Sirius, the brightest star sparkles at magnitude –1.4, Jupiter at –2.5, and Venus tops the planets at  –4.4. The Full Moon reaches a magnificent –12.7, bested only by the Sun at –26.7.&lt;/p&gt;
+&lt;div id=&quot;attachment_255427984&quot; class=&quot;wp-caption aligncenter&quot;&gt;&lt;a href=&quot;https://www.flickr.com/photos/47833278@N02/15081348717/&quot;&gt;&lt;img class=&quot;wp-image-255427984 size-full&quot; src=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-6.5-limit_ST_edited-2.jpg&quot; alt=&quot;A night sky too few of us ever see.&quot; width=&quot;504&quot; height=&quot;302&quot; srcset=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-6.5-limit_ST_edited-2.jpg 504w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-6.5-limit_ST_edited-2-300x179.jpg 300w&quot; sizes=&quot;(max-width: 504px) 100vw, 504px&quot;/&gt;&lt;/a&gt;
+&lt;p class=&quot;wp-caption-text&quot;&gt;The sky facing south at nightfall in late September from a dark, light-pollution-free site with stars visible to magnitude 6.5, the naked eye limit. Click to enlarge.&lt;br/&gt;&lt;em&gt;Source: Stellarium&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;br/&gt;While the total number of naked eye stars may seem unimpressive, consider what happens to the sky in and around cities, where most of us live. From the suburbs, the magnitude limit is around +4 for a worldwide total of about 900 stars or &lt;em&gt;half&lt;/em&gt; that for your location. If we set the city limit at magnitude +2 (stars similar to the Big Dipper in brightness) we're left with just 70 stars worldwide, or 35 stars visible from say, downtown Chicago or Boston.
+&lt;div id=&quot;attachment_255427985&quot; class=&quot;wp-caption aligncenter&quot;&gt;&lt;a href=&quot;https://www.flickr.com/photos/47833278@N02/15267904805/&quot;&gt;&lt;img class=&quot;wp-image-255427985 size-full&quot; src=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-2.5-limit_ST_edited-2.jpg&quot; alt=&quot;Out of stars, out of touch with the night. How many stars in the sky can you see?&quot; width=&quot;504&quot; height=&quot;302&quot; srcset=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-2.5-limit_ST_edited-2.jpg 504w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-stars-magnitude-2.5-limit_ST_edited-2-300x179.jpg 300w&quot; sizes=&quot;(max-width: 504px) 100vw, 504px&quot;/&gt;&lt;/a&gt;
+&lt;p class=&quot;wp-caption-text&quot;&gt;The same sky as above but seen from the downtown of a larger city. The reddish glow is simulated light pollution from high-pressure sodium vapor lights.&lt;br/&gt;&lt;em&gt;Source: Stellarium&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;No wonder city dwellers are stunned by the night sky when they take their first trip to the country. Stars barely exist for those trapped beneath an ever-present dome of light pollution.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;http://www.stargazing.net/david/constel/howmanystars.html&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;Numbers increase exponentially&lt;/strong&gt;&lt;/a&gt; if we go in the opposite direction as there are far more faint stars than bright. The standard limit for a pair of 50-mm binoculars is 9th magnitude, opening up a vista of some 217,000 stars across the heavens. Impressed? A 3-inch telescope pulls in a treasure-worthy 5.3 million, enough for several lifetimes of viewing pleasure. Dare I go further?&lt;/p&gt;
+&lt;div id=&quot;attachment_255427986&quot; class=&quot;wp-caption aligncenter&quot;&gt;&lt;a href=&quot;https://www.flickr.com/photos/47833278@N02/15081204590/&quot;&gt;&lt;img class=&quot;wp-image-255427986 size-full&quot; src=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-Stars-magnitude-9.5-limit-binoculars_ST_edited-2.jpg&quot; alt=&quot;Owl-eyed sky a starry paradise&quot; width=&quot;504&quot; height=&quot;302&quot; srcset=&quot;http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-Stars-magnitude-9.5-limit-binoculars_ST_edited-2.jpg 504w, http://wwwcdn.skyandtelescope.com/wp-content/uploads/Sky-Stars-magnitude-9.5-limit-binoculars_ST_edited-2-300x179.jpg 300w&quot; sizes=&quot;(max-width: 504px) 100vw, 504px&quot;/&gt;&lt;/a&gt;
+&lt;p class=&quot;wp-caption-text&quot;&gt;If we had eyes that could gather as much light as do a pair of 50-mm binoculars, we'd be dumbstruck with its richness. Many of the fainter stars can barely be seen in this much reduced simulation. Click to enlarge.&lt;br/&gt;&lt;em&gt;Source: Stellarium&lt;/em&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;On the very best nights, I can reach 16th magnitude with my 15-inch telescope, or 380 million stars. Well, only half that really, but who's counting?&lt;/p&gt;
+&lt;p&gt;How many stars in the sky can you see with binoculars? Use Gary Seronik's &lt;em&gt;&lt;a title=&quot;Shop at Sky!&quot; href=&quot;http://www.shopatsky.com/product/Binocular-Highlights/books?utm_source=JR&amp;amp;utm_medium=ar&amp;amp;utm_campaign=JRstar09172014&quot; target=&quot;_blank&quot;&gt;Binocular Highlights&lt;/a&gt;&lt;/em&gt; to help you find out!&lt;/p&gt;
+
+
+</description>
+<pubDate>Sun, 29 Apr 2018 18:58:20 +0000</pubDate>
+<dc:creator>georgecmu</dc:creator>
+<og:type>article</og:type>
+<og:title>How Many Stars in the Sky? 9,096—Is That All? | Sky &amp; Telescope</og:title>
+<og:description>You might be surprised at how many stars in the sky there are vs how few you can actually see, but it has more to do with impression over actual number!</og:description>
+<og:url>http://www.skyandtelescope.com/astronomy-resources/how-many-stars-night-sky-09172014/</og:url>
+<og:image>http://wwwcdn.skyandtelescope.com/wp-content/uploads/Stars-ST.jpg</og:image>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.skyandtelescope.com/astronomy-resources/how-many-stars-night-sky-09172014/</dc:identifier>
+</item>
+<item>
 <title>“Lifefaker.com makes faking perfection easy”</title>
 <link>http://lifefaker.com/?=HackerNews</link>
 <guid isPermaLink="true" >http://lifefaker.com/?=HackerNews</guid>
-<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://lifefaker.com/?=HackerNews&quot;&gt;http://lifefaker.com/?=HackerNews&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16953005&quot;&gt;https://news.ycombinator.com/item?id=16953005&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 463&lt;/p&gt;&lt;p&gt;# Comments: 159&lt;/p&gt;</description>
+<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://lifefaker.com/?=HackerNews&quot;&gt;http://lifefaker.com/?=HackerNews&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16953005&quot;&gt;https://news.ycombinator.com/item?id=16953005&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 631&lt;/p&gt;&lt;p&gt;# Comments: 212&lt;/p&gt;</description>
 <pubDate>Sun, 29 Apr 2018 17:42:54 +0000</pubDate>
 <dc:creator>olifrost</dc:creator>
 <og:title>Lifefaker.com makes faking perfection easy</og:title>
@@ -176,7 +366,7 @@ IV curve&lt;/div&gt;
 <title>France seizes france.com from man who&amp;#039;s had it since 1994</title>
 <link>https://arstechnica.com/tech-policy/2018/04/france-seizes-france-com-from-man-whos-had-it-since-94-so-he-sues/</link>
 <guid isPermaLink="true" >https://arstechnica.com/tech-policy/2018/04/france-seizes-france-com-from-man-whos-had-it-since-94-so-he-sues/</guid>
-<description>&lt;img src=&quot;https://cdn.arstechnica.net/wp-content/uploads/2018/04/GettyImages-565297243-800x535.jpg&quot;/&gt;&lt;aside id=&quot;social-left&quot;&gt;&lt;a title=&quot;105 posters participating&quot; class=&quot;comment-count icon-comment-bubble-down&quot; href=&quot;https://arstechnica.com/tech-policy/2018/04/france-seizes-france-com-from-man-whos-had-it-since-94-so-he-sues/?comments=1&quot;&gt;&lt;span class=&quot;comment-count-before&quot;&gt;reader comments&lt;/span&gt; &lt;span class=&quot;comment-count-number&quot;&gt;158&lt;/span&gt;&lt;/a&gt;
+<description>&lt;img src=&quot;https://cdn.arstechnica.net/wp-content/uploads/2018/04/GettyImages-565297243-800x535.jpg&quot;/&gt;&lt;aside id=&quot;social-left&quot;&gt;&lt;a title=&quot;132 posters participating&quot; class=&quot;comment-count icon-comment-bubble-down&quot; href=&quot;https://arstechnica.com/tech-policy/2018/04/france-seizes-france-com-from-man-whos-had-it-since-94-so-he-sues/?comments=1&quot;&gt;&lt;span class=&quot;comment-count-before&quot;&gt;reader comments&lt;/span&gt; &lt;span class=&quot;comment-count-number&quot;&gt;210&lt;/span&gt;&lt;/a&gt;
 &lt;div class=&quot;share-links&quot;&gt;&lt;span&gt;Share this story&lt;/span&gt;    &lt;/div&gt;
 &lt;/aside&gt;&lt;aside class=&quot;pullbox sidebar story-sidebar right&quot;&gt;
 &lt;/aside&gt;
@@ -253,1294 +443,11 @@ A French-born American has now &lt;a href=&quot;https://www.documentcloud.org/do
 <title>A History of APL in 50 Functions</title>
 <link>http://www.jsoftware.com/papers/50/</link>
 <guid isPermaLink="true" >http://www.jsoftware.com/papers/50/</guid>
-<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://www.jsoftware.com/papers/50/&quot;&gt;http://www.jsoftware.com/papers/50/&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16952045&quot;&gt;https://news.ycombinator.com/item?id=16952045&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 219&lt;/p&gt;&lt;p&gt;# Comments: 82&lt;/p&gt;</description>
+<description>[unable to retrieve full-text content]&lt;p&gt;Article URL: &lt;a href=&quot;http://www.jsoftware.com/papers/50/&quot;&gt;http://www.jsoftware.com/papers/50/&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=16952045&quot;&gt;https://news.ycombinator.com/item?id=16952045&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Points: 241&lt;/p&gt;&lt;p&gt;# Comments: 86&lt;/p&gt;</description>
 <pubDate>Sun, 29 Apr 2018 14:08:08 +0000</pubDate>
 <dc:creator>jim-jim-jim</dc:creator>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.jsoftware.com/papers/50/</dc:identifier>
-</item>
-<item>
-<title>Tell HN: Sci-Hub&amp;#039;s TLS certificate has started failing</title>
-<link>https://news.ycombinator.com/item?id=16951831</link>
-<guid isPermaLink="true" >https://news.ycombinator.com/item?id=16951831</guid>
-<description>&lt;tr class=&quot;athing comtr&quot; id=&quot;16952798&quot; readability=&quot;9.656652360515&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.8283261802575&quot;&gt;&lt;tr readability=&quot;9.656652360515&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;9.656652360515&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955759&quot; readability=&quot;6.5882352941176&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.2941176470588&quot;&gt;&lt;tr readability=&quot;6.5882352941176&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953318&quot; readability=&quot;3.53125&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.765625&quot;&gt;&lt;tr readability=&quot;3.53125&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.85546875&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955022&quot; readability=&quot;5.5&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.75&quot;&gt;&lt;tr readability=&quot;5.5&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955491&quot; readability=&quot;10.682830930537&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;5.3414154652687&quot;&gt;&lt;tr readability=&quot;10.682830930537&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955613&quot; readability=&quot;6.6570945945946&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.3285472972973&quot;&gt;&lt;tr readability=&quot;6.6570945945946&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.7060810810811&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955100&quot; readability=&quot;8.6374781085814&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.3187390542907&quot;&gt;&lt;tr readability=&quot;8.6374781085814&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.7180385288967&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955620&quot; readability=&quot;2.4458598726115&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2229299363057&quot;&gt;&lt;tr readability=&quot;2.4458598726115&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.2611464968153&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955603&quot; readability=&quot;2.0333333333333&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955081&quot; readability=&quot;3.2520325203252&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.6260162601626&quot;&gt;&lt;tr readability=&quot;3.2520325203252&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955182&quot; readability=&quot;10.608045977011&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;5.3040229885057&quot;&gt;&lt;tr readability=&quot;10.608045977011&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;12.054597701149&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr coll&quot; id=&quot;16952827&quot; readability=&quot;6.6818181818182&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.3409090909091&quot;&gt;&lt;tr readability=&quot;6.6818181818182&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;7.6363636363636&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953115&quot; readability=&quot;8.1771428571429&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.0885714285714&quot;&gt;&lt;tr readability=&quot;8.1771428571429&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.36&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955054&quot; readability=&quot;13.737785016287&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;6.8688925081433&quot;&gt;&lt;tr readability=&quot;13.737785016287&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;17.662866449511&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953560&quot; readability=&quot;2.5736040609137&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2868020304569&quot;&gt;&lt;tr readability=&quot;2.5736040609137&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.4314720812183&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953896&quot; readability=&quot;1.3535353535354&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954318&quot; readability=&quot;3.0088495575221&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954143&quot; readability=&quot;4.5229007633588&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2614503816794&quot;&gt;&lt;tr readability=&quot;4.5229007633588&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.618320610687&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953457&quot; readability=&quot;3.0534351145038&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953539&quot; readability=&quot;3.1351351351351&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953594&quot; readability=&quot;4.6361502347418&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.3180751173709&quot;&gt;&lt;tr readability=&quot;4.6361502347418&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.5633802816901&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954547&quot; readability=&quot;6.65953307393&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.329766536965&quot;&gt;&lt;tr readability=&quot;6.65953307393&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;240&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16956127&quot; readability=&quot;0.47663551401869&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953279&quot; readability=&quot;8.5384615384615&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.2692307692308&quot;&gt;&lt;tr readability=&quot;8.5384615384615&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;8.0641025641026&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954485&quot; readability=&quot;5.5161290322581&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.758064516129&quot;&gt;&lt;tr readability=&quot;5.5161290322581&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954163&quot; readability=&quot;4.8456375838926&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.4228187919463&quot;&gt;&lt;tr readability=&quot;4.8456375838926&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.2993288590604&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954247&quot; readability=&quot;16.690007293946&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;8.345003646973&quot;&gt;&lt;tr readability=&quot;16.690007293946&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;14.72647702407&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952944&quot; readability=&quot;9.0572390572391&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.5286195286195&quot;&gt;&lt;tr readability=&quot;9.0572390572391&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953262&quot; readability=&quot;4.4469026548673&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2234513274336&quot;&gt;&lt;tr readability=&quot;4.4469026548673&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953200&quot; readability=&quot;7.2669322709163&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.6334661354582&quot;&gt;&lt;tr readability=&quot;7.2669322709163&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954271&quot; readability=&quot;5.7037037037037&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.8518518518519&quot;&gt;&lt;tr readability=&quot;5.7037037037037&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.2777777777778&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952173&quot; readability=&quot;7.4385964912281&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.719298245614&quot;&gt;&lt;tr readability=&quot;7.4385964912281&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952656&quot; readability=&quot;7.6864864864865&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.8432432432432&quot;&gt;&lt;tr readability=&quot;7.6864864864865&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.7256756756757&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952680&quot; readability=&quot;4.5546558704453&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2773279352227&quot;&gt;&lt;tr readability=&quot;4.5546558704453&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953068&quot; readability=&quot;2.2429906542056&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953196&quot; readability=&quot;1.5056179775281&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953651&quot; readability=&quot;2.6010638297872&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.3005319148936&quot;&gt;&lt;tr readability=&quot;2.6010638297872&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.468085106383&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953677&quot; readability=&quot;5.4634146341463&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7317073170732&quot;&gt;&lt;tr readability=&quot;5.4634146341463&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952653&quot; readability=&quot;1.2727272727273&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953211&quot; readability=&quot;2.4358974358974&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2179487179487&quot;&gt;&lt;tr readability=&quot;2.4358974358974&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953697&quot; readability=&quot;4.1925465838509&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.0962732919255&quot;&gt;&lt;tr readability=&quot;4.1925465838509&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953715&quot; readability=&quot;3.2786885245902&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.6393442622951&quot;&gt;&lt;tr readability=&quot;3.2786885245902&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953905&quot; readability=&quot;1.0714285714286&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954032&quot; readability=&quot;0.81081081081081&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952765&quot; readability=&quot;4.4258373205742&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2129186602871&quot;&gt;&lt;tr readability=&quot;4.4258373205742&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952832&quot; readability=&quot;3.1111111111111&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952830&quot; readability=&quot;16.679453836151&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;8.3397269180754&quot;&gt;&lt;tr readability=&quot;16.679453836151&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;21.585175552666&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954042&quot; readability=&quot;5.3029045643154&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.6514522821577&quot;&gt;&lt;tr readability=&quot;5.3029045643154&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952715&quot; readability=&quot;11.757997218359&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;5.8789986091794&quot;&gt;&lt;tr readability=&quot;11.757997218359&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;18.126912378303&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952859&quot; readability=&quot;9.794319294809&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.8971596474045&quot;&gt;&lt;tr readability=&quot;9.794319294809&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;10.77375122429&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952902&quot; readability=&quot;5.5157894736842&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7578947368421&quot;&gt;&lt;tr readability=&quot;5.5157894736842&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.0561403508772&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953129&quot; readability=&quot;3.5428571428571&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7714285714286&quot;&gt;&lt;tr readability=&quot;3.5428571428571&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.5428571428571&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953259&quot; readability=&quot;3.5495495495495&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7747747747748&quot;&gt;&lt;tr readability=&quot;3.5495495495495&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954141&quot; readability=&quot;3.3557046979866&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.6778523489933&quot;&gt;&lt;tr readability=&quot;3.3557046979866&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16956517&quot; readability=&quot;2.5235294117647&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2617647058824&quot;&gt;&lt;tr readability=&quot;2.5235294117647&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952756&quot; readability=&quot;4.6354166666667&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.3177083333333&quot;&gt;&lt;tr readability=&quot;4.6354166666667&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.171875&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952796&quot; readability=&quot;4.0839694656489&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.0419847328244&quot;&gt;&lt;tr readability=&quot;4.0839694656489&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952867&quot; readability=&quot;5.5106382978723&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7553191489362&quot;&gt;&lt;tr readability=&quot;5.5106382978723&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.1329787234043&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953435&quot; readability=&quot;5.4225941422594&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7112970711297&quot;&gt;&lt;tr readability=&quot;5.4225941422594&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.6150627615063&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952961&quot; readability=&quot;4.4308943089431&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2154471544715&quot;&gt;&lt;tr readability=&quot;4.4308943089431&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.9878048780488&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953050&quot; readability=&quot;4.0322580645161&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.0161290322581&quot;&gt;&lt;tr readability=&quot;4.0322580645161&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953967&quot; readability=&quot;1.4347826086957&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954668&quot; readability=&quot;3.5947136563877&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7973568281938&quot;&gt;&lt;tr readability=&quot;3.5947136563877&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952007&quot; readability=&quot;2.3534482758621&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952627&quot; readability=&quot;9.6892341842397&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.8446170921199&quot;&gt;&lt;tr readability=&quot;9.6892341842397&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.2980022197558&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953683&quot; readability=&quot;4.4514767932489&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2257383966245&quot;&gt;&lt;tr readability=&quot;4.4514767932489&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954169&quot; readability=&quot;5.4297520661157&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7148760330579&quot;&gt;&lt;tr readability=&quot;5.4297520661157&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954820&quot; readability=&quot;11.634591961023&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;5.8172959805116&quot;&gt;&lt;tr readability=&quot;11.634591961023&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.3629719853837&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955243&quot; readability=&quot;13.631156930126&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;6.815578465063&quot;&gt;&lt;tr readability=&quot;13.631156930126&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;11.197021764032&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952974&quot; readability=&quot;3.6331877729258&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.8165938864629&quot;&gt;&lt;tr readability=&quot;3.6331877729258&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.6331877729258&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954149&quot; readability=&quot;4.6127946127946&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.3063973063973&quot;&gt;&lt;tr readability=&quot;4.6127946127946&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955252&quot; readability=&quot;3.1153846153846&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952014&quot; readability=&quot;0.8780487804878&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952035&quot; readability=&quot;6.1417624521073&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.0708812260536&quot;&gt;&lt;tr readability=&quot;6.1417624521073&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952046&quot; readability=&quot;5.3397129186603&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.6698564593301&quot;&gt;&lt;tr readability=&quot;5.3397129186603&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952065&quot; readability=&quot;4.5328719723183&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2664359861592&quot;&gt;&lt;tr readability=&quot;4.5328719723183&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952985&quot; readability=&quot;7.3707865168539&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.685393258427&quot;&gt;&lt;tr readability=&quot;7.3707865168539&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952109&quot; readability=&quot;3.5208333333333&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7604166666667&quot;&gt;&lt;tr readability=&quot;3.5208333333333&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.9609375&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952179&quot; readability=&quot;4.5065789473684&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2532894736842&quot;&gt;&lt;tr readability=&quot;4.5065789473684&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;240&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.5065789473684&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952265&quot; readability=&quot;2.4152542372881&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2076271186441&quot;&gt;&lt;tr readability=&quot;2.4152542372881&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;280&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952601&quot; readability=&quot;3.2156862745098&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.6078431372549&quot;&gt;&lt;tr readability=&quot;3.2156862745098&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;320&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952673&quot; readability=&quot;6.2205882352941&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.1102941176471&quot;&gt;&lt;tr readability=&quot;6.2205882352941&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;360&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.5546218487395&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954980&quot; readability=&quot;4.5272727272727&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2636363636364&quot;&gt;&lt;tr readability=&quot;4.5272727272727&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;400&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16956121&quot; readability=&quot;4.6058091286307&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.3029045643154&quot;&gt;&lt;tr readability=&quot;4.6058091286307&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;440&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955214&quot; readability=&quot;7.2466367713004&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.6233183856502&quot;&gt;&lt;tr readability=&quot;7.2466367713004&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;440&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.4349775784753&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952470&quot; readability=&quot;1.5353535353535&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952145&quot; readability=&quot;3.492385786802&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.746192893401&quot;&gt;&lt;tr readability=&quot;3.492385786802&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952172&quot; readability=&quot;3.4712643678161&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.735632183908&quot;&gt;&lt;tr readability=&quot;3.4712643678161&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;240&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952426&quot; readability=&quot;1.2162162162162&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952051&quot; readability=&quot;2.2159090909091&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952018&quot; readability=&quot;2.3534482758621&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953216&quot; readability=&quot;1.7222222222222&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952061&quot; readability=&quot;3.7826086956522&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952677&quot; readability=&quot;2.9056603773585&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952357&quot; readability=&quot;0.98360655737705&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952380&quot; readability=&quot;3.2230215827338&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.6115107913669&quot;&gt;&lt;tr readability=&quot;3.2230215827338&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952072&quot; readability=&quot;0.59459459459459&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952182&quot; readability=&quot;3.4355828220859&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7177914110429&quot;&gt;&lt;tr readability=&quot;3.4355828220859&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952298&quot; readability=&quot;1.6304347826087&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952338&quot; readability=&quot;4.28125&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.140625&quot;&gt;&lt;tr readability=&quot;4.28125&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;3.425&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952349&quot; readability=&quot;2.578125&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952567&quot; readability=&quot;2.7391304347826&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954267&quot; readability=&quot;2.6322580645161&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952030&quot; readability=&quot;1.3663366336634&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952063&quot; readability=&quot;3.4589371980676&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7294685990338&quot;&gt;&lt;tr readability=&quot;3.4589371980676&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952206&quot; readability=&quot;12.570071258907&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;6.2850356294537&quot;&gt;&lt;tr readability=&quot;12.570071258907&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.8361045130641&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952330&quot; readability=&quot;3.4942528735632&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7471264367816&quot;&gt;&lt;tr readability=&quot;3.4942528735632&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952438&quot; readability=&quot;8.8743455497382&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.4371727748691&quot;&gt;&lt;tr readability=&quot;8.8743455497382&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;7.0994764397906&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952678&quot; readability=&quot;5.3851590106007&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.6925795053004&quot;&gt;&lt;tr readability=&quot;5.3851590106007&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;200&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.0388692579505&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952726&quot; readability=&quot;2.35&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952812&quot; readability=&quot;7.5770114942529&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.7885057471264&quot;&gt;&lt;tr readability=&quot;7.5770114942529&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;280&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;8.0505747126437&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954507&quot; readability=&quot;4.1379310344828&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.0689655172414&quot;&gt;&lt;tr readability=&quot;4.1379310344828&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;320&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952844&quot; readability=&quot;1.4315789473684&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955019&quot; readability=&quot;9.4650205761317&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.7325102880658&quot;&gt;&lt;tr readability=&quot;9.4650205761317&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;280&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953209&quot; readability=&quot;3.4905660377358&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7452830188679&quot;&gt;&lt;tr readability=&quot;3.4905660377358&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954870&quot; readability=&quot;5.4295774647887&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7147887323944&quot;&gt;&lt;tr readability=&quot;5.4295774647887&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.9771126760563&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952783&quot; readability=&quot;2.75&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952838&quot; readability=&quot;5.6383928571429&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.8191964285714&quot;&gt;&lt;tr readability=&quot;5.6383928571429&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;5.6383928571429&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953184&quot; readability=&quot;22.134110787172&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;11.067055393586&quot;&gt;&lt;tr readability=&quot;22.134110787172&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;24.262390670554&quot;&gt;
-
-&lt;br/&gt;&lt;div class=&quot;comment&quot; readability=&quot;26.744378698225&quot;&gt;&lt;span class=&quot;c00&quot;&gt;Keep in mind &lt;em&gt;all&lt;/em&gt; of Weber's argument.&lt;/span&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;Government has a &lt;em&gt;monopoly&lt;/em&gt; on the &lt;em&gt;legitimate&lt;/em&gt; use of &lt;em&gt;force&lt;/em&gt;.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;&lt;em&gt;Weber claims that the state is the &quot;only human Gemeinschaft which lays claim to the monopoly on the legitimated use of physical force. However, this monopoly is limited to a certain geographical area, and in fact this limitation to a particular area is one of the things that defines a state.&quot;[2] In other words, Weber describes the state as any organization that succeeds in holding the exclusive right to use, threaten, or authorize physical force against residents of its territory. Such a monopoly, according to Weber, must occur via a process of legitimation.&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Monopoly_on_violence&quot; rel=&quot;nofollow&quot;&gt;https://en.wikipedia.org/wiki/Monopoly_on_violence&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;This is mis-read by many Libertarians, including Charles Koch,[1] who directly funds a wide set of Libertarian institutional propaganda mills,[2] that this invalidates government. It does not.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;Absent a monopoly, there are multiple parties that claim legitimacy over use of force, including lical strongmen, tribes, or corporations, for all of which there is an extensive history of same (including Koch Industries, to the present).&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;Government's monopoly is not for unlimited use of force, but for &lt;em&gt;legitimate&lt;/em&gt; use.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;And if some alternate structure emerges claiming this right, it is, &lt;em&gt;ipso facto&lt;/em&gt;, government.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;It is also possible for actual or nominal governments' use of force to be illegitimate. Which it rather frequently is.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;________________________________&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;Notes:&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;1. &lt;a href=&quot;https://www.marketplace.org/2015/10/21/business/corner-office/full-interview-charles-koch&quot; rel=&quot;nofollow&quot;&gt;https://www.marketplace.org/2015/10/21/business/corner-offic...&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;c00&quot;&gt;2. Amply documented, see: &lt;a href=&quot;https://en.wikipedia.org/wiki/Political_activities_of_the_Koch_brothers&quot; rel=&quot;nofollow&quot;&gt;https://en.wikipedia.org/wiki/Political_activities_of_the_Ko...&lt;/a&gt; &lt;a href=&quot;https://www.sourcewatch.org/index.php/Koch_Brothers&quot; rel=&quot;nofollow&quot;&gt;https://www.sourcewatch.org/index.php/Koch_Brothers&lt;/a&gt; &lt;/span&gt;&lt;/p&gt;
-
-&lt;/div&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955409&quot; readability=&quot;11.289293849658&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;5.6446469248292&quot;&gt;&lt;tr readability=&quot;11.289293849658&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;8.4669703872437&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953023&quot; readability=&quot;2.527397260274&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.263698630137&quot;&gt;&lt;tr readability=&quot;2.527397260274&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953177&quot; readability=&quot;2.5397727272727&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2698863636364&quot;&gt;&lt;tr readability=&quot;2.5397727272727&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953984&quot; readability=&quot;2.5873015873016&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2936507936508&quot;&gt;&lt;tr readability=&quot;2.5873015873016&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954621&quot; readability=&quot;4.8461538461538&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.4230769230769&quot;&gt;&lt;tr readability=&quot;4.8461538461538&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954086&quot; readability=&quot;3.6065573770492&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.8032786885246&quot;&gt;&lt;tr readability=&quot;3.6065573770492&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.9590163934426&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16954133&quot; readability=&quot;8.8392857142857&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;4.4196428571429&quot;&gt;&lt;tr readability=&quot;8.8392857142857&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;6.1875&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952015&quot; readability=&quot;1.3157894736842&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952067&quot; readability=&quot;2.8947368421053&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952083&quot; readability=&quot;4.4431279620853&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2215639810427&quot;&gt;&lt;tr readability=&quot;4.4431279620853&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;80&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.8874407582938&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952087&quot; readability=&quot;3.4457831325301&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.7228915662651&quot;&gt;&lt;tr readability=&quot;3.4457831325301&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952115&quot; readability=&quot;2.3030303030303&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952126&quot; readability=&quot;6.3615635179153&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;3.1807817589577&quot;&gt;&lt;tr readability=&quot;6.3615635179153&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;120&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.9983713355049&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16955032&quot; readability=&quot;5.5155279503106&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.7577639751553&quot;&gt;&lt;tr readability=&quot;5.5155279503106&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;160&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952755&quot; readability=&quot;0.51612903225806&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16952666&quot; readability=&quot;4.5038167938931&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;2.2519083969466&quot;&gt;&lt;tr readability=&quot;4.5038167938931&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;0&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot; readability=&quot;4.0534351145038&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953649&quot; readability=&quot;2.4521739130435&quot;&gt;&lt;td&gt;
-&lt;table border=&quot;0&quot; readability=&quot;1.2260869565217&quot;&gt;&lt;tr readability=&quot;2.4521739130435&quot;&gt;&lt;td class=&quot;ind&quot;&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;1&quot; width=&quot;40&quot;/&gt;&lt;/td&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;default&quot;&gt;
-
-&lt;br/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953511&quot; readability=&quot;1.4782608695652&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;athing comtr&quot; id=&quot;16953690&quot; readability=&quot;1.0188679245283&quot;&gt;&lt;td&gt;
-&lt;/td&gt;
-&lt;/tr&gt;</description>
-<pubDate>Sun, 29 Apr 2018 13:05:29 +0000</pubDate>
-<dc:creator>AlbertoGP</dc:creator>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://news.ycombinator.com/item?id=16951831</dc:identifier>
-</item>
-<item>
-<title>&amp;#039;Demonically Clever&amp;#039; Backdoor Hides Inside Computer Chip</title>
-<link>https://www.wired.com/2016/06/demonically-clever-backdoor-hides-inside-computer-chip/</link>
-<guid isPermaLink="true" >https://www.wired.com/2016/06/demonically-clever-backdoor-hides-inside-computer-chip/</guid>
-<description>&lt;p&gt;Security flaws in software can be tough to find. Purposefully planted ones—hidden backdoors created by spies or saboteurs—are often even stealthier. Now imagine a backdoor planted not in an application, or deep in an operating system, but even deeper, in the hardware of the processor that runs a computer. And now imagine that silicon backdoor is invisible not only to the computer’s software, but even to the chip’s designer, who has no idea that it was added by the chip’s manufacturer, likely in some farflung Chinese factory. And that it’s a single component hidden among hundreds of millions or billions. And that each one of those components is less than a thousandth of the width of a human hair.&lt;/p&gt;&lt;p&gt;In fact, researchers at the University of Michigan haven’t just imagined that computer security nightmare; they’ve built and proved it works. In a &lt;a href=&quot;http://static1.1.sqspcdn.com/static/f/543048/26931843/1464016046717/A2_SP_2016.pdf?token=N4pJSSoqL4kE4V4JXpTwx7qDRX4%3D&quot; target=&quot;_blank&quot;&gt;study&lt;/a&gt; that won the “best paper” award at last week’s IEEE Symposium on Privacy and Security, they detailed the creation of an insidious, microscopic hardware backdoor proof-of-concept. And they showed that by running a series of seemingly innocuous commands on their minutely sabotaged processor, a hacker could reliably trigger a feature of the chip that gives them full access to the operating system. Most disturbingly, they write, that microscopic hardware backdoor wouldn’t be caught by practically any modern method of hardware security analysis, and could be planted by a single employee of a chip factory.&lt;/p&gt;
-&lt;p&gt;“Detecting this with current techniques would be very, very challenging if not impossible,” says Todd Austin, one of the computer science professors at the University of Michigan who led the research. “It’s a needle in a mountain-sized haystack.” Or as Google engineer Yonatan Zunger &lt;a href=&quot;https://plus.google.com/+YonatanZunger/posts/ayXVWrFpQus&quot; target=&quot;_blank&quot;&gt;wrote&lt;/a&gt; after reading the paper: “This is the most demonically clever computer security attack I’ve seen in years.”&lt;/p&gt;
-&lt;h3&gt;Analog Attack&lt;/h3&gt;
-&lt;p&gt;The “demonically clever” feature of the Michigan researchers’ backdoor isn’t just its size, or that it’s hidden in hardware rather than software. It’s that it violates the security industry’s most basic assumptions about a chip’s digital functions and how they might be sabotaged. Instead of a mere change to the “digital” properties of a chip—a tweak to the chip’s logical computing functions—the researchers describe their backdoor as an “analog” one: a &lt;em&gt;physical&lt;/em&gt; hack that takes advantage of how the actual electricity flowing through the chip’s transistors can be hijacked to trigger an unexpected outcome. Hence the backdoor’s name: A2, which stands for both Ann Arbor, the city where the University of Michigan is based, and “Analog Attack.”&lt;/p&gt;
-&lt;p&gt;Here’s how that analog hack works: After the chip is fully designed and ready to be fabricated, a saboteur adds a single component to its “mask,” the blueprint that governs its layout. That single component or “cell”—of which there are hundreds of millions or even billions on a modern chip—is made out of the same basic building blocks as the rest of the processor: wires and transistors that act as the on-or-off switches that govern the chip’s logical functions. But this cell is secretly designed to act as a capacitor, a component that temporarily stores electric charge.&lt;/p&gt;
-
-&lt;a href=&quot;https://www.wired.com/wp-content/uploads/2016/05/Screen-Shot-2016-05-31-at-8.43.32-AM.png&quot;&gt;&lt;img class=&quot;wp-image-2037847 size-text-column-width&quot; src=&quot;https://www.wired.com/wp-content/uploads/2016/05/Screen-Shot-2016-05-31-at-8.43.32-AM-482x265.png&quot; alt=&quot;This diagram shows the size of the processor created by the researchers compared with the size of malicious cell that triggers its backdoor function.&quot; width=&quot;482&quot; height=&quot;265&quot;/&gt;&lt;/a&gt;This diagram shows the size of the processor created by the researchers compared with the size of malicious cell that triggers its backdoor function.&lt;span class=&quot;credit link-underline-sm&quot;&gt;University of Michigan&lt;/span&gt;
-&lt;p&gt;Every time a malicious program—say, a script on a website you visit—runs a certain, obscure command, that capacitor cell “steals” a tiny amount of electric charge and stores it in the cell’s wires without otherwise affecting the chip’s functions. With every repetition of that command, the capacitor gains a little more charge. Only after the “trigger” command is sent many thousands of times does that charge hit a threshold where the cell switches on a logical function in the processor to give a malicious program the full operating system access it wasn’t intended to have. “It takes an attacker doing these strange, infrequent events in high frequency for a duration of time,” says Austin. “And then finally the system shifts into a privileged state that lets the attacker do whatever they want.”&lt;/p&gt;
-&lt;p&gt;That capacitor-based trigger design means it’s nearly impossible for anyone testing the chip’s security to stumble on the long, obscure series of commands to “open” the backdoor. And over time, the capacitor also leaks out its charge again, closing the backdoor so that it’s even harder for any auditor to find the vulnerability.&lt;/p&gt;
-&lt;h3&gt;New Rules&lt;/h3&gt;
-&lt;p&gt;Processor-level backdoors &lt;a href=&quot;https://www.usenix.org/legacy/event/leet08/tech/full_papers/king/king_html/&quot; target=&quot;_blank&quot;&gt;have been proposed before&lt;/a&gt;. But by building a backdoor that exploits the unintended physical properties of a chip’s components—their ability to “accidentally” accumulate and leak small amounts of charge—rather than their intended logical function, the researchers say their backdoor component can be a thousandth the size of previous attempts. And it would be far harder to detect with existing techniques like visual analysis of a chip or measuring its power use to spot anomalies. “We take advantage of these rules ‘outside of the Matrix’ to perform a trick that would [otherwise] be very expensive and obvious,” says Matthew Hicks, another of the University of Michigan researchers. “By following that different set of rules, we implement a much more stealthy attack.”&lt;/p&gt;
-&lt;p&gt;The Michigan researchers went so far as to build their A2 backdoor into a simple open-source OR1200 processor to test out their attack. Since the backdoor mechanism depends on the physical characteristics of the chip’s wiring, they even tried their “trigger” sequence after heating or cooling the chip to a range of temperatures, from negative 13 degrees to 212 degrees Fahrenheit, and found that it still worked in every case.&lt;/p&gt;
-
-&lt;a href=&quot;https://www.wired.com/wp-content/uploads/2016/05/Screen-Shot-2016-05-31-at-8.43.56-AM.png&quot;&gt;&lt;img class=&quot;size-default-top-art wp-image-2037848&quot; src=&quot;https://www.wired.com/wp-content/uploads/2016/05/Screen-Shot-2016-05-31-at-8.43.56-AM-582x288.png&quot; alt=&quot;The experimental setup the researchers used to test their backdoored processor at different temperatures.&quot; width=&quot;582&quot; height=&quot;288&quot;/&gt;&lt;/a&gt;Here you can see the experimental setup the researchers used to test their backdoored processor at different temperatures.&lt;span class=&quot;credit link-underline-sm&quot;&gt;University of Michigan&lt;/span&gt;
-&lt;p&gt;As dangerous as their invention sounds for the future of computer security, the Michigan researchers insist that their intention is to prevent such undetectable hardware backdoors, not to enable them. They say it’s very possible, in fact, that governments around the world may have already thought of their analog attack method. “By publishing this paper we can say it’s a real, imminent threat,” says Hicks. “Now we need to find a defense.”&lt;/p&gt;
-&lt;p&gt;But given that current defenses against detecting processor-level backdoors wouldn’t spot their A2 attack, they argue that a new method is required: Specifically, they say that modern chips need to have a trusted component that constantly checks that programs haven’t been granted inappropriate operating-system-level privileges. Ensuring the security of that component, perhaps by building it in secure facilities or making sure the design isn’t tampered with before fabrication, would be far easier than ensuring the same level of trust for the entire chip.&lt;/p&gt;
-&lt;p&gt;They admit that implementing their fix could take time and money. But without it, their proof-of-concept is intended to show how deeply and undetectably a computer’s security could be corrupted before it’s ever sold. “I want this paper to start a dialogue between designers and fabricators about how we establish trust in our manufactured hardware,” says Austin. “We need to establish trust in our manufacturing, or something very bad will happen.”&lt;/p&gt;
-&lt;p&gt;Here’s the Michigan researchers’ full paper:&lt;/p&gt;
-
-&lt;a class=&quot;visually-hidden skip-to-text-link focusable bg-white&quot; href=&quot;https://www.wired.com/2016/06/demonically-clever-backdoor-hides-inside-computer-chip/#start-of-content&quot;&gt;Go Back to Top. Skip To: Start of Article.&lt;/a&gt;
-</description>
-<pubDate>Sun, 29 Apr 2018 08:53:35 +0000</pubDate>
-<dc:creator>Digit-Al</dc:creator>
-<og:type>article</og:type>
-<og:title>This ‘Demonically Clever’ Backdoor Hides In a Tiny Slice of a Computer Chip</og:title>
-<og:image>https://www.wired.com/wp-content/uploads/2016/05/GettyImages-467833575-1200x630.jpg</og:image>
-<og:description>Researchers have built a proof-of-concept processor that uses secretly stored electrical charge to trigger an ultra-stealthy backdoor.</og:description>
-<og:url>https://www.wired.com/2016/06/demonically-clever-backdoor-hides-inside-computer-chip/</og:url>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.wired.com/2016/06/demonically-clever-backdoor-hides-inside-computer-chip/</dc:identifier>
-</item>
-<item>
-<title>What happened, Gmail?</title>
-<link>https://uxplanet.org/what-happened-gmail-e5f35e423b1b</link>
-<guid isPermaLink="true" >https://uxplanet.org/what-happened-gmail-e5f35e423b1b</guid>
-<description>&lt;p name=&quot;3c01&quot; id=&quot;3c01&quot; class=&quot;graf graf--p graf--leading&quot;&gt;From a business perspective I understand that there are more people using Gmail than Calendar, Keep or the new Tasks, but the way Google has attempted to bring people into the fold and have them use add-ons and the rest of their products is just crazy. It’s a designer’s nightmare and it transports me back to the 90s when only developers were building web apps. Why do I mention the 90s? Well, it’s because it happens to look very similar to Outlook, AOL, and Yahoo, all from this era. All of these services still work amazingly well, but it’s not accurate to call what Google has done new. It’s the same thing in a new box, with the same problems and over complexity. It comes as no surprise that companies like Slack succeed by solving these problems.&lt;/p&gt;
-&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
-
-&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*aYkRcVr6msMgwMFXKrJvFw.png&quot; data-width=&quot;1490&quot; data-height=&quot;864&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*aYkRcVr6msMgwMFXKrJvFw.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*aYkRcVr6msMgwMFXKrJvFw.png&quot;/&gt;&lt;/div&gt;
-Starting to look a lot like this — which gets even worse on mobile
-&lt;blockquote name=&quot;2b5f&quot; id=&quot;2b5f&quot; class=&quot;graf graf--blockquote graf--startsWithDoubleQuote graf-after--figure&quot; readability=&quot;8.3684210526316&quot;&gt;
-&lt;p&gt;“Google has &lt;a href=&quot;https://www.cnbc.com/2018/02/01/google-cloud-revenue-passes-1-billion-per-quarter.html&quot; data-href=&quot;https://www.cnbc.com/2018/02/01/google-cloud-revenue-passes-1-billion-per-quarter.html&quot; class=&quot;markup--anchor markup--blockquote-anchor&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;4 million people&lt;/a&gt; paying for G Suite right now, compared to 120 million Office 365 commercial users….1.4 billion people are using Gmail, compared to 400 million on Microsoft’s Outlook.com service.” (The Verge)&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p name=&quot;301c&quot; id=&quot;301c&quot; class=&quot;graf graf--p graf-after--blockquote&quot;&gt;There is more functionality and design here than on an airplane dashboard.&lt;/p&gt;
-&lt;h3 name=&quot;54a6&quot; id=&quot;54a6&quot; class=&quot;graf graf--h3 graf-after--p&quot;&gt;Innovation&lt;/h3&gt;
-&lt;p name=&quot;d7ca&quot; id=&quot;d7ca&quot; class=&quot;graf graf--p graf-after--h3&quot;&gt;Cross-selling, merging, and doing a Frankenstein is not innovation. Moving features from one service to another is also not innovation. Even though it’s impossible to innovate every year, I would hope that within one of the core products at Google there is a willingness to innovate. When I hear of a redesign I’m always excited, and I’m still excited about the fact that something has changed with Gmail, even if it’s not enough to get me to go back to using it.&lt;/p&gt;
-&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
-
-&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*zB5W2nPicWBpXzwUnaP3ag.jpeg&quot; data-width=&quot;1500&quot; data-height=&quot;750&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*zB5W2nPicWBpXzwUnaP3ag.jpeg&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*zB5W2nPicWBpXzwUnaP3ag.jpeg&quot;/&gt;&lt;/div&gt;
-&lt;p name=&quot;581b&quot; id=&quot;581b&quot; class=&quot;graf graf--p graf-after--figure&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Here are a few of the innovations that are needed:&lt;/strong&gt;&lt;/p&gt;
-&lt;ul class=&quot;postList&quot;&gt;&lt;li name=&quot;47cb&quot; id=&quot;47cb&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;A good method for telling users what’s important to read and what can wait for later.&lt;/li&gt;
-&lt;/ul&gt;&lt;p name=&quot;8162&quot; id=&quot;8162&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;• A way to help users handle the amount of emails they get.&lt;/p&gt;
-&lt;p name=&quot;28b9&quot; id=&quot;28b9&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• An efficient way to categorize, filter and search content.&lt;/p&gt;
-&lt;p name=&quot;0534&quot; id=&quot;0534&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• New ways of passing information (from media types, to supported files for preview).&lt;/p&gt;
-&lt;p name=&quot;c9f4&quot; id=&quot;c9f4&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• A tool to help users fix mistakes they’ve made, such as sending someone the wrong email, or spelling something incorrectly.&lt;/p&gt;
-&lt;p name=&quot;289c&quot; id=&quot;289c&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• Providing an efficient way of sending big files (Drive works to some extent, but it’s cumbersome in many cases).&lt;/p&gt;
-&lt;p name=&quot;d3bb&quot; id=&quot;d3bb&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• Allowing users to handle their business better through Gmail (e.g. sign documents, approve things, review things).&lt;/p&gt;
-&lt;p name=&quot;ed8b&quot; id=&quot;ed8b&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• Allowing users to design their emails in a better way.&lt;/p&gt;
-&lt;p name=&quot;b335&quot; id=&quot;b335&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;• Letting users know if someone read their presentation and what parts interested them (DocSend).&lt;/p&gt;
-&lt;p name=&quot;f79c&quot; id=&quot;f79c&quot; class=&quot;graf graf--p graf-after--p graf--trailing&quot;&gt;All of these are focused on the core usage of Gmail: communicating with information. Ideally, you don’t need emails to schedule a meeting because emailing is slow, complicated and sometimes requires too much coordination. That’s why you have tools like X.AI (Amy), Calendarly and Doodle. Tasks are also way better informed by chatter rather than an email.&lt;/p&gt;
-</description>
-<pubDate>Sun, 29 Apr 2018 08:43:41 +0000</pubDate>
-<dc:creator>xoxoavi</dc:creator>
-<og:title>What happened Gmail? – UX Planet</og:title>
-<og:url>https://uxplanet.org/what-happened-gmail-e5f35e423b1b</og:url>
-<og:image>https://cdn-images-1.medium.com/max/1200/1*KOB2-XoR74y3LFPbH3b3hA.jpeg</og:image>
-<og:description>I’m a Google Inbox user, and since Inbox for iOS hasn’t been updated to match the screen size of iPhone X (which seems quite a trivial…</og:description>
-<og:type>article</og:type>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://uxplanet.org/what-happened-gmail-e5f35e423b1b?gi=2ff539a61ae7</dc:identifier>
-</item>
-<item>
-<title>The NetHack dev team is happy to announce the release of NetHack 3.6.1</title>
-<link>https://groups.google.com/forum/m/#!topic/rec.games.roguelike.nethack/XhcIrLlNzpA</link>
-<guid isPermaLink="true" >https://groups.google.com/forum/m/#!topic/rec.games.roguelike.nethack/XhcIrLlNzpA</guid>
-<description>The NetHack DevTeam is happy to announce the release of NetHack 3.6.1.&lt;p&gt;3.6.1 is a general patch release.  It includes a large number of fixes&lt;br /&gt;to the 3.6.0 version, all of which have been incrementally published on&lt;br /&gt;the public Git repository for the game.&lt;/p&gt;&lt;p&gt;The DevTeam has decided that 3.6.1 will be the final &quot;official&quot; 3.6.x&lt;br /&gt;version, barring some sort of major issue that requires a new release.&lt;/p&gt;&lt;p&gt;After this release, 3.6 will continue to be maintained in our Git repositories,&lt;br /&gt;however the team will focus on a new major release. Another 3.6.x release&lt;br /&gt;and packaged set of binaries, is not anticipated.&lt;/p&gt;&lt;p&gt;Here's a synopsis of some of the changes we've made in the past two years&lt;br /&gt;(approximately) since the release of 3.6.0 in December 2015:&lt;/p&gt;&lt;p&gt;1. Personnel changes&lt;/p&gt;&lt;p&gt;We've added some additional members to the team since the 3.6.0 release:&lt;/p&gt;&lt;p&gt;Alex Smith and Patric Mueller joined the team in July 2016.&lt;/p&gt;&lt;p&gt;Alex created the AceHack and NetHack 4 variants and is an expert on the&lt;br /&gt;inner workings of the game and the ways in which they can be exploited.&lt;/p&gt;&lt;p&gt;Patric is probably best known as the creator of the UnNetHack variant.&lt;br /&gt;He also created NetHack-De (a German translation of NetHack) and has&lt;br /&gt;considerable involvement in the Junethack tournament.&lt;/p&gt;&lt;p&gt;2. Gameplay changes&lt;/p&gt;&lt;p&gt;There are fewer gameplay changes in 3.6.1 than in 3.6.0,  but still over&lt;br /&gt;500 items.  Here are a few, though not necessarily the most important,&lt;br /&gt;examples:&lt;/p&gt;&lt;p&gt;General New Features&lt;br /&gt;--------------------&lt;/p&gt;&lt;p&gt;    Naming Sting or Orcrist now breaks illiterate conduct&lt;br /&gt;    Poison breath leaves a trail of poison gas&lt;br /&gt;    Allow knife and stiletto as possible tin opening tools&lt;br /&gt;    New status line conditions Stone Strngl Deaf Lev Fly Ride&lt;br /&gt;    Swallowers can't re-engulf hero immediately after spitting him/her out&lt;br /&gt;    Allow taming monkeys and apes with bananas&lt;br /&gt;    Ray bounceback chance depends on the wall type&lt;br /&gt;    Undead #turning takes less time at higher experience level&lt;br /&gt;    Peacefuls may react when you attack other peacefuls&lt;br /&gt;    Prevent diagonal jumping through open doorways&lt;br /&gt;    Give feedback just before timed levitation runs out&lt;br /&gt;    Blinded hero or monster who eats a nurse corpse will have blindness cured&lt;br /&gt;    Wielding *bane have additional effects&lt;br /&gt;    &quot;Elbereth&quot; must now be the only engraved text on a square to function&lt;br /&gt;    &quot;Elbereth&quot; now erodes based on attacks by the player, not monsters scared&lt;/p&gt;&lt;p&gt;NetHack Community Patches (or Variations) Included&lt;br /&gt;-------------------------------------------------&lt;/p&gt;&lt;p&gt;    Malcolm Ryan's improved tin opener&lt;br /&gt;    Ray Chason's keyboard may stop responding after locking or unlocking a door&lt;br /&gt;        when using altkeyhandler=nhraykey.dll&lt;br /&gt;    Ray Chason's fix: window interfaces that support transparency may give away&lt;br /&gt;        unseen parts of the map&lt;br /&gt;    Ray Chason's xprname should honor iflags.menu_tab_sep&lt;br /&gt;    Ray Chason's punctuation for &quot;That foo is really a mimic.&quot;&lt;br /&gt;    Ray Chason's proper background tiles for lava and water&lt;br /&gt;    Ray Chason's MS-DOS port restored to functionality with credit to Reddit user&lt;br /&gt;        b_helyer for the fix to sys/share/pcmain.c&lt;br /&gt;    Ray Chason's MSDOS port support for some VESA modes&lt;br /&gt;    Ray Chason's Qt4 windowport&lt;br /&gt;    Darshan Shaligram's pet ranged attack&lt;br /&gt;    Jason Dorje Short's key rebinding&lt;br /&gt;    Maxime Bacoux's new DUMPLOG: compile-time option to enable logging of&lt;br /&gt;         end-of-game information into a text file&lt;/p&gt;&lt;p&gt;For a complete, very granular, but not necessarily clear list of the&lt;br /&gt;changes incorporated in this release, please take a look at the file&lt;br /&gt;doc/fixes36.1 in the source distribution.  This file has a full list of all&lt;br /&gt;changes to the game.&lt;/p&gt;&lt;p&gt;The text in this file is populated automatically for the development team's&lt;br /&gt;own use and is provided &quot;as is&quot;, so please do not ask us to further explain&lt;br /&gt;the entries in that file. Some entries may also be &quot;spoilers&quot;, particularly&lt;br /&gt;in the &quot;new features&quot; sections, so read at your own risk.&lt;/p&gt;&lt;p&gt;3. Deprecations announced post NetHack 3.6.1&lt;/p&gt;&lt;p&gt;3.6.1 is essentially a maintenance release and as such doesn't change much&lt;br /&gt;in terms of what is or is not supported.  However there will be some&lt;br /&gt;significant changes to support in the next major release.&lt;/p&gt;&lt;p&gt;The following ports will be dropped from the next major release unless&lt;br /&gt;someone comes forward to maintain them:&lt;/p&gt;&lt;p&gt;    * Amiga&lt;br /&gt;    * Atari&lt;br /&gt;    * Macintosh Classic&lt;br /&gt;    * BeOS&lt;br /&gt;    * OS/2&lt;br /&gt;    * 16-bit MS-DOS&lt;br /&gt;    * Floppy disk support for all platforms&lt;/p&gt;&lt;p&gt;Starting with the next major release, we will be dropping support for most&lt;br /&gt;K&amp;amp;R and pre-ANSI C features, including:&lt;/p&gt;&lt;p&gt;    * The Bitfield macro&lt;br /&gt;    * K&amp;amp;R function definitions&lt;/p&gt;&lt;p&gt;Starting with the next major release, we will start using ANSI C features;&lt;br /&gt;which ones have yet to be determined.&lt;br /&gt; &lt;br /&gt;If you are actively running NetHack on a system that cannot handle full&lt;br /&gt;ANSI C, please let us know some details and we _might_ be able to&lt;br /&gt;accommodate you.&lt;/p&gt;&lt;p&gt;4. Save File Portability:&lt;/p&gt;&lt;p&gt;Save files should be portable between version 3.6.0 and 3.6.1.&lt;/p&gt;&lt;p&gt;We did, however, identify a bug early in the 3.6.0 release that may affect&lt;br /&gt;some score files.For full instructions on how to deal with this bug, please&lt;br /&gt;go to:&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://nethack.org/v360/bugmore/fixrecord.html&quot; rel=&quot;nofollow&quot;&gt;https://nethack.org/v360/bugmore/fixrecord.html&lt;/a&gt; &lt;a href=&quot;https://nethack.org/v360/bugmore/fixrecord.html&quot; rel=&quot;nofollow&quot;&gt;https://nethack.org/v360/bugmore/fixrecord.html&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Yes, this is in the 3.6.0 tree as it is a 3.6.0 bug.&lt;/p&gt;&lt;p&gt;As with all releases of the game, we appreciate your feedback. Please submit&lt;br /&gt;any bugs using the problem report form at:&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://www.nethack.org/common/contact.html&quot; rel=&quot;nofollow&quot;&gt;https://www.nethack.org/common/contact.html&lt;/a&gt;.&lt;/p&gt;&lt;p&gt;Also, please check the &quot;known bugs&quot; list at:&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://www.nethack.org/v361/bugs.html&quot; rel=&quot;nofollow&quot;&gt;https://www.nethack.org/v361/bugs.html&lt;/a&gt;&lt;/p&gt;&lt;p&gt;before you log a problem - somebody else may have already found it, after all.&lt;/p&gt;&lt;p&gt;Happy NetHacking!&lt;/p&gt;&lt;p&gt;For the DevTeam...&lt;/p&gt;&lt;p&gt;Mike Stephenson&lt;br /&gt;&lt;/p&gt;</description>
-<pubDate>Sun, 29 Apr 2018 00:49:32 +0000</pubDate>
-<dc:creator>hapnin</dc:creator>
-<og:title>The NetHack DevTeam is happy to announce the release of NetHack 3.6.1.</og:title>
-<og:type>website</og:type>
-<og:url>https://groups.google.com/forum/#!topic/rec.games.roguelike.nethack/XhcIrLlNzpA</og:url>
-<og:image>http://www.google.com/images/icons/product/groups-128.png</og:image>
-<og:description>Posted 4/27/18 6:59 PM, 13 messages</og:description>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://groups.google.com/forum/m/?_escaped_fragment_=topic/rec.games.roguelike.nethack/XhcIrLlNzpA</dc:identifier>
 </item>
 </channel>
 </rss>
