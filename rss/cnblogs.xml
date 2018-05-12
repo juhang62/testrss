@@ -9,6 +9,387 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>用信号量为共享内存添加同步机制 - tp_16b</title>
+<link>http://www.cnblogs.com/tp-16b/p/8992092.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/tp-16b/p/8992092.html</guid>
+<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;进程间通信的方式中，我们将多个进程共享同一块存储区来进行数据交换的方式称为共享内存通信。源于它直接将“内存”共享的特殊机制，它成为最快的一种&lt;strong&gt;&lt;span&gt;IPC通信方式&lt;/span&gt;&lt;/strong&gt;；然而它也不完美，它虽快，但是没有同步机制；通常在一个服务进程对共享存储区还未完成写操作之前，客户进程是不应当去取这些数据的，可没了同步，那可就乱了套了。&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;这种情况不是我们所愿意看到的，所以基于此 我们常常需要为用到的共享内存段添加上同步的机制，使之“完美”起来。通常呢，实现同步我们很自然地会想到信号量，是的，这里我就是这么干的。用基于信号量的PV操作实现完成一个带同步机制的共享内存段，这样它就可以像一个“fifo”队列一样了，并且它传输效率还会表现得非常不错，虽然它还比较简陋～。&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt; &lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h3&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;信号量及相关函数&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;hr/&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;先来说说用到的信号量及处理函数吧。信号量和其它的IPC结构（前面总结过管道、消息队列）不同。它本质就是一个计数器，用于为多个进程提供对共享数据对象的访问。通常进程为了获得共享的资源，需要执行以下操作：&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;①测试控制该资源的信号量&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;②若此信号量&amp;gt;0,则进程可以使用该资源。此种情况下，进程会将信号量值减1，表明它使用了一个资源单位。&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;③否则，此信号量的值为0，则使该进程进入休眠状态，直至信号量值&amp;gt;1。如果有进程正在休眠状态等待此信号量，则唤醒它们&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;还有就是为了正确的实现信号量，信号量值的测试及减1操作还应当是原子的。为此，信号量通常是在内核中实现的。一般而言，信号量初值可以是任意一个正值，该值表明有多少个共享资源单位可供共享应用。然而遗憾的是，这里我用到的&lt;span&gt;XSI信号量也是有缺陷的。&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;这源于①信号量并非是单个非负值，它被定义为一个可能含有多个信号量值的集合。通常在创建信号量的时候，对该集合中信号量数量进行指定 ②信号量创建独立于它的初始化。这是最致命的，因为这将导致的是不能原子的创建一个信号量集合，并对该集合中的各个信号量值赋初值。③有的程序1在终止时可能并没有释放掉已经分配给它的信号量。&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;而对于信号处理函数通常有3个，首先是&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;strong&gt;1.&lt;span&gt;&lt;strong&gt;&lt;strong&gt;semget函数&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;strong&gt;作用：创建一个新的信号量或取得一个已有的信号量&lt;/strong&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+原型：&lt;strong&gt;&lt;span&gt;int&lt;/span&gt; semget(key_t key, &lt;span&gt;int&lt;/span&gt; nsems, &lt;span&gt;int&lt;/span&gt; semflg)&lt;/strong&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;参数：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;int nsems   //它代表信号量集合中有多少个信号量。如果是创建新集合，则必须指定它；如果是引用现有的信号集（通常客户进程中），则将其指定为0.&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;int semflg  //和前面IPC机制类似，用来初始化信号集维护的semid_ds结构中的ipc_perm结构成员sem_perm。通常用IPC_CREAT|0644创建，要直接打开已存在的话 也直接填0就好&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.&lt;span&gt;semctl函数&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;用途：&lt;span&gt;该函数用来直接控制信号量信息.也就是直接删除信号量或者初始化信号量.&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+原型：&lt;strong&gt;&lt;span&gt;int&lt;/span&gt; semctl(&lt;span&gt;int&lt;/span&gt; semid, &lt;span&gt;int&lt;/span&gt; semnum, &lt;span&gt;int&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;&lt;strong&gt; cmd, ...)&lt;/strong&gt;
+&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;参数：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　int semid   &lt;/span&gt;&lt;/span&gt; &lt;span&gt;&lt;span&gt;&lt;span&gt;//&lt;/span&gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;semget函数返回的信号量标识符.&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt;　　&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　int semnum,  //它代表要给该信号量集中的第几个信号量设置初值&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　int cmd　　 //通常用&lt;span&gt;SETVAL&lt;span&gt;/&lt;/span&gt;GETVAL&lt;/span&gt;&lt;span&gt;&lt;span&gt;设置和获取信号量集中的一个单独的信号量&lt;/span&gt;。&lt;span&gt;具体还有&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('82951ccf-1e1a-4ab7-87f4-efdc57e99a33')&quot; readability=&quot;32.5&quot;&gt;&lt;img id=&quot;code_img_closed_82951ccf-1e1a-4ab7-87f4-efdc57e99a33&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_82951ccf-1e1a-4ab7-87f4-efdc57e99a33&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('82951ccf-1e1a-4ab7-87f4-efdc57e99a33',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_82951ccf-1e1a-4ab7-87f4-efdc57e99a33&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;60&quot;&gt;
+&lt;pre&gt;
+IPC_STAT &lt;span&gt;//&lt;/span&gt;&lt;span&gt;读取一个信号量集的数据结构semid_ds，并将其存储在semun中的buf参数中。&lt;/span&gt;
+&lt;span&gt;
+IPC_SET  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置信号量集的数据结构semid_ds中的元素ipc_perm，其值取自semun中的buf参数。&lt;/span&gt;
+IPC_RMID  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;将信号量集从内存中删除。&lt;/span&gt;
+&lt;span&gt; 
+GETALL  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;用于读取信号量集中的所有信号量的值。&lt;/span&gt;
+&lt;span&gt;
+GETNCNT  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;返回正在等待资源的进程数目。&lt;/span&gt;
+&lt;span&gt;
+GETPID  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;返回最后一个执行semop操作的进程的PID。&lt;/span&gt;
+&lt;span&gt;
+GETVAL   &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;返回信号量集中的一个单个的信号量的值。&lt;/span&gt;
+&lt;span&gt;
+GETZCNT  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;返回这在等待完全空闲的资源的进程数目。&lt;/span&gt;
+&lt;span&gt;
+SETALL   &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置信号量集中的所有的信号量的值。&lt;/span&gt;
+&lt;span&gt;
+SETVAL   &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置信号量集中的一个单独的信号量的值&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;cmd的种类&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt; &lt;span&gt;如果有第四个参数，取决于所请求的命令，如果使用该参数，它通常是一个&lt;span&gt;union semum&lt;/span&gt;结构，定义如下:&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;union semun
+{    
+    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; val;    &lt;span&gt;&lt;span&gt;&lt;span&gt;/*&lt;span&gt; Value for SETVAL &lt;span&gt;*/&lt;span&gt;通常就要它就够了&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+    &lt;/span&gt;&lt;span&gt;struct&lt;/span&gt; semid_ds *&lt;span&gt;buf;    
+    unsigned &lt;/span&gt;&lt;span&gt;short&lt;/span&gt; *&lt;span&gt;arry;    
+};  &lt;br/&gt;&lt;span&gt;赋值形式:semun.val = 2  //初值放在val中&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;执行PV操作&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;3.&lt;span&gt;semop函数&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;用途：用来改变信号量的值，该函数是具有原子性的。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;strong&gt;&lt;span&gt;原型：int&lt;/span&gt; semop(&lt;span&gt;int&lt;/span&gt; semid, &lt;span&gt;struct&lt;/span&gt; sembuf *sops, size_t nsops)&lt;/strong&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;参数：&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; 　　&lt;span&gt;&lt;span&gt;sem_id&lt;/span&gt;　　 //是由semget函数返回的信号量标识符.&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;　　&lt;span&gt;struct sembuf *sops&lt;/span&gt; //sops是一个指针，指向一个有sembuf结构表示的信号量操作数组，本质上就代表了一个数组地址。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;　　size_t nsops    //&lt;span&gt;相当于数组元素个数&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;该第二个参数维护数据结构struct sembuf定义如下：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
+&lt;pre class=&quot;brush:cpp;gutter:true;&quot;&gt;
+struct sembuf
+{
+      unsigned short sem_num;  /* semaphore number */除非使用一组信号量，否则它为0  
+      short          sem_op;   /* semaphore operation */ p -1,  v  1
+      short          sem_flg;  /* operation flags */  填 0就好 SEM_NOWAIT   SEM_UNDO
+}&lt;br/&gt;注意这当中的sem_op参数，信号量集合中的各个成员的操作都应由相应的sem_op值规定。此值可正可负可为0，相应的值就代表对于进程中占用的资源数量，同时这&lt;br/&gt;值会加到信号量值上，若指定undo标志，还从信号量调整值上减去sem_op.
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;h3&gt;&lt;span&gt;&lt;span&gt;共享内存增添同步机制&lt;/span&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;hr/&gt;&lt;p&gt;&lt;span&gt; 下面开始操作这段共享内存，使其带有同步，然后模拟重现我们操作系统书上的那个经典的生产消费者问题，并且解决它。这里我画个图帮助整理思路：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1272978/201805/1272978-20180511174331191-1777862897.png&quot; alt=&quot;&quot; width=&quot;703&quot; height=&quot;391&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;首先，定义出一个管理内存段的“shmfifo”结构，该结构中具体又用一个shm_head结构来管理数据读写的位置信息和大小。同时，shimfifo结构中还维护了3个用于解决互斥和同步的信号量。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1272978/201805/1272978-20180511221357939-1202985631.png&quot; alt=&quot;&quot; width=&quot;475&quot; height=&quot;254&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;维护的shm_head结构存放在共享内存的头部，当写入的数据从payload处开始写入，每次写入之后，便更新头部的wr_idx位，payload可由_head+1得到；同样，最开始读出数据时也是从payload处开始读，每次读完便更新wr_idx。好，到这里就有了大致的思路。于是可以实现出来它的头文件&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;39&quot;&gt;
+&lt;pre class=&quot;brush:cpp;gutter:true;&quot;&gt;
+ #ifndef __SHMFIFO_H__
+ #define __SHMFIFO_H__
+ 
+ #include &amp;lt;sys/ipc.h&amp;gt;
+ #include &amp;lt;string.h&amp;gt;
+ #include &amp;lt;stdlib.h&amp;gt;
+ #include &amp;lt;stdio.h&amp;gt;
+ #include &amp;lt;sys/ipc.h&amp;gt;
+ #include &amp;lt;sys/sem.h&amp;gt;
+ #include &amp;lt;sys/shm.h&amp;gt;
+ 
+ typedef struct shmhead {
+     int rd_idx; // 读入数据索引
+     int wr_idx; // 写数据索引
+     int blocks; // 存数据块数量
+     int blksz;  // 每个数据块大小
+ }shmhead_t;
+ 
+ typedef struct shmfifo {
+     shmhead_t *p_head;    // 共享内存的起始地址
+     char *     p_payload; // 有效数据的起始地址
+     int shmid;            // 打开的共享内存id
+     int sem_mutex;        // 互斥量 
+     int sem_empty;        // 还剩多少个可以消费&lt;br/&gt;int sem_full; // 剩余多少个地方可以生产
+ }shmfifo_t;
+ 
+ // 初始化函数
+ shmfifo_t *shmfifo_init(key_t key, int blocks, int blksz);
+ // 放入数据
+ void shmfifo_put(shmfifo_t *fifo, const void *buf);
+ // 取得数据
+ void shmfifo_get(shmfifo_t *fifo, void *buf);
+ // 结构销毁 
+ void shmfifo_destroy(shmfifo_t *fifo);
+ 
+ #endif //__SHMFIFO_H__
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt; 紧接着要考虑就该结构的初始化。首先，肯定是先要为结构开出空间来，其大小不难分析应该为shm_head大小加上blocks*blksz，其次就是一步步对这些变量和信号进行初始化了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;紧接着，对于放数据和取数据就依葫芦画瓢就好了，值得注意就是对信号量的处理，进行PV操作时，针对写数据时，我们需要先P(sem_empty)保证先有地方可以放数据，其次才进行P（sem_mutex）保证互斥性。否则，会因为在放入数据是进行了P（sem_mutex）操作,进而使取数据进程阻塞在信号量sem_mutex&amp;lt;0条件上，然后放数据完成，进行V(sem_full)后再进行V(sem_mutex)；在进行取数据操作时同理。基于此，便可有以下代码：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;94&quot;&gt;
+&lt;pre class=&quot;brush:cpp;gutter:true;&quot;&gt;
+ #include &quot;shmfifo.h&quot;
+ 
+ typedef union semun{
+     int val;
+ }semun;
+ 
+ // 初始化
+ shmfifo_t* shmfifo_init(key_t key, int blocks, int blksz)
+ {
+     shmfifo_t *p = malloc(sizeof(shmfifo_t));
+ 
+     int shmid = shmget(key, 0, 0);
+     int len = sizeof(shmhead_t) + blocks*blksz; //共享内存段大小
+ 
+     if(shmid == -1 )  // 内存段不存在，创建
+     {   
+         shmid = shmget(key, len, IPC_CREAT|0644);
+         if ( shmid == -1) perror(&quot;shmget&quot;),exit(1);
+ 
+         //初始化内存段头
+         p-&amp;gt;p_head = shmat(shmid, NULL, 0); //将开出的内存段挂载到进程地址空间
+         p-&amp;gt;p_head-&amp;gt;rd_idx = 0;
+         p-&amp;gt;p_head-&amp;gt;wr_idx = 0;
+         p-&amp;gt;p_head-&amp;gt;blocks = blocks;
+         p-&amp;gt;p_head-&amp;gt;blksz  = blksz;
+         //初始化后段
+         p-&amp;gt;p_payload = (char*)(p-&amp;gt;p_head+1);
+         p-&amp;gt;shmid = shmid;
+         p-&amp;gt;sem_mutex = semget(key,   1, IPC_CREAT|0644);
+         p-&amp;gt;sem_empty = semget(key+1, 1, IPC_CREAT|0644);
+         p-&amp;gt;sem_full  = semget(key+2, 1, IPC_CREAT|0644);
+ 
+         semun su = {1}; //设置互斥信号量初值为1
+         semctl(p-&amp;gt;sem_mutex, 0, SETVAL, su);
+ 
+         su.val = blocks;
+         semctl(p-&amp;gt;sem_empty, 0, SETVAL, su);
+ 
+         su.val = 0; //初始不能消费
+         semctl(p-&amp;gt;sem_full, 0, SETVAL, su);
+     }
+     else   //内存段存在 ,打开 
+     { 
+         p-&amp;gt;p_head = shmat(shmid, NULL, 0);
+         p-&amp;gt;p_payload = (char*)(p-&amp;gt;p_head+1);
+         p-&amp;gt;shmid = shmid;
+         p-&amp;gt;sem_mutex = semget(key,   0, 0); //
+         p-&amp;gt;sem_empty = semget(key+1, 0, 0);
+         p-&amp;gt;sem_full  = semget(key+2, 0, 0);
+     }
+     return p;
+ }
+ 
+ static void P(int id)
+ {
+     struct sembuf sb[1] = {0,-1, 0};
+     semop(id, sb, 1);
+ }
+ 
+ static void V(int id)
+ {
+     struct sembuf sb[1] = {0, 1, 0};
+     semop(id, sb, 1);
+ }
+ 
+ // 放入数据
+ void shmfifo_put(shmfifo_t *fifo, const void *buf)
+ {
+     P(fifo-&amp;gt;sem_empty);  //有多少地方可供生产,确保有空位生产
+     P(fifo-&amp;gt;sem_mutex); //保证进程互斥
+     memcpy(fifo-&amp;gt;p_payload + fifo-&amp;gt;p_head-&amp;gt;wr_idx * fifo-&amp;gt;p_head-&amp;gt;blksz, //写入位置
+             buf, 
+             fifo-&amp;gt;p_head-&amp;gt;blksz);  //每次写入一个数据块大小
+ 
+     fifo-&amp;gt;p_head-&amp;gt;wr_idx = (fifo-&amp;gt;p_head-&amp;gt;wr_idx+1)
+         %fifo-&amp;gt;p_head-&amp;gt;blocks;  //取模，保证数据存满时，转从payload处写数据
+ 
+     V(fifo-&amp;gt;sem_full);
+     V(fifo-&amp;gt;sem_mutex);
+ }
+ 
+ // 取得数据
+ void shmfifo_get(shmfifo_t* pFifo, void *buf)
+ {
+     P(pFifo-&amp;gt;sem_full);  //确保有数据可取
+     P(pFifo-&amp;gt;sem_mutex);
+     //从内存段读取，拷入buf中   
+     memcpy(buf, 
+             pFifo-&amp;gt;p_payload + pFifo-&amp;gt;p_head-&amp;gt;rd_idx* pFifo-&amp;gt;p_head-&amp;gt;blksz,
+             pFifo-&amp;gt;p_head-&amp;gt;blksz);   
+ 
+     pFifo-&amp;gt;p_head-&amp;gt;rd_idx = (pFifo-&amp;gt;p_head-&amp;gt;rd_idx+1)
+         %pFifo-&amp;gt;p_head-&amp;gt;blocks;  //取模，保证数据存满时，转从payload处取数据
+ 
+     V(pFifo-&amp;gt;sem_empty);
+     V(pFifo-&amp;gt;sem_mutex);
+ }
+ 
+ // 销毁 
+ void shmfifo_destroy(shmfifo_t* pFifo)
+ {
+     shmdt(pFifo-&amp;gt;p_head);  //取消内存段挂载
+     shmctl(pFifo-&amp;gt;shmid, IPC_RMID, 0); //释放掉该内存段
+     //删除信号量
+     semctl(pFifo-&amp;gt;sem_mutex, 0, IPC_RMID, 0);
+     semctl(pFifo-&amp;gt;sem_empty, 0, IPC_RMID, 0);
+     semctl(pFifo-&amp;gt;sem_full, 0, IPC_RMID, 0);
+ 
+     free(pFifo);
+ }                                                                                                          
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt; 最后就是分别实现get.c和put.c进行验证，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt; get.c&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;43&quot;&gt;
+&lt;pre class=&quot;brush:cpp;collapse:true;;gutter:true;&quot;&gt;
+ #include &quot;shmfifo.h&quot;                                         
+ #include &amp;lt;unistd.h&amp;gt;
+ 
+ typedef struct Products{
+     int id;
+     char pro_name[10];
+ }Pro;
+ 
+ int main()
+ {
+     shmfifo_t* fifo = shmfifo_init(12345, 3, sizeof(Pro));
+     Pro p;
+ 
+     while( 1){
+         memset(&amp;amp;p, 0x00, sizeof(p));
+         shmfifo_get(fifo, &amp;amp;p);
+         printf(&quot;id:%d, 产品名：%s\n&quot;, p.id, p.pro_name);
+         sleep(1);
+     }
+     shmfifo_destroy(fifo);
+ }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;strong&gt; put.c&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;43&quot;&gt;
+&lt;pre class=&quot;brush:cpp;collapse:true;;gutter:true;&quot;&gt;
+ #include &quot;shmfifo.h&quot;                                             
+ 
+ typedef struct Product
+ {
+     int id;
+     char pro_name[10];
+ }Pro;
+ 
+ int main()
+ {
+     shmfifo_t *fifo = shmfifo_init(12345, 4, sizeof(Pro));
+     Pro p;
+ 
+     for (int i=0; i&amp;lt;20; ++i)
+     {
+         memset(&amp;amp;p, 0x00, sizeof(p));
+         sprintf(p.pro_name, &quot;iphone%d&quot;, i);
+         p.id = i+1;
+         shmfifo_put(fifo, &amp;amp;p);
+         printf(&quot;put %d ok\n&quot;, i);
+     }
+ }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt; 验证同步，当写进程结束，读数据进程便阻塞&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1272978/201805/1272978-20180512005617214-1304844163.png&quot; alt=&quot;&quot; width=&quot;747&quot; height=&quot;370&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt; 验证互斥，进程1写第9个数据时，我另开启了一进程写数据，从右侧可见这两进程是交替进行写操作的&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1272978/201805/1272978-20180512004853412-235451245.png&quot; alt=&quot;&quot; width=&quot;747&quot; height=&quot;392&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 11 May 2018 17:00:00 +0000</pubDate>
+<dc:creator>tp_16b</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/tp-16b/p/8992092.html</dc:identifier>
+</item>
+<item>
+<title>2018年，传言QQ首次被神秘黑客DDOS攻击，Python可以实现？ - Python新世界</title>
+<link>http://www.cnblogs.com/xinshiye/p/9027110.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xinshiye/p/9027110.html</guid>
+<description>&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1395794/201805/1395794-20180511235740992-155766988.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;于2018-5-10日晚&lt;/p&gt;
+&lt;p&gt;网络流传黑客DDOS攻击了QQ服务器，导致大家聊天发送内容时出现感叹号。我们都知道一般情况下出现感叹号都是你的网络不稳定，或者...别人已经删除你了。然而昨晚很奇怪，发出的内容出现感叹号，但是内容的确是真的发出去了，也就是说别人接受到了你的内容。&lt;/p&gt;
+&lt;p&gt;看看当时的情况：&lt;/p&gt;
+&lt;p&gt;我非常同情下面这位学生。。。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/2a4cb35062e4449ea981827569ef0a9d.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/0459e078bee648cdb260d366859753f4.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;别人人确实可以看得到他发出的带感叹号的消息。绝非PS ，真的很滑稽！&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/27cea7da6c5042bea0650b06affbca68.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;还有QQ换锅换盆换洗衣粉牙膏的，各个都是人才！&lt;/p&gt;
+&lt;p&gt;现在我们看看网络上的人怎么说：&lt;/p&gt;
+&lt;p&gt;一部分人在讨论这个是黑客利用DDOS攻击造成的，说QQ要关闭，当然同时也有人说这个是谣言。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/0677ab64077f411688d9f02399d1a8a1.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;下面这个小朋友更加恐怖了，对网友散播说是他用DDOS攻击造成的。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/510ae3b2f31f4c54a7b5737b825221fc.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;手机QQ官方已经更新了一天微博如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://5b0988e595225.cdn.sohucs.com/images/20180510/1170b553fbef4de987557de74fe3f133.png&quot; alt=&quot;&quot;/&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/8af516e085c54217b685713d5b4d73a1.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/5bf96f15986f4be0abc581b3e8542680.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;谣言止于智者，腾讯那么大一个平台谁敢无故去攻击？服务器出现一点波动都是正常的，天有不测风云！&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/fc3e1282d8574cdab161a388b20c5a9c.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;所以我们这些网民坚决：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/ac21138ff8544f958617e599600354cf.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;好啦，不聊了，不然本着学习Python黑客的心来的朋友都看不下去了。&lt;/p&gt;
+&lt;p&gt;现在开始我们的Python教程：&lt;/p&gt;
+&lt;p&gt;本例子包含两个python小程序，具体如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/aece3e6e03dc4858ab69124d150bc896.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/3cff51ae293647c5a4a0ea5971a5d3a4.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/0eb815735d494327a33d6a7fe7943f96.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/c9a6d39f27224e86bb73fbca9681934a.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;黑客们如何运行这个Python程序？&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/35d0662e24b24ed99b41d7defb7a689f.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/2f783ff13e0e4f72b1561e3fd003d7a1.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;一个简单的DOS攻击程序&lt;/p&gt;
+&lt;p&gt;DoS, Denial of Service, 拒绝服务，一种常用来使服务器或网络瘫痪的网络攻击手段。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/a5db68f233034c1282a7b40ca7424799.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/85e28ce8d27449e6bc0c37de4ece46f2.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/dae95f1039ad40d58d5e78746de25f84.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;运行方法与上面的那个雷同。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/872d11ae30af4d1aaea60e1e891a749f.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;整合网络僵尸与DoS攻击——DDoS&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/77e6671a7a0d4d65a93046a94e598b68.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/492dbffeb3d54a039cde7bcda3809664.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/dcae6696ab5c43f9adbe08f0a20b152c.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;亦称作洪水攻击。DoS攻击与DDoS攻击的区别就是，它是一对一的攻击，而DDoS是分布式的攻击。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/9d48d4b96ba04b1885fd2dcc5700e510.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/9bedd531ffaa42889de06e7b8c32c750.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这就是黑客基于python实现的DDoS网络攻击。&lt;/p&gt;
+&lt;p&gt;网络安全人人有责，望共同维护网络安全！&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://5b0988e595225.cdn.sohucs.com/images/20180510/d13a50cd5b8f4943a5a031dc0d3de18b.jpeg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 11 May 2018 15:58:00 +0000</pubDate>
+<dc:creator>Python新世界</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/xinshiye/p/9027110.html</dc:identifier>
+</item>
+<item>
 <title>学HTTP协议所要知道的基础知识(微总结) - 汪凡</title>
 <link>http://www.cnblogs.com/wf-skylark/p/9027079.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/wf-skylark/p/9027079.html</guid>
@@ -658,10 +1039,8 @@
 <title>总结Array类型中常用的方法 - 逆旅wy</title>
 <link>http://www.cnblogs.com/gja1026/p/9026781.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/gja1026/p/9026781.html</guid>
-<description>&lt;p data-source-line=&quot;1&quot;&gt;&lt;span&gt;　　Array类型应该是 ECMAScript 中最常用的类型之一了，并且它定义的数组与其他语言有着相当大的区别。数组是数据的有序集合，我们可以通过下标对指定位置的数据进行读&lt;/span&gt;&lt;/p&gt;
-&lt;p data-source-line=&quot;1&quot;&gt;&lt;span&gt;写；特别的是，在 ECMAScript 中，数组的每一项可以保存任何类型的数据，数组的大小可以动态调整，它可以随着数据的添加自动增长来容纳新增的数据，从而变得更加灵活。&lt;/span&gt;&lt;/p&gt;
-&lt;p data-source-line=&quot;3&quot;&gt;&lt;span&gt;下面总结了Array类型常见的一些方法。&lt;/span&gt;&lt;/p&gt;
-&lt;h3 data-source-line=&quot;3&quot;&gt;1. 栈方法&lt;/h3&gt;
+<description>&lt;p data-source-line=&quot;1&quot;&gt;&lt;span&gt;　　Array类型应该是 ECMAScript 中最常用的类型之一了，并且它定义的数组与其他语言有着相当大的区别。数组是数据的有序集合，我们可以通过下标对指定位置的数据进行读&lt;/span&gt;&lt;span&gt;写；特别的是，在 ECMAScript 中，数组的每一项可以保存任何类型的数据，数组的大小可以动态调整，它可以随着数据的添加自动增长来容纳新增的数据，从而变得更加灵活。&lt;/span&gt;&lt;span&gt;下面总结了Array类型常见的一些方法。&lt;/span&gt;&lt;/p&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;&lt;strong&gt;一、&lt;/strong&gt;栈方法&lt;/h3&gt;
 &lt;p&gt;　　push() , pop() 这两个方法可以使数组的行为类似于“栈”这种数据结构，“栈”是一种 LIFO (Last-In-First-Out)后进先出的数据结构。&lt;/p&gt;
 &lt;h4&gt;1.1 push()&lt;/h4&gt;
 &lt;ul&gt;&lt;li&gt;参数：任意数量的元素；&lt;/li&gt;
@@ -686,7 +1065,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;push(),pop()&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;2. 队列方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;二、队列方法&lt;/h3&gt;
 &lt;p data-source-line=&quot;3&quot;&gt;　　队列”这种数据结构的访问规则是 FIFO (First-In-First-Out先进先出)，队列列表的末端添加元素，从列表的从头部开始删除。&lt;/p&gt;
 &lt;p data-source-line=&quot;33&quot;&gt;　　我们已经知道 push() 可以向数组的末端添加元素，结合方法 shift() 便可以将一个数组的操作模拟成队列。&lt;/p&gt;
 &lt;h4 data-source-line=&quot;33&quot;&gt;2.1 shift()&lt;/h4&gt;
@@ -725,7 +1104,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;shift(), unshift()&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;3. 重排序方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;三、重排序方法&lt;/h3&gt;
 &lt;h4&gt;3.1 reverse()&lt;/h4&gt;
 &lt;ul&gt;&lt;li&gt;参数：无；&lt;/li&gt;
 &lt;li&gt;作用：将数组反转，原数组发生改变；&lt;/li&gt;
@@ -763,7 +1142,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;sort()&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;4. 操作方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;四、操作方法&lt;/h3&gt;
 &lt;h4&gt;4.1 concat()&lt;/h4&gt;
 &lt;p&gt;　　该方法首先会创建一个当前数组的复本，然后将接受到的参数添加到这个复本的末尾。最后返回新构建的数组；注意原来那个数组是没有改变的，我们所做的改变都是在原数组的复本上进行操作的&lt;/p&gt;
 &lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;&lt;img id=&quot;code_img_closed_c1fc3716-21e9-428a-9041-408234c6792e&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_c1fc3716-21e9-428a-9041-408234c6792e&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_c1fc3716-21e9-428a-9041-408234c6792e&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;71&quot;&gt;
@@ -811,7 +1190,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;splice()&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;5. 位置方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;五、位置方法&lt;/h3&gt;
 &lt;p data-source-line=&quot;150&quot;&gt;　　indexOf() 和 lastIndexOf()，这两个方法都接受两个参数：要查找的项和（可选的）查找其实位置的索引。&lt;/p&gt;
 &lt;p data-source-line=&quot;152&quot;&gt;　　这两个方法的返回值是查找的项在数组中的位置，若没有则返回-1。注意在第一个参数比较数组的每一项时，是采用的全等操作符。&lt;/p&gt;
 &lt;div class=&quot;cnblogs_code&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_93db40c5-76a1-4f43-9da2-1985cc7abd95&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_93db40c5-76a1-4f43-9da2-1985cc7abd95&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_93db40c5-76a1-4f43-9da2-1985cc7abd95&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
@@ -825,7 +1204,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;indexOf&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;6. 迭代方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;六、迭代方法&lt;/h3&gt;
 &lt;p data-source-line=&quot;162&quot;&gt;　　以下这5个迭代方法都可以传入两个参数：要在每一项上运行的函数和（可选的）运行该函数的作用域对象——影响this的值。在每一项上运行的函数中会接受三个参数：数组项的值、位置、数组对象本身。以下方法都不会改变原来的数组。&lt;/p&gt;
 &lt;p data-source-line=&quot;164&quot;&gt;&lt;strong&gt;6.1 every()&lt;/strong&gt;&lt;/p&gt;
 &lt;p data-source-line=&quot;164&quot;&gt;　　对数组中的每一项都运行指定的函数，如果该函数对每一项都返回 true，则返回 true。&lt;/p&gt;
@@ -867,7 +1246,7 @@
 &lt;/pre&gt;&lt;/div&gt;
 &lt;span class=&quot;cnblogs_code_collapse&quot;&gt;迭代方法&lt;/span&gt;&lt;/div&gt;
 
-&lt;h3 data-source-line=&quot;3&quot;&gt;7. 归并方法&lt;/h3&gt;
+&lt;h3 data-source-line=&quot;3&quot;&gt;七、归并方法&lt;/h3&gt;
 &lt;p data-source-line=&quot;207&quot;&gt;　　两个归并数组的方式：reduce()、reduceRight()，这两个方法都会迭代数组的所有项，然后返回一个最终值。reduce() 从数组的第一项开始，逐个遍历到最后。reduceRight()相反。&lt;/p&gt;
 &lt;p data-source-line=&quot;209&quot;&gt;　　两个方法的都接受两个参数：每一项上调用的函数和（可选的）作为归并的初始值。 每一项上调用的函数有四个参数：前一个值、当前值、索引、数组对象。&lt;/p&gt;
 &lt;div class=&quot;cnblogs_code&quot; readability=&quot;46.5&quot;&gt;&lt;img id=&quot;code_img_closed_8bb0991c-5e85-463e-8ba4-b94ae935865a&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_8bb0991c-5e85-463e-8ba4-b94ae935865a&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_8bb0991c-5e85-463e-8ba4-b94ae935865a&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;88&quot;&gt;
@@ -1483,277 +1862,6 @@ Content &lt;/span&gt;&lt;span&gt;varchar&lt;/span&gt;(&lt;span&gt;max&lt;/span&g
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/Tjna/p/9026980.html</dc:identifier>
-</item>
-<item>
-<title>工厂模式之简单工厂模式 - 嵌动初心(aaron)</title>
-<link>http://www.cnblogs.com/cjaaron/p/9026974.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/cjaaron/p/9026974.html</guid>
-<description>&lt;p&gt;工厂模式有一种非常形象的描述，建立对象的类就如一个工厂，而需要被建立的对象就是一个个产品；在工厂中加工产品，使用产品的人，不用在乎产品是如何生产出来的。从软件开发的角度来说，这样就有效的降低了模块之间的耦合。&lt;/p&gt;
-&lt;p&gt;简单工厂的作用是实例化对象，而不需要客户了解这个对象属于哪个具体的子类。简单工厂实例化的类具有相同的接口或者基类，在子类比较固定并不需要扩展时，可以使用简单工厂。如数据库生产工厂就是简单工厂的一个应用&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;优点：&lt;span&gt;可以使用户根据参数获得对应的类实例，避免了直接实例化类，降低了耦合性；&lt;/span&gt;&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;缺点：&lt;span&gt;可实例化的类型在编译期间已经被确定，如果增加新类 型，则需要修改工厂，不符合OCP（开闭原则）的原则。简单工厂需要知道所有要生成的类型，当子类过多或者子类层次过多时不适合使用。&lt;/span&gt;&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;ul&gt;&lt;li&gt;面向对象三大特性：封装、继承、多态。&lt;/li&gt;
-&lt;li&gt;通过封装、继承、多态把程序耦合降低。&lt;/li&gt;
-&lt;li&gt;业务逻辑和界面逻辑分开。&lt;/li&gt;
-&lt;/ul&gt;
-&lt;ul&gt;&lt;li&gt;程序应该做到&lt;span&gt;：（&lt;strong&gt;1）可维护；（2）可复用；（3）可扩展；（4）灵活性好。&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;可维护：就是说代码一处更改，不能产生连锁反应，不能影响其他地方。&lt;/li&gt;
-&lt;li&gt;可复用：尽量减少重复性代码。&lt;/li&gt;
-&lt;li&gt;可扩展：如果要扩展新的功能、新的业务，则只需要增加新的类就好了，不对已有的类和逻辑产生影响。&lt;span&gt;&lt;strong&gt;插拔式的应用&lt;/strong&gt;&lt;/span&gt;。&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;题目：&lt;/h2&gt;
-&lt;p&gt;用任意一种面向对象语言实现一个计算器控制台程序。要求输入两个数和运算符号，得到结果。&lt;/p&gt;
-&lt;h2&gt;设计有缺陷的代码&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
-&lt;pre class=&quot;brush:python;gutter:true;&quot;&gt;
-#！/usr/bin/env python
-# _*_ coding utf-8 _*_
-#Author: aaron
-
-num1 = int(input('请输入第一个数：'))
-op =input('请输入运算符(+ - * /)：')
-num2 = int(input('请输入第一个数：'))
-
-if op == '+':
-    res = num1 + num2
-elif op == '-':
-    res = num1 - num2
-elif op == '*':
-    res = num1 * num2
-elif op == '/':
-    res = num1 / num2
-
-print('运算结果为：',res)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt; 存在的问题&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;业务逻辑和界面逻辑没有分开&lt;/li&gt;
-&lt;li&gt;业务逻辑有漏洞（除法中num2没有做非零判断）&lt;/li&gt;
-&lt;li&gt;不具有扩展性（无法添加新功能，eg：加入平方运算，再加入一条“elif语句”是很糟糕的修改方式，下文详细叙述）&lt;/li&gt;
-&lt;li&gt;可维护性差（eg：加入平方运算时，很可能修改其他地方的源代码，有人就说了，怎么可能，不就是再加入一条“elif语句”吗？是的，反这种低级错误的概率很小，我所说的是恶意修改源代码。当然，又有人反驳了，不就是添加一种运算吗，我修改其他运算干嘛？是的，非常正确。但你想过没，如果我们这里的“if语句”不是做运算符的判断，而是做某个公司的薪资计算呢，那修改代码的程序员会不会恶意将和自己相关的地方修改了呢？这也解释了不具有扩展性的问题了）&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;设计思路分析&lt;/h2&gt;
-&lt;p&gt;1. 首先，&lt;strong&gt;&lt;span&gt;搞清楚业务中容易发生变化的部分。&lt;/span&gt;&lt;/strong&gt;在本应用中，要求计算两个数的运算结果，那么要进行什么样的运算，这就是一个容易发生变化的部分。例如，我们现在只想实现加减乘除运算，后期又想增加开根或者求余运算。&lt;strong&gt;&lt;span&gt;那么如何应对这种需求带来的变化。在程序设计的时候就应该考虑到程序的可维护性、可扩展性、代码的可复用性、灵活性等等。&lt;/span&gt;&lt;/strong&gt;&lt;br/&gt; &lt;br/&gt;2. 例如现在这个运算器只有加减乘除四种运算。首先建一个Operation类，这个类是各种具体运算类（加减乘除）的父类，主要是接受用户输入的数值。该类如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:python;gutter:true;&quot;&gt;
-class Operation():  
-    def __init__(self,NumberA=0,NumberB=0):  
-        self.NumberA = NumberA  
-        self.NumberB = NumberB  
-  
-    def GetResult(self):  
-        pass  
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 3. 然后是具体的运算类：Add、Sub、Mul、Div。他们都继承了Operation类，并且重写了getResult()方法。这样就可以用多态性降低不同业务逻辑的耦合度，修改任何一种运算类都不会影响其他的运算类。具体类的代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:python;gutter:true;&quot;&gt;
-class AddOp(Operation):  
-    def GetResult(self):  
-        return self.NumberB + self.NumberA  
-  
-class MinusOp(Operation):  
-    def GetResult(self):  
-        return self.NumberA - self.NumberB  
-  
-class MultiOp(Operation):  
-    def GetResult(self):  
-        return self.NumberA * self.NumberB  
-  
-class DivideOp(Operation):  
-    def GetResult(self):  
-        try:  
-            return 1.0*self.NumberA / self.NumberB  
-        except ZeroDivisionError:  
-            raise  
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 4.  那么如何让计算器知道我是要用哪一种运算呢？也就是说到底要实例化哪一个具体的运算类，Add？Sub？Mul？Div？这时就应该考虑用 一个单独的类来做这个创造具体实例的过程，这个类就是工厂类。如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:python;gutter:true;&quot;&gt;
-class OperationFatory():  
-    def ChooseOperation(self,op):  
-        if op == '+':  
-            return AddOp()  
-        if op == '-':  
-            return MinusOp()  
-        if op == '*':  
-            return MultiOp()  
-        if op == '/':  
-            return DivideOp()  
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 5. 这样，用户只要输入运算符，工厂类就可以创建合适的实例，通过多态性，即返回给父类的方式实现运算结果。客户端代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
-&lt;pre class=&quot;brush:python;gutter:true;&quot;&gt;
-if __name__ == '__main__':  
-    ch = ''  
-    while not ch=='q':   
-        NumberA = eval(raw_input('Please input number1:  '))  
-        op = str(raw_input('Please input the operation:  '))  
-        NumberB = eval(raw_input('Please input number2:  '))  
-        OPFactory = OperationFatory()  
-        OPType = OPFactory.ChooseOperation(op)  
-        OPType.NumberA = NumberA  
-        OPType.NumberB = NumberB  
-        print 'The result is:',OPType.GetResult()  
-        print '\n#--  input q to exit any key to continue'  
-        try:  
-            ch = str(raw_input())  
-        except:  
-            ch = ''  
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h2&gt;完整版代码：&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;40&quot;&gt;
-&lt;pre class=&quot;brush:python;collapse:true;;gutter:true;&quot;&gt;
-# -*-coding:UTF-8-*-  
-from abc import ABCMeta,abstractmethod
-
-class Operation():
-        def __init__(self,NumberA=0,NumberB=0):
-                self.NumberA = NumberA
-                self.NumberB = NumberB
-
-        def GetResult(self):
-                pass
-
-class AddOp(Operation):
-        def GetResult(self):
-                return self.NumberB + self.NumberA
-
-class MinusOp(Operation):
-        def GetResult(self):
-                return self.NumberA - self.NumberB
-
-class MultiOp(Operation):
-        def GetResult(self):
-                return self.NumberA * self.NumberB
-
-class DivideOp(Operation):
-        def GetResult(self):
-                try:
-                        return 1.0*self.NumberA / self.NumberB
-                except ZeroDivisionError:
-                        raise
-
-class OperationFatory():
-        def ChooseOperation(self,op):
-                if op == '+':
-                        return AddOp()
-                if op == '-':
-                        return MinusOp()
-                if op == '*':
-                        return MultiOp()
-                if op == '/':
-                        return DivideOp()
-
-if __name__ == '__main__':
-        ch = ''
-        while not ch=='q': 
-                NumberA = eval(raw_input('Please input number1:  '))
-                op = str(raw_input('Please input the operation:  '))
-                NumberB = eval(raw_input('Please input number2:  '))
-                OPFactory = OperationFatory()
-                OPType = OPFactory.ChooseOperation(op)
-                OPType.NumberA = NumberA
-                OPType.NumberB = NumberB
-                print 'The result is:',OPType.GetResult()
-                print '\n#--  input q to exit any key to continue'
-                try:
-                        ch = str(raw_input())
-                except:
-                        ch = ''
-&lt;/pre&gt;&lt;/div&gt;
-
-
-</description>
-<pubDate>Fri, 11 May 2018 15:07:00 +0000</pubDate>
-<dc:creator>嵌动初心(aaron)</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/cjaaron/p/9026974.html</dc:identifier>
-</item>
-<item>
-<title>麦子学院学习视频之机器学习(1):1.1 机器学习介绍 - hangliu</title>
-<link>http://www.cnblogs.com/hangliu/p/9026829.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hangliu/p/9026829.html</guid>
-<description>&lt;p&gt;       今天开始学习机器学习，在网上找了很多视频还有书籍。由于本人不是计算机专业的学生，基础知识还是比较薄弱，但我非常想学习机器学习以及深度学习。最后还是选择了麦子学院的彭亮老师的《机器学习基础介绍》（以后简称机器学习课程）。说的挺好的，主要是通俗易懂。还选择了美国作者Miroslav Kubat的著作《机器学习导论》（以后简称机器学习书籍），再结合网络资源先学习一些基础课程，再开始我的深度学习之路吧。&lt;/p&gt;
-
-&lt;p&gt;本文主要是结合机器学习课程，以及网络资源了解机器学习。总结的不是太好，希望大家多多指教。&lt;/p&gt;
-&lt;h2&gt;1，机器学习 （Machine Learning, ML)&lt;/h2&gt;
-&lt;p&gt;1.1 概念：多领域交叉学科，涉及概率论、统计学、逼近论、凸分析、算法复杂度理论等多门学科。专门研究计算机怎样模拟或实现人类的学习行为，以获取新的知识或技能，重新组织已有的知识结构使之不断改善自身的性能。&lt;/p&gt;
-&lt;p&gt;1.2 学科定位：人工智能(Artificial Intelligence, AI）的核心，是使计算机具有智能的根本途径，其应用遍及人工智能的各个领域，它主要使用归纳、综合而不是演绎。&lt;/p&gt;
-&lt;p&gt;1.3 定义：探究和开发一系列算法来如何使计算机不需要通过外部明显的指示，而可以自己通过数据来学习，建模，并且利用建好的模型和新的输入来进行预测的学科。&lt;/p&gt;
-&lt;p&gt;      学习是人类具有的一种重要智能行为，但究竟什么是学习，长期以来却众说纷纭。社会学家、逻辑学家和心理学家都各有其不同的看法。&lt;/p&gt;
-&lt;p&gt;     (1)Arthur Samuel (1959): 一门不需要通过外部程序指示而让计算机有能力自我学习的学科&lt;/p&gt;
-&lt;p&gt;     (2)Langley（1996) ： “机器学习是一门人工智能的科学，该领域的主要研究对象是人工智能，特别是如何在经验学习中改善具体算法的性能”&lt;/p&gt;
-&lt;p&gt;     (3)Tom Michell (1997):  “机器学习是对能通过经验自动改进的计算机算法的研究”&lt;/p&gt;
-&lt;p&gt;1.4学习：针对经验E (experience) 和一系列的任务 T (tasks) 和一定表现的衡量 P，如果随之经验E的积累，针对定义好的任务T可以提高表现P，就说计算机具有学习能力。&lt;/p&gt;
-
-&lt;h2&gt;2. 机器学习的应用：&lt;/h2&gt;
-
-&lt;div readability=&quot;75.055495855081&quot;&gt; 
-&lt;p&gt;
-&lt;h2 class=&quot;title-text&quot;&gt;3. 发展史&lt;/h2&gt;
-&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;机器学习是人工智能研究较为年轻的分支，它的发展过程大体上可分为4个时期。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;      第一阶段是在20世纪50年代中叶到60年代中叶，属于热烈时期。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;      第二阶段是在20世纪60年代中叶至70年代中叶，被称为机器学习的冷静时期。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;      第三阶段是从20世纪70年代中叶至80年代中叶，称为复兴时期。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;      机器学习的最新阶段始于1986年。&lt;/p&gt;
-&lt;p&gt;
-&lt;h2 class=&quot;title-text&quot;&gt;4. 分类&lt;/h2&gt;
-&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;基于学习策略的分类　&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;       学习策略是指学习过程中系统所采用的推理策略。一个学习系统总是由学习和环境两部分组成。由环境（如书本或教师）提供信息，学习部分则实现信息转换，用能够理解的形式记忆下来，并从中获取有用的信息。在学习过程中，学生（学习部分）使用的推理越少，他对教师（环境）的依赖就越大，教师的负担也就越重。学习策略的分类标准就是根据学生实现信息转换所需的推理多少和难易程度来分类的，依从简单到复杂，从少到多的次序分为以下六种基本类型：&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;1）机械学习 (Rote learning)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;       学习者无需任何推理或其它的知识转换，直接吸取环境所提供的信息。如&lt;a href=&quot;https://baike.baidu.com/item/%E5%A1%9E%E7%BC%AA%E5%B0%94&quot; target=&quot;_blank&quot;&gt;塞缪尔&lt;/a&gt;的跳棋程序，&lt;a href=&quot;https://baike.baidu.com/item/%E7%BA%BD%E5%8E%84%E5%B0%94&quot; target=&quot;_blank&quot;&gt;纽厄尔&lt;/a&gt;和&lt;a href=&quot;https://baike.baidu.com/item/%E8%A5%BF%E8%92%99&quot; target=&quot;_blank&quot;&gt;西蒙&lt;/a&gt;的LT系统。这类学习系统主要考虑的是如何索引存贮的知识并加以利用。系统的学习方法是直接通过事先编好、构造好的程序来学习，&lt;a href=&quot;https://baike.baidu.com/item/%E5%AD%A6%E4%B9%A0%E8%80%85&quot; target=&quot;_blank&quot;&gt;学习者&lt;/a&gt;不作任何工作，或者是通过直接接收既定的事实和数据进行学习，对输入信息不作任何的推理。&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;2）示教学习 (Learning from instruction或Learning by being told)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;       学生从环境（教师或其它信息源如教科书等）获取信息，把知识转换成内部可使用的表示形式，并将新的知识和原有知识有机地结合为一体。所以要求学生有一定程度的推理能力，但环境仍要做大量的工作。教师以某种形式提出和组织知识，以使学生拥有的知识可以不断地增加。这种学习方法和人类社会的学校教学方式相似，学习的任务就是建立一个系统，使它能接受教导和建议，并有效地存贮和应用学到的知识。不少专家系统在建立知识库时使用这种方法去实现知识获取。示教学习的一个典型应用例是FOO程序。&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;3）演绎学习 (Learning by deduction)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;       学生所用的推理形式为演绎推理。推理从公理出发，经过逻辑变换推导出&lt;a href=&quot;https://baike.baidu.com/item/%E7%BB%93%E8%AE%BA&quot; target=&quot;_blank&quot;&gt;结论&lt;/a&gt;。这种推理是&quot;保真&quot;变换和特化(specialization)的过程，使学生在推理过程中可以获取有用的知识。这种学习方法包含宏操作(macro-operation)学习、知识编辑和组块(Chunking)技术。演绎推理的逆过程是归纳推理。&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;4）类比学习 (Learning by analogy)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;       利用二个不同领域（源域、目标域）中的知识相似性，可以通过类比，从源域的知识（包括相似的特征和其它性质）推导出目标域的相应知识，从而实现学习。类比学习系统可以使一个已有的&lt;a href=&quot;https://baike.baidu.com/item/%E8%AE%A1%E7%AE%97%E6%9C%BA%E5%BA%94%E7%94%A8%E7%B3%BB%E7%BB%9F&quot; target=&quot;_blank&quot;&gt;计算机应用系统&lt;/a&gt;转变为适应于新的领域，来完成原先没有设计的相类似的功能。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;       类比学习需要比上述三种学习方式更多的推理。它一般要求先从知识源（源域）中检索出可用的知识，再将其转换成新的形式，用到新的状况（目标域）中去。类比学习在人类科学技术发展史上起着重要作用，许多科学发现就是通过类比得到的。例如著名的&lt;a href=&quot;https://baike.baidu.com/item/%E5%8D%A2%E7%91%9F%E7%A6%8F&quot; target=&quot;_blank&quot;&gt;卢瑟福&lt;/a&gt;类比就是通过将原子结构（目标域）同太阳系（源域）作类比，揭示了原子结构的奥秘。&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;5）基于解释的学习 (Explanation-based learning, EBL)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;      学生根据教师提供的目标概念、该概念的一个例子、领域理论及可操作准则，首先构造一个解释来说明为什该例子满足目标概念，然后将解释推广为目标概念的一个满足可操作准则的充分条件。EBL已被广泛应用于知识库求精和改善系统的性能。&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;      著名的EBL系统有迪&lt;a href=&quot;https://baike.baidu.com/item/%E4%B9%94%E6%81%A9&quot; target=&quot;_blank&quot;&gt;乔恩&lt;/a&gt;（G.DeJong）的GENESIS,&lt;a href=&quot;https://baike.baidu.com/item/%E7%B1%B3%E5%88%87%E5%B0%94&quot; target=&quot;_blank&quot;&gt;米切尔&lt;/a&gt;（T.Mitchell）的LEXII和LEAP, 以及明顿（S.Minton）等的PRODIGY。&lt;/p&gt;
-&lt;h4 class=&quot;para&quot;&gt;6）归纳学习 (Learning from induction)&lt;/h4&gt;
-&lt;p class=&quot;para&quot;&gt;      归纳学习是由教师或环境提供某概念的一些实例或反例，让学生通过归纳推理得出该概念的一般描述。这种学习的推理工作量远多于示教学习和演绎学习，因为环境并不提供一般性概念描述（如公理）。从某种程度上说，归纳学习的推理量也比类比学习大，因为没有一个类似的概念可以作为&quot;源概念&quot;加以取用。归纳学习是最基本的，发展也较为成熟的学习方法，在人工智能领域中已经得到广泛的研究和应用。&lt;/p&gt;
-&lt;p&gt;
-&lt;h2 class=&quot;title-text&quot;&gt;5. 学习形式分类&lt;/h2&gt;
-&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;1）监督学习(supervised learning)&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;监督学习，即在机械学习过程中提供对错指示。一般实在是数据组中包含最终结果（0，1）。通过算法让机器自我减少误差。这一类学习主要应用于分类和预测 (regression &amp;amp; classify)。&lt;a href=&quot;https://baike.baidu.com/item/%E7%9B%91%E7%9D%A3%E5%AD%A6%E4%B9%A0&quot; target=&quot;_blank&quot;&gt;监督学习&lt;/a&gt;从给定的训练数据集中学习出一个函数，当新的数据到来时，可以根据这个函数预测结果。监督学习的训练集要求是包括输入和输出，也可以说是特征和目标。训练集中的目标是由人标注的。常见的监督学习算法包括&lt;a href=&quot;https://baike.baidu.com/item/%E5%9B%9E%E5%BD%92%E5%88%86%E6%9E%90&quot; target=&quot;_blank&quot;&gt;回归分析&lt;/a&gt;和统计分类。&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;2）非监督学习(unsupervised learning)&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;非监督学习又称归纳性学习（clustering）利用K方式(Kmeans)，建立中心（centriole），通过循环和递减运算(iteration&amp;amp;descent)来减小误差，达到分类的目的。&lt;/p&gt;
-&lt;div class=&quot;para&quot; readability=&quot;17.664179104478&quot;&gt;
-&lt;p&gt;
-&lt;h2 class=&quot;title-text&quot;&gt;6. 研究领域&lt;/h2&gt;
-&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;机器学习领域的研究工作主要围绕以下三个方面进行：&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;（1）面向任务的研究&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;研究和分析改进一组预定任务的执行性能的学习系统。&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;（2）认知模型&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;研究人类学习过程并进行计算机模拟。&lt;/p&gt;
-&lt;h3 class=&quot;para&quot;&gt;（3）理论分析&lt;/h3&gt;
-&lt;p class=&quot;para&quot;&gt;从理论上探索各种可能的学习方法和独立于应用领域的算法&lt;/p&gt;
-&lt;p class=&quot;para&quot;&gt;机器学习是继专家系统之后人工智能应用的又一重要研究领域，也是人工智能和神经计算的核心研究课题之一。现有的&lt;a href=&quot;https://baike.baidu.com/item/%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%B3%BB%E7%BB%9F&quot; target=&quot;_blank&quot;&gt;计算机系统&lt;/a&gt;和人工智能系统没有什么学习能力，至多也只有非常有限的学习能力，因而不能满足科技和生产提出的新要求。对机器学习的讨论和机器学习研究的进展，必将促使人工智能和整个科学技术的进一步发展 。&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div readability=&quot;12.821548821549&quot;&gt;
-&lt;h2&gt;7. 置业市场需求：&lt;/h2&gt;
-&lt;p&gt;LinkedIn所有职业技能需求量第一：机器学习，数据挖掘和统计分析人才&lt;/p&gt;
-&lt;h2&gt;参考资料：&lt;/h2&gt;
-&lt;p&gt;[1] 麦子学院“机器学习基础介绍”视频&lt;a href=&quot;http://www.maiziedu.com/course/373/&quot; target=&quot;_blank&quot;&gt;http://www.maiziedu.com/course/373/&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;[2] 百度百科“机器学习”&lt;a href=&quot;https://baike.baidu.com/item/%E6%9C%BA%E5%99%A8%E5%AD%A6%E4%B9%A0/217599?fr=aladdin&quot; target=&quot;_blank&quot;&gt;https://baike.baidu.com/item/%E6%9C%BA%E5%99%A8%E5%AD%A6%E4%B9%A0/217599?fr=aladdin&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;       本博文是博主个人学习时的一些记录，不保证是为原创，文章加入了转载的源地址还有个别文章是汇总网上多份资料所成，在这之中也必有疏漏未加标注者，如有侵权请与博主联系。&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Fri, 11 May 2018 14:46:00 +0000</pubDate>
-<dc:creator>hangliu</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hangliu/p/9026829.html</dc:identifier>
 </item>
 </channel>
 </rss>
