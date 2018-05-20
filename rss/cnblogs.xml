@@ -9,6 +9,442 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>JVM 线上故障排查基本操作 - 莫那-鲁道</title>
+<link>http://www.cnblogs.com/stateis0/p/9062196.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/stateis0/p/9062196.html</guid>
+<description>&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/4236553-630b33e7ec7b87dd.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;前言&quot;&gt;# 前言&lt;/h2&gt;
+&lt;p&gt;对于后端程序员，特别是 Java 程序员来讲，排查线上问题是不可避免的。各种 CPU 飚高，内存溢出，频繁 GC 等等，这些都是令人头疼的问题。楼主同样也遇到过这些问题，那么，遇到这些问题该如何解决呢？&lt;/p&gt;
+&lt;p&gt;首先，出现问题，肯定要先定位问题所在，然后分析问题原因，再然后解决问题，最后进行总结，防止下次再次出现。&lt;/p&gt;
+&lt;p&gt;今天的文章，就如我们的题目一样，讲的是基本操作，也就是一些排查线上问题的基本方法。为什么这么说呢？因为线上问题千奇百怪，就算是身经百战的专家也会遇到棘手的问题，因此不可能在一篇文章里说完，还有一个最重要的原因，当然就是楼主的水平不到位。&lt;/p&gt;
+&lt;p&gt;但不到位归不到位，任何经验都是值得记录的，因此，楼主有必要将这些问题记录一下。&lt;/p&gt;
+&lt;p&gt;还有，本文的排查环境是 Linux.&lt;/p&gt;
+&lt;h2 id=&quot;cpu-飚高&quot;&gt;#1. CPU 飚高&lt;/h2&gt;
+&lt;p&gt;线上 CPU 飚高问题大家应该都遇到过，那么如何定位问题呢？&lt;/p&gt;
+&lt;p&gt;思路：首先找到 CPU 飚高的那个 Java 进程，因为你的服务器会有多个 JVM 进程。然后找到那个进程中的 “问题线程”，最后根据线程堆栈信息找到问题代码。最后对代码进行排查。&lt;/p&gt;
+&lt;p&gt;如何操作呢？&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;通过 top 命令找到 CPU 消耗最高的进程，并记住进程 ID。&lt;/li&gt;
+&lt;li&gt;再次通过 top -Hp [进程 ID] 找到 CPU 消耗最高的线程 ID，并记住线程 ID.&lt;/li&gt;
+&lt;li&gt;通过 JDK 提供的 jstack 工具 dump 线程堆栈信息到指定文件中。具体命令：jstack -l [进程 ID] &amp;gt;jstack.log。&lt;/li&gt;
+&lt;li&gt;由于刚刚的线程 ID 是十进制的，而堆栈信息中的线程 ID 是16进制的，因此我们需要将10进制的转换成16进制的，并用这个线程 ID 在堆栈中查找。使用 printf &quot;%x\n&quot; [十进制数字] ，可以将10进制转换成16进制。&lt;/li&gt;
+&lt;li&gt;通过刚刚转换的16进制数字从堆栈信息里找到对应的线程堆栈。就可以从该堆栈中看出端倪。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;从楼主的经验来看，一般是某个业务死循环没有出口，这种情况可以根据业务进行修复。还有 C2 编译器执行编译时也会抢占 CPU，什么是 C2编译器呢？当 Java 某一段代码执行次数超过10000次（默认）后，就会将该段代码从解释执行改为编译执行，也就是编译成机器码以提高速度。而这个 C2编译器就是做这个的。如何解决呢？项目上线后，可以先通过压测工具进行预热，这样，等用户真正访问的时候，C2编译器就不会干扰应用程序了。如果是 GC 线程导致的，那么极有可能是 Full GC ，那么就要进行 GC 的优化。&lt;/p&gt;
+&lt;h2 id=&quot;内存问题排查&quot;&gt;2. 内存问题排查&lt;/h2&gt;
+&lt;p&gt;说完了 CPU 的问题排查，再说说内存的排查，通常，内存的问题就是 GC 的问题，因为 Java 的内存由 GC 管理。有2种情况，一种是内存溢出了，一种是内存没有溢出，但 GC 不健康。&lt;/p&gt;
+&lt;p&gt;内存溢出的情况可以通过加上 -XX:+HeapDumpOnOutOfMemoryError 参数，该参数作用是：在程序内存溢出时输出 dump 文件。&lt;/p&gt;
+&lt;p&gt;有了 dump 文件，就可以通过 dump 分析工具进行分析了，比如常用的MAT，Jprofile，jvisualvm 等工具都可以分析，这些工具都能够看出到底是哪里溢出，哪里创建了大量的对象等等信息。&lt;/p&gt;
+&lt;p&gt;第二种情况就比较复杂了。GC 的健康问题。&lt;/p&gt;
+&lt;p&gt;通常一个健康的 GC 是什么状态呢？根据楼主的经验，YGC 5秒一次左右，每次不超过50毫秒，FGC 最好没有，CMS GC 一天一次左右。&lt;/p&gt;
+&lt;p&gt;而 GC 的优化有2个维度，一是频率，二是时长。&lt;/p&gt;
+&lt;p&gt;我们看YGC，首先看频率，如果 YGC 超过5秒一次，甚至更长，说明系统内存过大，应该缩小容量，如果频率很高，说明 Eden 区过小，可以将 Eden 区增大，但整个新生代的容量应该在堆的 30% - 40%之间，eden，from 和 to 的比例应该在 8：1：1左右，这个比例可根据对象晋升的大小进行调整。&lt;/p&gt;
+&lt;p&gt;如果 YGC 时间过长呢？YGC 有2个过程，一个是扫描，一个是复制，通常扫描速度很快，复制速度相比而言要慢一些，如果每次都有大量对象要复制，就会将 STW 时间延长，还有一个情况就是 StringTable ，这个数据结构中存储着 String.intern 方法返回的常连池的引用，YGC 每次都会扫描这个数据结构（HashTable），如果这个数据结构很大，且没有经过 FGC，那么也会拉长 STW 时长，还有一种情况就是操作系统的虚拟内存，当 GC 时正巧操作系统正在交换内存，也会拉长 STW 时长。&lt;/p&gt;
+&lt;p&gt;再来看看FGC，实际上，FGC 我们只能优化频率，无法优化时长，因为这个时长无法控制。如何优化频率呢？&lt;/p&gt;
+&lt;p&gt;首先，FGC 的原因有几个，1 是 Old 区内存不够，2 是元数据区内存不够，3 是 System.gc()， 4 是 jmap 或者 jcmd，5 是CMS Promotion failed 或者 concurrent mode failure，6 JVM 基于悲观策略认为这次 YGC 后 Old 区无法容纳晋升的对象，因此取消 YGC，提前 FGC。&lt;/p&gt;
+&lt;p&gt;通常优化的点是 Old 区内存不够导致 FGC。如果 FGC 后还有大量对象，说明 Old 区过小，应该扩大 Old 区，如果 FGC 后效果很好，说明 Old 区存在了大量短命的对象，优化的点应该是让这些对象在新生代就被 YGC 掉，通常的做法是增大新生代，如果有大而短命的对象，通过参数设置对象的大小，不要让这些对象进入 Old 区，还需要检查晋升年龄是否过小。如果 YGC 后，有大量对象因为无法进入 Survivor 区从而提前晋升，这时应该增大 Survivor 区，但不宜太大。&lt;/p&gt;
+&lt;p&gt;上面说的都是优化的思路，我们也需要一些工具知道 GC 的状况。&lt;/p&gt;
+&lt;p&gt;JDK 提供了很多的工具，比如 jmap ，jcmd 等，oracle 官方推荐使用 jcmd 代替 jmap，因为 jcmd 确实能代替 jmap 很多功能。jmap 可以打印对象的分布信息，可以 dump 文件，注意，jmap 和 jcmd dump 文件的时候会触发 FGC ，使用的时候注意场景。&lt;/p&gt;
+&lt;p&gt;还有一个比较常用的工具是 jstat，该工具可以查看GC 的详细信息，比如eden ，from，to，old 等区域的内存使用情况。&lt;/p&gt;
+&lt;p&gt;还有一个工具是 jinfo，该工具可以查看当前 jvm 使用了哪些参数，并且也可以在不停机的情况下修改参数。&lt;/p&gt;
+&lt;p&gt;包括我们上面说的一些分析 dump 文件的可视化工具，MAT，Jprofile，jvisualvm 等，这些工具可以分析 jmap dump 下来的文件，看看哪个对象使用的内存较多，通常是能够查出问题的。&lt;/p&gt;
+&lt;p&gt;还有很重要的一点就是，线上环境一定要带上 GC 日志！！！&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;基于文章的标题，我们这个是基本操作，故障排查是说不完的话题，每个故障涉及的知识也都很多，因此，我们在学习了基本的排查之后，还需要学习更多事故排查技术，比如排查 IO，网络，TCP 连接等等。楼主将在后面的文章中将这些基本操作都记录下来。&lt;/p&gt;
+&lt;p&gt;good luck！！！！&lt;/p&gt;
+</description>
+<pubDate>Sat, 19 May 2018 16:01:00 +0000</pubDate>
+<dc:creator>莫那-鲁道</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/stateis0/p/9062196.html</dc:identifier>
+</item>
+<item>
+<title>linux，windows下检测指定的IP地址是否可用或者检测IP地址冲突的3种方式（批处理程序，python程序，linux shell 批量ping） - 我是某某某是我</title>
+<link>http://www.cnblogs.com/LiuBingBlogs/p/9054035.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/LiuBingBlogs/p/9054035.html</guid>
+<description>&lt;p&gt;本文中的脚本适用范围：&lt;/p&gt;
+&lt;p&gt;1）检测某些IP地址是否被占用；&lt;/p&gt;
+&lt;p&gt;2）检测网络中某些设备是否存活；&lt;/p&gt;
+&lt;p&gt;3）在分配新的ip地址之前，批量检测环境中是否存在冲突的机器&lt;/p&gt;
+&lt;p&gt;以上检测基于ICMP Ping报文，要求所有的设备允许Ping，设备开通禁止ICMP策略，防火墙禁止ICMP报文等情况不在本文的考虑范围之内。&lt;/p&gt;
+&lt;p&gt;不多说，上代码：&lt;/p&gt;
+&lt;p&gt;(一)windows 批处理脚本&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;::autor lb
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; ::&lt;span&gt;date&lt;/span&gt; 2018 05
+&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;@echo&lt;/span&gt; &lt;span&gt;off&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;::&lt;/span&gt;&lt;span&gt;屏显当前的测试时间并输出到测试结果（详细日志和结果日志）&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %&lt;span&gt;date&lt;/span&gt;% %&lt;span&gt;time&lt;/span&gt;&lt;span&gt;%
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; 
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;::&lt;/span&gt;&lt;span&gt;每次执行脚本时都要先删除日志&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;del&lt;/span&gt; %&lt;span&gt;cd&lt;/span&gt;%\IpCheckerDetailLog.&lt;span&gt;txt 
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;del&lt;/span&gt; %&lt;span&gt;cd&lt;/span&gt;%\IpCheckerResLog.&lt;span&gt;txt 
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %&lt;span&gt;date&lt;/span&gt;% %&lt;span&gt;time&lt;/span&gt;% &amp;gt;&amp;gt;IpCheckerDetailLog.&lt;span&gt;txt
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %&lt;span&gt;date&lt;/span&gt;% %&lt;span&gt;time&lt;/span&gt;%  &amp;gt;&amp;gt;IpCheckerResLog.&lt;span&gt;txt
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; IpCheckerResult &amp;gt;&amp;gt;IpCheckerResLog.&lt;span&gt;txt
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; 
+&lt;span&gt;14&lt;/span&gt; &lt;span&gt;::&lt;/span&gt;&lt;span&gt;for循环执行ping命令，每次循环都会从制定的文件中读取ip地址进行ping操作，ping count=1,timeout=1ms,每次Ping结果都会重定向到详细日志文件&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt; &lt;span&gt;set&lt;/span&gt; /a avaNum=0
+&lt;span&gt;16&lt;/span&gt; &lt;span&gt;set&lt;/span&gt; /a unReaccNum=0
+&lt;span&gt;17&lt;/span&gt; &lt;span&gt;for&lt;/span&gt; /f &quot;delims=&quot; %%i in (ip.txt) &lt;span&gt;do&lt;/span&gt; (
+&lt;span&gt;18&lt;/span&gt; Ping.exe -n 1 -w 1 %%i &amp;gt;&amp;gt; IpCheckerDetailLog.&lt;span&gt;txt
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; &lt;span&gt;not&lt;/span&gt; &lt;span&gt;errorlevel&lt;/span&gt; 1 ( &lt;span&gt;echo&lt;/span&gt;&lt;span&gt; %%i            is avaliable
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %%i            is avaliable &amp;gt;&amp;gt; IpCheckerResLog.&lt;span&gt;txt
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;set&lt;/span&gt; /a avaNum+=1 ) &lt;span&gt;else&lt;/span&gt; ( &lt;span&gt;echo&lt;/span&gt;&lt;span&gt; %%i            is unreachable[Warning] 
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;set&lt;/span&gt; /a unReaccNum+=1
+&lt;span&gt;23&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %%i            is unreachable[Warning]  &amp;gt;&amp;gt; IpCheckerResLog.txt )
+&lt;span&gt;24&lt;/span&gt; )
+&lt;span&gt;25&lt;/span&gt; &lt;span&gt;set&lt;/span&gt; /a Total=%avaNum% +&lt;span&gt; %unReaccNum%
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt;&lt;span&gt; Total Count:%Total%
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; &lt;span&gt;echo&lt;/span&gt; %avaNum% avaliable;&lt;span&gt;    %unReaccNum% unreachable!
+&lt;/span&gt;&lt;span&gt;28&lt;/span&gt; &lt;span&gt;pause&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;测试如下：&lt;/p&gt;
+&lt;p&gt;　创建ip.txt，&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1346188/201805/1346188-20180518010219729-1154115962.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;执行脚本&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1346188/201805/1346188-20180518010744284-701522771.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; （二） Windows Python脚本&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;!windows 64 python3.6.5&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; coding=utf-8&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt; 
+&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; Ip检测脚本&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; author lb&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; time 2018 05&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; os
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; datetime
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; 
+&lt;span&gt;10&lt;/span&gt; SrcFileName = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ip.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; CurT = datetime.datetime.now().strftime(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%m%d_%H%M%S&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; CurTInLog = datetime.datetime.now().strftime(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%Y-%m-%d %H:%M:%S\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; LogFileName = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s_LogDetail.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; %&lt;span&gt; CurT;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; ResFileName = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s_Res.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; %&lt;span&gt; CurT;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; IpOkNum=&lt;span&gt;0;
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; IpFailNum=&lt;span&gt;0;
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; 
+&lt;span&gt;18&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 创建详细日志文件&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt; LogFp = open(LogFileName, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w+&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; LogFp.write(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;PingTestDetailLog\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;LogFp.write(CurTInLog);
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; 
+&lt;span&gt;23&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 创建结果日志文件&lt;/span&gt;
+&lt;span&gt;24&lt;/span&gt; ResFp = open(ResFileName, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w+&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; ResFp.write(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;PingTestResult\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;ResFp.write(CurTInLog);
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; 
+&lt;span&gt;28&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 打开ip文件&lt;/span&gt;
+&lt;span&gt;29&lt;/span&gt; SrcFp = open(SrcFileName, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;for&lt;/span&gt; ip &lt;span&gt;in&lt;/span&gt;&lt;span&gt; SrcFp:
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt;     &lt;span&gt;#&lt;/span&gt;&lt;span&gt;print(ip)&lt;/span&gt;
+&lt;span&gt;32&lt;/span&gt;     cmd = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ping -n 1 -w 1 %s&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; %&lt;span&gt; ip;
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt;     ret =&lt;span&gt; os.popen(cmd);
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt;     strRet=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; %&lt;span&gt; ret.read();
+&lt;/span&gt;&lt;span&gt;35&lt;/span&gt; &lt;span&gt;    LogFp.write( strRet);
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt;     &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(strRet)
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt;     &lt;span&gt;#&lt;/span&gt;&lt;span&gt;找到了TTL关键字，证明ping通&lt;/span&gt;
+&lt;span&gt;38&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;  strRet.find(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;TTL&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;) != -1 &lt;span&gt;or&lt;/span&gt; strRet.find(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;丢失 = 0&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;)!=-1&lt;span&gt;:
+&lt;/span&gt;&lt;span&gt;39&lt;/span&gt;         strok=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s Is Reachable \n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%&lt;span&gt; ip;
+&lt;/span&gt;&lt;span&gt;40&lt;/span&gt;         &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(strok);
+&lt;/span&gt;&lt;span&gt;41&lt;/span&gt; &lt;span&gt;        ResFp.write(strok);
+&lt;/span&gt;&lt;span&gt;42&lt;/span&gt;         IpOkNum+=1&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;43&lt;/span&gt;     &lt;span&gt;else&lt;/span&gt;&lt;span&gt;:
+&lt;/span&gt;&lt;span&gt;44&lt;/span&gt;         strfail=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%s Is Uneachable[Warning]\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%&lt;span&gt; ip;
+&lt;/span&gt;&lt;span&gt;45&lt;/span&gt;         &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(strfail);
+&lt;/span&gt;&lt;span&gt;46&lt;/span&gt; &lt;span&gt;        ResFp.write(strfail);
+&lt;/span&gt;&lt;span&gt;47&lt;/span&gt;         IpFailNum+=1&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;48&lt;/span&gt; Res=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Total Ip Num i:%d\nReachable  Count:%d,Unreachable Count:%d &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; % ((IpFailNum+&lt;span&gt;IpOkNum),IpOkNum,IpFailNum);
+&lt;/span&gt;&lt;span&gt;49&lt;/span&gt; &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(Res)
+&lt;/span&gt;&lt;span&gt;50&lt;/span&gt; 
+&lt;span&gt;51&lt;/span&gt; &lt;span&gt;LogFp.close();
+&lt;/span&gt;&lt;span&gt;52&lt;/span&gt; &lt;span&gt;ResFp.close();
+&lt;/span&gt;&lt;span&gt;53&lt;/span&gt; SrcFp.close();
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1346188/201805/1346188-20180519220642288-2116848138.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; （三）linux shell&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;!bin/sh&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;author lb&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;date 2018 05&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt; 
+&lt;span&gt; 5&lt;/span&gt; 
+&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;PingFun()
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;{
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;Creat Log File&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt; echo DetailLog&amp;gt;&amp;gt;&lt;span&gt;IpCheckerDetailLog.txt
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; echo DetailResult&amp;gt;&amp;gt;&lt;span&gt;IpCheckerResLog.txt
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; CurT=$(date &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;+%Y:%m:%D %H:%M:%S&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; IpAvaCount=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; IpUnReachCount=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; 
+&lt;span&gt;15&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;Init Log File&lt;/span&gt;
+&lt;span&gt;16&lt;/span&gt; echo &lt;span&gt;$CurT&lt;/span&gt;&amp;gt;&amp;gt;&lt;span&gt;IpCheckerDetailLog.txt
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; echo &lt;span&gt;$CurT&lt;/span&gt;&amp;gt;&amp;gt;&lt;span&gt;pCheckerResLog.txt
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; 
+&lt;span&gt;19&lt;/span&gt; &lt;span&gt;echo Starting ping...
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;Read Ip &lt;/span&gt;
+&lt;span&gt;21&lt;/span&gt; &lt;span&gt;while&lt;/span&gt;&lt;span&gt; read ip
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;do&lt;/span&gt;
+&lt;span&gt;23&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; ping -c 1 -w 1 &lt;span&gt;$ip&lt;/span&gt; &amp;gt;/dev/&lt;span&gt;null ;then
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;         echo &lt;span&gt;$ip&lt;/span&gt;&lt;span&gt;     is avaliable
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;         echo &lt;span&gt;$ip&lt;/span&gt;     is avaliable &amp;gt;&amp;gt;&lt;span&gt;IpCheckerResLog.txt
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt;         IpAvaCount=$((&lt;span&gt;$IpAvaCount&lt;/span&gt;+1&lt;span&gt;))
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;     &lt;span&gt;else&lt;/span&gt; echo &lt;span&gt;$ip&lt;/span&gt;&lt;span&gt;     is unreachable
+&lt;/span&gt;&lt;span&gt;28&lt;/span&gt;          echo &lt;span&gt;$ip&lt;/span&gt;     is unreachable &amp;gt;&amp;gt;&lt;span&gt;IpCheckerResLog.txt    
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;         IpUnReachCount=$((1+&lt;span&gt;$IpUnReachCount&lt;/span&gt;&lt;span&gt;))
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;    fi
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; &lt;span&gt;done &amp;lt;ip.txt
+&lt;/span&gt;&lt;span&gt;32&lt;/span&gt; 
+&lt;span&gt;33&lt;/span&gt; &lt;span&gt;#&lt;/span&gt;&lt;span&gt;statistics&lt;/span&gt;
+&lt;span&gt;34&lt;/span&gt; &lt;span&gt;echo Statis:
+&lt;/span&gt;&lt;span&gt;35&lt;/span&gt; echo Total Count : $((&lt;span&gt;$IpUnReachCount&lt;/span&gt;+&lt;span&gt;$IpAvaCount&lt;/span&gt;&lt;span&gt;))
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt; echo Avaliable :&lt;span&gt;$IpAvaCount&lt;/span&gt;,Unreachable :&lt;span&gt;$IpUnReachCount&lt;/span&gt;
+&lt;span&gt;37&lt;/span&gt; &lt;span&gt;}
+&lt;/span&gt;&lt;span&gt;38&lt;/span&gt; PingFun
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 执行结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1346188/201805/1346188-20180519235847433-875538425.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 19 May 2018 15:58:00 +0000</pubDate>
+<dc:creator>我是某某某是我</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/LiuBingBlogs/p/9054035.html</dc:identifier>
+</item>
+<item>
+<title>js算法初窥02（排序算法02-归并、快速以及堆排序） - Zaking</title>
+<link>http://www.cnblogs.com/zaking/p/9053668.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zaking/p/9053668.html</guid>
+<description>&lt;p&gt;　　上一篇，我们讲述了一些简单的排序算法，其实说到底，在前端的职业生涯中，不涉及node、不涉及后台的情况下，我目前还真的没想到有哪些地方可以用到这些数据结构和算法，但是我在前面的文章也说过了。或许你用不到，但是，真的，如果你想要在前端领域有一个不错的发展。数据结构和算法一定是你的必修课。它不仅仅让你在处理问题的时候可以有一个思维底蕴，更重要的是，在遇到一些奇葩产品的时候，你可以和他PK到底！嗯，到底！&lt;/p&gt;
+&lt;p&gt;　　哈哈，开个小玩笑。咱们还是聊点有营养的。上一篇的算法比较简单，主内容就是循环，次内容就是比较。但是，这篇文章所介绍的一些算法，在实现上有些许的复杂，甚至在其中涉及到了一部分数据结构相关的知识，如果你对数据结构还不是十分了解，请移步这里&lt;a id=&quot;homepage1_HomePageDays_ctl00_DayList_TitleUrl_0&quot; class=&quot;postTitle2&quot; href=&quot;http://www.cnblogs.com/zaking/p/9016600.html&quot;&gt;用js来实现那些数据结构—目录&lt;/a&gt;。&lt;/p&gt;
+&lt;p&gt;　　那么，我们这篇文章要一起来看看另外一些在执行上有着更高效率的算法，比如归并排序，比如快速排序，还有堆排序等等。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;1、&lt;a href=&quot;https://zh.wikipedia.org/wiki/%E5%BD%92%E5%B9%B6%E6%8E%92%E5%BA%8F&quot; target=&quot;_blank&quot;&gt;归并排序&lt;/a&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;/span&gt;我们先来看看什么是归并排序，以及归并排序是怎么实现的。&lt;/p&gt;
+&lt;p&gt;　　归并排序属于一种&lt;strong&gt;分治&lt;/strong&gt;算法。归并排序的思想就是将原始数组切分成一个一个较小的数组，直到每一个数组只有一个元素为止，然后再把一个一个小数组，一点一点的结合成一个最终排序后的数组。其实简单来说，就是先分，再合。归并排序的实现有两种方法，一种是递归，一种是迭代。下面我们只用递归的方式来实现一下代码：&lt;/p&gt;
+
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;52&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;归并排序&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt; 不多说，你懂的。&lt;/span&gt;
+&lt;span&gt;this&lt;/span&gt;.mergeSort = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+    array &lt;/span&gt;=&lt;span&gt; mergeSortRec(array);
+};
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个私有函数，其实就是整个归并排序中“分”的部分。我们来看看它是如何“分”的。&lt;/span&gt;
+&lt;span&gt;var&lt;/span&gt; mergeSortRec = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (array) {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;存储数组长度。&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; length =&lt;span&gt; array.length;
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;由于是递归，所以当length 为 1 的时候，说明我们分到底了。直接返回这个数组。也就是只有一个元素的数组。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;同时这个判断条件也是递归的终止条件，要记住任何递归操作都必须有终止条件。不然会陷入死循环。&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt;(length === 1&lt;span&gt;) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; array;
+    }
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;我们要把原始数组从中一分为二。下面就是一分为二的操作。无需多说。&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; mid = Math.floor(length / 2&lt;span&gt;),
+        left &lt;/span&gt;= array.slice(0&lt;span&gt;,mid),
+        right &lt;/span&gt;=&lt;span&gt; array.slice(mid,length);
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里，我们先不去管merge函数是做什么的。我们先看递归到最底层。merge的两个参数会变成什么。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 由于我们又返回了自身，至此递归就形成了。在merge的参数中我们又递归调用了一次自身。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 那么这次调用我们把left和right两个数组又拆分了一次。直到最后array.length 为 1（归并的最小单位）。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 那么换句话说，实际上merge函数递归的最底层传入的就是两个只有一个元素的数组。&lt;/span&gt;
+    &lt;span&gt;return&lt;/span&gt;&lt;span&gt; merge(mergeSortRec(left),mergeSortRec(right));
+};
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; merge = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (left,right) {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 我们声明一个最终结果的数组result,&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; il和ir是用来控制左右两个数组的迭代的变量&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; result = [],il = 0,ir = 0&lt;span&gt;;
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里，我们的最底层是只有两个只有一个元素的数组&lt;/span&gt;
+    &lt;span&gt;/*&lt;/span&gt;&lt;span&gt;
+        array[left]和array[right]
+        第一个while， 循环的条件是两个长度变量是否在合法值内。
+    &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;while&lt;/span&gt;(il &amp;lt; left.length &amp;amp;&amp;amp; ir &amp;lt;&lt;span&gt; right.length) {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 如果左侧小于右侧，此时的il和ir是相等的都是0。注意这一点&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 我们就把左侧的left[il]放入数组并il++。否则，我们就把right[ir]存入数组result并ir++。此时，il和ir就不相等了。&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 所以，这时候，我们下一次循环判断的条件就是ir或il的递增与没有递增的il或者ir做比较。这样就做到了一个元素与另外数组中所有元素都比较过的一个方法。&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 希望上面我说明白了想要表达的意思。&lt;/span&gt;
+        &lt;span&gt;if&lt;/span&gt;(left[il] &amp;lt;&lt;span&gt; right[ir]) {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里，不太容易理解。为什么我们要在result中加入il++而不是il?&lt;/span&gt;
+            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 其实这里的意思是，先加如left[il]再il++。&lt;/span&gt;
+            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 不信，你可以把代码改成这个样子&lt;/span&gt;
+            &lt;span&gt;/*&lt;/span&gt;&lt;span&gt;
+            result.push(left[il]);
+            il++
+            &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 效果是一样一样的。&lt;/span&gt;
+            result.push(left[il++&lt;span&gt;]);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            result.push(right[ir&lt;/span&gt;++&lt;span&gt;]);
+        }
+    };
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这两个循环的目的是把剩余的数组元素（包括left数组和right数组）都存入result数组中。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这样我们就行了一个归并后的结果数组，然后进行下一次的归并过程的初始参数。&lt;/span&gt;
+    &lt;span&gt;while&lt;/span&gt;(il &amp;lt;&lt;span&gt; left.length) {
+        result.push(left[il&lt;/span&gt;++&lt;span&gt;]);
+    };
+
+    &lt;/span&gt;&lt;span&gt;while&lt;/span&gt;(ir &amp;lt;&lt;span&gt; right.length) {
+        result.push(right[ir&lt;/span&gt;++&lt;span&gt;]);
+    };
+
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
+};
+
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;我们用上一章的方法来测试一下归并排序&lt;/span&gt;
+&lt;span&gt;var&lt;/span&gt; arraylist = creatArrayList(5&lt;span&gt;);
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;5,4,3,2,1&lt;/span&gt;
+&lt;span&gt;arraylist.mergeSort();
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1,2,3,4,5&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　其实归并排序的核心思想就是先拆分数组直至分为只有一个元素的数组时，再对其一点一点的进行合并。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;2、&lt;a href=&quot;https://zh.wikipedia.org/wiki/%E5%BF%AB%E9%80%9F%E6%8E%92%E5%BA%8F&quot; target=&quot;_blank&quot;&gt;快速排序&lt;/a&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　快速排序是我们在组织架构或者实际应用中最为常用的排序算法之一，你也可以把快速排序用在你的项目中。&lt;/p&gt;
+&lt;p&gt;　　快速排序的思想和归并排序有些类似，但是快速排序不需要把拆分开的元素装入一个新的数组，而是直接在原数组上进行交换操作。&lt;/p&gt;
+&lt;p&gt;　　那么我们来看看快速排序的操作步骤：&lt;/p&gt;
+&lt;p&gt;　　　　首先我们要找到用于与之相比较的“主元”。理论上主元可以为数组中的任意的元素，但是在本文中我们选取数组的中间项作为主元。&lt;/p&gt;
+&lt;p&gt;　　　　然后，我们选择主元左侧和右侧的两部分中的元素分别和主元做比较，直到我们找到了左侧比主元大并且右侧比主元小的元素，那么我们就交换两个元素的位置。直到迭代的左侧指针超过了右侧指针。这样，我们就使比主元小的元素和比主元大的元素分别存在于主元的两侧。&lt;/p&gt;
+&lt;p&gt;　　　　最后，我们再对左右两侧的数组递归重复上面的步骤。直至数组排序结束。&lt;/p&gt;
+&lt;p&gt;　　我们来看下代码。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;60&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;快速排序&lt;/span&gt;
+&lt;span&gt;this&lt;/span&gt;.quickSort = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这里传入的参数是原始数组本身和首尾元素的下标。&lt;/span&gt;
+    quick(array,0,array.length - 1&lt;span&gt;);
+};
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; quick = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (array,left,right) {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这个index是为了帮助我们分离出较小值数组和较大值数组的&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt;&lt;span&gt; index;
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 如果length&amp;gt;1才执行逻辑，因为只有一个元素的数组意味着无需排序。&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt;(array.length &amp;gt; 1&lt;span&gt;) {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; partition返回一个元素的下标。&lt;/span&gt;
+        index =&lt;span&gt; partition(array,left,right);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;下面两个判断条件为了区分我们要递归的是较小值数组还是较大值数组。&lt;/span&gt;
+        &lt;span&gt;if&lt;/span&gt;(left &amp;lt; index - 1&lt;span&gt;) {
+            quick(array,left,index &lt;/span&gt;- 1&lt;span&gt;);
+        };
+
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(index &amp;lt;&lt;span&gt; right) {
+            quick(array,index,right);
+        };
+    }
+};
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;我们来看看划分过程的这个方法&lt;/span&gt;
+&lt;span&gt;var&lt;/span&gt; partition = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (array,left,right) {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; pivot（主元），也就是我们要与之比较的元素。我们选取中间项作为主元。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; i和j代表着较小值数组和较大值数组当前元素的指针&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; pivot = array[Math.floor((right + left) / 2)],i = left,j =&lt;span&gt; right;
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;要知道最开始的i是0，j是lenght-1。所以i++是往右侧移动指针，j--是往左侧移动指针。&lt;/span&gt;
+    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;循环的条件是较小值数组的下标小于较大值数组的下标。&lt;/span&gt;
+    &lt;span&gt;while&lt;/span&gt;(i &amp;lt;=&lt;span&gt; j) {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 如果array[i]元素小于主元，向右移动指针。&lt;/span&gt;
+        &lt;span&gt;while&lt;/span&gt;(array[i] &amp;lt;&lt;span&gt; pivot) {
+            i&lt;/span&gt;++&lt;span&gt;;
+        };
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 如果array[j]元素大于主元，向左移动指针。&lt;/span&gt;
+        &lt;span&gt;while&lt;/span&gt;(array[j] &amp;gt;&lt;span&gt; pivot) {
+            j&lt;/span&gt;--&lt;span&gt;;
+        };
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;上面两个while迭代，当遇到不符合条件的时候就会停下来。&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 而这种不符合条件的情况是array[i]&amp;gt;array[j]。这是要调整的情况。但是此时i仍旧是小于等于j的。要注意,i在这里不可能比j大。&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 所以我们此时交换两个下标对应的元素，并改变i和j的指针。最后返回下标i。&lt;/span&gt;
+        &lt;span&gt;if&lt;/span&gt;(i &amp;lt;=&lt;span&gt; j) {
+            swap(array,i,j);
+            i&lt;/span&gt;++&lt;span&gt;;
+            j&lt;/span&gt;--&lt;span&gt;;
+        };
+    };
+
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; i;
+};
+
+
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; arraylist = creatArrayList(5&lt;span&gt;);
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;5,4,3,2,1&lt;/span&gt;
+&lt;span&gt;arraylist.quickSort();
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1,2,3,4,5&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;a href=&quot;https://zh.wikipedia.org/wiki/%E5%BF%AB%E9%80%9F%E6%8E%92%E5%BA%8F&quot; target=&quot;_blank&quot;&gt;3&lt;/a&gt;、&lt;a href=&quot;https://zh.wikipedia.org/wiki/%E5%A0%86%E6%8E%92%E5%BA%8F&quot; target=&quot;_blank&quot;&gt;堆排序&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　在说堆排序之前，我们得先了解一下什么是&lt;a href=&quot;https://zh.wikipedia.org/wiki/%E5%A0%86_(%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84)&quot; target=&quot;_blank&quot;&gt;堆&lt;/a&gt;，堆这种数据结构本质是一个完全二叉树（如果你还不知道什么是树，请看我&lt;a href=&quot;http://www.cnblogs.com/zaking/p/9016600.html&quot; target=&quot;_blank&quot;&gt;前面的文章&lt;/a&gt;），那么既然堆是一种树，那么有关于树的一些概念都可以用在堆上面，比如深度，比如节点等。要知道，树通常都会有左孩子又孩子节点和父节点的指针，但是在完全二叉树中，这些指针都可以去掉，因为我们可以用一定的规律来直接找到当前节点的关联节点。比如给定某一个结点，假设它的下标为i，那么它的左孩子结点的下标就是2i + 1，右孩子结点的下标就是2i + 2，它的父结点为(i−1)/2。这样，我们就把可以省略去这些指针，直接将堆中的结点存储在数组中了。&lt;/p&gt;
+&lt;p&gt;　　在了解了什么是堆之后，我们看看堆排序是怎么操作的。我们直接从代码中看比较具体：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;57&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;堆排序&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt; 这里你需要对树数据结构有一定的了解和认识。如果你对树结构还不是十分了解，请看我前面有关于树结构的相关章节。&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt; 或者，你可以直接用下面的代码来解决问题，当然，你需要做一些细微的改动。&lt;/span&gt;
+&lt;span&gt;this&lt;/span&gt;.heapSort = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 把数组长度存入一个变量&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; heapSize =&lt;span&gt; array.length;
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 把该数组“堆”化。&lt;/span&gt;
+&lt;span&gt;    buildHeap(array);
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;迭代递减heapSize的长度，交换数组中下标为0和当前的heapSize重新使变动的堆“合理化”。这里的合理化是指让交换了元素位置的数组重新生成符合堆原理的一个新数组。&lt;/span&gt;
+    &lt;span&gt;while&lt;/span&gt;(heapSize &amp;gt; 1&lt;span&gt;) {
+        heapSize&lt;/span&gt;--&lt;span&gt;;
+        swap(array,&lt;/span&gt;0&lt;span&gt;,heapSize);
+        heapify(array,heapSize,&lt;/span&gt;0&lt;span&gt;);
+    };
+};
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;生成堆函数，我们的i为数组中间值并且递减i的循环为heapify函数传入。&lt;/span&gt;
+&lt;span&gt;var&lt;/span&gt; buildHeap = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (array) {
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; heapSize =&lt;span&gt; array.length;
+    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;(&lt;span&gt;var&lt;/span&gt; i = Math.floor(array.length / 2);i &amp;gt;= 0; i--&lt;span&gt;) {
+        heapify(array,heapSize,i);
+    };
+};
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;“堆”化函数。&lt;/span&gt;
+&lt;span&gt;var&lt;/span&gt; heapify = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (array,heapSize,i) {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;我们声明左节点，右节点，以及父节点（也就是largest）的变量&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; left = i * 2 + 1&lt;span&gt;,
+        right &lt;/span&gt;= i * 2 + 2&lt;span&gt;,
+        largest &lt;/span&gt;=&lt;span&gt; i;
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这两个判断是为了知道在当前轮中的父节点是谁。&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt;(left &amp;lt; heapSize &amp;amp;&amp;amp; array[left] &amp;gt;&lt;span&gt; array[largest]) {
+        largest &lt;/span&gt;=&lt;span&gt; left;
+    };
+
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(right &amp;lt; heapSize &amp;amp;&amp;amp; array[right] &amp;gt;&lt;span&gt; array[largest]) {
+        largest &lt;/span&gt;=&lt;span&gt; right;
+    };
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果largest变了，我们就需要交换两个值得位置。并且重新调用heapify。&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt;(largest !==&lt;span&gt; i) {
+        swap(array,i,largest);
+        heapify(array,heapSize,largest);
+    };
+};
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; arraylist = creatArrayList(125&lt;span&gt;);
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;5,4,3,2,1&lt;/span&gt;
+&lt;span&gt;arraylist.heapSort();
+console.log(arraylist.toString());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1,2,3,4,5&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　堆排序的概念其实并不难理解，唯一需要注意的就是堆数据结构的概念，希望我说清楚了，如果你觉得我对于堆的讲解并不详细，首先你可以百度，其次你可以谷歌，再次你还可以去搜维基百科。实在不行，你去这里看看&lt;a href=&quot;https://zhuanlan.zhihu.com/p/25820535&quot; target=&quot;_blank&quot;&gt;https://zhuanlan.zhihu.com/p/25820535&lt;/a&gt;。这是一篇有关于java相关的系列教程之一。当然，就算你不懂java，相信你也一样可以看懂，真的，我没开玩笑。&lt;/p&gt;
+&lt;p&gt;　　我在纠结要不要画张图还是就这样结束，因为画一个完整的流程图真的很花时间......我抽根烟考虑下......要不大家去买本书看吧。。。。嗯....一个不错的建议。　&lt;/p&gt;
+&lt;p&gt;　　下面我们以数组[3,5,1,6,4,7,2]作为图例的基本数据：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1184971/201805/1184971-20180519235452779-1679875301.png&quot; alt=&quot;&quot; width=&quot;1219&quot; height=&quot;647&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　图片要结合代码一起看，不然看不懂的噢.......还有，这个图你最好放大了看，不然累眼睛。。。&lt;/p&gt;
+&lt;p&gt;　　最后，其实有关于排序算法还有很多，比如计数排序，桶排序，基数排序等等等等等。排序算法远不止如此。但是本系列不会介绍这么多的算法，如果你想要更深入的去了解其它算法的内容，可以自行查找相关的资料。&lt;/p&gt;
+&lt;p&gt;　　好了，终于要结束了，希望本文的内容能带给你一点点的收获。&lt;/p&gt;
+
+&lt;p&gt;　　最后，&lt;strong&gt;由于本人水平有限，能力与大神仍相差甚远，若有错误或不明之处，还望大家不吝赐教指正。非常感谢！&lt;/strong&gt;&lt;/p&gt;
+</description>
+<pubDate>Sat, 19 May 2018 15:58:00 +0000</pubDate>
+<dc:creator>Zaking</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zaking/p/9053668.html</dc:identifier>
+</item>
+<item>
 <title>codeforces 982D Shark - qrfkickit</title>
 <link>http://www.cnblogs.com/kickit/p/9062168.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/kickit/p/9062168.html</guid>
@@ -1132,496 +1568,6 @@ public final Object resolveArgument(MethodParameter parameter, ModelAndViewConta
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/daoqidelv/p/9061862.html</dc:identifier>
-</item>
-<item>
-<title>一次数组越界的bug经历 - Andrew_qian</title>
-<link>http://www.cnblogs.com/qsyll0916/p/9061841.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/qsyll0916/p/9061841.html</guid>
-<description>&lt;p&gt;数组和指针都是C里面的好东西，但是一旦使用不当，真的会让人抓狂。&lt;/p&gt;
-&lt;p&gt;下面是写程序时遇到的一次数组越界的经历，感觉对以后写程序有点启发，所以记录下来。&lt;/p&gt;
-
-&lt;h2&gt;起因：&lt;/h2&gt;
-&lt;p&gt;我想用OLED动态显示一组浮点数，而且浮点数的长度是不定的。&lt;/p&gt;
-&lt;h3&gt;1、如果只是单纯的显示，没有消隐的话，上一次的长数的据残留会影响下一次短长度数据的显示。&lt;/h3&gt;
-&lt;h3&gt;2、如果显示一次就清空一次显示区域的话，数据会一直抖动，一开始以为是我刷新频率不够，故把刷新频率由100HZ改为1000HZ，但是效果还是和之前一样！&lt;/h3&gt;
-&lt;h3&gt;后来想想也是，不管我把刷新频率改为多少，清空后的空白和显示的数据都是相同的频率。1000hz显示数据，那么也是1000hz的空白。所以会抖动严重。&lt;/h3&gt;
-&lt;h3&gt;3、把数据的每一位都取出来单独显示，但是这样就又带来了数据对齐的问题。不爽，不好看，弃之。&lt;/h3&gt;
-&lt;h3&gt;4、使用sprintf格式化需要显示的数据为字符串。然后用OLED的显示字符串的方式显示。&lt;/h3&gt;
-
-&lt;p&gt;于是有了下面这样的程序：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-    sprintf((&lt;span&gt;char&lt;/span&gt; *)weight_string,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%.1f&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,weight);        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;格式化为字符串&lt;/span&gt;
-    Clear_Left_Num(money_string);                                &lt;span&gt;//&lt;/span&gt;&lt;span&gt;消除残余&lt;/span&gt;
-    OLED_Show_String(&lt;span&gt;42&lt;/span&gt;,&lt;span&gt;2&lt;/span&gt;&lt;span&gt;,weight_string);
-
-    sprintf((&lt;/span&gt;&lt;span&gt;char&lt;/span&gt; *)price_string,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;%d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,price);
-    Clear_Left_Num(money_string);
-    OLED_Show_String(&lt;/span&gt;&lt;span&gt;42&lt;/span&gt;,&lt;span&gt;4&lt;/span&gt;,price_string);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这段程序在定时器中断函数中调用。weight 和 price 就是我想显示的浮点数。&lt;/p&gt;
-&lt;p&gt;先格式化为字符串，然后显示。OLED_Show_String() 的前两个参数是字符的起始显示坐标。&lt;/p&gt;
-&lt;p&gt;Clear_Left_Num 函数如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;void&lt;/span&gt; Clear_Left_Num(unsigned &lt;span&gt;char&lt;/span&gt; *&lt;span&gt;num_string)
-{
-    &lt;/span&gt;&lt;span&gt;while&lt;/span&gt;(*num_string != &lt;span&gt;'&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-        num_string&lt;/span&gt;++&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;一位小数点后面的数据用空格刷新&lt;/span&gt;
-    *(num_string+&lt;span&gt;2&lt;/span&gt;) = &lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;*(num_string+&lt;span&gt;3&lt;/span&gt;) = &lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;*(num_string+&lt;span&gt;4&lt;/span&gt;) = &lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;思路就是把小数点后一位后面的残余数据用空格刷新。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;但是实验现象是在显示完第一行数据之后，本来应该在第二行显示第二个数据，但是他 在第一行数据的后面又显示了第二行的数据！！也就是说第二行数据显示了两次。&lt;/p&gt;
-&lt;p&gt;为什么会显示两次呢？我程序中就写了一次啊、、、&lt;/p&gt;
-
-&lt;h2&gt;分析：&lt;/h2&gt;
-&lt;p&gt;既然是显示的问题，那就先看看这个显示函数！&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/*&lt;/span&gt;&lt;span&gt;----------------------------------
-**函数名称：OLED_Show_String
-**功能描述：光标处显示字符串，字符串可以用数组表示，unsigned char string_2[] = {&quot;THIS IS A TEST  &quot;};
-**参数说明：X,Y为坐标
-            * chr：字符串首地址
-**作者：Andrew
-**日期：2018.1.24
------------------------------------&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;void&lt;/span&gt; OLED_Show_String(u8 x, u8 y, u8 *&lt;span&gt;chr)
-{
-    u8 j&lt;/span&gt;=&lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;while&lt;/span&gt; (chr[j]!=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\0&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-    {
-        OLED_ShowChar(x,y,chr[j]);
-
-        x&lt;/span&gt;+= &lt;span&gt;8&lt;/span&gt;&lt;span&gt; ;
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(x&amp;gt;&lt;span&gt;120&lt;/span&gt;){x=&lt;span&gt;0&lt;/span&gt;;y+=&lt;span&gt;2&lt;/span&gt;;}  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;自动换行写&lt;/span&gt;
-&lt;span&gt;
-        j&lt;/span&gt;++&lt;span&gt;;
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;原来这个函数会在数组结束之前，显示数组的全部内容。因为数组的最后一个结尾标志是  &lt;span&gt;&lt;strong&gt;'\0’&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;那么，上面第一行一直在显示，&lt;strong&gt;说明他可能没有遇到数组结束标识符。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看数组定义的大小：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-unsigned &lt;span&gt;char&lt;/span&gt; weight_string[&lt;span&gt;7&lt;/span&gt;] = {&lt;span&gt;0&lt;/span&gt;&lt;span&gt;};
-unsigned &lt;/span&gt;&lt;span&gt;char&lt;/span&gt; price_string[&lt;span&gt;3&lt;/span&gt;] = {&lt;span&gt;0&lt;/span&gt;};
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;原来 weight_string 数组的最后一个结束标志被我赋值成了空格。那么他就会一直读取存储在这个数组后面的内存数据，并且给显示出来。也就是所谓的“数组越界”。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;幸好我们只是读取显示，并没有改写这个数据！&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;既然他显示的是第二行的数据，说明第二行的数据就是存储在在这个数组后面的内存中。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;查看编译器生成的map文件：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1083998/201805/1083998-20180519220338786-270080841.jpg&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;h3&gt;果然，第二个数组紧邻着第一个数组存储。&lt;/h3&gt;
-&lt;p&gt;第一个数组读取越界之后，读到了第二个数组。&lt;/p&gt;
-&lt;p&gt;到此，问题解决。&lt;/p&gt;
-
-&lt;h2&gt;总结：&lt;/h2&gt;
-&lt;p&gt;一定要看到程序的内在联系。分析内存虽然困难，但是却是找到烦人bug 的捷径。&lt;/p&gt;
-
-</description>
-<pubDate>Sat, 19 May 2018 14:10:00 +0000</pubDate>
-<dc:creator>Andrew_qian</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/qsyll0916/p/9061841.html</dc:identifier>
-</item>
-<item>
-<title>2.Spring构建REST Web Service - 星云博客园</title>
-<link>http://www.cnblogs.com/xingyunblog/p/9060596.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/xingyunblog/p/9060596.html</guid>
-<description>&lt;p&gt;上篇文章我们已经对Spring 已经有了一个初步的认识，接下来本篇文章我们将继续一起在官网学习新技术。 原文地址：&lt;a href=&quot;https://spring.io/guides/gs/rest-service/&quot; target=&quot;_blank&quot;&gt;https://spring.io/guides/gs/rest-service/&lt;br/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;本指南指导您使用Spring创建一个“Hello World”REST Web Service 的过程。&lt;/p&gt;
-
-&lt;p&gt;Tips: 上面已经提到，我们将使用Spring创建一个“Hello World”REST Web服务的过程，但是最终的效果是什么样呢？&lt;/p&gt;
-&lt;p&gt;我们将构建一个接受HTTP GET请求的服务：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-http:&lt;span&gt;//&lt;/span&gt;&lt;span&gt;localhost:8080/greeting&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;当我们发出上面的Http Get 请求后，会响应返回下面的JSON 内容。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-{&quot;id&quot;:1,&quot;content&quot;:&quot;Hello, World!&quot;}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;我们也可以带一个参数进行请求&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-http:&lt;span&gt;//&lt;/span&gt;&lt;span&gt;localhost:8080/greeting?name=User&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;strong&gt;Name&lt;/strong&gt;参数值重写“Word”的默认值，并反映在响应中：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-{&quot;id&quot;:1,&quot;content&quot;:&quot;Hello, User!&quot;}
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;ul readability=&quot;0&quot;&gt;&lt;li&gt;
-&lt;p&gt;大约十五分钟&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;一个喜欢的文本编辑器或者IDE&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.oracle.com/technetwork/java/javase/downloads/index.html&quot;&gt;JDK 1.8&lt;/a&gt; or later&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-0.24&quot;&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.gradle.org/downloads&quot;&gt;Gradle 4+&lt;/a&gt; or &lt;a href=&quot;https://maven.apache.org/download.cgi&quot;&gt;Maven 3.2+&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-0.6&quot;&gt;
-&lt;p&gt;You can also import the code straight into your IDE:&lt;/p&gt;
-
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;像大多数Spriing 入门指南一样，你可以从头开始，完成每一步，或者你可以绕过已经熟悉的基本设置步骤。不管怎样，你最终都会得到工作代码&lt;/p&gt;
-&lt;h2&gt;3.1 获取工作代码&lt;/h2&gt;
-&lt;p&gt;  a.使用Maven构建&lt;/p&gt;
-&lt;p&gt;  b. 使用Gradle构建&lt;/p&gt;
-&lt;p&gt;  &lt;strong&gt;c. 使用IDE构建&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;  d.  &lt;a href=&quot;https://github.com/spring-guides/gs-rest-service/archive/master.zip&quot; target=&quot;_blank&quot;&gt;点击下载&lt;/a&gt; 然后 解压仓库源码&lt;/p&gt;
-&lt;p&gt;  e. 使用git 克隆&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-git clone https:&lt;span&gt;//&lt;/span&gt;&lt;span&gt;github.com/spring-guides/gs-rest-service.git&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面有五种方法，但是由于之后我们会经常使用IDE来完成这些操作，所以这里我们使用IDE 来构建入门指南项目&lt;/p&gt;
-&lt;h3&gt;3.1.1 用STS开始入门指南&lt;/h3&gt;
-&lt;p&gt;本指南引导您&lt;a href=&quot;https://spring.io/guides/gs/sts/&quot; target=&quot;_blank&quot;&gt;使用Spring工具套件（STS）构建一个入门指南&lt;/a&gt;。&lt;/p&gt;
-&lt;h4&gt;3.1.1.1 你将会构建什么？&lt;/h4&gt;
-&lt;p&gt;您将选择Spring指南并将其导入Spring Tool Suite。然后你可以阅读指南，处理代码，运行项目。&lt;/p&gt;
-&lt;h4&gt;3.1.1.2 你需要什么？&lt;/h4&gt;
-&lt;h4&gt;3.1.1.3 安装STS&lt;/h4&gt;
-&lt;p&gt;   如果你还没有安装STS，请访问上面的链接。从那里，您可以下载一个副本为您的平台。要安装它，只需解压缩下载的存档文件。&lt;/p&gt;
-&lt;p&gt;   当你完成后，继续登陆 STS&lt;/p&gt;
-&lt;h4&gt;3.1.1.4 导入入门指南&lt;/h4&gt;
-&lt;p&gt;   使用STS启动并运行，从文件菜单打开Import Spring Getting Started Content 向导。&lt;/p&gt;
-&lt;p&gt; 点击File ——&amp;gt; New ————&amp;gt; Import Spring Geting Started Content&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519164627701-174218420.png&quot; alt=&quot;&quot; width=&quot;524&quot; height=&quot;450&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后会弹出来一个窗口向导，将为您提供从Spring网站搜索和挑选任何已发布指南的机会。&lt;/p&gt;
-&lt;p&gt;你可以浏览列表，或者输入搜索词来立即过滤选项。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;当提供即时搜索结果时，该标准适用于标题和描述。支持通配符。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;输入rest ，选择 Rest Service ,点击Finish &lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519212411941-1107593705.png&quot; alt=&quot;&quot; width=&quot;486&quot; height=&quot;592&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;您可以选择Maven或Gradle作为构建系统来使用。&lt;/p&gt;
-&lt;p&gt;您还可以决定是否抓取初始代码集、完成代码集，或两者兼而有之。&lt;/p&gt;
-&lt;p&gt;对于大多数项目，&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;（initial）初始代码集是一个空的项目，使得您可以通过指南复制和粘贴您的方式&lt;/li&gt;
-&lt;li&gt;  (Complete)完整的代码集是来自已经进入的指南的所有代码。如果你抓住这两个，你可以比较你的工作与指南的差异。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最后，你可以让STS向网站上的指南打开浏览器标签。这会让你在不离开STS的情况下通过向导工作。&lt;/p&gt;
-&lt;p&gt; STS将在您的工作区中创建两个新项目，导入消耗REST代码库（初始和完整），并在STS中打开浏览器选项卡，如下所示：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519212620858-905180767.png&quot; alt=&quot;&quot; width=&quot;536&quot; height=&quot;453&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Tips: &lt;/p&gt;
-&lt;p&gt;gs-rest-service-complete 是完成后的项目&lt;a href=&quot;https://spring.io/guides/gs/consuming-rest/&quot; target=&quot;_blank&quot;&gt;&lt;br/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;gs-rest-service-initial 是初始化一个空的项目&lt;/p&gt;
-&lt;h3&gt;3.1.2 用Intellij Idea 开始入门指南&lt;/h3&gt;
-&lt;p&gt; 本指南指导您使用Intellij Idea 构建一个入门指南。&lt;/p&gt;
-&lt;h4&gt;3.1.2.1 你将会构建什么？&lt;/h4&gt;
-&lt;p&gt;你会选择一个Spring指南并导入到iTeliJ的想法中。然后你可以阅读指南，处理代码，运行项目。&lt;/p&gt;
-&lt;h4&gt;3.1.2.2 你需要准备什么？&lt;/h4&gt;
-&lt;h4&gt;3.1.2.3 安装 IntelliJ IDEA&lt;/h4&gt;
-&lt;p&gt;如果你还没有安装 IntelliJ IDEA (Ultimate Edition) ，请访问上面的链接。从那里，您可以下载一个副本为您的平台。要安装它，只需解压缩下载的存档文件。&lt;/p&gt;
-&lt;p&gt; 当你完成后，继续启动Intellij IDEA&lt;/p&gt;
-&lt;h4&gt;3.1.2.4 导入入门指南&lt;/h4&gt;
-&lt;p&gt;要导入现有的项目，需要一些代码，&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/spring-guides/gs-rest-service/archive/master.zip&quot; target=&quot;_blank&quot;&gt;点击下载&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;或者使用Git 克隆或复制其中一个入门指南，例如REST服务指南：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-git clone https:&lt;span&gt;//&lt;/span&gt;&lt;span&gt;github.com/spring-guides/gs-rest-service.git&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;下载解压后如图所示&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519172647242-349165433.png&quot; alt=&quot;&quot; width=&quot;470&quot; height=&quot;416&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;使用Intellij IDEA 启动和运行，点击欢迎屏幕上的导入项目，或在主菜单上打开文件：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519172336334-1134965268.png&quot; alt=&quot;&quot; width=&quot;486&quot; height=&quot;476&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 在弹出对话框中，确保在完整文件夹下选择Maven的POM.xml或Gradle的build.gradle文件：&lt;/p&gt;
-&lt;p&gt;这里我们选择build.gradle&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519172609545-1665903101.png&quot; alt=&quot;&quot; width=&quot;497&quot; height=&quot;691&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Intellij IDEA 将创建一个项目，所有的代码从指南准备运行。&lt;/p&gt;
-&lt;p&gt;保持默认，点击OK&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519173050828-2131533873.png&quot; alt=&quot;&quot; width=&quot;498&quot; height=&quot;292&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;构建完成后如图所示&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519173810440-121996162.png&quot; alt=&quot;&quot; width=&quot;446&quot; height=&quot;632&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;3.2 创建资源表示类&lt;/h2&gt;
-&lt;p&gt; 既然已经建立了项目并建立了系统，就可以创建Web服务。&lt;/p&gt;
-&lt;p&gt; 通过考虑服务交互来开始这个过程。&lt;/p&gt;
-&lt;p&gt;服务将处理查询t /greeting  GET 请求，可选地在查询字符串中使用name参数。GET请求应该返回一个200 OK响应，其中JSON在表示greetin的主体中。它应该看起来像这样：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;{
-    &lt;/span&gt;&quot;id&quot;: 1&lt;span&gt;,
-    &lt;/span&gt;&quot;content&quot;: &quot;Hello, World!&quot;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;ID字段是问候语的唯一标识符，content是问候语的文本表示。&lt;/p&gt;
-&lt;p&gt; 为了建模问候语表示，您创建一个资源表示类。提供一个字段，构造函数普通java对象，并为ID和content数据访问：&lt;/p&gt;
-&lt;p&gt;src/main/java/hello/Greeting.java&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;package&lt;/span&gt;&lt;span&gt; hello;
-
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Greeting {
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;long&lt;/span&gt;&lt;span&gt; id;
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;final&lt;/span&gt;&lt;span&gt; String content;
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Greeting(&lt;span&gt;long&lt;/span&gt;&lt;span&gt; id, String content) {
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.id =&lt;span&gt; id;
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.content =&lt;span&gt; content;
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;long&lt;/span&gt;&lt;span&gt; getId() {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; id;
-    }
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; String getContent() {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; content;
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt; 正如您在下面的步骤中看到的，Spring使用Jackson JSON库自动将问候类型的实例封送到JSON中。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt; 接下来，创建将为这些问候服务的资源控制器。&lt;/p&gt;
-&lt;h2&gt;3.3 创建资源Controller&lt;/h2&gt;
-&lt;p&gt;在Spring构建REST Web服务的方法中，HTTP请求由控制器处理。这些组件很容易被@ RESTController注释标识，下面的GreetingController通过返回Greeting 类的新实例来处理GET请求/greeting：&lt;/p&gt;
-&lt;p&gt; src/main/java/hello/GreetingController.java&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;package&lt;/span&gt;&lt;span&gt; hello;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.concurrent.atomic.AtomicLong;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.RequestMapping;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.RequestParam;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.web.bind.annotation.RestController;
-
-@RestController
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; GreetingController {
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; String template = &quot;Hello, %s!&quot;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; AtomicLong counter = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; AtomicLong();
-
-    @RequestMapping(&lt;/span&gt;&quot;/greeting&quot;&lt;span&gt;)
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Greeting greeting(@RequestParam(value=&quot;name&quot;, defaultValue=&quot;World&quot;&lt;span&gt;) String name) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Greeting(counter.incrementAndGet(),
-                            String.format(template, name));
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这个控制器简洁明了，但引擎盖下还有很多事情要做。让我们一步一步地打破它。&lt;/p&gt;
-&lt;p&gt; @RequestMapping  注解 确保将HTTP请求 /greeting映射到 greeting()方法。&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;上面的示例不指定GET、PUT、POST等等，因为@RequestMapping 默认映射所有HTTP操作。使用@RequestMapping（Method= GET）来缩小此映射。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;@RequestParam将查询字符串参数name 的值绑定到greeting（）方法的name参数中。 如果请求中缺少name参数，则使用“World”的默认值。&lt;/p&gt;
-&lt;p&gt;方法体的实现基于计数器的下一个值创建并返回一个带有id和content属性的新Greeting对象，并使用问候template 格式化给定name。&lt;/p&gt;
-
-&lt;p&gt;传统的MVC控制器和上面的RESTful Web服务控制器之间的一个主要区别在于HTTP响应主体的创建方式。&lt;/p&gt;
-&lt;p&gt;这个RESTful Web服务控制器只需填充并返回一个Greeting对象，而不是依赖视图技术将问候数据的服务器端呈现呈现给HTML。&lt;/p&gt;
-&lt;p&gt;对象数据将作为JSON直接写入HTTP响应。&lt;/p&gt;
-&lt;p&gt;此代码使用Spring 4的新的@RestController注释，该注释将类标记为控制器，其中每个方法都返回一个域对象而不是视图。 它是@Controller和@ResponseBody的缩写。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;@RestController = = @Controller + @ResponseBody &lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Greeting对象必须转换为JSON。 由于Spring的HTTP消息转换器支持，您不需要手动执行此转换。&lt;/p&gt;
-&lt;p&gt;由于Jackson 2位于classpath中，因此会自动选择Spring的MappingJackson2HttpMessageConverter将Greeting实例转换为JSON。&lt;/p&gt;
-&lt;h2&gt;3.4 使应用程序可执行&lt;/h2&gt;
-&lt;p&gt;虽然可以将此服务作为传统WAR文件打包以部署到外部应用程序服务器，但下面演示的更简单的方法会创建独立应用程序。&lt;/p&gt;
-&lt;p&gt;您将所有内容打包到一个单独的，可执行的JAR文件中，由一个良好的旧Java main（）方法驱动。&lt;/p&gt;
-&lt;p&gt;一路上，您使用Spring的支持将Tomcat servlet容器作为HTTP运行时嵌入，而不是部署到外部实例。&lt;/p&gt;
-&lt;div class=&quot;paragraph&quot; readability=&quot;11.5&quot;&gt;
-&lt;p&gt;&lt;code&gt;src/main/java/hello/Application.java&lt;/code&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;package&lt;/span&gt;&lt;span&gt; hello;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.boot.SpringApplication;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Application {
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-        SpringApplication.run(Application.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args);
-    }
-}&lt;/span&gt;&lt;code&gt; &lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;SpringBootApplication是一个方便的注解，它增加了以下所有内容：&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;@Configuration将类标记为应用程序上下文的bean定义的来源。&lt;/li&gt;
-&lt;li&gt;@EnableAutoConfiguration通知Spring Boot根据类路径设置，其他bean和各种属性设置开始添加bean。&lt;/li&gt;
-&lt;li&gt;通常你会为Spring MVC应用程序添加@EnableWebMvc，但Spring Boot在类路径中看到spring-webmvc时会自动添加。 这将该应用程序标记为Web应用程序并激活关键行为，例如设置DispatcherServlet。&lt;/li&gt;
-&lt;li&gt;@ComponentScan告诉Spring在hello包中查找其他组件，配置和服务，以便找到控制器。&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;/div&gt;
-&lt;p&gt;main（）方法使用Spring Boot的SpringApplication.run（）方法启动应用程序。你有没有注意到没有一行XML？ 没有web.xml文件。这个Web应用程序是100％纯Java，您不必处理配置任何管道或基础设施。&lt;/p&gt;
-&lt;h2&gt;3.5 构建一个可执行的JAR&lt;/h2&gt;
-&lt;p&gt;您可以使用Gradle或Maven从命令行运行应用程序。 或者您可以构建一个包含所有必需的依赖项，类和资源的可执行JAR文件，并运行该文件。 这使得在整个开发生命周期内跨越不同环境等，将服务作为应用程序发布，版本化和部署变得非常容易。&lt;/p&gt;
-&lt;p&gt;如果您正在使用Gradle，则可以使用./gradlew bootRun运行该应用程序。 或者您可以使用./gradlew构建构建JAR文件。 然后你可以运行JAR文件：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-java -jar build/libs/gs-rest-service-0.1.0.jar
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;如果您使用的是Maven，则可以使用./mvnw spring-boot：run来运行该应用程序。 或者，您可以使用./mvnw clean包构建JAR文件。 然后你可以运行JAR文件：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-java -jar target/gs-rest-service-0.1.0.jar
-&lt;/pre&gt;&lt;/div&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;上述过程将创建一个可运行的JAR。 您也可以选择构建经典的WAR文件。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;记录输出显示。 该服务应该在几秒钟内启动并运行。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/622489/201805/622489-20180519214059131-2005798961.png&quot; alt=&quot;&quot; width=&quot;540&quot; height=&quot;264&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;3.6 测试 service&lt;/h2&gt;
-&lt;p&gt; 现在这个service已经启动，我们访问 &lt;a href=&quot;http://127.0.0.1:8080/greeting&quot; target=&quot;_blank&quot;&gt;http://127.0.0.1:8080/greeting&lt;/a&gt; 你将会看到这样的结果&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-{&quot;id&quot;:1,&quot;content&quot;:&quot;Hello, World!&quot;}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;提供一个name参数进行查询，访问 &lt;a href=&quot;http://localhost:8080/greeting?name=User&quot; target=&quot;_blank&quot;&gt;http://localhost:8080/greeting?name=User&lt;/a&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-{&quot;id&quot;:2,&quot;content&quot;:&quot;Hello, User!&quot;}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;注意content 文本内容已经从 &quot;Hello ,World!&quot; 变成了&quot; Hello, User!&quot;&lt;/p&gt;
-&lt;p&gt;此更改演示了GreetingController中的@RequestParam排列按预期工作。 name参数已被赋予默认值“World”，但始终可以通过查询字符串显式覆盖。&lt;/p&gt;
-&lt;p&gt;还要注意id属性如何从1更改为2.这证明您正在针对多个请求中的同一个GreetingController实例工作，并且它的计数器字段按照预期在每次调用时递增。&lt;/p&gt;
-&lt;p&gt;恭喜！ 您刚刚用Spring开发了一个RESTful Web Service。&lt;/p&gt;
-&lt;p&gt;源码下载：&lt;a href=&quot;https://github.com/geekxingyun/JavaEE-Framework-Sample/tree/master/Spring-RESTful-Web-Service-Sample&quot; target=&quot;_blank&quot;&gt;https://github.com/geekxingyun/JavaEE-Framework-Sample/tree/master/Spring-RESTful-Web-Service-Sample&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Sat, 19 May 2018 13:52:00 +0000</pubDate>
-<dc:creator>星云博客园</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/xingyunblog/p/9060596.html</dc:identifier>
-</item>
-<item>
-<title>第十一章——训练深度神经网络 - royhoo</title>
-<link>http://www.cnblogs.com/royhoo/p/Training-Deep-Neural-Nets.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/royhoo/p/Training-Deep-Neural-Nets.html</guid>
-<description>&lt;p&gt;上一章我们训练了一个浅层神经网络，只要两个隐层。但如果处理复杂的问题，例如从高分辨率图像中识别上百种类的物品，这就需要训练一个深度DNN。也行包含十层，每层上百个神经元，几十万个连接。这绝不是闹着玩的：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;首先，需要面对梯度消失（或者相对的梯度爆炸）问题，这会导致浅层很难被训练。&lt;/li&gt;
-&lt;li&gt;其次，这么大一个网络，训练速度很慢。&lt;/li&gt;
-&lt;li&gt;最后，一个包含上百万参数的模型，存在很大过拟合的风险。&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;11.1 梯度消失（爆炸）问题&lt;/h2&gt;
-&lt;p&gt;反向传播算法会计算损失函数关于每一个参数的偏导数，然后使用梯度下降更新参数。不幸的是，反向传播时，梯度经常会逐层越来越小，导致底层权重基本保持不变，从而不能得到好的训练结果。这就是所谓的梯度消失问题。而有时候还可能发生相反的情况：很多层的权重每次修改量很大，导致不能收敛。这就是梯度爆炸问题，主要发生在RNN。更普遍的问题是，深度神经网络往往梯度不稳定，不同的层学习速度差别很大。&lt;/p&gt;
-&lt;p&gt;这一问题知道2010才有了突破性的进展。在Xavier Glorot和Yoshua Bengio的论文&lt;a href=&quot;http://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf&quot; target=&quot;_blank&quot;&gt;Understanding the Difficulty of Training Deep Feedforward Neural Networks&lt;/a&gt;中，作者发现了一些造成这一问题的可能因素，包括logistic sigmoid激活函数和当时流行的随机初始化方式（使用使用均值为0标准差为1的正态分布进行初始化）。他们表明，这一激活函数加上这种初始化方式，使得每一层输出的方差远大于输入。这一情况在使用均值是0.5的logistic函数时变得更为糟糕（双曲正切函数的均值是0，从而在深度网络中表现优于logistic函数）。&lt;/p&gt;
-&lt;p&gt;观察图11-1的激活函数，随着输入值的绝对值变大，函数值趋近于1和0，此时导数趋近于0。因此在方向传播时，几乎没有导数传回去。 &lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180510194245898-2135757874.png&quot; alt=&quot;&quot; width=&quot;397&quot; height=&quot;256&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;图11-1 Logistic激活函数&lt;/p&gt;
-&lt;h3&gt;11.1.1 Xavier and He Initialization&lt;/h3&gt;
-&lt;p&gt;在其论文中，Glorot and Bengio提供了一种可以显著改善该问题的建议。我们需要信号在两个方向都可以正常的流动：在前向做出预测和反向传播梯度时。我们不希望信号消失，也不希望它保障或者饱和（也就是趋近于某一个值）。为了使信号正常流动，作者主张每一层输入和输出的方差相等，并且在反向传播时梯度的方差保持不变（如果对其中的数学细节感兴趣，可以研究一下论文）。我们无法同时满足这连个条件，不过作者提供了更为宽松的约束条件，并且在实践中表现还不错，各个连接的权重必须按照如下方式初始化：&lt;/p&gt;
-&lt;p&gt;正态分布均值0，标准差$\sigma = \sqrt{\frac{2}{n_{\mbox{input}} + n_{\mbox{output}}}}$&lt;/p&gt;
-&lt;p&gt;或者，$-r$到$+r$之间的均匀分布，并且$r = \sqrt{\frac{6}{n_{\mbox{input}} + n_{\mbox{output}}}}$&lt;/p&gt;
-&lt;p&gt;其中，$n_{\mbox{input}}$和$n_{\mbox{output}}$是改成输入和输出数量。这一初始化策略称为Xavier初始化，或者Glorot初始化。&lt;/p&gt;
-&lt;p&gt;如果输入和输出数量大致相等，公式可以简化为$\sigma = 1/\sqrt{n_{\mbox{input}}}$，$\sigma = \sqrt{3} / \sqrt{n_{\mbox{input}}}$，这正是我们在&lt;a href=&quot;http://www.cnblogs.com/royhoo/p/Introduction-to-Artificial-Neural-Networks.html&quot; target=&quot;_blank&quot;&gt;第十章&lt;/a&gt;使用的。&lt;/p&gt;
-&lt;p&gt;使用Xavier初始化策略可以使训练速度得到显著提升，这正是为当今深度学习带来成果的一个技术手段。一些&lt;a href=&quot;https://arxiv.org/pdf/1502.01852v1.pdf&quot; target=&quot;_blank&quot;&gt;不久前的论文&lt;/a&gt;提供了类似的，针对其他激活函数的初始化策略，如表11-1所示。所有这些初始化策略有时被称作He（这是中国姓氏，但不知道是何，贺，还是和）初始化。&lt;/p&gt;
-&lt;p&gt;表11-1. 针对不同激活函数的初始化策略&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180511143646947-1224159618.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h3&gt;11.1.2 不饱和（Nonsaturating）激活函数&lt;/h3&gt;
-&lt;p&gt;$f$是不饱和函数当且仅当$\mathop{\lim}\limits_{z \to \infty} |f(z)| = +\infty$&lt;/p&gt;
-&lt;p&gt;Glorot和Bengio在其2010年的论文中认为，带来梯度消失（爆炸）问题的重要原因是可供选择的激活函数太少。最初人们倾向于选择sigmoid激活函数，但事实上在神经网络中其他激活函数表现更好，尤其是ReLU。很重要的原因是ReLU对正值具有不饱和性（也就是没有上限）。&lt;/p&gt;
-&lt;p&gt;不过ReLU也并不完美，会遇到被称作dying ReLUs的问题：在训练期间，有些神经元事实上死掉了，除了0之外什么也不会输出（这里的输出，应该指的是反向传播时，高层对底层输出的梯度）。有时候一半的神经元都是死的，尤其是学习率较大的情况下。一旦出现这一情况，基本上就不能恢复过来了，因为当ReLU的输入是负数时，其梯度是0。&lt;/p&gt;
-&lt;p&gt;为了解决这一问题，可以使用ReLU的变体，比如leaky ReLU（如图11-2）。$\mbox{LeakyReLU}_{\alpha}(z) = max(\alpha z, z)$。其中，超参数$\alpha$定义了输入为负值时的倾斜度，一般设置为0.01。这个小斜坡保证了leaky ReLU不会死掉，不过也就可能进入长期的昏迷。毕竟还活着，长期昏迷后还是有可能苏醒过来的。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180511154739739-163869998.png&quot; alt=&quot;&quot; width=&quot;379&quot; height=&quot;244&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;图11-2 Leaky ReLU&lt;/p&gt;
-&lt;p&gt;Djork-Arné Clevert等人在其&lt;a href=&quot;https://arxiv.org/pdf/1511.07289v5.pdf&quot; target=&quot;_blank&quot;&gt;2015年的一篇论文&lt;/a&gt;中提出了一种称为exponential linear unit (ELU)的新的激活函数，表现好过ReLU的所有变体。&lt;/p&gt;
-&lt;p&gt;\begin{align*}&lt;br/&gt;\mbox{ELU}_{\alpha}(z) = \left\{\begin{matrix}&lt;br/&gt;\alpha(\exp(z) - 1) &amp;amp;\mbox{if} &amp;amp;z &amp;lt; 0 \\&lt;br/&gt;z &amp;amp;\mbox{if} &amp;amp; z \geq 0&lt;br/&gt;\end{matrix}\right.&lt;br/&gt;\end{align*}&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180511163827492-871948132.png&quot; alt=&quot;&quot; width=&quot;392&quot; height=&quot;251&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;图11-3 ELU激活函数&lt;/p&gt;
-&lt;p&gt;选择激活函数时，一般ELU &amp;gt; leaky ReLU (及其变种) &amp;gt; ReLU &amp;gt; tanh &amp;gt; logistic。如果你更关心运行时表现，leaky ReLU要优于ELU。&lt;/p&gt;
-&lt;h3&gt;11.1.3 Batch Normalization&lt;/h3&gt;
-&lt;p&gt;尽管He initialization搭配ELU可以缓解训练初期的梯度消失（爆炸）问题，但是并不能保证在整个训练周期都不会出现这一问题。Sergey Ioffe和Christian Szegedy在其&lt;a href=&quot;https://arxiv.org/pdf/1502.03167v3.pdf&quot; target=&quot;_blank&quot;&gt;2015年的论文&lt;/a&gt;中提出了一种被称作Batch Normalization (BN)的解决方案。比梯度消失（爆炸）更一般的问题是，由于前层参数的变化，造成后层输入数据分布变化的问题（他们称为Internal Covariate Shift问题）。&lt;/p&gt;
-&lt;p&gt;该技术就是在每一层应用激活函数之前，增加一些操作。首先对数据进行简单的zero-centering和normalizing（其实就是转换成均值为0，标准差为1的数据），然后使用两个参数对数据进行scaling和shifting（缩放和平移）操作。换句话说，这两步就是让模型学习每层输入最优的scale（规模）和均值。&lt;/p&gt;
-&lt;p&gt;批规范化算法（Batch Normalization algorithm）：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180519132543508-737060804.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;$\mu_B$是经验均值，在整个mini-batch上进行评估。&lt;/li&gt;
-&lt;li&gt;$\sigma_B$是经验标准差，也是在整个mini-batch上评估的。&lt;/li&gt;
-&lt;li&gt;$m_B$是mini-batch的实例数。&lt;/li&gt;
-&lt;li&gt;$\hat{X}^{(i)}$是zero-centered和normalized后的输入数据。&lt;/li&gt;
-&lt;li&gt;$\gamma$是该层的scaling参数。&lt;/li&gt;
-&lt;li&gt;$\beta$是该层的shifting参数。&lt;/li&gt;
-&lt;li&gt;$\epsilon$是为了避免除零的，通常为$10^{-3}$，也被称为平滑系数。&lt;/li&gt;
-&lt;li&gt;$Z^{(i)}$是BN操作的输出。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;在测试阶段，不存在mini-batch来计算经验均值和标准差，简单地使用整个训练集的均值和标准差即可。 These are typically efficiently computed during training using a moving average.（这句话没看懂。moving average是一种快速计算均值和标准差的技术？）所以，每个batch-normalized层需要学习四个参数：$\gamma$(scale)，$\beta$(offset)，$\mu$(mean)和$\sigma_B$(standard deviation)。&lt;/p&gt;
-&lt;p&gt;作者宣称，该技术提升了他们实验所采用的所有深度学习网络。梯度消失问题得到了明显的环境，以至于可以使用饱和激活函数，比如tanh，甚至是logistic激活函数。网络对权重初始值的敏感度也明显降低。他们也可以提到学习率来加快训练速度。此外，Batch Normalization也充当了正则化的角色，减少其他正则化技术的使用（比如后面章节将会介绍的dropout）。&lt;/p&gt;
-&lt;p&gt;当然，该技术有利也有弊——其增加了模型复杂度，这是一种运行时惩罚：额外的计算导致预测缓慢。所以，如果更在意预测效率的话，最好还是选择ELU + He initialization。&lt;/p&gt;
-&lt;p&gt;然后是Batch Normalization的TensorFlow实现，代码可参考作者的GitHub。&lt;/p&gt;
-&lt;h3&gt;11.1.4 Gradient Clipping&lt;/h3&gt;
-&lt;p&gt;减轻梯度爆炸的一项技术是使反向传播的梯度不超过某个阈值（这在训练rnn时比较有用）。 这一技术称为&lt;a href=&quot;http://proceedings.mlr.press/v28/pascanu13.pdf&quot; target=&quot;_blank&quot;&gt;Gradient Clipping&lt;/a&gt;。现在人们更喜欢Batch Normalization，不过了解一下Gradient Clipping还是有帮助的。&lt;/p&gt;
-&lt;h2&gt;11.2 Reusing Pretrained Layers&lt;/h2&gt;
-&lt;p&gt;如果训练一个大型的DNN，一般都不会从零开始，而是找到一个已经训练好的，与你的任务相似的模型。复用旧模型的底层，这称为transfer learning。这不仅会加快训练速度，而且需要更少的训练数据。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180519152650381-991953039.png&quot; alt=&quot;&quot; width=&quot;457&quot; height=&quot;354&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;图11-4 Reusing pretrained layers&lt;/p&gt;
-&lt;p&gt;在上图中，如果新旧模型训练数据的结构不一致，那就需要增加一步预处理，将数据的格式转换为就模型需要的。一般情况下，transfer learning在输入值具有相似的低级别特征时表现良好。&lt;/p&gt;
-&lt;h3&gt;11.2.1 Reusing a TensorFlow Model&lt;/h3&gt;
-&lt;p&gt;讲解在原始模型使用TensorFlow时，新的模型如何复用。&lt;/p&gt;
-&lt;h3&gt;11.2.2 Reusing Models from Other Frameworks&lt;/h3&gt;
-&lt;p&gt;讲解如果模型是其他框架实现的，在TensorFlow中如何复用。&lt;/p&gt;
-&lt;h3&gt;11.2.3 Freezing the Lower Layers&lt;/h3&gt;
-&lt;p&gt;就是冷冻住低层级的参数，使其在反向传播时不被更新。&lt;/p&gt;
-&lt;h3&gt;11.2.4 Caching the Frozen Layers&lt;/h3&gt;
-&lt;p&gt;如果使用了11.2.3的技术，由于前面几层的参数是不变的，可以将最高冷冻层的输出值缓存起来，不用每次前向传播都去计算。这可以提高训练速度。&lt;/p&gt;
-&lt;h3&gt;11.2.5 Tweaking, Dropping, or Replacing the Upper Layers&lt;/h3&gt;
-&lt;p&gt;原始模型的输出层会被替换掉，因为它一本对新任务来讲是没用的，甚至与新任务输出值的个数都不匹配。类似的，原始模型的高级隐层对新任务的用处较小。我们需要找到适合复用的层数。&lt;/p&gt;
-&lt;p&gt;首先复用所有层，训练模型并评估其表现。然后解冻一个或两个隐层，训练之后观察其表现是否提升。训练数据越多，就解冻越多的层。&lt;/p&gt;
-&lt;h3&gt;11.2.6 Model Zoos&lt;/h3&gt;
-&lt;p&gt;这就是模型仓库，可以找到别人训练好的模型。&lt;/p&gt;
-&lt;p&gt;TensorFlow的model zoo位于&lt;a href=&quot;https://github.com/tensorflow/models&quot; target=&quot;_blank&quot;&gt;https://github.com/tensorflow/models&lt;/a&gt;。包含目前最先进的图像分类网络，比如VGG, Inception, and ResNet。&lt;/p&gt;
-&lt;p&gt;另一个是Caffe’s Model Zoo：&lt;a href=&quot;https://github.com/BVLC/caffe/wiki/Model-Zoo&quot; target=&quot;_blank&quot;&gt;https://github.com/BVLC/caffe/wiki/Model-Zoo&lt;/a&gt;。&lt;/p&gt;
-&lt;h3&gt;11.2.7 Unsupervised Pretraining&lt;/h3&gt;
-&lt;p&gt;假设你要处理一个复杂的任务，并且没有足够带标签的训练数据。并且的是，也找不到针对类似任务训练好的模型。不要绝望！首先，你当然应该收集更多的带标签数据，如果这很困难或者很昂贵，仍然可以使用unsupervised pretraining完成任务（如图11-5）。这就是说，如果你有大量的无标签数据，那就可以一层层地训练，使用无监督特征检测（feature detector）算法，比如Restricted Boltzmann Machines或者autoencoders。等到所有层都训练完成，就可以使用监督学习对网络进行微调。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180519165254913-1318409057.png&quot; alt=&quot;&quot; width=&quot;624&quot; height=&quot;412&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;图11-5 Unsupervised pretraining&lt;/p&gt;
-&lt;p&gt;这是一个漫长乏味的过程，但是往往表现良好。事实上，这一技术正是Geoffrey Hinton及其团队在2016年使用并带来了神经网络的复兴以及深度学习的成功。&lt;/p&gt;
-&lt;h3&gt;11.2.8 Pretraining on an Auxiliary Task&lt;/h3&gt;
-&lt;p&gt;另外一个选择是，首先训练一个辅助的模型，该模型的标签数据可以轻易生成，然后复用底层来训练模型实现真正的任务。&lt;/p&gt;
-&lt;p&gt;比如，你想建立一个人脸识别系统，并且没有太多的带标签数据。不过你可以在网络随机搜集一些照片，并训练一个模型来识别不同的照片中是否是同一个人。第一个模型会学习到识别人脸的优秀特征，这可以在第二个模型中复用，并减少第二个模型所需的训练数据。&lt;/p&gt;
-&lt;h2&gt;11.3 Faster Optimizers&lt;/h2&gt;
-&lt;p&gt;这一小节的结论是，用AdamOptimizer替换掉GradientDescentOptimizer就行了。我先跳过了，后面有时间再补上这几个优化算法。&lt;/p&gt;
-&lt;h2&gt;11.4 Avoiding Overfitting Through Regularization&lt;/h2&gt;
-&lt;p&gt;神经网络往往参数很多，自由度很大，太容易过拟合，所以应该使用一些正则化技术防止过拟合。&lt;/p&gt;
-&lt;h3&gt;11.4.1 Early Stopping&lt;/h3&gt;
-&lt;p&gt;这在第四章介绍过，就是在校验集表现最好时终止训练。&lt;/p&gt;
-&lt;h3&gt;11.4.2 $l_i$和$l_2$正则&lt;/h3&gt;
-&lt;p&gt;这个也和第四章的意义，跟传统机器模型的方式一样。&lt;/p&gt;
-&lt;h3&gt;11.4.3 Dropout&lt;/h3&gt;
-&lt;p&gt;当前深度神经网络最受欢迎的正则化技术大概就是dropout了。它首先由G. E. Hinton在2012年&lt;a href=&quot;https://arxiv.org/pdf/1207.0580.pdf&quot; target=&quot;_blank&quot;&gt;提出&lt;/a&gt;，并由Nitish Srivastava在其&lt;a href=&quot;http://jmlr.org/papers/volume15/srivastava14a/srivastava14a.pdf&quot; target=&quot;_blank&quot;&gt;论文&lt;/a&gt;中完善。该技术取得了巨大成功。&lt;/p&gt;
-&lt;p&gt;这是一个很简单的算法：在每一步训练，所有神经元（包括输入神经元但不包括输出神经元）都有一个可能“dropped out”的概率$p$，意味着本次训练它可能会被忽视，但在下次训练有可能会被激活。超参数$p$被称作dropout rate，一般被设置为50%。训练结束后，神经元不再被忽视。&lt;/p&gt;
-&lt;p&gt;起初可能觉得吃惊，这一蛮横的算法居然表现良好。我们现在假设，一家公司通过抛硬币决定每个员工是否上班。很明显这家公司要改编其组织架构。任何工作都不能依赖于单独一个人，所以专业技术需要传授给很多人。雇员必须学着与同事合作。如果某员工退出，影响不会太大。虽然不知道这一思想是否适用于公司运营，但其确实适用于神经网络的训练。神经元将对输入值的轻微变化不再敏感，最终会得到一个更加鲁棒，更容易一般化的神经网络。&lt;/p&gt;
-&lt;p&gt;理解dropout巨大威力的另一个途径就是理解，每一步训练其实都在生成一个不同的神经网络。由于每个神经元都可能出席或者缺席，总共有$2^N$（其中，$N$是可忽视神经元总数）种可能的网络。如果训练10000步，本质上就是训练了10000个神经元。最终的神经元可以看成是这些单独神经元的一个averaging ensemble。&lt;/p&gt;
-&lt;p&gt;还有一个技术细节。假设$p = 50%$，在这种情况下测试阶段的神经元数量是训练阶段的两倍。为了弥补这一问题，我们需要在训练结束后对连接权重乘以0.5。更一般的，我们需要在训练结束后对连接权重乘以keep probability (1 – p)。&lt;/p&gt;
-&lt;p&gt;如果观察到模型过拟合，可以增大dropout rate。欠拟合就减小dropout rate。&lt;/p&gt;
-&lt;p&gt;Dropout会显著地降低收敛速度，但通常会得到一个更好的模型。多花费一些训练时间也是值得的。&lt;/p&gt;
-&lt;h3&gt;11.4.4 Max-Norm Regularization&lt;/h3&gt;
-&lt;p&gt;另外一种比较受欢迎的神经网络正则化方法是max-norm正则。对于每一个连接权重$w$，都使其满足$\left \| w \right \|_2 \leq \gamma $，其中$\gamma$是max-norm超参数。&lt;/p&gt;
-&lt;p&gt;算法实现时，一般会先计算$\left \| w \right \|_2$，如果需要的话就对其进行修剪（$w \leftarrow w\frac{r}{\left \| w \right \|_2}$）。&lt;/p&gt;
-&lt;p&gt;降低$\gamma$就可以减少过拟合的可能性。max-norm正则也可以缓解梯度消失（爆炸）问题（如果没使用Batch Normalization）。&lt;/p&gt;
-&lt;p&gt;TensorFlow并不提供现成的max-norm正则，不过作者自己实现了一个。&lt;/p&gt;
-&lt;h3&gt;11.4.5 Data Augmentation&lt;/h3&gt;
-&lt;p&gt;该正则化技术就是通过已经存在的训练集来生成新的训练实例。这一技巧就是生成逼真的训练数据。理想情况下，人无法区分该实例是否自动生成。简单的增加white noise并没有帮助，因为改变必须是可学习的（white noise不能被学习）。例如，根据一个图片，生成各种不同的图片，如下图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/934105/201805/934105-20180519212055242-285907378.png&quot; alt=&quot;&quot; width=&quot;682&quot; height=&quot;420&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 图11-10 使用现有训练样本生成新的实例&lt;/p&gt;
-&lt;h2&gt;11.5 实用的指导方针&lt;/h2&gt;
-&lt;p&gt;DNN默认配置：&lt;/p&gt;
-&lt;p&gt;Initialization：He initialization&lt;br/&gt;Activation function： ELU&lt;br/&gt;Normalization： Batch Normalization&lt;br/&gt;Regularization： Dropout&lt;br/&gt;Optimizer： Adam&lt;br/&gt;Learning rate schedule： None&lt;/p&gt;
-&lt;p&gt;默认的配置可能需要调整：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;如果找不到一个合适的学习率（收敛太慢，增大学习率。然后收敛加快了，但是最终的模型不是最优的），那就可以尝试增加一个learning schedule，比如exponential decay。&lt;/li&gt;
-&lt;li&gt;如果训练集太小，可以实现data augmentation&lt;/li&gt;
-&lt;li&gt;如果想要一个稀疏的模型，可以增加$l_1$正则。需要更加稀疏的话，尝试使用FTRL代替Adam优化，并配合$l_1$正则。&lt;/li&gt;
-&lt;li&gt;如果需要一个能够快速预测的模型，那也许就需要放弃Batch Normalization，改为ELU激活函数。稀疏的模型也能加快预测时间。&lt;/li&gt;
-&lt;/ul&gt;
-</description>
-<pubDate>Sat, 19 May 2018 13:39:00 +0000</pubDate>
-<dc:creator>royhoo</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/royhoo/p/Training-Deep-Neural-Nets.html</dc:identifier>
 </item>
 </channel>
 </rss>
