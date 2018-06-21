@@ -9,6 +9,193 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>I discovered a browser bug</title>
+<link>https://jakearchibald.com/2018/i-discovered-a-browser-bug/</link>
+<guid isPermaLink="true" >https://jakearchibald.com/2018/i-discovered-a-browser-bug/</guid>
+<description>&lt;time class=&quot;article-date&quot; datetime=&quot;2018-06-20&quot;&gt;Posted 20 June 2018&lt;/time&gt;&lt;p&gt;I accidentally discovered a huge browser bug a few months ago and I'm pretty excited about it. Security engineers always seem like the &quot;cool kids&quot; to me, so I'm hoping that now I can be part of the club, and y'know, get into the special parties or whatever.&lt;/p&gt;
+&lt;p&gt;I've noticed that a lot of these security disclosure things are only available as PDFs. Personally, I prefer the web, but if you're a SecOps PDF addict, check out &lt;a href=&quot;https://jakearchibald.com/static/posts/wavethrough/wavethrough.015d7b73b3d0.pdf&quot;&gt;the PDF version of this post&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Oh, I guess the vulnerability needs an extremely tenuous name and logo right? Here goes:&lt;/p&gt;
+
+&lt;p&gt;Why Wavethrough? Well, it involves wave audio, and data is allowed through that shouldn't be. Tenuous enough?&lt;/p&gt;
+&lt;p&gt;All the browser security bugs I cover in this post have since been fixed. Make sure your browser is up to date.&lt;/p&gt;
+&lt;p&gt;As I said, I stumbled into this whole thing by accident. Here's how it happened from the start:&lt;/p&gt;
+
+&lt;p&gt;If you have a service worker like this:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;8&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;nx&quot;&gt;addEventListener&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'fetch'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+  &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;respondWith&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;fetch&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;request&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;});&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;…the idea is you shouldn't see any behavioural difference between this and no-service-worker. Unfortunately cross-origin &lt;code&gt;&amp;lt;video&amp;gt;&lt;/code&gt; and &lt;code&gt;&amp;lt;audio&amp;gt;&lt;/code&gt; doesn't quite behave the same. Seeking doesn't work, and sometimes it fails entirely.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;&amp;lt;video&amp;gt;&lt;/code&gt; and &lt;code&gt;&amp;lt;audio&amp;gt;&lt;/code&gt; are different from most web APIs in that they use range requests. Ok, let's push that onto the stack:&lt;/p&gt;
+&lt;h3 id=&quot;range-requests&quot;&gt;Range requests&lt;/h3&gt;
+&lt;p&gt;Usually when the browser makes a request, it's asking for the whole resource. However, HTTP defines the &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range&quot;&gt;&lt;code&gt;Range&lt;/code&gt; header&lt;/a&gt; and &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/206&quot;&gt;partial content responses&lt;/a&gt;. For example, the request may have the following header:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;n&quot;&gt;Range&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bytes&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;50&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;…which is requesting bytes 50-100 (inclusive) of the resource. The server may then respond with a &lt;code&gt;206 Partial Content&lt;/code&gt;, and a header like this:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
+&lt;pre&gt;
+Content-Range: bytes=50-100/5000
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;…indicating it's returning bytes 50-100 (inclusive) of a 5000 byte resource.&lt;/p&gt;
+&lt;p&gt;Browsers use this for resuming downloads, but it's also used by media elements if the user seeks the media, so it can go straight to that point without downloading everything before it, or to pick up metadata if it's one of those annoying media formats that has important metadata at the end of the file.&lt;/p&gt;
+&lt;p&gt;Unfortunately, via a service worker, that &lt;code&gt;Range&lt;/code&gt; header was going missing (dun-dun-dunnnnnnnnn!). This is because media elements make what we call &quot;no-cors&quot; requests. Let's push that onto the stack too:&lt;/p&gt;
+&lt;h3 id=&quot;no-cors-requests&quot;&gt;No-cors requests&lt;/h3&gt;
+&lt;p&gt;If you &lt;code&gt;fetch()&lt;/code&gt; something from another origin, that origin has to give you permission to view the response. By default the request is made without cookies, and if you want cookies to be involved, the origin has to give extra permission for that. If you want to send fancy headers, the browser checks with the origin first, before making the request with the fancy headers. This is known as &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS&quot;&gt;CORS&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;However, some APIs couldn't give a shit about all that. They make &quot;no-cors&quot; requests, so the checks above don't happen. If you make a no-cors request to another origin, it's sent with cookies and you get back an &quot;opaque&quot; response. Developers shouldn't be able to access the data of an opaque response, but particular APIs may interpret that data behind the scenes.&lt;/p&gt;
+&lt;p&gt;Take &lt;code&gt;&amp;lt;img&amp;gt;&lt;/code&gt; for instance. If you include an &lt;code&gt;&amp;lt;img&amp;gt;&lt;/code&gt; that points to another origin, it'll make a no-cors request to that origin using that origin's cookies. If valid image data is returned, it'll display on your site. Although you can't access the pixel data of that image, data is still leaked through the &lt;code&gt;width&lt;/code&gt; and &lt;code&gt;height&lt;/code&gt; of the image. You also know whether or not you received valid image data.&lt;/p&gt;
+&lt;p&gt;Let's say there's an image that's only accessible if the user is logged into a particular site. An attacker can tell from the load/error event of the &lt;code&gt;&amp;lt;img&amp;gt;&lt;/code&gt; whether that user is logged into that site. The user's privacy has been compromised. Yaaaay.&lt;/p&gt;
+&lt;p&gt;Allowing this to happen is a mistake, but we have decades of content depending on this behaviour. We can't simply prevent it, but we can add things to mitigate it in certain situations. If we started the web again, everything would require something like CORS.&lt;/p&gt;
+&lt;p&gt;It isn't just images either. Classic non-module scripts, CSS, and media elements also make no-cors requests by default.&lt;/p&gt;
+&lt;h3 id=&quot;no-cors-ranges-service-workers&quot;&gt;No-cors + ranges + service workers&lt;/h3&gt;
+&lt;p&gt;So, back to our pass-through service worker:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;8&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;nx&quot;&gt;addEventListener&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'fetch'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+  &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;respondWith&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;fetch&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;request&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;});&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;A media element would make a no-cors request with a &lt;code&gt;Range&lt;/code&gt; header. When it's passed to &lt;code&gt;fetch()&lt;/code&gt; the request object is checked. At this point fetch sees a header (&lt;code&gt;Range&lt;/code&gt;) that isn't allowed in no-cors requests, and silently removes it. Therefore the server doesn't see the &lt;code&gt;Range&lt;/code&gt; header, so it just responds with a standard 200 response.&lt;/p&gt;
+&lt;p&gt;Why is this header filtered? Well, no one standardised how they were supposed to work. Actually that deserves its own heading:&lt;/p&gt;
+&lt;h2 id=&quot;range-requests-were-never-standardised&quot;&gt;Range requests were never standardised&lt;/h2&gt;
+&lt;p&gt;They're standardised in HTTP, but not by HTML. We know what the headers look like, and when they should appear, but there's nothing to say what a browser should actually do with them.&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Should all media requests be range requests, or just additional requests?&lt;/li&gt;
+&lt;li&gt;What happens if the returned range ends sooner/later than what the browser asked for?&lt;/li&gt;
+&lt;li&gt;What happens if the returned range starts sooner/later than what the browser asked for?&lt;/li&gt;
+&lt;li&gt;What happens if a range is requested but the server returns a normal 200 response?&lt;/li&gt;
+&lt;li&gt;What happens if a range is requested but the server returns a redirect?&lt;/li&gt;
+&lt;li&gt;What happens if the underlying content appears to have changed between requests?&lt;/li&gt;
+&lt;li&gt;What happens if a normal request is made but a 206 partial is returned?&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;None of this is defined, so browsers all kinda do different things. Yay.&lt;/p&gt;
+&lt;p&gt;We couldn't just add the &lt;code&gt;Range&lt;/code&gt; header to &lt;a href=&quot;https://fetch.spec.whatwg.org/#cors-safelisted-request-header&quot;&gt;the safelist&lt;/a&gt;, as developers would be able to set it to values the browser would never usually send, and that presents a security risk.&lt;/p&gt;
+&lt;p&gt;Also, with a service worker in the middle, you can respond to a request however you want, even if it's a no-cors request to another origin. For example, you can have an &lt;code&gt;&amp;lt;img&amp;gt;&lt;/code&gt; on your page that points to &lt;code&gt;facebook.com&lt;/code&gt;, but your service worker could return data from &lt;code&gt;twitter.com&lt;/code&gt;. This isn't a problem as you can only lie to yourself.&lt;/p&gt;
+&lt;p&gt;However, media elements piece multiple responses together and treat it as a single resource, and that opens up an interesting attack vector: Can known data be mixed with unknown data to reveal the content of the unknown data?&lt;/p&gt;
+&lt;p&gt;I pretended to be a hacker and &lt;a href=&quot;https://github.com/whatwg/fetch/issues/144#issuecomment-368040980&quot;&gt;wrote down all the attacks I could think of&lt;/a&gt;, and &lt;a href=&quot;https://twitter.com/annevk&quot;&gt;Anne van Kesteren&lt;/a&gt; pointed out that some of them were possible without a service worker, as you can do similar things with redirects. So, I investigated how browsers currently handle these situations.&lt;/p&gt;
+&lt;h2 id=&quot;mixing-known-and-unknown-data&quot;&gt;Mixing known and unknown data&lt;/h2&gt;
+&lt;div class=&quot;chat&quot; readability=&quot;31&quot;&gt;
+&lt;p class=&quot;chat-item page-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;Page&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; Hey, this audio tag needs audio data from &lt;span class=&quot;chat-nowrap&quot;&gt;&quot;/whatever.wav&quot;&lt;/span&gt;. &lt;span class=&quot;time&quot;&gt;10:24&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;chat-item cache-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;evil.com&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; No problem, here's 44 bytes of data. &lt;span class=&quot;time&quot;&gt;10:24&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;chat-item page-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;Page&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; Cool, I see this is a PCM WAV header, 1 channel, 44100hz, 8bit, 30mins long. However, that's not enough data, can you send me &lt;span class=&quot;chat-nowrap&quot;&gt;Range: 44-&lt;/span&gt; please? &lt;span class=&quot;time&quot;&gt;10:24&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;chat-item cache-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;evil.com&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; Oh, get that from &lt;span class=&quot;chat-nowrap&quot;&gt;facebook.com/&lt;/span&gt; instead. &lt;span class=&quot;time&quot;&gt;10:24&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;chat-item page-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;Page&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; Ok &lt;span class=&quot;chat-nowrap&quot;&gt;facebook.com/&lt;/span&gt;, here are your cookies, can I get &lt;span class=&quot;chat-nowrap&quot;&gt;Range: 44-&lt;/span&gt; please? &lt;span class=&quot;time&quot;&gt;10:24&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;chat-item server-chat&quot;&gt;&lt;span class=&quot;author&quot;&gt;facebook.com&lt;span&gt;:&lt;/span&gt;&lt;/span&gt; Sure, here you go… &lt;span class=&quot;time&quot;&gt;10:25&lt;/span&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;I created a site that does the above. I used a PCM wav header because everything after the header is valid data, and whatever Facebook returned would be treated as uncompressed audio.&lt;/p&gt;
+&lt;p&gt;In my opinion, browsers should reject the response from Facebook, as the media element shouldn't allow mixing visible and opaque data. Nor should it allow opaque data from multiple sources, although that isn't happening here.&lt;/p&gt;
+&lt;p&gt;Chrome and Safari rejected as soon as they saw the redirect. This is safe, although they would need to check the response if a service worker was in the middle too, since that can result in a response from somewhere else without a redirect occurring.&lt;/p&gt;
+&lt;p&gt;However…&lt;/p&gt;
+&lt;h2 id=&quot;firefox-security-bug&quot;&gt;Firefox security bug&lt;/h2&gt;
+&lt;p&gt;Beta and nightly versions of Firefox at the time allowed the redirect, combine the responses together, and expose the duration of the audio through &lt;code&gt;mediaElement.duration&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;Because I set the frequency, bit depth, and channel count of the audio in the header, I could determine the length of the cross-origin resource from the audio length using ✨basic maths✨.&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;contentLength&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;audio&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;duration&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;
+  &lt;span class=&quot;cm&quot;&gt;/* WAV frequency */&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;44100&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;
+  &lt;span class=&quot;cm&quot;&gt;/* WAV header length */&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;44&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;iframe src=&quot;https://www.youtube.com/embed/D5wu_za7ows?rel=0&amp;amp;showinfo=0&quot; frameborder=&quot;0&quot; allow=&quot;autoplay; encrypted-media&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+Length of sensitive resource revealed in Firefox 59.0b9
+&lt;p&gt;It looks like the size isn't detected exactly, but Google returns a range, so the reported size includes the extra 44 bytes that are missing from the start (the WAV header).&lt;/p&gt;
+&lt;p&gt;And here's &lt;a href=&quot;https://jewel-chair.glitch.me/exploit.html?url=https://www.google.com/gmail/about/&quot;&gt;a link to the attack&lt;/a&gt;, which works in Firefox 59.0b9 at least.&lt;/p&gt;
+&lt;p&gt;Leaking the length of a resource may not sound like a big deal, but consider an endpoint like &lt;code&gt;gender.json&lt;/code&gt;. The content length can give a lot away. Also see &lt;a href=&quot;https://tom.vg/papers/timing-attacks_ccs2015.pdf&quot;&gt;Timing attacks in the Modern Web&lt;/a&gt; (PDF, heh) which demonstrates the amount of information content-length can leak.&lt;/p&gt;
+&lt;p&gt;Firefox handled this &lt;em&gt;brilliantly&lt;/em&gt;. Within three hours &lt;a href=&quot;https://twitter.com/padenot?lang=en&quot;&gt;Paul Adenot&lt;/a&gt; replied to &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=1441153#c4&quot;&gt;the bug report&lt;/a&gt;, confirming it, and digged into other potential leaks (there weren't any). I was able to engage with engineers directly on how the issue should be fixed, which was important as I was planning how to standardise the mitigation.&lt;/p&gt;
+&lt;p&gt;Since this was a regression caught in beta, Firefox were able to patch it before it reached stable.&lt;/p&gt;
+&lt;h2 id=&quot;edge-security-bug&quot;&gt;Edge security bug&lt;/h2&gt;
+&lt;p&gt;Edge suffered from the same kind of bug, but with a huge twist. Firstly, it didn't care if the other server returned a 206 or not. Secondly, and this is the big one, it allowed the resulting audio to pass through the web audio API. The web audio API is like the &lt;code&gt;&amp;lt;canvas&amp;gt;&lt;/code&gt; equivalent for audio, meaning I could monitor the samples being played:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;22&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;c1&quot;&gt;// Get the audio element.&lt;/span&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;audio&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;document&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;querySelector&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'audio'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;// Create a web audio context.&lt;/span&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;ac&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;AudioContext&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;// Connect the two.&lt;/span&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;source&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;ac&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;createMediaElementSource&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;audio&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;// Create a script processor.&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;// This lets me transform the audio data. I don't really care&lt;/span&gt;
+&lt;span class=&quot;c1&quot;&gt;// about transforming, I just want to collect the data.&lt;/span&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;ac&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;createScriptProcessor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;256&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+&lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;datas&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[];&lt;/span&gt;
+
+&lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;onaudioprocess&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+  &lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;inputData&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;inputBuffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;getChannelData&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+  &lt;span class=&quot;c1&quot;&gt;// Store the audio data&lt;/span&gt;
+  &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;!&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;audio&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;paused&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;datas&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;push&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;inputData&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;slice&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;());&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;};&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;// Connect the processor.&lt;/span&gt;
+&lt;span class=&quot;nx&quot;&gt;source&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;connect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+&lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;connect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;ac&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;destination&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+&lt;span class=&quot;nx&quot;&gt;audio&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;addEventListener&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'ended'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+  &lt;span class=&quot;nx&quot;&gt;source&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;disconnect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+  &lt;span class=&quot;nx&quot;&gt;scriptNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;disconnect&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;ac&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;destination&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+  &lt;span class=&quot;c1&quot;&gt;// Now I can look at all the data received, and turn it from&lt;/span&gt;
+  &lt;span class=&quot;c1&quot;&gt;// audio sample data, back into bytes, then into a string.&lt;/span&gt;
+  &lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;str&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;datas&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;reduce&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// Each sample is -1 to 1.&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// In the original wav it was 16-bits per sample,&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// so I map each value to a signed 16-bit value.&lt;/span&gt;
+    &lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;ints&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;Array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;from&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;data&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;).&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;map&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;num&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;Math&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;round&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;num&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;32768&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// Then put that into a typed array.&lt;/span&gt;
+    &lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;int16&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;Int16Array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;ints&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// But, assuming utf-8, I need unsigned 8-bit chunks:&lt;/span&gt;
+    &lt;span class=&quot;kr&quot;&gt;const&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;bytes&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;Uint8Array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;int16&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;buffer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;// Now I can create a string from that.&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;nx&quot;&gt;str&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;Array&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;from&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;bytes&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;).&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;map&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;b&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&amp;gt;&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;String&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;fromCharCode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)).&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;join&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;''&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+  &lt;span class=&quot;p&quot;&gt;},&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;''&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+  &lt;span class=&quot;c1&quot;&gt;// Output the data.&lt;/span&gt;
+  &lt;span class=&quot;nb&quot;&gt;document&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;body&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;appendChild&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;document&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;createTextNode&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nx&quot;&gt;str&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;});&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And here's what that looks like:&lt;/p&gt;
+&lt;p&gt;&lt;iframe src=&quot;https://www.youtube.com/embed/4yanGsSk8rw?rel=0&amp;amp;showinfo=0&quot; frameborder=&quot;0&quot; allow=&quot;autoplay; encrypted-media&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+Reading cross-origin content in Edge
+&lt;p&gt;The text you see is the content of BBC News. Since the request is made with cookies, the content is the &quot;logged in&quot; view, although I wasn't logged in for the demo.&lt;/p&gt;
+&lt;p&gt;It's kinda pathetic how excited I got about this, but this is a &lt;em&gt;huge&lt;/em&gt; bug. It means you could visit my site in Edge, and I could read your emails, I could read your Facebook feed, all without you knowing.&lt;/p&gt;
+&lt;p&gt;And here's &lt;a href=&quot;http://jewel-chair.glitch.me/exploit.html?url=http://www.bbc.co.uk/news&amp;amp;initialLen=90000&amp;amp;totalLength=*&amp;amp;freq=44100&amp;amp;bits=16&amp;amp;useWebAudio=1&quot;&gt;a link to the attack&lt;/a&gt;. If this works in your version of Edge, &lt;strong&gt;update your browser immediately&lt;/strong&gt;.&lt;/p&gt;
+&lt;h3 id=&quot;reporting-the-bug-to-microsoft&quot;&gt;Reporting the bug to Microsoft&lt;/h3&gt;
+&lt;p&gt;You're about to witness a boy in his mid-30s having a massive entitled whinge. If you want to avoid that, skip this section, but I really need to get it off my chest. The experience I had with Microsoft was very different to Firefox.&lt;/p&gt;
+&lt;p&gt;I filed the issue in &lt;a href=&quot;https://developer.microsoft.com/en-us/microsoft-edge/platform/issues/&quot;&gt;Edge's bug tracker&lt;/a&gt; on March 1st and notified secure@microsoft.com. I got an email from Microsoft security later that day saying that they don't have access to Edge's bug tracker, and asked if I could paste the details into an email for them. So yeah, Microsoft's security team don't have visibility into Edge security issues. Anyway, I sent them the details of the exploit over plain email.&lt;/p&gt;
+&lt;p&gt;The next day they said they couldn't investigate the issue unless I provided the source code. C'mon folks, the &quot;view source&quot; button is right there. Anyway, I sent them the source. Then there was &lt;em&gt;20 days of silence&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;At this point I had no idea if they were able to understand the issue, or if they knew how serious it was. I pointed out that the attack could be used to read people's private messages, but received no response.&lt;/p&gt;
+&lt;p&gt;I asked &lt;a href=&quot;https://twitter.com/jacobrossi&quot;&gt;Jacob Rossi&lt;/a&gt; and &lt;a href=&quot;https://twitter.com/patrickkettner&quot;&gt;Patrick Kettner&lt;/a&gt; (awesome folks who work on the Edge team) if they could chase it internally. After they did, I finally got a reply from Microsoft security saying they were &quot;developing a fix&quot;, with no further detail.&lt;/p&gt;
+&lt;p&gt;If you find a bug like this, you're eligible for a bounty. I asked if I could nominate a charity or two to receive the bounty. There was no response. 14 days of silence.&lt;/p&gt;
+&lt;p&gt;I asked Patrick to chase them again (thanks Patrick!), and they replied saying they wouldn't be able to give the bounty to charity, despite their public docs saying otherwise. Apparently the rules changed at some point, and I was looking at old docs. Whatever. Thankfully Google are ok with me taking the money directly, and will match what I donate (I found the bug while at work, so I was worried about the legal implications of taking the money. I'm sure there'll be some tax complications too, ugh).&lt;/p&gt;
+&lt;p&gt;I wasn't getting any progress update, or any details on how they planned to fix it (which would have been useful from a standards perspective). So, I &lt;a href=&quot;https://twitter.com/jaffathecake/status/984339892183490560&quot;&gt;shitposted on Twitter&lt;/a&gt;, and &lt;a href=&quot;https://twitter.com/shhnjk/status/987261708971462657&quot;&gt;Jun Kokatsu kinda sniped back&lt;/a&gt;. Jun is a security engineer at Edge, and we got chatting over DMs. And holy shit, this is who I should have been talking to all along.&lt;/p&gt;
+&lt;p&gt;Jun told me there had been a lot of activity around the bug internally, and they're looking to improve visibility of this kind of stuff to the reporter. We were able to discuss what the fix would look like, and how that would work with a service worker in the middle. I really can't stress enough how helpful Jun has been.&lt;/p&gt;
+&lt;p&gt;Microsoft released a patch for the bug, and published &lt;a href=&quot;https://portal.msrc.microsoft.com/en-us/security-guidance/advisory/CVE-2018-8235&quot;&gt;CVE-2018-8235&lt;/a&gt;. I found out about this through Jun. I haven't heard anything through the official channel.&lt;/p&gt;
+&lt;p&gt;On June 7th I asked the official contact for an update on the bug bounty, since they haven't confirmed any of that yet. I've yet to receive a reply. &lt;strong&gt;Update&lt;/strong&gt;: Shortly after publishing this they contacted me to say I qualify for the bounty.&lt;/p&gt;
+&lt;p&gt;Ok, that was a lot of complaining, but I really want Microsoft to look at the experience I had with Firefox and learn from it. Security issues like this put their users at huge risk, and they need to ensure reporting these things isn't more effort than it's worth.&lt;/p&gt;
+&lt;h2 id=&quot;standards-are-important&quot;&gt;Standards are important&lt;/h2&gt;
+&lt;p&gt;I've covered two browser security issues here, but these bugs started when browsers implemented range requests for media elements, which wasn't covered by the standard. These range requests were genuinely useful, so all browsers did it by copying each others behaviour, but no one integrated it into the standard.&lt;/p&gt;
+&lt;p&gt;The result is the browsers all behave slightly differently, and some ended up with security issues.&lt;/p&gt;
+&lt;p&gt;This is why standards are important. Chrome had &lt;a href=&quot;https://sirdarckcat.blogspot.com/2015/10/range-responses-mix-match-leak.html&quot;&gt;a similar security issue a few years ago&lt;/a&gt;, but instead of just fixing it in Chrome, the fix should have been written into a standard, and &lt;a href=&quot;https://github.com/web-platform-tests/wpt&quot;&gt;tests&lt;/a&gt; should have been written for other browsers to check against.&lt;/p&gt;
+&lt;p&gt;I've been working to improve standards here. Range requests are now &lt;a href=&quot;https://fetch.spec.whatwg.org/#privileged-no-cors-request-header-name&quot;&gt;able to pass through a service worker safely&lt;/a&gt; according to the spec. The next step is to specify the request and response handling for media elements.&lt;/p&gt;
+&lt;p&gt;Also, &lt;a href=&quot;https://fetch.spec.whatwg.org/#corb&quot;&gt;CORB has been added to fetch&lt;/a&gt;. The aim here is to reduce the capabilities of no-cors while retaining compatibility with the web. For instance:&lt;/p&gt;
+&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
+&lt;pre&gt;
+&lt;span class=&quot;nt&quot;&gt;&amp;lt;img&lt;/span&gt; &lt;span class=&quot;na&quot;&gt;src=&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;https://facebook.com/secret-data.json&quot;&lt;/span&gt;&lt;span class=&quot;nt&quot;&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Previously, the above would fail to load, but the response would be in the same process as the rest of the page. This is really bad thing given Spectre and Meltdown. But CORB will prevent that resource entering the page process, since its content (JSON) isn't something that can be loaded by any no-cors API.&lt;/p&gt;
+&lt;p&gt;CORB also prevents the attack outlined in this post, as it wouldn't allow &lt;code&gt;text/html&lt;/code&gt; content to enter the process as the result of a no-cors request.&lt;/p&gt;
+&lt;p&gt;And that's it! I now have a CVE number I can have etched on my grave. And I'm going to sit here and patiently await my invite to all the cool security parties.&lt;/p&gt;
+&lt;p&gt;&lt;small&gt;Thanks to &lt;a href=&quot;https://thenounproject.com/term/sound/1065225/&quot;&gt;Sandra&lt;/a&gt; and &lt;a href=&quot;https://thenounproject.com/term/padlock/174117/#_=_&quot;&gt;Monica Stromann&lt;/a&gt;, whose icons I butchered to create the Wavethrough logo. Also thanks to &lt;a href=&quot;https://twitter.com/mathias&quot;&gt;Mathias Bynens&lt;/a&gt;, &lt;a href=&quot;https://twitter.com/shhnjk&quot;&gt;Jun Kokatsu&lt;/a&gt;, and &lt;a href=&quot;https://twitter.com/aerotwist&quot;&gt;Paul Lewis&lt;/a&gt; for proofreading &amp;amp; corrections.&lt;/small&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Jun 2018 12:26:45 +0000</pubDate>
+<dc:creator>cgtyoder</dc:creator>
+<og:image>https://jakearchibald.com/static/imgs/icon.e36785a43208.png</og:image>
+<og:url>https://jakearchibald.com/2018/i-discovered-a-browser-bug</og:url>
+<og:title>I discovered a browser bug</og:title>
+<og:description>I accidentally discovered a huge browser security bug. Here's what it does, and how I discovered it…</og:description>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://jakearchibald.com/2018/i-discovered-a-browser-bug/</dc:identifier>
+</item>
+<item>
 <title>Firefox is back. It&amp;#039;s time to give it a try</title>
 <link>https://mobile.nytimes.com/2018/06/20/technology/personaltech/firefox-chrome-browser-privacy.html</link>
 <guid isPermaLink="true" >https://mobile.nytimes.com/2018/06/20/technology/personaltech/firefox-chrome-browser-privacy.html</guid>
@@ -34,6 +221,46 @@
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://mobile.nytimes.com/2018/06/20/technology/personaltech/firefox-chrome-browser-privacy.html</dc:identifier>
+</item>
+<item>
+<title>Theory Suggests That All Genes Affect Every Complex Trait</title>
+<link>https://www.quantamagazine.org/omnigenic-model-suggests-that-all-genes-affect-every-complex-trait-20180620/</link>
+<guid isPermaLink="true" >https://www.quantamagazine.org/omnigenic-model-suggests-that-all-genes-affect-every-complex-trait-20180620/</guid>
+<description>&lt;p&gt;The question most of genetics tries to answer is how genes connect to the traits we see. One person has red hair, another blonde hair; one dies at age 30 of Huntington’s disease, another lives to celebrate a 102nd birthday. Knowing what in the vast expanse of the genetic code is behind traits can fuel better treatments and information about future risks and illuminate how biology and evolution work. For some traits, the connection to certain genes is clear: Mutations of a single gene are behind sickle cell anemia, for instance, and mutations in another are behind cystic fibrosis.&lt;/p&gt;
+&lt;p&gt;But unfortunately for those who like things simple, these conditions are the exceptions. The roots of many traits, from how tall you are to your susceptibility to schizophrenia, are far more tangled. In fact, they may be so complex that almost the entire genome may be involved in some way, &lt;a href=&quot;http://dx.doi.org/10.1016/j.cell.2017.05.038&quot;&gt;an idea formalized in a theory&lt;/a&gt; put forward last year.&lt;/p&gt;
+&lt;p&gt;Starting about 15 years ago, geneticists began to collect DNA from thousands of people who shared traits, to look for clues to each trait’s cause in commonalities between their genomes, a kind of analysis called &lt;a href=&quot;https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3543921/#__sec3title&quot;&gt;a genome-wide association study (GWAS)&lt;/a&gt;. What they found, first, was that you need an enormous number of people to get statistically significant results — &lt;a href=&quot;https://www.technologyreview.com/s/610151/a-search-for-insomnia-genes-involving-13-million-people-is-the-largest-genetic-study-ever/&quot;&gt;one recent GWAS&lt;/a&gt; seeking correlations between genetics and insomnia, for instance, included more than a million people. Second, in study after study, even the most significant genetic connections turned out to have surprisingly small effects. The conclusion, sometimes called the polygenic hypothesis, was that multiple loci, or positions in the genome, were likely to be involved in every trait, with each contributing just a small part. (A single large gene can contain several loci, each representing a distinct part of the DNA where mutations make a detectable difference.)&lt;/p&gt;
+&lt;p&gt;How many loci that “multiple” description might mean was not defined precisely. One very early genetic mapping study in 1999 suggested that “a large number of loci (perhaps &amp;gt; than 15)” might contribute to autism risk, recalled &lt;a href=&quot;https://web.stanford.edu/group/pritchardlab/pritchard.html&quot;&gt;Jonathan Pritchard&lt;/a&gt;, now a geneticist at Stanford University. “That’s a lot!” he remembered thinking when the paper came out.&lt;/p&gt;
+
+&lt;p&gt;Over the years, however, what scientists might consider “a lot” in this context has quietly inflated. Last June, Pritchard and his Stanford colleagues &lt;a href=&quot;http://greenleaf.stanford.edu/people.html&quot;&gt;Evan Boyle&lt;/a&gt; and &lt;a href=&quot;https://genes.uchicago.edu/directory/yang-li-phd&quot;&gt;Yang Li&lt;/a&gt; (now at the University of Chicago) published a paper about this in &lt;em&gt;Cell&lt;/em&gt; that immediately sparked controversy, although it also had many people nodding in cautious agreement. The authors described what they called &lt;a href=&quot;http://dx.doi.org/10.1016/j.cell.2017.05.038&quot;&gt;the “omnigenic” model of complex traits&lt;/a&gt;. Drawing on GWAS analyses of three diseases, they concluded that in the cell types that are relevant to a disease, it appears that not 15, not 100, but essentially all genes contribute to the condition. The authors suggested that for some traits, “multiple” loci could mean more than 100,000.&lt;/p&gt;
+&lt;p&gt;The reaction was swift. “It caused a lot of discussion,” said &lt;a href=&quot;https://www.ru.nl/english/people/franke-b/&quot;&gt;Barbara Franke&lt;/a&gt;, a geneticist at Radboud University in the Netherlands who studies attention deficit hyperactivity disorder (ADHD). “Everywhere you went the omnigenic paper would be discussed.” &lt;em&gt;The Journal of Psychiatry and Brain Science&lt;/em&gt; did a &lt;a href=&quot;http://jpbs.qingres.com/SpecialIssuesList.aspx?menuid=1&quot;&gt;special issue just of response papers&lt;/a&gt;, some of them &lt;a href=&quot;http://jpbs.qingres.com/htmls/JPBS_922_Detail.html&quot;&gt;taking exception to the name&lt;/a&gt;, some saying that &lt;a href=&quot;http://jpbs.qingres.com/htmls/JPBS_920_Detail.html&quot;&gt;after all it was just an expansion of earlier ideas&lt;/a&gt;. A year on, however, the study has been cited more than 200 times, by papers whose subjects range from GWAS data to &lt;a href=&quot;https://www.sciencedirect.com/science/article/pii/S0092867418300011&quot;&gt;individual receptors&lt;/a&gt;. It seems to have encapsulated something many people in the genomics community had been turning over in their minds. But exactly what scientists should do with its insights depends on whom you talk to.&lt;/p&gt;
+&lt;h2&gt;An Infinity of Small Effects&lt;/h2&gt;
+&lt;p&gt;The origin of the idea lies in a very simple observation: When you look at the portions of the genome that GWAS findings have flagged as significant to individual traits, they are eerily well-distributed. Pritchard and his colleagues had been studying loci that contribute to height in humans. “What we realized was that the signal for height was coming from almost the whole genome,” he said. If the genome were a long string of ornamental lights, and every DNA snippet linked to height were illuminated, more than 100,000 lights would be shining all the way down the string. That result contrasted starkly with the general expectation that GWAS findings would be clustered around the most important genes for a trait.&lt;/p&gt;
+&lt;p&gt;Then, while looking at GWAS analyses of schizophrenia, rheumatoid arthritis and Crohn’s disease, the researchers found something else unexpected. In our current understanding, disease often arises because of malfunctions in key biological pathways. Depending on the disease, this might lead to the overactivation of immune cells, for example, or the underproduction of a hormone. You might expect that the genetic loci incriminated by GWAS would be in genes in that key pathway. And you’d expect those genes would be ones used specifically in the types of cells associated with that disease: immune cells for autoimmune diseases, brain cells for psychiatric disorders, or pancreatic cells for diabetes, for instance.&lt;/p&gt;
+&lt;p&gt;But when the researchers looked at disease-specific cell types, an enormous number of the regions flagged by GWAS were not in those genes. They were in genes expressed in nearly every cell in the body — genes doing basic maintenance tasks that all cells need. Pritchard and his colleagues suggest that this manifests a truth that is perhaps not always taken literally: Everything in a cell is connected. If incremental disruptions in basic processes can add up to greatly derange a trait, then perhaps nearly every gene expressed in a cell, no matter how seemingly unrelated to the metabolic process of interest, matters.&lt;/p&gt;
+
+&lt;p&gt;In its broadest strokes, this idea has been around since 1918, when R. A. Fisher, one of the founders of population genetics, proposed that complex traits could be produced by an infinite number of genes, each with infinitely small effects. But his was a statistical model that didn’t refer to any actual, specific biological conditions. It seems we are now in the era of being able to provide those specifics.&lt;/p&gt;
+&lt;p&gt;“This was the right paper at the right time,” according to &lt;a href=&quot;https://med.nyu.edu/faculty/aravinda-chakravarti&quot;&gt;Aravinda Chakravarti&lt;/a&gt;, a professor of neuroscience and physiology and director of the Center for Human Genetics and Genomics at New York University, who was a prepublication reviewer of the omnigenics paper in &lt;em&gt;Cell&lt;/em&gt;. He and others had noticed many examples of how widely distributed genetic influences could be, he said, but they had not put them together into a coherent thesis. He disagrees with critics who say the paper simply stated the obvious. “The paper clarified many points of view. It didn’t matter if I had thought about it — I had not thought about it hard enough. And I had never heard anybody thinking about it hard enough, with any clarity, [such] that it formed any new hypothesis.”&lt;/p&gt;
+&lt;p&gt;In the paper, Pritchard and his colleagues proposed that, when geneticists seek what’s responsible for a disease or trait, it may be fruitful to think of the genes in a cell as a network. There may be some very highly connected genes at the center of a disease process, which they dub core genes. Peripheral genes, meanwhile, in aggregate help tip the scales one way or the other. The &lt;em&gt;Cell&lt;/em&gt; paper authors suggest that understanding of the core genes will offer the best insights into the mechanism of a disease. Piecing together how peripheral genes contribute, on the other hand, will broaden understanding of why some people develop a disorder and others don’t.&lt;/p&gt;
+&lt;h2&gt;Do Core Genes Exist?&lt;/h2&gt;
+&lt;p&gt;Since the &lt;em&gt;Cell&lt;/em&gt; paper’s publication a year ago, scientists’ discussion has circled around whether such a distinction is useful. &lt;a href=&quot;http://www.igm.columbia.edu/profile/dbgoldstein&quot;&gt;David Goldstein&lt;/a&gt;, a geneticist at Columbia University, is not sure that disease processes must truly be routed through core genes, but he also says that the idea that not everything picked up by GWAS is central and specific to a given disease is important. In the early days of GWAS, he said, when a connection between a genetic locus and a disease was detected, people would take that as a sign that it should be the target of investigation for new treatments, even if the connection was weak.&lt;/p&gt;
+&lt;p&gt;“Those arguments are all fine — and were — unless something like what Jonathan is describing is going on,” he continued. “That’s a really big deal in terms of our interpretation of GWAS,” because weakly connected loci might then be less useful for getting at the pathology of a disease than people thought.&lt;/p&gt;
+
+&lt;p&gt;Yet that may well depend on the disease, according to &lt;a href=&quot;https://qbi.uq.edu.au/profile/295/naomi-wray&quot;&gt;Naomi Wray&lt;/a&gt;, a quantitative geneticist at the University of Queensland who pointed out when scientists first started doing GWAS analyses that they should expect to see many weak associations. A few conditions, she says, are primarily attributable to a small number of identifiable genes, or even just one — yet other genes may still flip the switch between one manifestation of illness and another. She cites the example of Huntington’s disease, a progressive neurological disorder caused by a specific defect in one gene. The age at which it strikes depends on how many repeats of a particular DNA sequence someone has in that gene. But even among patients with the same number of repeats, the age at which symptoms first appear varies, as does the severity with which the disability progresses. Scientists in the field are looking at other loci linked to Huntington’s disease to see how they might be causing the differences.&lt;/p&gt;
+&lt;p&gt;“These [loci] are by definition in peripheral genes. But they’re actually how the body is responding to this major insult of the core gene,” Wray said.&lt;/p&gt;
+&lt;p&gt;For most complex conditions and diseases, however, she thinks that the idea of a tiny coterie of identifiable core genes is a red herring because the effects might truly stem from disturbances at innumerable loci — and from the environment — working in concert. In a new paper out in &lt;em&gt;Cell&lt;/em&gt; this week, Wray and her colleagues argue that the core gene idea amounts to an unwarranted assumption, and that researchers should simply let the experimental data about particular traits or conditions lead their thinking. (In their paper proposing omnigenics, Pritchard and his co-authors also asked whether the distinction between core and peripheral genes was useful and acknowledged that some diseases might not have them.)&lt;/p&gt;
+
+&lt;p&gt;Teasing out the detailed genetics of diseases will therefore continue to require studies on very large numbers of people. Unfortunately, in the past year, Pritchard has been told that some groups applying for funding to do GWAS have been turned down by reviewers citing the omnigenics paper. He feels this reflects a misinterpretation: Omnigenics “explains why GWAS is hard,” he said. “It doesn’t mean we shouldn’t do GWAS.”&lt;/p&gt;
+&lt;p&gt;Franke, who sees the paper as a provocatively phrased extension of earlier ideas, says that it has nevertheless shaped her thinking in the past year. “It made me rethink what I know about signal transduction — about how messages are relayed in cells — and how functions are fulfilled,” she said. The deeper you look at the workings of a cell, the more you realize that a single common protein may have quite different effects depending on what type of cell it is in: It may bear different messages, or block different processes, so much so that traits that might seem to be quite disconnected begin to change.&lt;/p&gt;
+&lt;p&gt;“It gave a lot of food for thought,” she said of the paper, “and I think that was the goal.”&lt;/p&gt;
+</description>
+<pubDate>Wed, 20 Jun 2018 19:19:45 +0000</pubDate>
+<dc:creator>digital55</dc:creator>
+<og:title>‘Omnigenic’ Model Suggests That All Genes Affect Every Complex Trait | Quanta Magazine</og:title>
+<og:type>article</og:type>
+<og:url>https://www.quantamagazine.org/omnigenic-model-suggests-that-all-genes-affect-every-complex-trait-20180620/</og:url>
+<og:image>https://d2r55xnwy6nx47.cloudfront.net/uploads/2018/06/Omnigenics_1200_FB.jpg</og:image>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.quantamagazine.org/omnigenic-model-suggests-that-all-genes-affect-every-complex-trait-20180620/</dc:identifier>
 </item>
 <item>
 <title>Certificates for localhost</title>
@@ -438,6 +665,161 @@ keybase chat send --exploding-lifetime &lt;span class=&quot;hljs-string&quot;&gt
 <dc:identifier>https://keybase.io/blog/keybase-exploding-messages</dc:identifier>
 </item>
 <item>
+<title>MySQL High Availability at GitHub</title>
+<link>https://githubengineering.com/mysql-high-availability-at-github/</link>
+<guid isPermaLink="true" >https://githubengineering.com/mysql-high-availability-at-github/</guid>
+<description>&lt;p&gt;GitHub uses MySQL as its main datastore for all things non-&lt;code class=&quot;highlighter-rouge&quot;&gt;git&lt;/code&gt;, and its availability is critical to GitHub’s operation. The site itself, GitHub’s API, authentication and more, all require database access. We run multiple MySQL clusters serving our different services and tasks. Our clusters use classic master-replicas setup, where a single node in a cluster (the &lt;em&gt;master&lt;/em&gt;) is able to accept writes. The rest of the cluster nodes (the &lt;em&gt;replicas&lt;/em&gt;) asynchronously replay changes from the master and serve our read traffic.&lt;/p&gt;
+&lt;p&gt;The availability of master nodes is particularly critical. With no master, a cluster cannot accept writes: any writes that need to be persisted cannot be persisted. Any incoming changes such as commits, issues, user creation, reviews, new repositories, etc., would fail.&lt;/p&gt;
+&lt;p&gt;To support writes we clearly need to have an available writer node, a master of a cluster. But just as important, we need to be able to identify, or &lt;em&gt;discover&lt;/em&gt;, that node.&lt;/p&gt;
+&lt;p&gt;On a failure, say a master box crash scenario, we must ensure the existence of a new master, as well as be able to quickly advertise its identity. The time it takes to detect a failure, run the failover and advertise the new master’s identity makes up the total outage time.&lt;/p&gt;
+&lt;p&gt;This post illustrates GitHub’s MySQL high availability and master service discovery solution, which allows us to reliably run a cross-data-center operation, be tolerant of data center isolation, and achieve short outage times on a failure.&lt;/p&gt;
+&lt;h2 id=&quot;high-availability-objectives&quot;&gt;High availability objectives&lt;/h2&gt;
+&lt;p&gt;The solution described in this post iterates on, and improves, previous high availability (HA) solutions implemented at GitHub. As we scale, our MySQL HA strategy must adapt to changes. We wish to have similar HA strategies for our MySQL and for other services within GitHub.&lt;/p&gt;
+&lt;p&gt;When considering high availability and service discovery, some questions can guide your path into an appropriate solution. An incomplete list may include:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;How much outage time can you tolerate?&lt;/li&gt;
+&lt;li&gt;How reliable is crash detection? Can you tolerate false positives (premature failovers)?&lt;/li&gt;
+&lt;li&gt;How reliable is failover? Where can it fail?&lt;/li&gt;
+&lt;li&gt;How well does the solution work cross-data-center? On low and high latency networks?&lt;/li&gt;
+&lt;li&gt;Will the solution tolerate a complete data center (DC) failure or network isolation?&lt;/li&gt;
+&lt;li&gt;What mechanism, if any, prevents or mitigates split-brain scenarios (two servers claiming to be the master of a given cluster, both independently and unknowingly to each other accepting writes)?&lt;/li&gt;
+&lt;li&gt;Can you afford data loss? To what extent?&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;To illustrate some of the above, let’s first consider our previous HA iteration, and why we changed it.&lt;/p&gt;
+&lt;h2 id=&quot;moving-away-from-vip-and-dns-based-discovery&quot;&gt;Moving away from VIP and DNS based discovery&lt;/h2&gt;
+&lt;p&gt;In our previous iteration, we used:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://githubengineering.com/orchestrator-github/&quot;&gt;orchestrator&lt;/a&gt; for detection and failover, and&lt;/li&gt;
+&lt;li&gt;VIP and DNS for master discovery.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;In that iteration, clients discovered the writer node by using a name, e.g. &lt;code class=&quot;highlighter-rouge&quot;&gt;mysql-writer-1.github.net&lt;/code&gt;. The name resolved to a Virtual IP address (VIP) which the master host would acquire.&lt;/p&gt;
+&lt;p&gt;Thus, on a normal day, clients would just resolve the name, connect to the resolved IP, and find the master listening on the other side.&lt;/p&gt;
+&lt;p&gt;Consider this replication topology, spanning three different data centers:&lt;/p&gt;
+&lt;div&gt;&lt;img alt=&quot;sample 3 data center topology&quot; src=&quot;https://githubengineering.com/images/mysql-high-availability-at-github/sample-3dc-topology.png&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;In the event of a master failure, a new server, one of the replicas, must be promoted in its place.&lt;/p&gt;
+&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; will detect a failure, promote a new master, and then act to reassign the name/VIP. Clients don’t actually know the identity of the master: all they have is a &lt;em&gt;name&lt;/em&gt;, and that name must now resolve to the new master. However, consider:&lt;/p&gt;
+&lt;p&gt;VIPs are cooperative: they are claimed and owned by the database servers themselves. To acquire or release a VIP, a server must send an ARP request. The server owning the VIP must first release it before the newly promoted master acquires it. This has some undesired effects:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;An orderly failover operation will first contact the dead master and request that it release the VIP, and then contact the newly promoted master and request that it grab the VIP. What if the old master cannot be reached or refuses to release the VIP? Given that there’s a failure scenario on that server in the first place, it is not unlikely that it would fail to respond in a timely manner, or indeed respond at all.
+&lt;ul&gt;&lt;li&gt;We can end up with a split-brain: two hosts claiming to have the same VIP. Different clients may connect to either of those servers, depending on the shortest network path.&lt;/li&gt;
+&lt;li&gt;The source of truth here depends on the cooperation of two independent servers, and this setup is unreliable.&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;Even if the old master does cooperate, the workflow wastes precious time: the switch to the new master waits while we contact the old master.&lt;/li&gt;
+&lt;li&gt;And even as the VIP changes, existing client connections are not guaranteed to disconnect from the old server, and we may still experience a split-brain.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;In parts of our setup VIPs are bound by physical location. They are owned by a switch or a router. Thus, we can only reassign the VIPs onto co-located servers. In particular, in some cases we cannot assign the VIP to a server promoted in a different data center, and must make a DNS change.&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;DNS changes take longer to propagate. Clients cache DNS names for a preconfigured time. A cross-DC failover implies more outage time: it will take more time to make all clients aware of the identity of the new master.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;These limitations alone were enough to push us in search of a new solution, but for even more consideration were:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Masters were self-injecting themselves with heartbeats via the &lt;code class=&quot;highlighter-rouge&quot;&gt;pt-heartbeat&lt;/code&gt; service, for the purpose of &lt;a href=&quot;https://githubengineering.com/mitigating-replication-lag-and-reducing-read-load-with-freno/&quot;&gt;lag measurement and throttling control&lt;/a&gt;. The service had to be kicked off on the newly promoted master. If possible, the service would be shut down on the old master.&lt;/li&gt;
+&lt;li&gt;Likewise, &lt;a href=&quot;https://github.com/github/orchestrator/blob/master/docs/pseudo-gtid.md&quot;&gt;Pseudo-GTID&lt;/a&gt; injection was self-managed by the masters. It would need to kick off on the new master, and preferably stop on the old master.&lt;/li&gt;
+&lt;li&gt;The new master was set as writable. The old master was to be set as &lt;code class=&quot;highlighter-rouge&quot;&gt;read_only&lt;/code&gt;, if possible.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;These extra steps were a contributing factor to the total outage time and introduced their own failures and friction.&lt;/p&gt;
+&lt;p&gt;The solution worked, and GitHub has had successful MySQL failovers that went well under the radar, but we wanted our HA to improve on the following:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Be data center agnostic.&lt;/li&gt;
+&lt;li&gt;Be tolerant of data center failure.&lt;/li&gt;
+&lt;li&gt;Remove unreliable cooperative workflows.&lt;/li&gt;
+&lt;li&gt;Reduce total outage time.&lt;/li&gt;
+&lt;li&gt;As much as possible, have lossless failovers.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;githubs-ha-solution-orchestrator-consul-glb&quot;&gt;GitHub’s HA solution: orchestrator, Consul, GLB&lt;/h2&gt;
+&lt;p&gt;Our new strategy, along with collateral improvements, solves or mitigates much of the concerns above. In today’s HA setup, we have:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://github.com/github/orchestrator&quot;&gt;orchestrator&lt;/a&gt; to run detection and failovers. We use a cross-DC &lt;a href=&quot;https://github.com/github/orchestrator/blob/master/docs/raft.md&quot;&gt;orchestrator/raft&lt;/a&gt; setup as depicted below.&lt;/li&gt;
+&lt;li&gt;Hashicorp’s &lt;a href=&quot;https://www.consul.io/&quot;&gt;Consul&lt;/a&gt; for service discovery.&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://githubengineering.com/introducing-glb/&quot;&gt;GLB/HAProxy&lt;/a&gt; as a proxy layer between clients and writer nodes.&lt;/li&gt;
+&lt;li&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;anycast&lt;/code&gt; for network routing.&lt;/li&gt;
+&lt;/ul&gt;&lt;div&gt;&lt;img alt=&quot;MySQL HA solution at GitHub&quot; src=&quot;https://githubengineering.com/images/mysql-high-availability-at-github/mysql-ha-solution-at-github.png&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;The new setup removes VIP and DNS changes altogether. And while we introduce more components, we are able to decouple the components and simplify the task, as well as be able to utilize solid and stable solutions. A breakdown follows.&lt;/p&gt;
+&lt;h3 id=&quot;a-normal-flow&quot;&gt;A normal flow&lt;/h3&gt;
+&lt;p&gt;On a normal day the apps connect to the write nodes through GLB/HAProxy.&lt;/p&gt;
+&lt;p&gt;The apps are never aware of the master’s identity. As before, they use a name. For example, the master for &lt;code class=&quot;highlighter-rouge&quot;&gt;cluster1&lt;/code&gt; would be &lt;code class=&quot;highlighter-rouge&quot;&gt;mysql-writer-1.github.net&lt;/code&gt;. In our current setup, however, this name gets resolved to an &lt;a href=&quot;https://en.wikipedia.org/wiki/Anycast&quot;&gt;anycast&lt;/a&gt; IP.&lt;/p&gt;
+&lt;p&gt;With &lt;code class=&quot;highlighter-rouge&quot;&gt;anycast&lt;/code&gt;, the name resolves to the same IP everywhere, but traffic is routed differently based on a client’s location. In particular, in each of our data centers we have GLB, our highly available load balancer, deployed on multiple boxes. Traffic to &lt;code class=&quot;highlighter-rouge&quot;&gt;mysql-writer-1.github.net&lt;/code&gt; always routes to the local data center’s GLB cluster. Thus, all clients are served by local proxies.&lt;/p&gt;
+&lt;p&gt;We run GLB on top of &lt;a href=&quot;https://www.haproxy.com&quot;&gt;HAProxy&lt;/a&gt;. Our HAProxy has &lt;em&gt;writer pools&lt;/em&gt;: one pool per MySQL cluster, where each pool has exactly one backend server: the cluster’s &lt;em&gt;master&lt;/em&gt;. All GLB/HAProxy boxes in all DCs have the exact same pools, and they all indicate the exact same backend servers in these pools. Thus, if an app wishes to write to &lt;code class=&quot;highlighter-rouge&quot;&gt;mysql-writer-1.github.net&lt;/code&gt;, it matters not which GLB server it connects to. It will always get routed to the actual &lt;code class=&quot;highlighter-rouge&quot;&gt;cluster1&lt;/code&gt; master node.&lt;/p&gt;
+&lt;p&gt;As far as the apps are concerned, discovery ends at GLB, and there is never a need for re-discovery. It’s all on GLB to route the traffic to the correct destination.&lt;/p&gt;
+&lt;p&gt;How does GLB know which servers to list as backends, and how do we propagate changes to GLB?&lt;/p&gt;
+&lt;h3 id=&quot;discovery-via-consul&quot;&gt;Discovery via Consul&lt;/h3&gt;
+&lt;p&gt;Consul is well known as a service discovery solution, and also offers DNS services. In our solution, however, we utilize it as a highly available key-value (KV) store.&lt;/p&gt;
+&lt;p&gt;Within Consul’s KV store we write the identities of cluster masters. For each cluster, there’s a set of KV entries indicating the cluster’s master &lt;code class=&quot;highlighter-rouge&quot;&gt;fqdn&lt;/code&gt;, port, ipv4, ipv6.&lt;/p&gt;
+&lt;p&gt;Each GLB/HAProxy node runs &lt;a href=&quot;https://github.com/hashicorp/consul-template&quot;&gt;consul-template&lt;/a&gt;: a service that listens on changes to Consul data (in our case: changes to clusters masters data). &lt;code class=&quot;highlighter-rouge&quot;&gt;consul-template&lt;/code&gt; produces a valid config file and is able to reload HAProxy upon changes to the config.&lt;/p&gt;
+&lt;p&gt;Thus, a change in Consul to a master’s identity is observed by each GLB/HAProxy box, which then reconfigures itself, sets the new master as the single entity in a cluster’s backend pool, and reloads to reflect those changes.&lt;/p&gt;
+&lt;p&gt;At GitHub we have a Consul setup in each data center, and each setup is highly available. However, these setups are independent of each other. They do not replicate between each other and do not share any data.&lt;/p&gt;
+&lt;p&gt;How does Consul get told of changes, and how is the information distributed cross-DC?&lt;/p&gt;
+&lt;h3 id=&quot;orchestratorraft&quot;&gt;orchestrator/raft&lt;/h3&gt;
+&lt;p&gt;We run an &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; setup: &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes communicate to each other via &lt;a href=&quot;http://raft.github.io/&quot;&gt;raft&lt;/a&gt; consensus. We have one or two &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes per data center.&lt;/p&gt;
+&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; is charged with failure detection, with MySQL failover, and with communicating the change of master to Consul. Failover is operated by the single &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; leader node, but the &lt;em&gt;change&lt;/em&gt;, the news that a cluster now has a new master, is propagated to all &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes through the &lt;code class=&quot;highlighter-rouge&quot;&gt;raft&lt;/code&gt; mechanism.&lt;/p&gt;
+&lt;p&gt;As &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes receive the news of a master change, they each communicate to their local Consul setups: they each invoke a KV write. DCs with more than one &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; representative will have multiple (identical) writes to Consul.&lt;/p&gt;
+&lt;h3 id=&quot;putting-the-flow-together&quot;&gt;Putting the flow together&lt;/h3&gt;
+&lt;p&gt;In a master crash scenario:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;The &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes detect failures.&lt;/li&gt;
+&lt;li&gt;The &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; leader kicks off a recovery. A new master gets promoted.&lt;/li&gt;
+&lt;li&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; advertises the master change to all &lt;code class=&quot;highlighter-rouge&quot;&gt;raft&lt;/code&gt; cluster nodes.&lt;/li&gt;
+&lt;li&gt;Each &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; member receives a leader change notification. They each update the local Consul’s KV store with the identity of the new master.&lt;/li&gt;
+&lt;li&gt;Each GLB/HAProxy has &lt;code class=&quot;highlighter-rouge&quot;&gt;consul-template&lt;/code&gt; running, which observes the change in Consul’s KV store, and reconfigures and reloads HAProxy.&lt;/li&gt;
+&lt;li&gt;Client traffic gets redirected to the new master.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;There is a clear ownership of responsibilities for each component, and the entire design is both decoupled as well as simplified. &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; doesn’t know about the load balancers. Consul doesn’t need to know where the information came from. Proxies only care about Consul. Clients only care about the proxy.&lt;/p&gt;
+&lt;p&gt;Furthermore:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;There are no DNS changes to propagate.&lt;/li&gt;
+&lt;li&gt;There is no TTL.&lt;/li&gt;
+&lt;li&gt;The flow does not need the dead master’s cooperation. It is largely ignored.&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;additional-details&quot;&gt;Additional details&lt;/h3&gt;
+&lt;p&gt;To further secure the flow, we also have the following:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;HAProxy is configured with a very short &lt;code class=&quot;highlighter-rouge&quot;&gt;hard-stop-after&lt;/code&gt;. When it reloads with a new backend server in a writer-pool, it automatically terminates any existing connections to the old master.
+&lt;ul&gt;&lt;li&gt;With &lt;code class=&quot;highlighter-rouge&quot;&gt;hard-stop-after&lt;/code&gt; we don’t even require cooperation from the clients, and this mitigates a split-brain scenario. It’s noteworthy that this isn’t hermetic, and &lt;em&gt;some time&lt;/em&gt; passes before we kill old connections. But there’s then a point in time after which we’re comfortable and expect no nasty surprises.&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;We do not strictly require Consul to be available at all times. In fact, we only need it to be available at failover time. If Consul happens to be down, GLB continues to operate with the last known values and makes no drastic moves.&lt;/li&gt;
+&lt;li&gt;GLB is set to validate the identity of the newly promoted master. Similarly to our &lt;a href=&quot;https://githubengineering.com/context-aware-mysql-pools-via-haproxy/&quot;&gt;context-aware MySQL pools&lt;/a&gt;, a check is made on the backend server, to confirm it is indeed a writer node. If we happen to delete the master’s identity in Consul, no problem; the empty entry is ignored. If we mistakenly write the name of a non-master server in Consul, no problem; GLB will refuse to update it and keep running with last known state.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;We further tackle concerns and pursue HA objectives in the following sections.&lt;/p&gt;
+&lt;h2 id=&quot;orchestratorraft-failure-detection&quot;&gt;orchestrator/raft failure detection&lt;/h2&gt;
+&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; uses a &lt;a href=&quot;https://github.com/github/orchestrator/blob/master/docs/failure-detection.md&quot;&gt;holistic approach&lt;/a&gt; to detecting failure, and as such it is very reliable. We do not observe false positives: we do not have premature failovers, and thus do not suffer unnecessary outage time.&lt;/p&gt;
+&lt;p&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; further tackles the case for a complete DC network isolation (aka DC fencing). A DC network isolation can cause confusion: servers within that DC can talk to each other. Is it &lt;em&gt;they&lt;/em&gt; that are network isolated from other DCs, or is it &lt;em&gt;other DCs&lt;/em&gt; that are being network isolated?&lt;/p&gt;
+&lt;p&gt;In an &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator/raft&lt;/code&gt; setup, the &lt;code class=&quot;highlighter-rouge&quot;&gt;raft&lt;/code&gt; leader node is the one to run the failovers. A leader is a node that gets the support of the majority of the group (quorum). Our &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; node deployment is such that no single data center makes a majority, and any &lt;code class=&quot;highlighter-rouge&quot;&gt;n-1&lt;/code&gt; DCs do.&lt;/p&gt;
+&lt;p&gt;In the event of a complete DC network isolation, the &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes in that DC get disconnected from their peers in other DCs. As a result, the &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; nodes in the isolated DC cannot be the leaders of the &lt;code class=&quot;highlighter-rouge&quot;&gt;raft&lt;/code&gt; cluster. If any such node did happen to be the leader, it steps down. A new leader will be assigned from any of the other DCs. That leader will have the support of all the other DCs, which are capable of communicating between themselves.&lt;/p&gt;
+&lt;p&gt;Thus, the &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; node that calls the shots will be one that is outside the network isolated data center. Should there be a master in an isolated DC, &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; will initiate the failover to replace it with a server in one of the available DCs. We mitigate DC isolation by delegating the decision making to the quorum in the non-isolated DCs.&lt;/p&gt;
+&lt;h2 id=&quot;quicker-advertisement&quot;&gt;Quicker advertisement&lt;/h2&gt;
+&lt;p&gt;Total outage time can further be reduced by advertising the master change sooner. How can that be achieved?&lt;/p&gt;
+&lt;p&gt;When &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; begins a failover, it observes the fleet of servers available to be promoted. Understanding replication rules and abiding by hints and limitations, it is able to make an educated decision on the best course of action.&lt;/p&gt;
+&lt;p&gt;It may recognize that a server available for promotion is also an &lt;em&gt;ideal candidate&lt;/em&gt;, such that:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;There is nothing to prevent the promotion of the server (and potentially the user has hinted that such server is preferred for promotion), and&lt;/li&gt;
+&lt;li&gt;The server is expected to be able to take all of its siblings as replicas.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;In such a case &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; proceeds to first set the server as writable, and immediately advertises the promotion of the server (writes to Consul KV in our case), even while asynchronously beginning to fix the replication tree, an operation that will typically take a few more seconds.&lt;/p&gt;
+&lt;p&gt;It is likely that by the time our GLB servers have been fully reloaded, the replication tree is already intact, but it is not strictly required. The server is good to receive writes!&lt;/p&gt;
+&lt;h2 id=&quot;semi-synchronous-replication&quot;&gt;Semi-synchronous replication&lt;/h2&gt;
+&lt;p&gt;In MySQL’s &lt;a href=&quot;https://dev.mysql.com/doc/refman/en/replication-semisync.html&quot;&gt;semi-synchronous replication&lt;/a&gt; a master does not acknowledge a transaction commit until the change is known to have shipped to one or more replicas. It provides a way to achieve lossless failovers: any change applied on the master is either applied or waiting to be applied on one of the replicas.&lt;/p&gt;
+&lt;p&gt;Consistency comes with a cost: a risk to availability. Should no replica acknowledge receipt of changes, the master will block and writes will stall. Fortunately, there is a timeout configuration, after which the master can revert back to asynchronous replication mode, making writes available again.&lt;/p&gt;
+&lt;p&gt;We have set our timeout at a reasonably low value: &lt;code class=&quot;highlighter-rouge&quot;&gt;500ms&lt;/code&gt;. It is more than enough to ship changes from the master to local DC replicas, and typically also to remote DCs. With this timeout we observe perfect semi-sync behavior (no fallback to asynchronous replication), as well as feel comfortable with a very short blocking period in case of acknowledgement failure.&lt;/p&gt;
+&lt;p&gt;We enable semi-sync on local DC replicas, and in the event of a master’s death, we expect (though do not strictly enforce) a lossless failover. Lossless failover on a complete DC failure is costly and we do not expect it.&lt;/p&gt;
+&lt;p&gt;While experimenting with semi-sync timeout, we also observed a behavior that plays to our advantage: we are able to influence the identity of the &lt;em&gt;ideal candidate&lt;/em&gt; in the event of a master failure. By enabling semi-sync on designated servers, and by marking them as &lt;em&gt;candidates&lt;/em&gt;, we are able to reduce total outage time by &lt;em&gt;affecting&lt;/em&gt; the outcome of a failure. In our &lt;a href=&quot;https://githubengineering.com/mysql-testing-automation-at-github/&quot;&gt;experiments&lt;/a&gt; we observe that we typically end up with the &lt;em&gt;ideal candidates&lt;/em&gt;, and hence run quick advertisements.&lt;/p&gt;
+&lt;h2 id=&quot;heartbeat-injection&quot;&gt;Heartbeat injection&lt;/h2&gt;
+&lt;p&gt;Instead of managing the startup/shutdown of the &lt;code class=&quot;highlighter-rouge&quot;&gt;pt-heartbeat&lt;/code&gt; service on promoted/demoted masters, we opted to run it everywhere at all times. This required some &lt;a href=&quot;https://github.com/percona/percona-toolkit/pull/302/files?w=1&quot;&gt;patching&lt;/a&gt; so as to make &lt;code class=&quot;highlighter-rouge&quot;&gt;pt-heartbeat&lt;/code&gt; comfortable with servers either changing their &lt;code class=&quot;highlighter-rouge&quot;&gt;read_only&lt;/code&gt; state back and forth or completely crashing.&lt;/p&gt;
+&lt;p&gt;In our current setup &lt;code class=&quot;highlighter-rouge&quot;&gt;pt-heartbeat&lt;/code&gt; services run on masters and on replicas. On masters, they generate the heartbeat events. On replicas, they identify that the servers are &lt;code class=&quot;highlighter-rouge&quot;&gt;read-only&lt;/code&gt; and routinely recheck their status. As soon as a server is promoted as master, &lt;code class=&quot;highlighter-rouge&quot;&gt;pt-heartbeat&lt;/code&gt; on that server identifies the server as writable and begins injecting heartbeat events.&lt;/p&gt;
+&lt;h2 id=&quot;orchestrator-ownership-delegation&quot;&gt;orchestrator ownership delegation&lt;/h2&gt;
+&lt;p&gt;We further delegated to orchestrator:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Pseudo-GTID injection,&lt;/li&gt;
+&lt;li&gt;Setting the promoted master as writable, clearing its replication state, and&lt;/li&gt;
+&lt;li&gt;Setting the old master as &lt;code class=&quot;highlighter-rouge&quot;&gt;read_only&lt;/code&gt;, if possible.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;On all things new-master, this reduces friction. A master that is just being promoted is clearly expected to be alive and accessible, or else we would not promote it. It makes sense, then, to let &lt;code class=&quot;highlighter-rouge&quot;&gt;orchestrator&lt;/code&gt; apply changes directly to the promoted master.&lt;/p&gt;
+&lt;h2 id=&quot;limitations-and-drawbacks&quot;&gt;Limitations and drawbacks&lt;/h2&gt;
+&lt;p&gt;The proxy layer makes the apps unaware of the master’s identity, but it also masks the apps’ identities from the master. All the master sees are connections coming from the proxy layer, and we lose information about the actual source of the connection.&lt;/p&gt;
+&lt;p&gt;As distributed systems go, we are still left with unhandled scenarios.&lt;/p&gt;
+&lt;p&gt;Notably, on a data center isolation scenario, and assuming a master is in the isolated DC, apps in that DC are still able to write to the master. This may result in state inconsistency once network is brought back up. We are working to mitigate this split-brain by implementing a reliable &lt;a href=&quot;https://en.wikipedia.org/wiki/STONITH&quot;&gt;STONITH&lt;/a&gt; from within the very isolated DC. As before, &lt;em&gt;some time&lt;/em&gt; will pass before bringing down the master, and there could be a short period of split-brain. The operational cost of avoiding split-brains altogether is very high.&lt;/p&gt;
+&lt;p&gt;More scenarios exist: the outage of Consul at the time of the failover; partial DC isolation; others. We understand that with distributed systems of this nature it is impossible to close all of the loopholes, so we focus on the most important cases.&lt;/p&gt;
+&lt;h2 id=&quot;the-results&quot;&gt;The results&lt;/h2&gt;
+&lt;p&gt;Our orchestrator/GLB/Consul setup provides us with:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Reliable failure detection,&lt;/li&gt;
+&lt;li&gt;Data center agnostic failovers,&lt;/li&gt;
+&lt;li&gt;Typically lossless failovers,&lt;/li&gt;
+&lt;li&gt;Data center network isolation support,&lt;/li&gt;
+&lt;li&gt;Split-brain mitigation (more in the works),&lt;/li&gt;
+&lt;li&gt;No cooperation dependency,&lt;/li&gt;
+&lt;li&gt;Between &lt;code class=&quot;highlighter-rouge&quot;&gt;10 and 13 seconds&lt;/code&gt; of total outage time in most cases.
+&lt;ul&gt;&lt;li&gt;We see up to &lt;code class=&quot;highlighter-rouge&quot;&gt;20 seconds&lt;/code&gt; of total outage time in less frequent cases, and up to &lt;code class=&quot;highlighter-rouge&quot;&gt;25 seconds&lt;/code&gt; in extreme cases.&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;The orchestration/proxy/service-discovery paradigm uses well known and trusted components in a decoupled architecture, which makes it easier to deploy, operate and observe, and where each component can independently scale up or down. We continue to seek improvements as we continuously test our setup.&lt;/p&gt;
+</description>
+<pubDate>Wed, 20 Jun 2018 17:14:17 +0000</pubDate>
+<dc:creator>samlambert</dc:creator>
+<og:title>MySQL High Availability at GitHub</og:title>
+<og:description>GitHub uses MySQL as its main datastore for all things non-git, and its availability is critical to GitHub’s operation. The site itself, GitHub’s API, authentication and more, all require database access. We run multiple MySQL clusters serving our different services and tasks. Our clusters use classic master-replicas setup, where a single node in a cluster (the master) is able to accept writes. The rest of the cluster nodes (the replicas) asynchronously replay changes from the master and serve our read traffic.</og:description>
+<og:url>https://githubengineering.com/mysql-high-availability-at-github/</og:url>
+<og:type>article</og:type>
+<dc:language>en-us</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://githubengineering.com/mysql-high-availability-at-github/</dc:identifier>
+</item>
+<item>
 <title>Erlang OTP 21.0 is Released</title>
 <link>http://www.erlang.org/news/123</link>
 <guid isPermaLink="true" >http://www.erlang.org/news/123</guid>
@@ -516,370 +898,6 @@ keybase chat send --exploding-lifetime &lt;span class=&quot;hljs-string&quot;&gt
 <og:url>https://www.theverge.com/2018/6/20/17484030/tesla-sues-employee-hacking-theft-leaking</og:url>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://www.theverge.com/2018/6/20/17484030/tesla-sues-employee-hacking-theft-leaking</dc:identifier>
-</item>
-<item>
-<title>PostgreSQL Features You May Not Have Tried but Should</title>
-<link>https://pgdash.io/blog/postgres-features.html?h=</link>
-<guid isPermaLink="true" >https://pgdash.io/blog/postgres-features.html?h=</guid>
-<description>&lt;p&gt;PostgreSQL contains a slew of great features. Many of them are very well known. Others can be incredibly useful but are not as widely appreciated. Here are our top picks for great PostgreSQL features you may not have taken a look at but really should, since they can help you get code into production faster, make ops easier and generally get things done with less code and sweat.&lt;/p&gt;
-&lt;h3 id=&quot;pubsub-notifications&quot;&gt;Pub/Sub Notifications&lt;/h3&gt;
-&lt;p&gt;PostgreSQL comes with a simple non-durable topic-based publish-subscribe notification system. It’s no Kafka, but the features do support common use cases.&lt;/p&gt;
-&lt;p&gt;Messages on a specific topic can be broadcast to all connected subscribers who are listening for that topic. The messages are &lt;em&gt;pushed&lt;/em&gt; by the Postgres server to the listening clients. Polling is not required, but your database driver should support delivery of notifications to the application asynchronously.&lt;/p&gt;
-&lt;p&gt;The notification consists of a topic name and a payload (upto about 8000 characters). The payload would typically be a JSON string, but of course it can be anything. You can send a notification using the &lt;a href=&quot;https://www.postgresql.org/docs/current/static/sql-notify.html&quot;&gt;NOTIFY&lt;/a&gt; command:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-sql&quot; data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;k&quot;&gt;NOTIFY&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;'foo_events'&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;'{&quot;userid&quot;:42,&quot;action&quot;:&quot;grok&quot;}'&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;or the &lt;a href=&quot;https://www.postgresql.org/docs/current/static/sql-notify.html&quot;&gt;pg_notify()&lt;/a&gt; function:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-sql&quot; data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;k&quot;&gt;SELECT&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pg_notify&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;'foo_events'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;'{&quot;userid&quot;:42,&quot;action&quot;:&quot;grok&quot;}'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;The subscription happens with the &lt;a href=&quot;https://www.postgresql.org/docs/current/static/sql-listen.html&quot;&gt;LISTEN&lt;/a&gt; command, but typically you’ve to use driver-specific APIs. Here’s the &lt;a href=&quot;https://godoc.org/github.com/lib/pq/example/listen&quot;&gt;Go version&lt;/a&gt; for example.&lt;/p&gt;
-&lt;h3 id=&quot;table-inheritance&quot;&gt;Table Inheritance&lt;/h3&gt;
-&lt;p&gt;Assume you have a table called “invoices”. You’ve to now support “government invoices”, which are invoices but have a few additional fields. How would you model this? Rather than adding nullable columns to invoices, or a single nullable JSON column to invoices, try the inheritance feature:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-sql&quot; data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;k&quot;&gt;CREATE&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;TABLE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;invoices&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
-    &lt;span class=&quot;n&quot;&gt;invoice_number&lt;/span&gt;   &lt;span class=&quot;n&quot;&gt;int&lt;/span&gt;  &lt;span class=&quot;k&quot;&gt;NOT&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;NULL&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;PRIMARY&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;KEY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
-    &lt;span class=&quot;n&quot;&gt;issued_on&lt;/span&gt;        &lt;span class=&quot;n&quot;&gt;date&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;NOT&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;NULL&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;DEFAULT&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;now&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-
-&lt;span class=&quot;k&quot;&gt;CREATE&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;TABLE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;government_invoices&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
-    &lt;span class=&quot;n&quot;&gt;department_id&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;text&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;NOT&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;NULL&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;INHERITS&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;invoices&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;This reflects the situation that all government invoices are invoices, but have an extra attribute. The “government_invoices” table above has a total of 3 columns:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# \d invoices
-                  Table &quot;public.invoices&quot;
-     Column     |  Type   | Collation | Nullable | Default
-----------------+---------+-----------+----------+---------
- invoice_number | integer |           | not null |
- issued_on      | date    |           | not null | now()
-Indexes:
-    &quot;invoices_pkey&quot; PRIMARY KEY, btree (invoice_number)
-Number of child tables: 1 (Use \d+ to list them.)
-
-test=# \d government_invoices
-            Table &quot;public.government_invoices&quot;
-     Column     |  Type   | Collation | Nullable | Default
-----------------+---------+-----------+----------+---------
- invoice_number | integer |           | not null |
- issued_on      | date    |           | not null | now()
- department_id  | text    |           | not null |
-Inherits: invoices&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Adding rows work as though the tables are independent:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-sql&quot; data-lang=&quot;sql&quot;&gt;&lt;span class=&quot;k&quot;&gt;INSERT&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;INTO&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;invoices&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;invoice_number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;VALUES&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;100&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-
-&lt;span class=&quot;k&quot;&gt;INSERT&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;INTO&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;government_invoices&lt;/span&gt;
-    &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;invoice_number&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;department_id&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;VALUES&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;101&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;'DOD'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;But watch happens when you SELECT:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# SELECT * FROM government_invoices;
- invoice_number | issued_on  | department_id
-----------------+------------+---------------
-            101 | 2018-06-19 | DOD
-(1 row)
-
-test=# SELECT * FROM invoices;
- invoice_number | issued_on
-----------------+------------
-            100 | 2018-06-19
-            101 | 2018-06-19
-(2 rows)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Invoice number 101 from the child table is also listed in the parent table. This facilitates algorithms that know only about invoices to work on the parent invoices table while ignoring any child tables.&lt;/p&gt;
-&lt;p&gt;You can learn more about table inheritance in PostgreSQL &lt;a href=&quot;https://www.postgresql.org/docs/current/static/ddl-inherit.html&quot;&gt;in the docs&lt;/a&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;foreign-data-wrappers&quot;&gt;Foreign Data Wrappers&lt;/h3&gt;
-&lt;p&gt;Did you know you can have virtual tables that actually serve data from another PostgreSQL instance? Or even SQLite files, MongoDB, Redis, and more? This feature is called &lt;em&gt;Foreign Data Wrappers&lt;/em&gt;, which provides a standardized way to access and manipulate data stored externally to the Postgres server you’re connecting to. There are various FDW implementations available that let you connect to various different data sources. These are typically packaged as extensions.&lt;/p&gt;
-&lt;p&gt;The standard Postgres distribution comes with the &lt;a href=&quot;https://www.postgresql.org/docs/current/static/postgres-fdw.html&quot;&gt;postgres_fdw&lt;/a&gt; extension, which lets you connect to other Postgres servers. For example, you can move a big table to another server, and setup a virtual table (the proper term is a “foreign table”) locally:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;-- install the extension (required only once)
-CREATE EXTENSION postgres_fdw;
-
--- big_server is our big, remote server with the migrated table
-CREATE SERVER big_server FOREIGN DATA WRAPPER postgres_fdw
-  OPTIONS (host '10.1.2.3', dbname 'big_db');
-
--- create a user mapping for the app user
-CREATE USER MAPPING FOR app_user SERVER big_server
-  OPTIONS (user 'remote_user', password 'remote_pass');
-
--- and finally create the virtual table invoices -&amp;gt; big_db.public.invoices
-CREATE FOREIGN TABLE invoices (
-  invoice_num int NOT NULL PRIMARY KEY
-  -- other columns omitted for brevity
-) SERVER big_server;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;This &lt;a href=&quot;https://wiki.postgresql.org/wiki/Foreign_data_wrappers&quot;&gt;Wiki page&lt;/a&gt; has a good list of the many FDW implementations available.&lt;/p&gt;
-&lt;p&gt;Apart from accessing data from other servers, FDW has also been used to implement alternate storage layouts, like &lt;a href=&quot;https://github.com/citusdata/cstore_fdw&quot;&gt;cstore_fdw&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;There is also &lt;a href=&quot;https://www.postgresql.org/docs/current/static/dblink.html&quot;&gt;dblink&lt;/a&gt;, which is yet another method of accessing remote PostgreSQL (only) data.&lt;/p&gt;
-&lt;h3 id=&quot;partitioned-tables&quot;&gt;Partitioned Tables&lt;/h3&gt;
-&lt;p&gt;Starting with version 10, PostgreSQL natively supports sharding of a table into multiple child tables, based on a partition key value computed from one or more column values. This allows a single, large table to be physically stored as separate tables, for better DML performance and storage management.&lt;/p&gt;
-&lt;p&gt;Here’s how to create a partitioned table, with the intention of adding a new table each month:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;-- the parent table
-CREATE TABLE invoices (
-    invoice_number   int  NOT NULL,
-    issued_on        date NOT NULL DEFAULT now()
-) PARTITION BY RANGE (issued_on);
-  
--- table for the month of May 2018
-CREATE TABLE invoices_2018_05 PARTITION OF invoices
-  FOR VALUES FROM ('2018-05-01') TO ('2018-06-01');
-
--- table for the month of June 2018
-CREATE TABLE invoices_2018_06 PARTITION OF invoices
-  FOR VALUES FROM ('2018-06-01') TO ('2018-07-01');&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;The child tables have to be manually or programmatically created, it does not happen automatically.&lt;/p&gt;
-&lt;p&gt;You can query and insert at the parent level, and PostgreSQL will route it to the appropriate child table, have a look:&lt;/p&gt;
-&lt;p&gt;First, we insert two rows:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# INSERT INTO invoices VALUES (10042, '2018-05-15');
-INSERT 0 1
-test=# INSERT INTO invoices VALUES (43029, '2018-06-15');
-INSERT 0 1&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;We can see that the rows are actually inserted into the child tables:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# SELECT * FROM invoices_2018_05;
- invoice_number | issued_on
-----------------+------------
-          10042 | 2018-05-15
-(1 row)
-
-test=# SELECT * FROM invoices_2018_06;
- invoice_number | issued_on
-----------------+------------
-          43029 | 2018-06-15
-(1 row)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;But queries can be done on the parent, returning combined result:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# SELECT * FROM invoices;
- invoice_number | issued_on
-----------------+------------
-          10042 | 2018-05-15
-          43029 | 2018-06-15
-(2 rows)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Partitioning is in some ways similar to inheritance (query at parent level), but there are differences too (partition parent contains no data, for example). You can read more about partitioning &lt;a href=&quot;https://www.postgresql.org/docs/current/static/ddl-partitioning.html&quot;&gt;in the docs&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;PostgreSQL 11, currently in beta, improves upon this feature. &lt;a href=&quot;https://pgdash.io/blog/partition-postgres-11.html&quot;&gt;This article&lt;/a&gt; has an overview of the improvements.&lt;/p&gt;
-&lt;h3 id=&quot;range-types&quot;&gt;Range Types&lt;/h3&gt;
-&lt;p&gt;Ever worked with temperature ranges, calendar scheduling, price ranges and the like? Working with intervals are one of those deceptively simple things that gently lead you into hair-pulling and late night debugging.&lt;/p&gt;
-&lt;p&gt;Here’s a table with a range column, and some values:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;CREATE TABLE prices (
-    item  text,
-    price int4range -- int4range is a range of regular integers
-);
-
-INSERT INTO prices VALUES ('mouse',    '[10,16)');
-INSERT INTO prices VALUES ('keyboard', '[20,31)');
-INSERT INTO prices VALUES ('joystick', '[35,56)');&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;The numbers in the mismatched brackets represent a half-open interval. Here is the query to find all items that are in the price range $15 to $30, using the &lt;code class=&quot;highlighter-rouge&quot;&gt;&amp;amp;&amp;amp;&lt;/code&gt; operator (range overlap):&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# SELECT * FROM prices WHERE price &amp;amp;&amp;amp; int4range(15,30);
-   item   |  price
-----------+---------
- mouse    | [10,16)
- keyboard | [20,31)
-(2 rows)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;If you are not impressed, try writing the query without ranges. (No really, just try it.)&lt;/p&gt;
-&lt;p&gt;Range types are quite powerful – there are &lt;a href=&quot;https://www.postgresql.org/docs/10/static/functions-range.html#RANGE-OPERATORS-TABLE&quot;&gt;more operators&lt;/a&gt;, &lt;a href=&quot;https://www.postgresql.org/docs/10/static/functions-range.html#RANGE-FUNCTIONS-TABLE&quot;&gt;functions&lt;/a&gt;, you can define your own range types, and even index them.&lt;/p&gt;
-&lt;p&gt;To learn more about ranges, try this &lt;a href=&quot;https://wiki.postgresql.org/images/7/73/Range-types-pgopen-2012.pdf&quot;&gt;presentation&lt;/a&gt;, and &lt;a href=&quot;https://www.postgresql.org/docs/current/static/rangetypes.html&quot;&gt;the docs&lt;/a&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;array-types&quot;&gt;Array Types&lt;/h3&gt;
-&lt;p&gt;PostgreSQL has supported arrays for a long time. Array types can reduce the amount of boilerplate application code and simplify queries. Here is a table that uses an array column:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;CREATE TABLE posts (
-    title text NOT NULL PRIMARY KEY,
-    tags  text[]
-);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Assuming each row represents a blog post, each having a set of tags, here is how we can list all the posts that have both “postgres” and “go” tags:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# SELECT title, tags FROM posts WHERE '{&quot;postgres&quot;, &quot;go&quot;}' &amp;lt;@ tags;
-               title               |          tags
------------------------------------+------------------------
- Writing PostgreSQL Triggers in Go | {postgres,triggers,go}
-(1 row)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;The usage of the array type here makes for concise data modelling and simpler queries. Postgres arrays come with &lt;a href=&quot;https://www.postgresql.org/docs/current/static/functions-array.html&quot;&gt;operators and functions&lt;/a&gt;, including &lt;a href=&quot;https://www.postgresql.org/docs/current/static/functions-aggregate.html&quot;&gt;aggregate functions&lt;/a&gt;. You can also create indexes on array expressions. Here is &lt;a href=&quot;https://www.opsdash.com/blog/postgres-arrays-golang.html&quot;&gt;an article&lt;/a&gt; on using arrays with &lt;a href=&quot;https://golang.org&quot;&gt;Go&lt;/a&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;triggers&quot;&gt;Triggers&lt;/h3&gt;
-&lt;p&gt;You can ask PostgreSQL to execute a specific function when rows are inserted, updated or deleted from a table. The function can even alter the values during an insert. You can read more about triggers &lt;a href=&quot;https://www.postgresql.org/docs/10/static/plpgsql-trigger.html&quot;&gt;here&lt;/a&gt;. Just to whet your appetite, here is a trigger that sends out a notification and writes to an audit log when a user is created:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;-- a table of users
-CREATE TABLE users (
-  username text NOT NULL PRIMARY KEY
-);
-
--- an audit log
-CREATE TABLE audit_log (
-  at          timestamptz NOT NULL DEFAULT now(),
-  description text NOT NULL
-);
-
--- the actual function that is executed per insert
-CREATE FUNCTION on_user_added() RETURNS TRIGGER AS $$
-BEGIN
-  IF (TG_OP = 'INSERT') THEN
-    -- add an entry into the audit log
-    INSERT INTO audit_log (description)
-        VALUES ('new user created, username is ' || NEW.username);
-    -- send a notification
-    PERFORM pg_notify('usercreated', NEW.username);
-  END IF;
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
--- set the function as an insert trigger
-CREATE TRIGGER on_user_added AFTER INSERT ON users
-  FOR EACH ROW EXECUTE PROCEDURE on_user_added();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Now if we try to add a new user, an audit log entry is automatically added:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;language-text&quot; data-lang=&quot;text&quot;&gt;test=# INSERT INTO users VALUES ('alice');
-INSERT 0 1
-test=# SELECT * FROM audit_log;
-                at             |             description
--------------------------------+-------------------------------------
- 2018-06-19 04:00:30.672947+00 | new user created, username is alice
-(1 row)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;pg_stat_statements&quot;&gt;pg_stat_statements&lt;/h3&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.postgresql.org/docs/current/static/pgstatstatements.html&quot;&gt;pg_stat_statements&lt;/a&gt; is an extension that is present by default in your PostgreSQL distribution, but is not enabled. This extension records a wealth of information about each statement executed, including the time taken, the memory used and disk I/Os initiated. It’s indispensible for understanding and debugging query performance issues.&lt;/p&gt;
-&lt;p&gt;The overhead of installing and enabling this extension is small, it’s very simple to use, and there is no reason NOT to run it on your production servers! Read &lt;a href=&quot;https://www.postgresql.org/docs/current/static/pgstatstatements.html&quot;&gt;the docs&lt;/a&gt; for more info.&lt;/p&gt;
-&lt;h3 id=&quot;hash-gin-and-brin-indexes&quot;&gt;Hash, GIN and BRIN Indexes&lt;/h3&gt;
-&lt;p&gt;The default index type in PostgreSQL is the B-Tree, but there are also other types, that are documented &lt;a href=&quot;https://www.postgresql.org/docs/current/static/indexes-types.html&quot;&gt;here&lt;/a&gt;. Other index types are very helpful in cases that aren’t actually uncommon. In particular, setting up indexes of the hash, GIN and BRIN type might just be the solution to your performance issues:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;em&gt;Hash&lt;/em&gt;: Unlike B-Tree indexes which have inherent ordering, hash indexes are unordered and can only do equality matches (lookup). However, hash indexes occupy much lesser space and are faster than B-Trees for equality matches. (Also, note that prior to PostgreSQL 10 it was not possible to replicate hash indexes; they were unlogged.)&lt;/li&gt;
-&lt;li&gt;&lt;em&gt;GIN&lt;/em&gt;: GIN is an inverted index, which essentially allows for multiple values for a single key. GIN indexes are useful for indexing arrays, JSON, ranges, full text search etc.&lt;/li&gt;
-&lt;li&gt;&lt;em&gt;BRIN&lt;/em&gt;: If your data has a specific, natural order – for example, time series data – and your queries typically work only with a small range of it, then BRIN indexes can speed up your queries with very little overhead. BRIN indexes maintain ranges per block of data, allowing the optimizer to skip over blocks that contain rows that won’t be selected by the query.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;Start reading about PostgreSQL index types &lt;a href=&quot;https://www.postgresql.org/docs/current/static/indexes-types.html&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;full-text-search&quot;&gt;Full Text Search&lt;/h3&gt;
-&lt;p&gt;PostgreSQL can do full text search very well, including in languages other than English. Here’s an [article] (https://www.opsdash.com/blog/postgres-full-text-search-golang.html) that walks you through the steps of creating a full text query search app over Postgres in Go.&lt;/p&gt;
-&lt;h3 id=&quot;about-pgdash&quot;&gt;About pgDash&lt;/h3&gt;
-&lt;p&gt;&lt;a href=&quot;https://pgdash.io&quot;&gt;pgDash&lt;/a&gt; is an in-depth monitoring solution designed specifically for PostgreSQL deployments. pgDash shows you information and metrics about every aspect of your PostgreSQL database server, collected using the open-source tool &lt;a href=&quot;https://pgmetrics.io&quot;&gt;pgmetrics&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://pgdash.io/blog/images/pgdash-repl-primary.png&quot;&gt;&lt;img src=&quot;https://pgdash.io/blog/images/pgdash-repl-primary.png&quot; alt=&quot;Monitoring with pgDash&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;pgDash is currently in Beta and provides core reporting and visualization functionality, including collecting and displaying PostgreSQL information and providing time-series graphs, detailed reports, alerting and more.&lt;/p&gt;
-</description>
-<pubDate>Wed, 20 Jun 2018 16:39:12 +0000</pubDate>
-<dc:creator>_1</dc:creator>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://pgdash.io/blog/postgres-features.html?h=</dc:identifier>
-</item>
-<item>
-<title>Surgeon Atul Gawande selected as CEO of new health care company from Amazon</title>
-<link>https://www.statnews.com/2018/06/20/surgeon-atul-gawande-selected-ceo-amazon-partners/</link>
-<guid isPermaLink="true" >https://www.statnews.com/2018/06/20/surgeon-atul-gawande-selected-ceo-amazon-partners/</guid>
-<description>&lt;p class=&quot;big-cap-wrap&quot;&gt;&lt;span class=&quot;big-cap&quot;&gt;D&lt;/span&gt;&lt;/p&gt;&lt;p&gt;r. Atul Gawande — the prominent physician, prolific writer, and all-around health care celebrity — will become the &lt;a href=&quot;https://www.statnews.com/2018/06/20/gawande-five-ideas/&quot;&gt;chief executive&lt;/a&gt; of the &lt;a href=&quot;https://www.statnews.com/2018/01/30/amazon-jpmorgan-berkshire-health-care/&quot; rel=&quot;noopener&quot;&gt;new health care company&lt;/a&gt; launched by Amazon, Berkshire Hathaway, and JPMorgan Chase, the three companies announced Wednesday.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.statnews.com/2015/11/11/atul-gawande-health-care-journalism/&quot; rel=&quot;noopener&quot;&gt;Gawande&lt;/a&gt;, a surgeon at Brigham and Women’s Hospital in Boston who teaches at Harvard’s medical and public health schools, will take charge of the new organization July 9. In a note sent to friends and colleagues, Gawande said that he is not giving up his positions at Harvard or the Brigham and that he will keep writing, including for the New Yorker. But he said he will transition from being executive director to chairman of Ariadne Labs, which works on solving problems in health systems around the world.&lt;/p&gt;
-&lt;p&gt;The new company will be based in Boston.&lt;/p&gt;
-&lt;p class=&quot;ad-label&quot;&gt;advertisement&lt;/p&gt;
-
-&lt;p&gt;“I have devoted my public health career to building scalable solutions for better healthcare delivery that are saving lives, reducing suffering, and eliminating wasteful spending both in the US and across the world,” Gawande said in a statement put out by the companies. “Now I have the backing of these remarkable organizations to pursue this mission with even greater impact for more than a million people, and in doing so incubate models of care for all.”&lt;/p&gt;
-&lt;aside class=&quot;read-more standard&quot;&gt;
-&lt;/aside&gt;&lt;p&gt;Not much has been revealed about the new health care enterprise from the three corporate giants; in the release Wednesday, it doesn’t even have a name. The new organization is meant to come up with ways to address the health care costs for the companies’ employees, though its founders have indicated they hope that it comes up with solutions that could be spread across the entire U.S. health system.&lt;/p&gt;
-&lt;p&gt;Some experts have &lt;a href=&quot;https://www.statnews.com/2018/01/30/amazon-health-care-reaction/&quot; rel=&quot;noopener&quot;&gt;expressed some skepticism&lt;/a&gt; though so far, given the lack of details and the quagmire that is the health care industry. Many other innovators have sought to find solutions to health care costs in the past but have run head-on into the complexity of the system.&lt;/p&gt;
-&lt;p&gt;But in his note to friends, Gawande said that “this new health care organization represents one of the most promising opportunities to accelerate improvement of US health care delivery. The work will be difficult and take time, but it must be done.”&lt;/p&gt;
-&lt;p&gt;Gawande was not immediately available for an interview, according to the Brigham.&lt;/p&gt;
-
-&lt;div class=&quot;content-meta&quot;&gt;
-
-&lt;div class=&quot;author-info&quot; readability=&quot;4.0737704918033&quot;&gt;
-&lt;div class=&quot;author-avatar&quot;&gt;&lt;img src=&quot;https://www.statnews.com/wp-content/uploads/2018/01/Circular_Drew.png&quot; srcset=&quot;https://www.statnews.com/wp-content/uploads/2018/01/Circular_Drew.png 160w, https://www.statnews.com/wp-content/uploads/2018/01/Circular_Drew-80x80.png 80w&quot; width=&quot;80&quot; height=&quot;80&quot; class=&quot;avatar&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;author-data&quot; readability=&quot;5.2377049180328&quot;&gt;
-
-&lt;p&gt;General Assignment Reporter&lt;/p&gt;
-&lt;p&gt;Andrew is a general assignment reporter.&lt;/p&gt;
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 20 Jun 2018 13:57:35 +0000</pubDate>
-<dc:creator>uptown</dc:creator>
-<og:type>article</og:type>
-<og:title>Atul Gawande picked as CEO of Amazon, Berkshire health care company</og:title>
-<og:description>Atul Gawande, the surgeon and author, has been selected to lead the health-care venture from Amazon, J.P. Morgan, and Berkshire Hathaway.</og:description>
-<og:url>https://www.statnews.com/2018/06/20/surgeon-atul-gawande-selected-ceo-amazon-partners/</og:url>
-<og:image>https://www.statnews.com/wp-content/uploads/2017/07/Boghosian_Atul-Gawande3_STAT-1024x576.jpg</og:image>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.statnews.com/2018/06/20/surgeon-atul-gawande-selected-ceo-amazon-partners/</dc:identifier>
-</item>
-<item>
-<title>Demand for Ruby on Rails is Still Huge</title>
-<link>https://medium.com/@yoelblum_45935/demand-for-ruby-on-rails-is-still-huge-ea4434926c57</link>
-<guid isPermaLink="true" >https://medium.com/@yoelblum_45935/demand-for-ruby-on-rails-is-still-huge-ea4434926c57</guid>
-<description>&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
-
-&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*ZlCHsXU3PuTzRdpp7w5LBg.png&quot; data-width=&quot;1100&quot; data-height=&quot;450&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*ZlCHsXU3PuTzRdpp7w5LBg.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*ZlCHsXU3PuTzRdpp7w5LBg.png&quot;/&gt;&lt;/div&gt;
-Silicon Valley Area demand for Rails developers is huge
-&lt;p name=&quot;b121&quot; id=&quot;b121&quot; class=&quot;graf graf--p graf-after--figure&quot;&gt;TL;DR Looking at job postings, Rails is more popular than Django, Laravel or Express. By a lot. If you specifically measure startup cities like San Francisco Bay area, Rails even beats ASP.NET . In fact, judging by job postings, &lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Rails is probably the most used full stack web technology for U.S web based startups.&lt;/strong&gt;&lt;/p&gt;
-&lt;p name=&quot;73d8&quot; id=&quot;73d8&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;a href=&quot;https://medium.com/@yoelblum_45935/is-rails-still-popular-in-2018-d17f3b062b18&quot; data-href=&quot;https://medium.com/@yoelblum_45935/is-rails-still-popular-in-2018-d17f3b062b18&quot; class=&quot;markup--anchor markup--p-anchor&quot; target=&quot;_blank&quot;&gt;In a previous post&lt;/a&gt; I made the case that Rails is still popular but much less than in it used to be and that it’s used about as much as other frameworks like Laravel, Django, Express.JS etc. The method I used is looking at the number of Stackoverflow questions asked over time. Lots of people argued this is not a good metric so I decided to dig deeper.&lt;/p&gt;
-&lt;p name=&quot;2f5a&quot; id=&quot;2f5a&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Instead of gauging popularity by Stackoverflow or Google trends, &lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;let’s look at the number of job openings (I used Linkedin); jobs are what we actually care about most , right?&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;aspectRatioPlaceholder is-locked&quot;&gt;
-
-&lt;img class=&quot;graf-image&quot; data-image-id=&quot;1*sEN7tliT0NVef_w3-AlMrA.png&quot; data-width=&quot;737&quot; data-height=&quot;176&quot; data-action=&quot;zoom&quot; data-action-value=&quot;1*sEN7tliT0NVef_w3-AlMrA.png&quot; src=&quot;https://cdn-images-1.medium.com/max/1600/1*sEN7tliT0NVef_w3-AlMrA.png&quot;/&gt;&lt;/div&gt;
-&lt;p name=&quot;9ed7&quot; id=&quot;9ed7&quot; class=&quot;graf graf--p graf-after--figure&quot;&gt;San Francisco Bay Area:&lt;/p&gt;
-&lt;ol class=&quot;postList&quot;&gt;&lt;li name=&quot;349e&quot; id=&quot;349e&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--li-strong&quot;&gt;Rails&lt;/strong&gt; &lt;strong class=&quot;markup--strong markup--li-strong&quot;&gt;1066&lt;/strong&gt;&lt;/li&gt;
-&lt;li name=&quot;e90b&quot; id=&quot;e90b&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Django 636&lt;/li&gt;
-&lt;li name=&quot;ea9d&quot; id=&quot;ea9d&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Spring MVC 304&lt;/li&gt;
-&lt;li name=&quot;6cc7&quot; id=&quot;6cc7&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;ASP.NET 298&lt;/li&gt;
-&lt;li name=&quot;9387&quot; id=&quot;9387&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Symphony 98&lt;/li&gt;
-&lt;li name=&quot;f4c6&quot; id=&quot;f4c6&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Express.JS 74&lt;/li&gt;
-&lt;li name=&quot;6ade&quot; id=&quot;6ade&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Laravel 30&lt;/li&gt;
-&lt;li name=&quot;94e3&quot; id=&quot;94e3&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Sails 18&lt;/li&gt;
-&lt;/ol&gt;&lt;p name=&quot;8689&quot; id=&quot;8689&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;Caveat: Measuring ‘Express’ is problematic because it is a popular English word appearing in may jobs postings. I had to go with Express.js and it might do it injustice.&lt;/p&gt;
-&lt;p name=&quot;ade4&quot; id=&quot;ade4&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;&lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Rails is the most popular web framework in the bay area by job openings.&lt;/strong&gt;&lt;/p&gt;
-&lt;p name=&quot;1660&quot; id=&quot;1660&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Notable mentions are “Spring” with 2498 and “.NET” with 1120. The reason I don’t include them is Spring is not a web framework but a general application framework (that is why I compare Rails to ‘Spring MVC’): a lot of Spring openings are actually meant for big data, data science etc. Same for .NET.&lt;/p&gt;
-&lt;h4 name=&quot;c1aa&quot; id=&quot;c1aa&quot; class=&quot;graf graf--h4 graf-after--p&quot;&gt;How about the languages themselves?&lt;/h4&gt;
-&lt;p name=&quot;01a8&quot; id=&quot;01a8&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;San Francisco Bay Area:&lt;/p&gt;
-&lt;ol class=&quot;postList&quot;&gt;&lt;li name=&quot;e2d2&quot; id=&quot;e2d2&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;Python 13866&lt;/li&gt;
-&lt;li name=&quot;7ab9&quot; id=&quot;7ab9&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Java 11472&lt;/li&gt;
-&lt;li name=&quot;8d67&quot; id=&quot;8d67&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Javascript 7433&lt;/li&gt;
-&lt;li name=&quot;df72&quot; id=&quot;df72&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;PHP 3628&lt;/li&gt;
-&lt;li name=&quot;f98f&quot; id=&quot;f98f&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;&lt;strong class=&quot;markup--strong markup--li-strong&quot;&gt;Ruby 3371&lt;/strong&gt;&lt;/li&gt;
-&lt;li name=&quot;9772&quot; id=&quot;9772&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Node 2301 (Not a language, I know)&lt;/li&gt;
-&lt;li name=&quot;c090&quot; id=&quot;c090&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;C# 2070&lt;/li&gt;
-&lt;/ol&gt;&lt;p name=&quot;4d81&quot; id=&quot;4d81&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;It might not look that impressive for Ruby but being almost tied with PHP is impressive; and a possible explanation for PHP being popular as a language while it’s frameworks aren’t is that PHP is heavily used for Wordpress, Drupal or basic short scripts. That’s not classic app development.&lt;/p&gt;
-&lt;p name=&quot;46c1&quot; id=&quot;46c1&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Let’s look at the entire United States, counting everything from startups to Big Corps.&lt;/p&gt;
-&lt;p name=&quot;4ecc&quot; id=&quot;4ecc&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;United States:&lt;/p&gt;
-&lt;ol class=&quot;postList&quot;&gt;&lt;li name=&quot;8cff&quot; id=&quot;8cff&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;Asp.NET 12203&lt;/li&gt;
-&lt;li name=&quot;27e9&quot; id=&quot;27e9&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;&lt;strong class=&quot;markup--strong markup--li-strong&quot;&gt;Rails 8710&lt;/strong&gt;&lt;/li&gt;
-&lt;li name=&quot;c6df&quot; id=&quot;c6df&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Spring MVC 3570&lt;/li&gt;
-&lt;li name=&quot;93f3&quot; id=&quot;93f3&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Django 2650&lt;/li&gt;
-&lt;li name=&quot;016b&quot; id=&quot;016b&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Laravel 957&lt;/li&gt;
-&lt;li name=&quot;d2b5&quot; id=&quot;d2b5&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Express.js 620&lt;/li&gt;
-&lt;/ol&gt;&lt;p name=&quot;3647&quot; id=&quot;3647&quot; class=&quot;graf graf--p graf-after--li&quot;&gt;That’s really high for Rails!&lt;/p&gt;
-&lt;p name=&quot;a48f&quot; id=&quot;a48f&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;Key conclusions and takeaways:&lt;/p&gt;
-&lt;ol class=&quot;postList&quot;&gt;&lt;li name=&quot;e8c0&quot; id=&quot;e8c0&quot; class=&quot;graf graf--li graf-after--p&quot;&gt;Rails is still extremely popular, especially in Silicon Valley and other startup cities, but also throughout the entire U.S. It gets more mentions in job postings than it’s immediate competitors Django, Laravel, Express.JS etc.&lt;/li&gt;
-&lt;li name=&quot;de3a&quot; id=&quot;de3a&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;Surprisingly low numbers for Laravel and Express in the Bay area. I can’t completely explain it because I know Node has a huge following. Either Node mostly became a front end tool or the server side is done frameworkless in Node world. Whatever the case you rarely see Express.JS in job posts.&lt;/li&gt;
-&lt;li name=&quot;9c2b&quot; id=&quot;9c2b&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;As a general application development frameworks (not just web) Spring and .NET are still the most popular, by quite a margin. Rails doesn’t yet come close to their numbers.&lt;/li&gt;
-&lt;li name=&quot;3c21&quot; id=&quot;3c21&quot; class=&quot;graf graf--li graf-after--li&quot;&gt;I only checked the United States. I’m positive different countries will show different results. For example, being based in the Netherlands I sense that PHP is very popular here for app development. But like it or not, the influence of the U.S on the rest of the tech industry is huge.&lt;/li&gt;
-&lt;/ol&gt;&lt;h4 name=&quot;ed9a&quot; id=&quot;ed9a&quot; class=&quot;graf graf--h4 graf-after--li&quot;&gt;How about coding boot camps?&lt;/h4&gt;
-&lt;p name=&quot;8e53&quot; id=&quot;8e53&quot; class=&quot;graf graf--p graf-after--h4&quot;&gt;Looking at &lt;a href=&quot;https://www.switchup.org/research/best-coding-bootcamps&quot; data-href=&quot;https://www.switchup.org/research/best-coding-bootcamps&quot; class=&quot;markup--anchor markup--p-anchor&quot; rel=&quot;nofollow noopener&quot; target=&quot;_blank&quot;&gt;Switchup’s list of best boot camps for 2018&lt;/a&gt;, &lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;Rails is still the most taught web framework in prominent coding boot camps&lt;/strong&gt;. Many of the big ones still choose Rails to teach app development. I see a lot of Node.JS in there and some Django too but barely any PHP. I don’t see this changing any time soon; Scala, Elixir and newcomers etc are just not a good fit for coding boot camps.&lt;/p&gt;
-&lt;p name=&quot;9697&quot; id=&quot;9697&quot; class=&quot;graf graf--p graf-after--p&quot;&gt;This is important because &lt;strong class=&quot;markup--strong markup--p-strong&quot;&gt;boot camps know the market and care about their graduates employment prospects&lt;/strong&gt;. They choose Rails not only because it’s fun and easy to teach but because there’s a huge market for it.&lt;/p&gt;
-&lt;p name=&quot;739d&quot; id=&quot;739d&quot; class=&quot;graf graf--p graf-after--p graf--trailing&quot;&gt;&lt;em class=&quot;markup--em markup--p-em&quot;&gt;These conclusions somewhat contradict my previous post that argued all these frameworks are more or less equal. We should definitely be careful when assessing framework popularity and use many metrics.&lt;/em&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 20 Jun 2018 13:37:15 +0000</pubDate>
-<dc:creator>rbanffy</dc:creator>
-<og:title>Demand for Ruby on Rails is Still Huge – Yoel Blum – Medium</og:title>
-<og:url>https://medium.com/@yoelblum_45935/demand-for-ruby-on-rails-is-still-huge-ea4434926c57</og:url>
-<og:image>https://cdn-images-1.medium.com/max/1200/1*ZlCHsXU3PuTzRdpp7w5LBg.png</og:image>
-<og:description>TL;DR Looking at job postings, Rails is more popular than Django, Laravel or Express. By a lot. If you specifically measure startup cities…</og:description>
-<og:type>article</og:type>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://medium.com/@yoelblum_45935/demand-for-ruby-on-rails-is-still-huge-ea4434926c57</dc:identifier>
 </item>
 </channel>
 </rss>
