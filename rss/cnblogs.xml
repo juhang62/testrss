@@ -9,6 +9,504 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>剖析HBase负载均衡和性能指标 - 哥不是小萝莉</title>
+<link>http://www.cnblogs.com/smartloli/p/9249259.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/smartloli/p/9249259.html</guid>
+<description>&lt;p&gt;　　在分布式系统中，负载均衡是一个非常重要的功能，在HBase中通过Region的数量来实现负载均衡，HBase中可以通过hbase.master.loadbalancer.class来实现自定义负载均衡算法。下面将为大家剖析HBase负载均衡的相关内容以及性能指标。&lt;/p&gt;
+
+&lt;p&gt;　　在HBase系统中，负载均衡是一个周期性的操作，通过负载均衡来均匀分配Region到各个RegionServer上，通过hbase.balancer.period属性来控制负载均衡的时间间隔，默认是5分钟。触发负载均衡操作是有条件的，但是如果发生如下情况，则不会触发负载均衡操作：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;负载均衡自动操作balance_switch关闭，即：balance_switch false&lt;/li&gt;
+&lt;li&gt;HBase Master节点正在初始化操作&lt;/li&gt;
+&lt;li&gt;HBase集群中正在执行RIT，即Region正在迁移中&lt;/li&gt;
+&lt;li&gt;HBase集群正在处理离线的RegionServer&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;2.1 负载均衡算法&lt;/h2&gt;
+&lt;p&gt;　　HBase在执行负载均衡操作时，如何判断各个RegionServer节点上的Region个数是否均衡，这里通过以下步骤来判断：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;计算均衡值的区间范围，通过总Region个数以及RegionServer节点个数，算出平均Region个数，然后在此基础上计算最小值和最大值&lt;/li&gt;
+&lt;li&gt;遍历超过Region最大值的RegionServer节点，将该节点上的Region值迁移出去，直到该节点的Region个数小于等于最大值的Region&lt;/li&gt;
+&lt;li&gt;遍历低于Region最小值的RegionServer节点，分配集群中的Region到这些RegionServer上，直到大于等于最小值的Region&lt;/li&gt;
+&lt;li&gt;负责上述操作，直到集群中所有的RegionServer上的Region个数在最小值与最大值之间，集群才算到达负载均衡，之后，即使再次手动执行均衡命令，HBase底层逻辑判断会执行忽略操作&lt;/li&gt;
+&lt;/ol&gt;&lt;h2&gt;2.2 实例分析&lt;/h2&gt;
+&lt;p&gt;　　下面笔者通过一个实际的应用场景来给大家剖析HBase负载均衡算法的实现流程。举个例子，假如我们当前有一个5台节点规模的HBase集群（包含Master和RegionServer），其中2台Master和3台RegionServer组成，每台RegionServer上的Region个数，如下图所示。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/666745/201807/666745-20180701031812382-384345116.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　在执行负载均衡操作之前，会计算集群中总的Region个数，当前实例中集群中的Region总个数为175+56+99=330。然后计算每个RegionServer需要容纳的Region平均值。计算结果如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+平均值(&lt;span&gt;110&lt;/span&gt;) = 总Region个数(&lt;span&gt;330&lt;/span&gt;) / RegionServers总数(&lt;span&gt;3&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　计算最小值和最大值来判断HBase集群是否需要进行负载均衡操作，计算公式如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+# hbase.regions.slop 权重值，默认为0.&lt;span&gt;2&lt;/span&gt;&lt;span&gt;
+最小值 &lt;/span&gt;= Math.floor(平均值 * (&lt;span&gt;1&lt;/span&gt;-&lt;span&gt;0.2&lt;/span&gt;&lt;span&gt;))
+最大值 &lt;/span&gt;= Math.ceil(平均值 * (&lt;span&gt;1&lt;/span&gt;+&lt;span&gt;0.2&lt;/span&gt;))
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　HBase集群如果判断各个RegionServer中的最小Region个数大于计算后的最小值，并且最大Region个数小于最大值，这是直接返回不会触发负载均衡操作。根据实例中给出的Region数，计算得出最小值Region为88，最大值Region为120。&lt;/p&gt;
+&lt;p&gt;　　由于实例中RegionServer2的Region个数为56，小于最小值Region数88，而RegionServer1的Region个数为175，大于了最大值Region数120，所以需要负载均衡操作。&lt;/p&gt;
+&lt;p&gt;　　HBase系统有提供管理员命令，来操作负载均衡，具体操作如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;# 使用hbase shell命令进入到HBase控制台，然后开启自动执行负载均衡
+hbase(main):&lt;/span&gt;&lt;span&gt;001&lt;/span&gt;:&lt;span&gt;0&lt;/span&gt;&amp;gt; balance_switch &lt;span&gt;true&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这样HBase负载均衡自动操作就开启了，但是，如果我们需要立即均衡集群中的Region个数怎么办？这里HBase也提供了管理命令，通过balancer命令来实现，操作如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+hbase(main):&lt;span&gt;001&lt;/span&gt;:&lt;span&gt;0&lt;/span&gt;&amp;gt; balancer
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　但是，这样每次手动执行，每次均衡的个数不一定能满足要求，那么我们可以通过封装该命令，用脚本来调度执行，具体实现代码如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+#! /bin/&lt;span&gt;bash
+
+num&lt;/span&gt;=$&lt;span&gt;1&lt;/span&gt;
+
+&lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;[`date &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+%Y-%m-%d %H:%M:%S&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`] INFO : RegionServer Start Balancer...&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
+&lt;span&gt;if&lt;/span&gt; [ ! -n &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;$num&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; ]; &lt;span&gt;then&lt;/span&gt;
+    &lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;[`date &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+%Y-%m-%d %H:%M:%S&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`] INFO : Default Balancer 20 Times.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+    num&lt;/span&gt;=&lt;span&gt;20&lt;/span&gt;
+&lt;span&gt;elif&lt;/span&gt; [[ $num == *[!&lt;span&gt;0&lt;/span&gt;-&lt;span&gt;9&lt;/span&gt;]* ]]; &lt;span&gt;then&lt;/span&gt;
+    &lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;[`date &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+%Y-%m-%d %H:%M:%S&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`] INFO : Input [$num] Times Must Be Number.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+    exit &lt;/span&gt;&lt;span&gt;1&lt;/span&gt;
+&lt;span&gt;else&lt;/span&gt;
+    &lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;[`date &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+%Y-%m-%d %H:%M:%S&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`] INFO : User-Defined Balancer [$num] Times.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
+&lt;span&gt;fi&lt;/span&gt;
+
+&lt;span&gt;for&lt;/span&gt; (( i=&lt;span&gt;1&lt;/span&gt;; i&amp;lt;=$num; i++&lt;span&gt; ))
+&lt;/span&gt;&lt;span&gt;do&lt;/span&gt;
+    &lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;[`date &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+%Y-%m-%d %H:%M:%S&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`] INFO : Balancer [$i] Times,Total [$num] Times.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
+    &lt;span&gt;echo&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;balancer&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;|&lt;span&gt;hbase shell
+    &lt;/span&gt;&lt;span&gt;sleep&lt;/span&gt; &lt;span&gt;5&lt;/span&gt;
+&lt;span&gt;done&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　脚本默认执行20次，可以通过输入一个整型参数来自定义执行次数。&lt;/p&gt;
+&lt;p&gt;　　当HBase集群检查完所有的RegionServer上的Region个数已打要求，那么此时集群的负载均衡操作就已经完成了。如果没有达到要求，可以再次执行上述脚本，直到所有的Region个数在最小值和最大值之间为止。当HBase集群中所有的RegionServer完成负载均衡后，实例中的各个RegionServer上的Region个数分布，如下图所示。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/666745/201807/666745-20180701034521358-719436022.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　此时，各个RegionServer节点上的Region个数均在最小值和最大值范围内，HBase集群各个RegionServer节点上的Region处理均衡状态。&lt;/p&gt;
+
+&lt;p&gt;　　在HBase系统中，有一个非常重要的性能指标，那就是集群处理请求的延时。HBase系统为了反应集群内部处理请求所耗费的时间，提供了一个工具类，即：org.apache.hadoop.hbase.tool.Canary，这个类主要用户检查HBase系统的耗时状态。如果不知道使用方法，可以通过help命令来查看具体的用法，命令如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+hbase org.apache.hadoop.hbase.tool.Canary -help
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;（1）查看集群中每个表中每个Region的耗时情况&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+hbase org.apache.hadoop.hbase.tool.Canary
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;（2）查看money表中每个Region的耗时情况，多个表之间使用空格分割&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;# 查看money表和person表
+hbase org.apache.hadoop.hbase.tool.Canary money person&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;（3）查看每个RegionServer的耗时情况&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+hbase org.apache.hadoop.hbase.tool.Canary -regionserver dn1
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　通常情况下，我们比较关注每个RegionServer节点的耗时情况，将该命令封装一下，然后打印集群中每个RegionServer的耗时情况，脚本实现如下所示：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#########################################################
+# 将捕获的RS耗时，写入到InfluxDB中进行存储，用于绘制历史趋势图
+#########################################################
+#&lt;/span&gt;!/bin/&lt;span&gt;bash
+ 
+post_influxdb_write&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;http://influxdb:8086/write?db=telegraf_mario_bank_rs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;
+
+source &lt;/span&gt;/home/hadoop/&lt;span&gt;.bash_profile
+ 
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; i &lt;span&gt;in&lt;/span&gt; `&lt;span&gt;cat&lt;/span&gt;&lt;span&gt; rs.list`
+    &lt;/span&gt;&lt;span&gt;do&lt;/span&gt;&lt;span&gt;
+        timespanStr&lt;/span&gt;=`(hbase org.apache.hadoop.hbase.tool.Canary -regionserver $i &lt;span&gt;2&lt;/span&gt;&amp;gt;&amp;amp;&lt;span&gt;1&lt;/span&gt;) | &lt;span&gt;grep&lt;/span&gt;&lt;span&gt; tool.Canary`
+        timespanMs&lt;/span&gt;=`&lt;span&gt;echo&lt;/span&gt; $timespanStr|&lt;span&gt;awk&lt;/span&gt; -F &lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;{print $NF}&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;`
+        timespan&lt;/span&gt;=`&lt;span&gt;echo&lt;/span&gt; $timespanMs|&lt;span&gt;awk&lt;/span&gt; -F &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ms&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;{print $1}&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;`
+        &lt;/span&gt;&lt;span&gt;echo&lt;/span&gt; `&lt;span&gt;date&lt;/span&gt; +&lt;span&gt;'&lt;/span&gt;&lt;span&gt;%Y-%m-%d %H:%M:%S&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;` INFO : RegionServer $i delay $timespanMs .
+        currentTime&lt;/span&gt;=`&lt;span&gt;date&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;+%Y-%m-%d %H:%M:%S&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;`
+        currentTimeStamp&lt;/span&gt;=`&lt;span&gt;date&lt;/span&gt; -d &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;$currentTime&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +%&lt;span&gt;s`
+        insert_sql&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;regionsever,host=$i value=$timespan ${currentTimeStamp}000000000&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+        #&lt;/span&gt;&lt;span&gt;echo&lt;/span&gt;&lt;span&gt; $insert_sql
+        curl &lt;/span&gt;-i -X POST &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;$post_influxdb_write&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; --data-binary &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;$insert_sql&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
+    &lt;span&gt;done&lt;/span&gt;&lt;span&gt; 
+exit&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;　　在维护HBase集群时，比如重启某几个RegionServer节点后，可能会发送Region不均衡的情况，这时如果开启自动均衡后，需要立即使当前集群上其他RegionServer上的Region处于均衡状态，那么就可以使用手动均衡操作。另外，HBase集群中各个RegionServer的耗时情况，能够反映当前集群的健康状态。&lt;/p&gt;
+
+&lt;p&gt;　　这篇博客就和大家分享到这里，如果大家在研究学习的过程当中有什么问题，可以加群进行讨论或发送邮件给我，我会尽我所能为您解答，与君共勉！&lt;/p&gt;
+&lt;p&gt;　　另外，博主出书了《Hadoop大数据挖掘从入门到进阶实战》，喜欢的朋友或同学， 可以在公告栏那里点击购买链接购买博主的书进行学习，在此感谢大家的支持。&lt;/p&gt;
+</description>
+<pubDate>Sat, 30 Jun 2018 20:10:00 +0000</pubDate>
+<dc:creator>哥不是小萝莉</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/smartloli/p/9249259.html</dc:identifier>
+</item>
+<item>
+<title>关于STM32 DMA相关总结[概述知识点] - 坐着坟头上吃饺子</title>
+<link>http://www.cnblogs.com/Jack-Tango/p/9249138.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/Jack-Tango/p/9249138.html</guid>
+<description>&lt;p&gt;关于DMA相关知识的总结，写给未来的自己，希望有帮助。立个Flag[坚持写博客总结自己工作或学习记录自己的生活]&lt;/p&gt;
+&lt;p&gt; -------------------------------------------------------------------------------------有事做，有人爱，有所期待----------------------------------------------------------------------------------------------------------------------------------------------------&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;                         DMA基础知识点&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt; &lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;DMA&lt;/span&gt; &lt;span class=&quot;fontstyle2&quot;&gt;&lt;span&gt;简介&lt;/span&gt;&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span&gt;直接存储器访问&lt;/span&gt; &lt;span class=&quot;fontstyle3&quot;&gt;(DMA) &lt;span class=&quot;fontstyle2&quot;&gt;用于在&lt;span&gt;外设&lt;/span&gt;与&lt;span&gt;存储器&lt;/span&gt;之间以及&lt;span&gt;存储器&lt;/span&gt;与&lt;span&gt;存储器&lt;/span&gt;之间&lt;span&gt;提供高速数据传输&lt;/span&gt;。可以在无需任何 &lt;span class=&quot;fontstyle3&quot;&gt;CPU &lt;span class=&quot;fontstyle2&quot;&gt;操作的情况下通过 &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;快速移动数据。这样节省的 &lt;span class=&quot;fontstyle3&quot;&gt;CPU &lt;span class=&quot;fontstyle2&quot;&gt;资源可供其它操作使用。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器基于复杂的总线矩阵架构，将功能强大的双 &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;主总线架构与独立的 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle2&quot;&gt;结合在一起，优化了系统带宽。两个 &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器总共有 &lt;span class=&quot;fontstyle3&quot;&gt;16 &lt;span class=&quot;fontstyle2&quot;&gt;个数据流（每个控制器 &lt;span class=&quot;fontstyle3&quot;&gt;8 &lt;span class=&quot;fontstyle2&quot;&gt;个），每一个 &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;器都用于管理一个或多个外设的存储器访问请求。每个数据流总共可以有多达 &lt;span class=&quot;fontstyle3&quot;&gt;8 &lt;span class=&quot;fontstyle2&quot;&gt;个通道（或称请求）。每个通道都有一个仲裁器，用于处理 &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;请求间的优先级。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;(说白了，就是通过AHB总线将数据从源地址---&amp;gt;目标地址无需CPU参与高效数据传输模式，在数据传输的过程中通过寄存器配置好要传输的数据流和数据通道然后DMA控制器管理相关的寄存器进行数据传输)&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;DMA　框图&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;strong&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630231447400-1001301965.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器执行直接存储器传输：因为采用 &lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;主总线，它可以控制 &lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;总线矩阵来启&lt;br/&gt;动 &lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;事务。&lt;br/&gt;它可以执行下列事务：&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;外设到存储器的传输&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;存储器到外设的传输&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;存储器到存储器的传输&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器提供两个 &lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;主端口： &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;存储器端口&lt;span class=&quot;fontstyle2&quot;&gt;（用于连接存储器）和 &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;外设端口&lt;span class=&quot;fontstyle2&quot;&gt;（用于连接外设）。但是，要执行存储器到存储器的传输， &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;外设端口&lt;span class=&quot;fontstyle2&quot;&gt;必须也能访问存&lt;br/&gt;储器。&lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;从端口用于对 &lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器进行编程（它仅支持 &lt;span class=&quot;fontstyle0&quot;&gt;32 &lt;span class=&quot;fontstyle2&quot;&gt;位访问）&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630231648481-388363004.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;DMA&lt;/span&gt; &lt;span class=&quot;fontstyle2&quot;&gt;&lt;span&gt;事务（DMA实现过程）&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;事务由给定数目的数据传输序列组成。要传输的数据项的数目及其宽度（&lt;span class=&quot;fontstyle0&quot;&gt;8 &lt;span class=&quot;fontstyle2&quot;&gt;位、 &lt;span class=&quot;fontstyle0&quot;&gt;16 &lt;span class=&quot;fontstyle2&quot;&gt;位或 &lt;span class=&quot;fontstyle0&quot;&gt;32 &lt;span class=&quot;fontstyle2&quot;&gt;位）可用软件编程。&lt;br/&gt;每个 &lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;传输包含三项操作：&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;通过 &lt;span class=&quot;fontstyle0&quot;&gt;DMA_SxPAR（外设） &lt;span class=&quot;fontstyle2&quot;&gt;或 &lt;span class=&quot;fontstyle0&quot;&gt;DMA_SxM0AR （存储器）&lt;span class=&quot;fontstyle2&quot;&gt;寄存器寻址，从外设数据寄存器或存储器单元中加载数据。&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;通过 &lt;span class=&quot;fontstyle0&quot;&gt;DMA_SxPAR &lt;span class=&quot;fontstyle2&quot;&gt;或 &lt;span class=&quot;fontstyle0&quot;&gt;DMA_SxM0AR &lt;span class=&quot;fontstyle2&quot;&gt;寄存器寻址，将加载的数据存储到外设数据寄存器或存储器单元。&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle0&quot;&gt;DMA_SxNDTR &lt;span class=&quot;fontstyle2&quot;&gt;计数器在数据存储结束后递减，该计数器中包含仍需执行的事务数。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;在产生事件后，外设会向 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控制器发送请求信号。 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控制器根据通道优先级处理该请求。只要 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控制器访问外设， &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控制器就会向外设发送确认信号。外设获得 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控&lt;br/&gt;制器的确认信号后，便会立即释放其请求。一旦外设使请求失效， &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;控制器就会释放确认信号。如果有更多请求，外设可以启动下一个事务。 （DMA 就是将设定好目的地址和源地址&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;设定好的数据大小（8字节16位半字 32位字），传输的数据量，传输模式，传输的方向等基本配置后按照指定的源地址将通过AHB总线将数据传输到目的地址）；&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;DMA数据流和数据通道 [DMA_SxCR寄存器控制 CHSEL[2:0]]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;每个数据流都与一个 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;请求相关联，此 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;请求可以从 &lt;span class=&quot;fontstyle2&quot;&gt;8 &lt;span class=&quot;fontstyle0&quot;&gt;个可能的通道请求中选出。此选择由 &lt;span class=&quot;fontstyle2&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle2&quot;&gt;CHSEL[2:0] &lt;span class=&quot;fontstyle0&quot;&gt;位控制。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630233849534-1418572336.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630233915523-2044493811.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;来自外设的 &lt;span class=&quot;fontstyle2&quot;&gt;8 &lt;span class=&quot;fontstyle0&quot;&gt;个请求（&lt;span class=&quot;fontstyle2&quot;&gt;TIM&lt;span class=&quot;fontstyle0&quot;&gt;、 &lt;span class=&quot;fontstyle2&quot;&gt;ADC&lt;span class=&quot;fontstyle0&quot;&gt;、 &lt;span class=&quot;fontstyle2&quot;&gt;SPI&lt;span class=&quot;fontstyle0&quot;&gt;、 &lt;span class=&quot;fontstyle2&quot;&gt;I2C &lt;span class=&quot;fontstyle0&quot;&gt;等）独立连接到每个通道，具体的连接取决于产品实现情况。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630234011829-306413090.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;DMA1，控制器控制UART数据流和数据通道&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630234110229-1327301167.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;DMA　仲裁器（控制每个数据流［０－７］优先级） 【相同的优先级，数据流编号低的数据流优先】&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;仲裁器为两个 &lt;span class=&quot;fontstyle2&quot;&gt;AHB &lt;span class=&quot;fontstyle0&quot;&gt;主端口（存储器和外设端口）提供基于请求优先级的 &lt;span class=&quot;fontstyle2&quot;&gt;8 &lt;span class=&quot;fontstyle0&quot;&gt;个 &lt;span class=&quot;fontstyle2&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;数据流请&lt;br/&gt;求管理，并启动外设&lt;span class=&quot;fontstyle2&quot;&gt;/&lt;span class=&quot;fontstyle0&quot;&gt;存储器访问序列。&lt;br/&gt;优先级管理分为两个阶段：&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle0&quot;&gt;软件：每个数据流优先级都可以在 &lt;span class=&quot;fontstyle2&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中配置。分为四个级别：&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;— &lt;span class=&quot;fontstyle0&quot;&gt;非常高优先级&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;— &lt;span class=&quot;fontstyle0&quot;&gt;高优先级&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;— &lt;span class=&quot;fontstyle0&quot;&gt;中优先级&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;— &lt;span class=&quot;fontstyle0&quot;&gt;低优先级&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle0&quot;&gt;硬件：如果两个请求具有相同的软件优先级，则编号低的数据流优先于编号高的数据流。例如，数据流 &lt;span class=&quot;fontstyle2&quot;&gt;2 &lt;span class=&quot;fontstyle0&quot;&gt;的优先级高于数据流 &lt;span class=&quot;fontstyle2&quot;&gt;4&lt;span class=&quot;fontstyle0&quot;&gt;。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;DMA&lt;/span&gt; &lt;span class=&quot;fontstyle2&quot;&gt;&lt;span&gt;数据流&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;8 &lt;span class=&quot;fontstyle2&quot;&gt;个 &lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;控制器数据流都能够提供源和目标之间的&lt;span&gt;单向传输链路&lt;/span&gt;。每个数据流配置后都可以执行：&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;常规类型事务：存储器到外设、外设到存储器或存储器到存储器的传输。&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;● &lt;span class=&quot;fontstyle2&quot;&gt;双缓冲区类型事务：使用存储器的两个存储器指针的双缓冲区传输（当 &lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;正在进行自&lt;span class=&quot;fontstyle0&quot;&gt;/&lt;span class=&quot;fontstyle4&quot;&gt;&lt;br/&gt;&lt;span class=&quot;fontstyle2&quot;&gt;至缓冲区的读&lt;span class=&quot;fontstyle0&quot;&gt;/&lt;span class=&quot;fontstyle2&quot;&gt;写操作时，应用程序可以进行至&lt;span class=&quot;fontstyle0&quot;&gt;/&lt;span class=&quot;fontstyle2&quot;&gt;自其它缓冲区的写&lt;span class=&quot;fontstyle0&quot;&gt;/&lt;span class=&quot;fontstyle2&quot;&gt;读操作）。&lt;br/&gt;要传输的数据量（多达 &lt;span class=&quot;fontstyle0&quot;&gt;65535&lt;span class=&quot;fontstyle2&quot;&gt;）可以编程，并与连接到外设 &lt;span class=&quot;fontstyle0&quot;&gt;AHB &lt;span class=&quot;fontstyle2&quot;&gt;端口的外设（请求 &lt;span class=&quot;fontstyle0&quot;&gt;DMA &lt;span class=&quot;fontstyle2&quot;&gt;传&lt;br/&gt;输）的源宽度相关。每个事务完成后，包含要传输的数据项总量的寄存器都会递减。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle4&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;源、目标和传输模式&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;源传输和目标传输在整个 &lt;span class=&quot;fontstyle2&quot;&gt;&lt;span&gt;4 GB&lt;/span&gt; &lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;区域&lt;/span&gt;（地址在 &lt;span class=&quot;fontstyle2&quot;&gt;0x0000 0000 &lt;span class=&quot;fontstyle0&quot;&gt;和 &lt;span class=&quot;fontstyle2&quot;&gt;0xFFFF FFFF &lt;span class=&quot;fontstyle0&quot;&gt;之间）都可以寻址外设和存储器。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;传输方向使用 &lt;span class=&quot;fontstyle2&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle2&quot;&gt;DIR[1:0] &lt;span class=&quot;fontstyle0&quot;&gt;位进行配置，有三种可能的传输方向：存储器到外设、外设到存储器或存储器到存储器。 &lt;span class=&quot;fontstyle0&quot;&gt;表 &lt;span class=&quot;fontstyle3&quot;&gt;37 &lt;span class=&quot;fontstyle0&quot;&gt;介绍了相应的源和目标地址。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt; &lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle2&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201806/1273407-20180630235003577-1801719076.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;DMA　模式&lt;/p&gt;
+&lt;p&gt;源地址-------------&amp;gt;目标地址&lt;/p&gt;
+&lt;p&gt;外   设---DMA--&amp;gt;  存储器&lt;/p&gt;
+&lt;p&gt;存储器 ---------&amp;gt; 外设&lt;/p&gt;
+&lt;p&gt;存储器-----------&amp;gt;存储器&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;外设到存储器模式&lt;br/&gt;&lt;span class=&quot;fontstyle0&quot;&gt;图 &lt;span class=&quot;fontstyle2&quot;&gt;28 &lt;span class=&quot;fontstyle0&quot;&gt;介绍了这种模式。&lt;br/&gt;使能这种模式（将 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的位 &lt;span class=&quot;fontstyle3&quot;&gt;EN &lt;span class=&quot;fontstyle0&quot;&gt;置 &lt;span class=&quot;fontstyle3&quot;&gt;1&lt;span class=&quot;fontstyle0&quot;&gt;） 时，每次产生外设请求，数据流都会启动数据源到 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的传输。&lt;br/&gt;达到 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的阈值级别时， &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的内容移出并存储到目标中。&lt;br/&gt;如果 &lt;span class=&quot;fontstyle3&quot;&gt;&lt;span&gt;DMA_SxNDTR&lt;/span&gt; &lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;寄存器达到零&lt;/span&gt;、&lt;span&gt;外设请求传输终止（在使用外设流控制器的情况下）或&lt;/span&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span&gt;DMA_SxCR&lt;/span&gt; &lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;寄存器中的&lt;/span&gt; &lt;span class=&quot;fontstyle3&quot;&gt;&lt;span&gt;EN&lt;/span&gt; &lt;span class=&quot;fontstyle0&quot;&gt;&lt;span&gt;位由软件清零，传输即会停止。&lt;/span&gt;&lt;br/&gt;在直接模式下（当 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxFCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle3&quot;&gt;DMDIS &lt;span class=&quot;fontstyle0&quot;&gt;值为“&lt;span class=&quot;fontstyle3&quot;&gt;0&lt;span class=&quot;fontstyle0&quot;&gt;”时），不使用 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的阈值级别控制：每完成一次从外设到 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的数据传输后，相应的数据立即就会移出并存储到目标中。&lt;br/&gt;只有赢得了数据流的仲裁后，相应数据流才有权访问 &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle0&quot;&gt;源或目标端口。系统使用在&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器 &lt;span class=&quot;fontstyle3&quot;&gt;PL[1:0] &lt;span class=&quot;fontstyle0&quot;&gt;位中为每个数据流定义的优先级执行仲裁。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201807/1273407-20180701000017490-140783593.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;存储器到外设模式&lt;br/&gt;&lt;span class=&quot;fontstyle0&quot;&gt;图 &lt;span class=&quot;fontstyle2&quot;&gt;29 &lt;span class=&quot;fontstyle0&quot;&gt;介绍了这种模式。&lt;br/&gt;使能这种模式（将 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle3&quot;&gt;EN &lt;span class=&quot;fontstyle0&quot;&gt;位置 &lt;span class=&quot;fontstyle3&quot;&gt;1&lt;span class=&quot;fontstyle0&quot;&gt;）时，数据流会立即启动传输，从源完&lt;br/&gt;全填充 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO&lt;span class=&quot;fontstyle0&quot;&gt;。&lt;br/&gt;每次发生外设请求， &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的内容都会移出并存储到目标中。当 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的级别小于或等于预定&lt;br/&gt;义的阈值级别时，将使用存储器中的数据完全重载 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO&lt;span class=&quot;fontstyle0&quot;&gt;。&lt;br/&gt;如果 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxNDTR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器达到零、外设请求传输终止（在使用外设流控制器的情况下）或&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle3&quot;&gt;EN &lt;span class=&quot;fontstyle0&quot;&gt;位由软件清零，传输即会停止。&lt;br/&gt;在直接模式下（当 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxFCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle3&quot;&gt;DMDIS &lt;span class=&quot;fontstyle0&quot;&gt;值为“&lt;span class=&quot;fontstyle3&quot;&gt;0&lt;span class=&quot;fontstyle0&quot;&gt;”时），不使用 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的阈值级&lt;br/&gt;别。一旦使能了数据流， &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;便会预装载第一个数据，将其传输到内部 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO&lt;span class=&quot;fontstyle0&quot;&gt;。一旦外设请&lt;br/&gt;求数据传输， &lt;span class=&quot;fontstyle3&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;便会将预装载的值传输到配置的目标。然后，它会使用要传输的下一个数&lt;br/&gt;据再次重载内部空 &lt;span class=&quot;fontstyle3&quot;&gt;FIFO&lt;span class=&quot;fontstyle0&quot;&gt;。预装载的数据大小为 &lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中 &lt;span class=&quot;fontstyle3&quot;&gt;PSIZE &lt;span class=&quot;fontstyle0&quot;&gt;位字段的值。&lt;br/&gt;只有赢得了数据流的仲裁后，相应数据流才有权访问 &lt;span class=&quot;fontstyle3&quot;&gt;AHB &lt;span class=&quot;fontstyle0&quot;&gt;源或目标端口。系统使用在&lt;br/&gt;&lt;span class=&quot;fontstyle3&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器 &lt;span class=&quot;fontstyle3&quot;&gt;PL[1:0] &lt;span class=&quot;fontstyle0&quot;&gt;位中为每个数据流定义的优先级执行仲裁。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201807/1273407-20180701000205701-1150593186.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;p&gt; &lt;span class=&quot;fontstyle0&quot;&gt;存储器到存储器模式&lt;br/&gt;&lt;span class=&quot;fontstyle1&quot;&gt;DMA &lt;span class=&quot;fontstyle0&quot;&gt;通道在没有外设请求触发的情况下同样可以工作。此为&lt;span class=&quot;fontstyle0&quot;&gt;图 &lt;span class=&quot;fontstyle3&quot;&gt;30 &lt;span class=&quot;fontstyle0&quot;&gt;中介绍的存储器到存储器&lt;br/&gt;模式。&lt;br/&gt;通过将 &lt;span class=&quot;fontstyle1&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的使能位 &lt;span class=&quot;fontstyle1&quot;&gt;(EN) &lt;span class=&quot;fontstyle0&quot;&gt;置 &lt;span class=&quot;fontstyle1&quot;&gt;1 &lt;span class=&quot;fontstyle0&quot;&gt;来使能数据流时，数据流会立即开始填充&lt;br/&gt;&lt;span class=&quot;fontstyle1&quot;&gt;FIFO&lt;span class=&quot;fontstyle0&quot;&gt;，直至达到阈值级别。达到阈值级别后， &lt;span class=&quot;fontstyle1&quot;&gt;FIFO &lt;span class=&quot;fontstyle0&quot;&gt;的内容便会移出，并存储到目标中。&lt;br/&gt;如果 &lt;span class=&quot;fontstyle1&quot;&gt;DMA_SxNDTR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器达到零或 &lt;span class=&quot;fontstyle1&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器中的 &lt;span class=&quot;fontstyle1&quot;&gt;EN &lt;span class=&quot;fontstyle0&quot;&gt;位由软件清零，传输即会&lt;br/&gt;停止。&lt;br/&gt;只有赢得了数据流的仲裁后，相应数据流才有权访问 &lt;span class=&quot;fontstyle1&quot;&gt;AHB &lt;span class=&quot;fontstyle0&quot;&gt;源或目标端口。系统使用在&lt;br/&gt;&lt;span class=&quot;fontstyle1&quot;&gt;DMA_SxCR &lt;span class=&quot;fontstyle0&quot;&gt;寄存器 &lt;span class=&quot;fontstyle1&quot;&gt;PL[1:0] &lt;span class=&quot;fontstyle0&quot;&gt;位中为每个数据流定义的优先级执行仲裁。&lt;br/&gt;&lt;span class=&quot;fontstyle0&quot;&gt;注意： 使用存储器到存储器模式时，不允许循环模式和直接模式。&lt;br/&gt;只有 &lt;span class=&quot;fontstyle3&quot;&gt;DMA2 &lt;span class=&quot;fontstyle0&quot;&gt;控制器能够执行存储器到存储器的传输&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle1&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;span class=&quot;fontstyle3&quot;&gt;&lt;span class=&quot;fontstyle0&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1273407/201807/1273407-20180701000812438-206133222.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 30 Jun 2018 16:09:00 +0000</pubDate>
+<dc:creator>坐着坟头上吃饺子</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/Jack-Tango/p/9249138.html</dc:identifier>
+</item>
+<item>
+<title>Asp.Net Core中利用Seq组件展示结构化日志功能 - 微笑刺客D</title>
+<link>http://www.cnblogs.com/CKExp/p/9246788.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CKExp/p/9246788.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;&lt;span&gt;在一次.Net Core小项目的开发中，掌握的不够深入，对日志记录并没有好好利用，以至于一出现异常问题，都得跑动服务器上查看，那时一度怀疑自己肯定没学好，不然这一块日志不可能需要自己扒服务器日志来查看，果然，很多东西没掌握，至此，花点时间看了下日志的相关操作。利用日志服务来查看日志数据。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;本文地址：&lt;a href=&quot;https://www.cnblogs.com/CKExp/p/9246788.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/CKExp/p/9246788.html&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;本文Demo的地址：&lt;a href=&quot;https://gitee.com/530521314/LogPanel.git&quot; target=&quot;_blank&quot;&gt;https://gitee.com/530521314/LogPanel.git&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;一、日志记录的原则&lt;/h3&gt;
+&lt;p&gt;　　日志是为了方便我们观察应用程序是否正常运行，也是当运行不正常是，能够快速找到出现问题，定位问题的方式。&lt;/p&gt;
+&lt;p&gt;　　有几条日志记录原则是我们大多都得遵循的：&lt;/p&gt;
+&lt;p&gt;　　1、日志记录清晰，内容得让我们能够知道应用程序运行正常或运行不正常下能够有关键信息指明哪里出问题了。&lt;/p&gt;
+&lt;p&gt;　　2、不要过度记录，一些场景下我们需要预判是否需要记录日志信息，我们能够控制日志记录的数量，同样，日志内容，要精简记录，无关紧要的文字，废话等无需加入。&lt;/p&gt;
+&lt;p&gt;　　3、控制日志记录级别，或许在一个日志级别下记录了很多信息，可是其中的部分信息才是最为重要的，当调高一个记录级别，这部分最为重要的信息就展示出来了，那就直接调高级别吧。&lt;/p&gt;
+&lt;p&gt;　　4、隐私保护，日志虽然是让开发运维人员看到，可是我们也不能所有信息都记录下来，用户的隐私信息我们得保护好。&lt;/p&gt;
+
+&lt;h3&gt;二、内置日志组件&lt;/h3&gt;
+&lt;p&gt;　　Asp.Net Core中内置了日志组件，功能也很强大，首先来个简单示例：&lt;/p&gt;
+&lt;p&gt;　　直接使用内置日志功能，无需在startup中加入另外的代码。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; 　　 &lt;span&gt;private&lt;/span&gt; &lt;span&gt;readonly&lt;/span&gt; ILogger&amp;lt;HomeController&amp;gt;&lt;span&gt; _logger;
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; 
+&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; HomeController(ILogger&amp;lt;HomeController&amp;gt;&lt;span&gt; logger)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         _logger =&lt;span&gt; logger;
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
+&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; IActionResult Index()
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;         _logger.LogDebug($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;开始监控整个网站的日志信息_{DateTime.Now}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;_logger.LogError($&quot;开始监控整个网站的日志信息Error_{DateTime.Now}&quot;);&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; View();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 　　在调试框下看到输出的日志信息。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630172357586-786023905.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　开始控制日志记录级别：&lt;/p&gt;
+&lt;p&gt;　　在StartUp下,对内置日志组件做一些处理，在配置文件中将日志记录的级别提高到Information级别：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+　　&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;默认日志功能&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt;         loggerFactory.AddConsole(Configuration.GetSection(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Logging&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;        loggerFactory.AddDebug();
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;loggerFactory.AddSerilog();&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt; 
+&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (env.IsDevelopment())
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;            app.UseBrowserLink();
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;             app.UseDeveloperExceptionPage();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;更多错误信息的开发者异常详情页&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;else&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;             app.UseExceptionHandler(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/Home/Error&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; 
+&lt;span&gt;18&lt;/span&gt; &lt;span&gt;        app.UseStaticFiles();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; 
+&lt;span&gt;20&lt;/span&gt;         app.UseMvc(routes =&amp;gt;
+&lt;span&gt;21&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;            routes.MapRoute(
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;                 name: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;default&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;                 template: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{controller=Home}/{action=Index}/{id?}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; &lt;span&gt;        });
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　appsetting.json文件中,将LogLevel的默认级别设为Information，这样一来&lt;span&gt;在之前的示例中_logger.LogDebug将失去作用。&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;{
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;   &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Logging&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;IncludeScopes&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;false&lt;/span&gt;&lt;span&gt;,
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LogLevel&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;       &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Default&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Information&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;       &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;System&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Error&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;       &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Microsoft&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Error&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;  }
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　对于异常来讲，出现异常，日志肯定得记录下来，不然出现异常，直接抛出，那还要日志有什么用呢。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; IActionResult About()
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             _logger.LogInformation($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;业务逻辑执行前，运行正常&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行其它业务逻辑&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt;             &lt;span&gt;int&lt;/span&gt; textInt = &lt;span&gt;5&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;             &lt;span&gt;int&lt;/span&gt; result = textInt / &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行其它业务逻辑&lt;/span&gt;
+&lt;span&gt;10&lt;/span&gt;             _logger.LogInformation($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;业务逻辑执行后，运行正常&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;         &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception ex)
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;             _logger.LogError($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;出现异常,异常信息{ex.Message}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;             &lt;span&gt;throw&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; 
+&lt;span&gt;18&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; View();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　异常信息加载出来。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630174743993-347723438.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　出现异常，拦截异常，记录日志信息，不单单在这里，在Filter或是几个中间件中，都能够记录下来，此处不在多讨论。&lt;/p&gt;
+
+&lt;h3&gt;三、第三方日志组件&lt;/h3&gt;
+&lt;p&gt;　　尽管微软已经内置了日志记录组件，但是一些第三方组件或许是我们中意的，在性能上、记录方式上、操作上等等，如Log4Net、Logger、NLog和Serilog 等。结构化的日志使得我们阅读日志也更加轻松点。&lt;/p&gt;
+&lt;p&gt;　　在此，我利用Serilog组件来替换内置的日志组件，添加相应的依赖包(Serilog.Extensions.Logging和Serilog.Sinks.Literate)。&lt;/p&gt;
+&lt;p&gt;　　然后来更新Startup类，令Serilog组件开始发挥它的作用。&lt;/p&gt;
+&lt;p&gt;　　尽管可以在Program中加入Serilog组件，在这里，我将只在StartUp类中更改代码，为了代码统一存放，对于组件加入有三种方式：&lt;/p&gt;
+&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;方式一&lt;/strong&gt;&lt;/span&gt;：&lt;strong&gt;在StartUp初始化完毕加入进来，利用Log.Logger的全局性，在整个应用程序中发挥作用，而不需要在各处声明注入。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　其中的 .WriteTo.Seq(&quot;http://localhost:5341&quot;)是为了后面加入Seq组件而提前写入的，可以忽略。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Startup(IConfiguration configuration)
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         Configuration =&lt;span&gt; configuration;
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;方式一：配置Seq服务器的地址(5341端口为默认地址)&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt;         Log.Logger = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; LoggerConfiguration()
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;            .MinimumLevel.Debug()
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             .MinimumLevel.Override(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LoggingService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, Serilog.Events.LogEventLevel.Debug)
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;            .Enrich.FromLogContext()
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;             .WriteTo.Seq(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://localhost:5341&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;            .WriteTo.LiterateConsole()
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            .CreateLogger();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　在应用程序中的使用方式是直接使用Log.Logger写入即可，如在HomeController的Contact方法中，利用且只能利用这种方式写入，当想用最开始那种方式注入时，在LoggerFactory中并没有SerilogProvider，因为我们并没有把Serilog加入到LoggerFactory中，这也使得Serilog和内置日志出现共存的局面，并可以通过两种方式使用日志功能。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; IActionResult Contact()
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; &lt;span&gt;        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;         Log.Debug(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Log.Debug:Serilog Start Send Message&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;         Log.Information(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Log.Information:Serilog Start send Message&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt;         Log.Logger.Debug(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Log.Logger:Serilog Start Send Message&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;         Log.Logger.Information(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Log.Logger.Information:Serilog Start Send Message&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;8&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; View();
+&lt;/span&gt;&lt;span&gt;9&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　利用这种方式下的日志输出。　　&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630202732131-984578171.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　&lt;strong&gt;　 &lt;span&gt;方式二&lt;/span&gt;：在ConfigureServices中将Serilog加入到LoggerFactory中，通过统一的扩展方式加入进来，利用Action委托指定Serilog组件，其中允许我们对Serilog进行相关设置。&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; ConfigureServices(IServiceCollection services)
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;方式二&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;var&lt;/span&gt; serilog = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; LoggerConfiguration()
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;                .MinimumLevel.Information()
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;                 .MinimumLevel.Override(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LoggingService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, Serilog.Events.LogEventLevel.Debug)
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;                .Enrich.FromLogContext()
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                 .WriteTo.Seq(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://localhost:5341&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                .WriteTo.LiterateConsole();
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; 
+&lt;span&gt;11&lt;/span&gt;         services.AddLogging(loggerBuilder =&amp;gt;
+&lt;span&gt;12&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;            loggerBuilder.AddSerilog(serilog.CreateLogger());
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;        });
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;        services.AddMvc();
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　这种方式下，我们需要将Logger通过依赖注入的形式加入进来，先来看下是否加入到了LoggerFactory中&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630203839773-1345284150.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　加入进来了，并完成了日志的输出。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630204119971-196124518.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;　　&lt;span&gt;方式三&lt;/span&gt;：和方式二一样都是加入到LoggerFactory中，但是直接利用的是Serilog提供的扩展方法AddSerilog加入进来。&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;默认日志功能
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;loggerFactory.AddConsole(Configuration.GetSection(&quot;Logging&quot;));
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;loggerFactory.AddDebug();&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt; 
+&lt;span&gt; 7&lt;/span&gt;         &lt;span&gt;#region&lt;/span&gt; Serilog
+&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;方式三
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;默认配置
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;loggerFactory.AddSerilog();
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; 
+&lt;span&gt;12&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;配置Seq服务器的地址(5341端口为默认地址)
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;var serilog = new LoggerConfiguration()
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;    .MinimumLevel.Information()
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;    .MinimumLevel.Override(&quot;LoggingService&quot;, Serilog.Events.LogEventLevel.Debug)
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;    .Enrich.FromLogContext()
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;    .WriteTo.Seq(&quot;&lt;/span&gt;&lt;span&gt;http://localhost&lt;/span&gt;&lt;span&gt;:5341&quot;)
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;    .WriteTo.LiterateConsole();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;loggerFactory.AddSerilog(serilog.CreateLogger());&lt;/span&gt;
+&lt;span&gt;20&lt;/span&gt;         &lt;span&gt;#endregion&lt;/span&gt;
+&lt;span&gt;21&lt;/span&gt; 
+&lt;span&gt;22&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (env.IsDevelopment())
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;            app.UseBrowserLink();
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;             app.UseDeveloperExceptionPage();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;更多错误信息的开发者异常详情页&lt;/span&gt;
+&lt;span&gt;26&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;         &lt;span&gt;else&lt;/span&gt;
+&lt;span&gt;28&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;             app.UseExceptionHandler(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/Home/Error&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; 
+&lt;span&gt;32&lt;/span&gt; &lt;span&gt;        app.UseStaticFiles();
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt; 
+&lt;span&gt;34&lt;/span&gt;         app.UseMvc(routes =&amp;gt;
+&lt;span&gt;35&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt; &lt;span&gt;            routes.MapRoute(
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt;                 name: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;default&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+&lt;/span&gt;&lt;span&gt;38&lt;/span&gt;                 template: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{controller=Home}/{action=Index}/{id?}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;39&lt;/span&gt; &lt;span&gt;        });
+&lt;/span&gt;&lt;span&gt;40&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　Serilog组件同源加入进来了，输出结果就不展示了和方式二一样的。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630181953344-1117795002.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　具体Serilog的非常优秀的功能就不介绍了，请看Serilog的官方介绍 &lt;a href=&quot;https://github.com/serilog&quot; target=&quot;_blank&quot;&gt;https://github.com/serilog&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;四、Seq组件&lt;/h3&gt;
+&lt;p&gt;　　到了本文的主题——Seq组件，通过网页UI的形式将日志展现出来，内容更加多样化，并赋予了更多功能日志搜索。&lt;/p&gt;
+&lt;p&gt;　　首先，安装Seq组件，Seq下载地址：&lt;a href=&quot;https://getseq.net/Download&quot; target=&quot;_blank&quot;&gt;https://getseq.net/Download&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;　　本地开发情形下是免费使用的，如果需要在生产环境中使用，需要商业许可(你懂的,money).在目前的版本中，4.2是只能够在windows下跑，也就是说我们如果是在windows下开发，在测试时可以借助这个方便的查看日志信息，按照给定的安装步骤完成安装。&lt;/p&gt;
+&lt;p&gt;　　在应用程序中，我们通过Nuget管理Serilog.Sinks.Seq包，该组件隶属于Serilog旗下。Seq默认的端口是利用5341端口，如果我们想要使用其它端口，我们可以更改在应用程序中的地址&lt;/p&gt;
+&lt;p&gt;　　以上一节的方式三为例，在其中加入一行.WriteTo.Seq(“http://localhost:5341”)便可指定Seq服务器地址。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt;     &lt;span&gt;var&lt;/span&gt; serilog = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; LoggerConfiguration()
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;        .MinimumLevel.Information()
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;         .MinimumLevel.Override(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LoggingService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, Serilog.Events.LogEventLevel.Debug)
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; &lt;span&gt;        .Enrich.FromLogContext()
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;         .WriteTo.Seq(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://localhost:5341&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; &lt;span&gt;        .WriteTo.LiterateConsole();
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt;     loggerFactory.AddSerilog(serilog.CreateLogger());
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　在本地windows运行起来看下，启动Seq服务器，当然，你这里或许需要配置一些账号密码之类的，都是小问题。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630221716242-1099040504.png&quot; alt=&quot;&quot; width=&quot;699&quot; height=&quot;333&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　启动应用程序，并进入那些写了日志的方法中，日志信息已经进来了，我们可以查看这些日志信息，并通过日志搜索功能搜索。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630222017090-1209466570.png&quot; alt=&quot;&quot; width=&quot;670&quot; height=&quot;250&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630222106356-1686999237.png&quot; alt=&quot;&quot; width=&quot;701&quot; height=&quot;222&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　在这里要说明一下，同时也在Seq组件的网站中也写明了。使用这些方式都可以直接使用Seq组件，第三方组件也不是必须的，直接利用Asp.Net Core的内置日志组件一样可以使用Seq组件。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630222441378-9695790.png&quot; alt=&quot;&quot;/&gt;　　　&lt;/p&gt;
+&lt;p&gt;　　可是，Linux下可以吗？　假如我的开发环境在Linux下岂不是不行。现在有一个预览版5.0的，在Docker Hub中有Seq的镜像，虽然是预览版，可是我还是想试试。&lt;/p&gt;
+&lt;p&gt;　　Docker Hub中Seq镜像地址：&lt;a href=&quot;https://docs.getseq.net/v5.0/docs/docker&quot; target=&quot;_blank&quot;&gt;https://docs.getseq.net/v5.0/docs/docker&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;　　现在，开始Linux中弄起来。&lt;/p&gt;
+&lt;p&gt;　　首先完成镜像的爬取，之后会自动启动该镜像内部的服务。我们直接输入地址访问即可。默认地址ip:5341端口&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+docker run -e ACCEPT_EULA=Y -p &lt;span&gt;5341&lt;/span&gt;:&lt;span&gt;80&lt;/span&gt; datalust/seq:latest
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　页面有了，Linux下看来也是可以的了，把应用程序通过Jenkins上都发布成功了，可是访问出现问题，Docker外部端口无法映射到内部端口，糟心，可是应该不是大问题，就此也就不弄日志信息的展示了。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1133736/201806/1133736-20180630234828195-385091602.png&quot; alt=&quot;&quot; width=&quot;719&quot; height=&quot;259&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　至此，日志相关的一系列知识简单带过，关键是Seq那个可视化日志界面，很nice。&lt;/p&gt;
+&lt;p&gt;　　本文地址：&lt;a href=&quot;https://www.cnblogs.com/CKExp/p/9246788.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/CKExp/p/9246788.html&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;　　本文Demo的地址：&lt;a href=&quot;https://gitee.com/530521314/LogPanel.git&quot; target=&quot;_blank&quot;&gt;https://gitee.com/530521314/LogPanel.git&lt;/a&gt;&lt;/p&gt;
+
+&lt;pre class=&quot;lang-java prettyprint prettyprinted&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;str&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;lit&quot;&gt;&lt;strong&gt;2018-6-30,望技术有成后能回来看见自己的脚步&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+
+</description>
+<pubDate>Sat, 30 Jun 2018 15:55:00 +0000</pubDate>
+<dc:creator>微笑刺客D</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CKExp/p/9246788.html</dc:identifier>
+</item>
+<item>
+<title>Optaplanner规划引擎的工作原理及简单示例(1) - kentzhang</title>
+<link>http://www.cnblogs.com/kentzhang/p/8947385.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/kentzhang/p/8947385.html</guid>
+<description>&lt;p&gt;　　在之前的文章中，老猿已介绍过APS及规划的相关内容，也对Optaplanner相关的概念和一些使用示例进行过介绍，接下来的文章中，我会自己做一个规划小程序 - 一个关于把任务分配到不同的机台上进行作来的小程序，并在这个小程序的基础上对Optaplanner中更多的概念，功能，及使用方法进行讲解。但在此之前，我需要先讲解一下Optaplanner在运行规则运算的原理。所以，本文是讲述一些关于寻找最优解的过程中的原理性的内容，作为后续通过示例深入讲解的基础。但这些原理知识不会涉及过分深奥的数学算法，毕竟我们的目标不是写一个新的规划引擎出来，只是理解一些概念，用于理解Optaplanner是依据什么找出一个相对优解的。好让在接下来的一系列文章中，可以快速无障碍地理解我所讲解的更细化的Optaplanner功能。&lt;/p&gt;
+&lt;p&gt;　　好了，言归正传，本文主要是讲述Optaplanner是如何在用户定义的规则限制条件中，基于约束的限制，对被规划对象进行排列组合，再对比各个组合（称作解，或方案），并找出相对最优的解出来。在这个寻优过程中，Optaplanner会使用到一些相关算法，例如启发式算法（例如First Fit）和延迟接受法（例如禁忌搜索），从而提高寻找相对最优解的效率和防止嵌入局部最优解，从而可以在固定的时间内，找到尽可能优的方案。&lt;/p&gt;
+&lt;p&gt;　　在理解Optapalnner是如何实现之前，我们先复习并展开一下上一篇提到的概念 - 约束。&lt;/p&gt;
+&lt;h3&gt;&lt;strong&gt;约束（Constraint）:&lt;/strong&gt;&lt;/h3&gt;
+&lt;p&gt;　　也就是对事物的一种限制，规定事物的发展应该遵循什么规则，具体到Optaplanner里，就是用于表达出什么是对的，什么是错的，什么情况是最优，什么情况次优，什么情况较差。从而让引擎得到各个解的对比依据。&lt;/p&gt;
+&lt;p&gt;　　在Optapalnner中的约束可以分为&lt;strong&gt;硬约束&lt;/strong&gt;和&lt;strong&gt;软约束&lt;/strong&gt;两种，其实还有更多的约束类型 ，例如&lt;strong&gt;中间约束&lt;/strong&gt;，甚至是无限层级的约束，但总结起来,其作用也就是把约束划分为不同层级，从而区分出不同的优等级而已，如果有软件开发经验的同学，可以理解不同层级的约束，分别是SQL语句里Order By子句后面的字段次序。在进行记录排序时，前面的字段排列的优先级，是从性质上优先于后面的字段的，大家理解了Order By子句，也就理解了不同层级约束的问题了。拉下来我们以最简单的软硬约束，来分析一下约束的作用。&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;硬约束：&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;　　硬约束是用来规定什么情况是对的，什么情况是错的；什么组合是好的，什么组合是不好的......也就是它通常是用来对所得的解进行一些定性的状态定义。例如一个计划是否可行，例如会不会同一个机台同一个时间分配了两个不同的任务（假设每个机台同时只能做同一个任务）。一个员工所排班次是否正确（例如一个员工是否被安排了三个连续的班次）。若出现上种情况，即表示违反了硬约束，这种方案称作不可行方案。以后的文章里，会提到Optaplanner里有一个明确的概念 - Feasable Solution(可行方案，或称可行解)，就是表示这个方案是完全符合硬约束的。&lt;/p&gt;
+&lt;h3&gt;软约束：&lt;/h3&gt;
+&lt;p&gt;　　软约束规定什么情况最优，什么情况次优，什么情况是差的；它是用来定义方案优劣的定量状态。例如：一个计划的成本是否足够低；一个排班表到底有多大程度上的合理性，例如一个人正常情况下是需要5天工作制的，但如果遇到特殊情况，也可以连续工作6天，但这种情况是特殊的，需要额外付加班费（成本上升）最好不要出现这种情况。那么在编制这个排班表的时候，如果有一个方案是需要有人员连续工作6天，但如果找到另一个方案，可以令所有人均不需要连续工作6天，那么，后面这个方案就比那些有人需要连续工作6天的方案更好了。体现在软约束上，就是后面的排产表，其软约束上会比前一个排班表更好，违反的软约束更少。&lt;/p&gt;
+&lt;p&gt;　　上述讲述的是两种常见约束，那么这些约束在Optaplanner里是如何生效的呢？那说需要有一种&lt;strong&gt;评分机制&lt;/strong&gt;了，也是我们在使用Optaplanner里，比较难准确把握的一个内容之一。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;评分机制：&lt;/strong&gt;评分是用分数来评价事物特性的一种方法。但如果我们细心观察总结一下，会发现评份是可以通过两种方向来评价的；分别是正评分(奖励性评分)和负评分(惩罚性评分)。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;正评分：&lt;/strong&gt;通过获得分数的多少，来体现事物的优劣。例如我们在学校考试过程中，成绩是通过一种正分数来体现的，即做对一题奖励相应的分数，分数越高成绩越好；完美状态是获得满分。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;负评分：&lt;/strong&gt;通过扣除分数的多少，来体现事物的优劣。例如我们的驾驶证记分制，每违章一次就扣除相应的分数，很明显这种评份体系中，分数越低越好，也就是扣得越少越好；完美状态是扣0分。&lt;/p&gt;
+&lt;p&gt;　　在对实际问题进行约束规划时，是一种封闭性约束，也就是约定事物往指定的一个方向发现，使用负评分的方式，很显然更合理。也就是一个方案有哪些不好的，我们通过对它评定一些惩罚分数标准，告诉引擎这种组合出现了一些不太好的情况。如此类推，每找到一个更佳、扣分更少的方案，就离完美就更近一步。无论是使用正方向评份还是反方向评分（或称负方向评分），在Optaplanner里都是可以实现的，只不过按我们日常的逻辑，在定义方案时，通常我们只会根据业务定义出一些规则，方案是需要守这些规则，当一个方案出现有违反规则时，就作出相应的惩罚性扣分；这种方法比当出现好的情况就加分更合理。因为我们的现实世界里，&quot;好&quot;是可能无限好的，当问题足够复杂，数据量足够大，即问题规模够大时，描述一个方案如何个好法，其实很难是一个定数。比描述一个方案如何个差法更难，因为前者可以是无限的，而后都就只需要我们定义好什么是差的标准，一但问题范围确定，它的最差情况（也就是最差的扣分情况）就有一个字数了。所以，在Optaplanner的世界里，常见的做法是，定义一些约束，并设定相应的惩罚分数标准（即将约束量化），用来描述这个方案的制约因素，当这个约束实打破时，就作出惩罚性记分，那么到最后，扣分越少的方案就越好。这就是Optaplanner实现寻优的最基本原理，但其实现是非常复杂的，会将问题划分为很多种类，将寻优的过程划分为多个阶段，每个阶段利用不同种类的算法来提高找到更优方案的效率，每个阶段有很多个步骤，每个步骤又有多个移动（没错，Optaplanner里就有Step与Move的概念，以后会详解）；在以后的深入文章中，我会详细把这个过程分析出来。&lt;/p&gt;
+&lt;p&gt;　　上面描述了硬约束、软约束和评份机制。那么如何将这两种约束与这种评分机制关联起来，令评分机制可以实现软、硬约束呢？大家可能已想到，在Optaplanner给出了软分数，硬分数的概念。在评分机制中，当出现一个方案违反了某个硬约束时，就给这个方案扣除这个约束相应的分数；同样地，当该方案违反了一种软约束时，就对该方案扣除该软约束相应的分数。这两个分数是分开处理的。因为通过它们对应的约束类别就知道，它们分别代表的性质不一样，硬分数对应的硬约束，代表的是一种定性评价；即描述方案好不好，行不行，可不可取等，一旦被记扣硬分数，那就表示这个方案的性质就变了，由可行方案变成不可行方案。理想的方案是一个硬分都不能扣的，一旦扣了就是不可行方案了。有人问，那么定义硬分数的分值有什么用？直接给一个标识出来，将方案的可用性定义为True or False，分别代表是事有硬约束被违反不就行了吗，多简单呀，因为一旦为False就是不可用了，再去讨论它扣了多少分，又有何意义呢？硬约束、硬分数不就是为了给方案定性而设立的吗？何必还要记录它的扣分量，多此一举呢？&lt;/p&gt;
+&lt;p&gt;　　如果这样想，就是一种不全面的想法了。因为大家需要明白，现实世界往往是很大程度是不完美的，但而对不完美，我们是放弃这个世界，还是在不完美中进行坚持，对这个不完美的世界，朝完美的方向进行改造呢？上面的说法就比较抽象比较虚了，举个大家容易理解的例子。例如：刑法是用来惩罚犯罪的，在正常的法治社会中，犯罪对于一个人说，就相当于违反了硬约束（刑事处罚记录是终身跟随的）。也就是对于一个人来说，一生中是否触犯过刑法，是一个定性的问题。那么既然是定性问题，我们在设立刑法的时候，其对应的惩罚是不是只有一种就足够了呢？例如凡是触犯刑法，全部判死刑，那不就简单得多啦？事实上人类社会是不可能这样的，因为就算是触犯了刑法（这个已经是定性问题），但罪行也有轻重之分的、对应了刑法的不同条款，有些罪名经过对罪犯的惩戒，是可以再给他一次机会的，也说就是说触犯的刑法，是有轻重之分的，但性质不会变，他在国家司法机关的档案里，永远留有普被刑事处理的记录。所以，这可以称该种情况为定性范围内的定量问题。就是一个人做错了就是错了，其性质已经定了，但犯的错误有多大，还得是一个定量问题。因此，硬约束对应的扣除硬的分数有多有少就不难理解了。就是我们的方案如果出现了违反硬约束、被扣除了硬分数的，它在Optaplanner上就是一个不可行方案了。但是在众多的不可行方案里，其实还要区分哪个是更不可行，哪些其实只是违反了一点点，还是“稍为可行的”。回到我们的实际排程问题中，有可能客观条件限制，我们所有排出来的方案（例如生产计划、排班表、车辆调试线路图）都是不可行的，例如：我们排生产计划的时候，将交货期延误作为一种硬约束，但是现实的生产活动中，确确实实有可能无论你怎么排，因为产能、资源限制等因素，你是不可能找到一个完完全全符合交期的生产计划的，那么这个时间我们就需要找出一个违反得最小的计划出来，作为可行计划，视情况进行相应的修改并执行了。也就是说两害相遇取其轻。&lt;/p&gt;
+&lt;p&gt;　　对于硬约束，除了上述讲到，当出现有可能确实需要使用不可行方案作为执行计划的情况外，在Optaplanner进行规则的过程中，其实也起到非常大作用的。先不说optaplanner引来来排程；如果让你来排，对于各种硬约束，全都不给出一个分数，而是给一个定性的标识，就是一旦出现违反了，就报一个违反硬约束的消息出来，你会怎么样?你肯定会抱怨提示的信息太简陋了，只有一个标识，最多只是知道哪里违反了，再也没有更详细的信息供你参考了。那你接下来的排产活动，其实就是一个组合一个组合逐一地去碰彩了。因为各个方案之间是否有关联，你是无法得知的，所以你根本找不到什么好的办法去将各种情况下的方案进行归类、比较进行往指定的一个方向收敛。但如果在一个硬约束被违反时，会出现一些明确的信息，是哪个硬约束被违反了。违反和程度是多少，扣了多少分，是因为哪个被规则的对象，放在哪里，或与哪个对象相邻从而导致的硬约束被违反。这样就形成了一个很明确指导方向，对于人而言，通过归纳统计就知道某些情况肯定会出现，或极大可能会出现违反硬约束的情况，那我们就可以在排列新方案时，尽力去避免这种情况了；也就是有了参考方向 。对于Optaplanner引擎来说也是同理，尽管它不像人这么聪明（但最从近的消息来看，Optapalnner团队已经着手思考人工智能引入到引擎中，从而实现如上述人类一样对这类问题进行归纳思考），但也能够作为其寻找更佳方案的过程中的一些很重要的参考，从而为寻优算法所用，进而提高寻优效率。例如遗传算法。&lt;/p&gt;
+&lt;p&gt;　　软分数对应的软约束，代表的是一种定量评价；即描述方案有多好、有多差，成本有多高、有多低。它是一种优化约束，即在定义它的时候，就已经知道它必然是被违反的（也有可能完全不违反，那当然是好的，但如果是这样的话，就脱离了软约束的初充了）。所以，软件约束、软件分数的扣分值用途相对来说就容易理解得多了。&lt;/p&gt;
+&lt;p&gt;　　 综上所述，Optaplanner就是通过一种体现为分数的约束机制，进行寻找最优组合。当一个排产问题中，设定的软硬两种约束时，它会优先满足硬约束的要求，再满足软约束的要求，也就是说，软约束被扣为1万分，也不及硬约束被扣了1分重要，联系上面的SQL语句中的Order By子句的例子。&lt;/p&gt;
+&lt;p&gt;　　Optaplanner其利用途径有以下两点：&lt;/p&gt;
+&lt;p&gt;1. 用分数来确定，一个方案是否可行，是优是劣；&lt;/p&gt;
+&lt;p&gt;2. 在决定每一步的时候，参考上一点的扣分情况，来确定下一次生成方法时，应该考虑哪此因素（想想遗传算法）.&lt;/p&gt;
+&lt;p&gt;　　这一篇我们先讲解一下原理，打一下基础，下一篇将用一个任务与机台的例子来说明一下这些原理在Optaplanner中是如何体现的。&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 30 Jun 2018 15:54:00 +0000</pubDate>
+<dc:creator>kentzhang</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/kentzhang/p/8947385.html</dc:identifier>
+</item>
+<item>
 <title>[CSS]一次z-index与position问题解决记录 - bee0060</title>
 <link>http://www.cnblogs.com/bee0060/p/9191978.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/bee0060/p/9191978.html</guid>
@@ -613,1288 +1111,6 @@
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/ncdxlxk/p/9248599.html</dc:identifier>
-</item>
-<item>
-<title>J2EE导论 | 疑惑篇 - kid551</title>
-<link>http://www.cnblogs.com/kid551/p/9248483.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/kid551/p/9248483.html</guid>
-<description>&lt;p&gt;J2EE是Java程序员从新手进阶的一个必经之路。要体会所谓的工业级代码，就必须要融入和经历更为复杂的开发、部署环境，需要同更多的模块、组件做信息流交换，比较和使用不同的框架，逐一去琢磨和考察它们的必要性及优缺点。&lt;/p&gt;
-&lt;p&gt;这样一种进阶，注定了其过程必然是痛苦的。这不仅是因为你要掌控和关注的细节、模块一下子陡然攀升，更因为这些增加的细节和模块背后都蕴含着各种复杂的理论知识：网络、web、程序构建。如果再考虑到你要使用的计算机，从一台PC变成多台服务器的交互，而部署环境从一直使用的eclipse自动化，变成多台Linux的部署，各种不适合不理解一下子都全部爆发，实在是巨大的挑战。&lt;/p&gt;
-&lt;p&gt;还记得当初最开始学习J2EE的时候，没用到一个月时间，就从入门走向了放弃。太多繁杂的部署和配置文件，理论知识又弄得来似是而非，更为要命的是当初根本没有什么软件工程的思想和意识，就简单粗暴地把这些繁琐工作扣上了一个“苦力”的帽子。并且自我安慰道：这么多复杂的零碎，不就是农民工搬砖么，果然是码农，我才不走这样的路。而完全没有意识到，这正是软件工程思想的匮乏所导致的。&lt;/p&gt;
-&lt;p&gt;正是因为事务性的东西太多，所以你才需要有出色的工程能力，运用你的谋篇布局将复杂的管理任务，通过各种工具、技巧和构架，把它们逐一消磨，从而让所有的细节都在自己的掌控之中，有条不紊地把一项浩繁的工程管理好。&lt;/p&gt;
-&lt;p&gt;我想，这一思想是一名优秀的软件工程师，也是J2EE入门所必备的 ，那就是&lt;strong&gt;控制复杂度是所有工程师最本质的任务&lt;/strong&gt;。如果出现了细节太过繁杂，让自己深陷其中而无法解脱时，就一定要停下来跳出去思考，自己的整个工作流程应该做怎样的优化和改进，应该如何重构自己的流程和组织，从而把整个团队和工作流程理顺，发挥出他们应有的实力。&lt;/p&gt;
-&lt;p&gt;也即是，当你面对复杂问题的时候，你不会用消极的放弃或者粗暴的贬低来逃避复杂度失控的现实，而是会更加积极地去寻求改进方案，让自己更有条理更高效地完成任务。&lt;/p&gt;
-&lt;p&gt;怀揣着这一思想，就可以更为深入地探讨J2EE对新人的挑战和隐藏的深坑。在我看来学习Java，对新手来讲有这么几个坑：&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;1、不关注Java命令的运行&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;因为Eclipse的大而全，从而完全不会使用java的命令行，更不知道Java参数是些什么鬼。&lt;/p&gt;
-&lt;p&gt;或许一般的教科书会谈到一点如何通过命令行去运行Java，但紧接着，后面会补充道，有了Eclipse我们就不需要关注这些繁琐的细节。然后把Java命令行的东西永远地抛到脑后。&lt;/p&gt;
-&lt;p&gt;话是没错，有了Eclipse，谁还会去关注那堆交互极差的命令行？&lt;/p&gt;
-&lt;p&gt;可正如我在前面所说，当你运行的机器，从个人PC变成了远程端的Linux Server，你还能不关注命令行吗？甚至，让我问一个更为傻气但往往却能戳中新手痛点的一个问题：&lt;strong&gt;你使用的Linux Server端，很可能连图形界面都没有，请问如何使用你熟悉而又引以为傲的Eclipse呢&lt;/strong&gt;？进一步，Eclipse都没有，请问你如何debug呢？又如何加断点，做你习以为常的单步调试，看着一条条的黄色加亮行debug？&lt;/p&gt;
-&lt;p&gt;从这个角度讲，你或许就能够理解：为什么单步调试并不总是一个好的方法。同样地，为什么你需要学习不同的调试技术，为什么需要学会怎么写log又如何依靠log来做debug。种种这些说法和论调，都会因为你使用工具、计算机的环境的改变而改变。&lt;/p&gt;
-&lt;p&gt;为什么你以前无法理解这些东西？&lt;/p&gt;
-&lt;p&gt;因为你以前只会使用一台PC，不会同远程端的Server打交道。更没有什么严肃的工作和需求，逼迫你同Server打交道。即便是在PC上安装了Linux，你或许也会困惑，为什么要用这堆东西呢？都说Linux好，可为什么自己感觉不到呢？原因就在于，Linux的通常使用环境，并不是作为个人PC来用的。它更多的是被当做Server端的操作系统来使用。你连使用场景都弄错了，那又怎么可能理解和体会Linux的好处？&lt;/p&gt;
-&lt;p&gt;回到我文章开头的那句话，我说“J2EE是Java程序员从新手进阶的一个必经之路”。那么现在，我能更好地给出这个论断的理由：因为有了J2EE相关项目的介入，你终于可以在一个&lt;strong&gt;真实需求&lt;/strong&gt;的情境下，开始逐一发现你使用计算机的不同情况，进而真正去体会不同的论断和说法。例如，这个部分我提到的关于Eclipse的那些问题。&lt;/p&gt;
-&lt;p&gt;所以，所谓的为什么软件工程师需要实操、需要有真实的工作经验，为什么它们有时候比学校的理论来得重要。这就是因为，“工作”本身会为你提供一个真实的需求，而不是学校书本里自己臆想的一个伪需求，来让你一个个地去体会真实世界中的限制，进而再看到那些曾经在书本上但却不以为意的解决方案或工具时，便会有一种大梦初醒的感觉。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2、不知道Java运行的是什么&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;同样是因为过于依赖大而全的Eclipse，你逐渐会“忘记”，你运行Java的时候，到底在运行什么。或许，你早已在书本上看过，Java源代码需要经过编译变成class字节码，再由JVM把这堆字节码变成所在平台的机器码，进而这堆机械码被加载进内存运行。&lt;/p&gt;
-&lt;p&gt;可一旦要在Server端部署代码，新手的第一反应很可能就是我上面提到的：我的Eclipse在哪里？没有了Eclipse，我的Java怎么运行？&lt;/p&gt;
-&lt;p&gt;这其实就是完全没有真正理解上面说的Java运行机制。要运行起来Java，有了JVM、有了class文件就够了啊，你要Eclipse干嘛？&lt;/p&gt;
-&lt;p&gt;更进一步：OK，就算有class，我不需要通过Eclipse来做编译，可那些&lt;code&gt;jar&lt;/code&gt;包的依赖怎么玩儿？每次的&lt;code&gt;jar&lt;/code&gt;的依赖都是靠Eclipse来做的连接，没有了它，依赖关系怎么做？&lt;/p&gt;
-&lt;p&gt;这就又回到了第一部分提到的，根本不懂如何使用Java的命令行，更加不知道Java参数是些神马鬼。更本质来讲，你并不清楚Eclipse为你封装、简化的服务是些什么。你不了解，在Eclipse的背后，到底调动了那些命令来指挥你程序的运行，而这些调动的东西，如果不通过Eclipse又该通过什么方式被实现？&lt;/p&gt;
-&lt;p&gt;或许你可以辩解道，我曾经的编程工作确实不需要了解这些底层啊，因为了解了也没用，我还是会用Eclipse来简化我的工作。&lt;/p&gt;
-&lt;p&gt;所以咯，这就是学习J2EE的价值，强迫你弄懂这些细节，并且真的会在Server端的部署和开发中运用到。你不得不关注这些Java的依赖和build，从而更深入地理解Java的运行方式，进而才可以体会到为什么需要所谓的部署工具，从最简单的makefile，到比较流行的Ant、Maven等。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;3、服务器端的Java入口在那儿&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;这是另一个有点玄乎的问题，但同样是因为长期在Eclipse环境下做开发导致的。要开发、测试你的程序，那么第一步，你至少要让它运行起来。那么，通常的做法是什么呢？&lt;/p&gt;
-&lt;p&gt;那当然是在Eclipse中点开某个具有main函数的java文件，然后点击Eclipse的运行按钮。&lt;/p&gt;
-&lt;p&gt;等到了J2EE的环境下，你会惊讶地发现，你竟然不知道如何将自己写的这堆代码给跑起来。一来当然是因为那个老问题，Server端没有Eclipse，我如何点击运行按钮？&lt;/p&gt;
-&lt;p&gt;再来，就算我知道可以通过Java命令行来开启一个Java程序的运行，可是，随便拿来一套J2EE的源代码，&lt;strong&gt;你竟然找不到一个类是有main函数的&lt;/strong&gt;！&lt;/p&gt;
-&lt;p&gt;这可一下子就傻眼了，main函数都没有，你让我如何使用Java命令行把整个代码启动起来？&lt;/p&gt;
-&lt;p&gt;且等后面再回答这个问题，让我们再提一个有着相同理由的另一个问题。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;4、数量繁多的配置文件和互补相关的源代码&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;让J2EE从新手走向放弃的另一大关键，就是“数量繁多的配置文件”和看起来“互不相关的源代码”。随便拿到一个J2EE的项目，就会发现各种xml和独特格式的文件满天飞。而随便找一个java文件读一段，就更加莫名其妙，似乎这个文件就是独立存在的，没有和别的java类的交互，声明自己有哪些变量、提供好自己的setter/getter，然后，就TM没有然后了！或许你以为这只是个特殊的文件，又接连抓过几个java文件来看，发现都是这样的风格。如此种种，当然会把一个newbie逼到抓狂。&lt;/p&gt;
-&lt;p&gt;你会因为无法把这些配置文件和类文件的功能连起来而抓狂，又同样因为要不断地切入切出各种种类繁多的文件类型而焦躁：搞这么多的文件类型的目的是什么？为什么需要它们、为什么需要这些独立又互不关联的文件？&lt;/p&gt;
-&lt;p&gt;要理解这个，就必须回到我们最开始说的关于工程师本质目标的思想：控制复杂度。&lt;/p&gt;
-&lt;p&gt;控制复杂度最基本的技术就是：&lt;strong&gt;分而治之，把一个复杂的问题分解为独立的子问题&lt;/strong&gt;。&lt;/p&gt;
-&lt;p&gt;这是一个看起来简单，实则深不见底的技术。甚至可以这样夸张地说，&lt;strong&gt;所有的&lt;/strong&gt;工程上控制复杂度的技术，都是对这一条的直接/间接地使用，又或是通过复杂的其它技术的辅助，来实践这一条技术。&lt;/p&gt;
-&lt;p&gt;将问题分而治之，有很多好处，其重要的就两条：&lt;/p&gt;
-&lt;ul class=&quot;list-paddingleft-2&quot; readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;一是把问题分解后，你就可以不必直接面对一个大问题，从而可以更好地通过各个击破的方式将它解决。用最通俗的话来讲，就是饭要一口一口地吃。你不会直接把一大碗饭倒入嘴里，而是各个击破。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;另一个是，当你把问题分解成独立的子问题后，那么复杂度就从系统性的关联复杂性，转变为了一个个小模块各自的复杂度。因为这个独立性，你才得以获得更好的稳定性。因为，就算是一个模块突然出现了问题，由于它的独立性，便可以只把损失限定在它这个模块里，不会影响到系统别的方面。以这样的方式，实实在在地把问题，限定在了一个更小的范围，从而控制住了复杂度。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;那么，配置文件、互不相关的源文件、以及Server端的J2EE代码竟然没有main函数，其实都是一系列关于“设计模块、系统构架”的综合技术对这一思想的体现。它们无疑都是为“分而治之”控制复杂度而服务的。&lt;/p&gt;
-&lt;p&gt;所以，当你有了这些疑问时，其实是最好的学习设计模式和系统构架的机会。因为你有了一个真实场景，从而会立刻能感受到现实的限制条件对你的逼迫。此时，你将会为这些限制而焦头烂额。如果这时候，你去研究一下业界的成熟解决方案，就会很快发现它们都会和设计模式、系统设计搭上线。进而，你便能够势如破竹地理解清楚这些技术的精髓和存在的意义。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;5、繁多的理论知识&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;由于J2EE涉及的环境很多，又是web应用，那么最基本的一点，便是网络、web、Server端的软件、Client端的软件他们之间有什么区别和联系。&lt;/p&gt;
-&lt;p&gt;还记得我最开始学习J2EE的时候，那简直是胡子眉毛一把抓，且不说把网络和web各种混淆，就连互联网产品和传统IT技术产品的区别都傻傻分不清楚。结果便是，各种概念混用。&lt;/p&gt;
-&lt;p&gt;而大部分的资料，会一个个地讲解browser的运行方式，讲解HTTP多么高深莫测，又提到Tomcat的Servlet多么本质，又或是Spring框架多么方便和利剑出鞘。可TM从来没有谁把他们串起来，好好地说明他们的职能位置在哪里，在一条生产流水线的位置在哪里。&lt;/p&gt;
-&lt;p&gt;或许，这是因为这个东西恰好处在一个微妙的尴尬之地：会的人，会觉得这个东西太过简单，拿出讲解或许没啥技术含量，有点不好意思。而不会的人呢，任凭他看多少细节的东西，反正就是不能把各个模块安放在正确的位置，便总是打不通任督二脉，干着急。&lt;/p&gt;
-&lt;p&gt;我想，我的一个重要任务，便是对这些关联性的东西，做一个细致的宏观review，反正我的脸皮比较厚，不怕diss。&lt;/p&gt;
-&lt;p&gt;理清楚了这些潜藏在newbie内心模糊的疑问，我们才能在下一篇开始比较系统的自顶向下的技术细节讨论。&lt;/p&gt;
-&lt;p&gt;不要小看这些问题的梳理。往往，一个newbie从入门走向放弃，就是因为感觉极端模糊，感觉到处都是问题，进而开始展开联想，怀疑是不是自己有问题。而如果能够理清楚自己的问题真正在哪里，就如同分而治之的思想那样，你便能够做到心中有数，只需要把不清晰的技术点，逐一攻破就好了，没什么天塌下来的大事情。&lt;/p&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;近期回顾&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;《&lt;a href=&quot;http://mp.weixin.qq.com/s?__biz=MzI5MDMyMTEwNw==&amp;amp;mid=2247484361&amp;amp;idx=1&amp;amp;sn=d277e80b078d47e9e67cfb75b3464e9a&amp;amp;chksm=ec20e475db576d63bc61f487d49e136f6249f4d7aa2dd9750e5e4b910849883ae3fdc1e03065&amp;amp;scene=21#wechat_redirect&quot; target=&quot;_blank&quot;&gt;前端技术的碎碎念&lt;/a&gt;》&lt;br/&gt;《&lt;a href=&quot;http://mp.weixin.qq.com/s?__biz=MzI5MDMyMTEwNw==&amp;amp;mid=2247484356&amp;amp;idx=1&amp;amp;sn=e0a37db74591a83e10b58156a373c070&amp;amp;chksm=ec20e478db576d6e9daf1c7ffe417a1d633f3961a4a7027c7f9b88d60e92981b8cb5a283e6f9&amp;amp;scene=21#wechat_redirect&quot; target=&quot;_blank&quot;&gt;放眼望去都是痛&lt;/a&gt;》&lt;br/&gt;《&lt;a href=&quot;https://mp.weixin.qq.com/s?__biz=MzI5MDMyMTEwNw==&amp;amp;mid=2247484338&amp;amp;idx=1&amp;amp;sn=b5b6e3d5a3b04825dcca488b3aa8199a&amp;amp;chksm=ec20e40edb576d18ab9d88e8673cdd5e5970ac508df049c4fbab05545a353454eaa2c41149f0#rd&quot; target=&quot;_blank&quot;&gt;网络概念与快递物流&lt;/a&gt;》&lt;/p&gt;
-
-&lt;h2&gt; &lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;如果你喜欢我的文章或分享，请长按下面的二维码关注我的微信公众号，谢谢！&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/672506/201806/672506-20180630194130623-338310305.jpg&quot; alt=&quot;&quot; width=&quot;572&quot; height=&quot;286&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h3&gt;   &lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;更多信息交流和观点分享，可加入知识星球：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/672506/201806/672506-20180630194229323-1361408445.png&quot; alt=&quot;&quot; width=&quot;404&quot; height=&quot;249&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;VIP赞赏专区：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/672506/201806/672506-20180630194313502-509473760.jpg&quot; alt=&quot;&quot; width=&quot;214&quot; height=&quot;214&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-</description>
-<pubDate>Sat, 30 Jun 2018 11:45:00 +0000</pubDate>
-<dc:creator>kid551</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/kid551/p/9248483.html</dc:identifier>
-</item>
-<item>
-<title>成长秘笈：是你教我，不是我教你 - 旁观者</title>
-<link>http://www.cnblogs.com/zhengyun_ustc/p/upgrade2.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhengyun_ustc/p/upgrade2.html</guid>
-<description>&lt;p&gt;&lt;span&gt;郑昀 20180622&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;“谢谢你，你是第一个面试的时候跟我说这么详细的。那我到你们公司之后怎么就能成长了呢？”&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;“你们这些人最大的问题是出不了方案。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;为什么出不了方案？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;因为没有养成深度思考问题的习惯。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;实现方案、算法、数据迁移、准备数据、实施、故障排查、解决线上问题……思路都是别人定的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;领导让干什么就干什么。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;也不去问为什么。为什么是这样，为什么不是那样。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;在我们这儿做事方式不是这样的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;是你教我，不是我教你。&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;是你告诉我方案，整个方案，从前到后的方案，长什么样子。而不是我告诉你，然后你去执行。”&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;“#￥%……（这样就能成长？）”，疑惑的眼神。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/7438/201806/7438-20180630173546081-882432058.gif&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;“你们这些刚从学校里出来没几年的人，怎么全都忘记了呢？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;你看啊，做论文的时候，是不是你的导师给你定了一个方向？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;导师认为沿着这个方向能做出好的工作结果，然后你来：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;定义课题的边界，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;整理之前学界对于这个课题的所有探索，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;实践这些前人探索，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;得到数据，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;验证你的判断，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;结合自己的资源、场景和边界，提出新的思路，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;构造实验，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;得到数据，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;验证你的思路，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;在这个过程中，你做了深度思考，能力得到了提升。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;而导师在这个过程中，开阔你的视野，打开你的思路，告诉你什么是正确的做法，什么是错误的做法，不断地矫正你的行为。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;道理是一样的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;再举一个例子。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;初高中的时候，老师恨不能把详细的实验步骤都写下来，还会从头到尾演示给你看。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;而大学里，做基础物理实验是这么做的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;实验课讲义只列出了两样东西：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;一，这次实验用到的物理原理，&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;二，这次实验的目标。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;仅此而已，没有操作步骤。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;记得有一次做放射源钚做实验，实验课老师把放射源分发给每个小组后，叮嘱了安全措施。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;每个小组面前摆着几台奇奇怪怪的仪器，几本砖头一样厚的仪器说明手册。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;这个时候就需要你来设计实验，先做什么，后做什么，看到什么，理解它证明了什么。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;你当然可以问老师这么做对不对，但总不能问该怎么做吧，那是你做实验还是他做实验？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;（什么？你上大学的时候没这么做过？你上的莫非是一个假大学？XD）&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;人就是这样成长起来的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/7438/201806/7438-20180630173622808-1295729140.gif&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;来我们公司的时候，你出不了方案。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;在这里，我们告诉你方法论，逼着你出方案，还整一堆老兵来评审你，挑战你。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;离开的时候，你不仅仅在业务上能拿出从前到后的解决方案，还能出通用性技术课题的商业应用方案。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;比如说我刚才给你讲的那些：&lt;/span&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/multi-live.html&quot;&gt;&lt;span&gt;#研发解决方案#异地多活让商户无感知&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/spaceb.html&quot;&gt;&lt;span&gt;#研发解决方案#智慧的太空桥管理智慧设备&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/datab.html&quot;&gt;&lt;span&gt;#研发解决方案#共享能力的数屏&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/adhoc2017.html&quot;&gt;&lt;span&gt;#研发解决方案#数据开放实验室：再战即席查询和数据开放&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/ce.html&quot;&gt;&lt;span&gt;#研发解决方案#研发协作平台CloudEngine&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/Summoner.html&quot;&gt;&lt;span&gt;#研发解决方案#分布式并行计算调度和管理系统Summoner&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/idb.html&quot;&gt;&lt;span&gt;#研发解决方案#iDB-数据库自动化运维平台&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/flowguard.html&quot;&gt;&lt;span&gt;#研发解决方案#基于Apriori算法的Nginx+Lua+ELK异常流量拦截方案&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/m2m.html&quot;&gt;&lt;span&gt;#研发解决方案#从宏观到微观——天机与鹰眼联手&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution10.html&quot;&gt;&lt;span&gt;#研发解决方案#discache-分布式缓存查询与管理系统&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution9.html&quot;&gt;&lt;span&gt;#研发解决方案介绍#基于StatsD+Graphite的智能监控解决方案&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution8.html&quot;&gt;&lt;span&gt;#研发中间件介绍#定时任务调度与管理JobCenter&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution4.html&quot;&gt;&lt;span&gt;#研发中间件介绍#异步消息可靠推送Notify&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution3.html&quot;&gt;&lt;span&gt;#研发解决方案介绍#基于持久化配置中心的业务降级&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/55solution2.html&quot;&gt;&lt;span&gt;#研发解决方案介绍#Tracing（鹰眼）&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;每个方案都是一两个平凡人做的非凡事。&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;记住，改变思路，以后是你教我，不是我教你。”&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;p.s.:&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;何谓方案？&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;即领导给出了需求，作为一个高级工程师或者研发经理乃至于总监的候选人，他应该从无到有、从零到一，和盘托出整体方案，而不是简单地说了几个词，最起码得说出来这个方案包括哪些子系统，哪些模块，有哪些功能，如何协调各部门或各个工程的开发者，大家都需要做什么，才能让这个方案跑起来。&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;-EOF-&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;关联阅读：&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a id=&quot;post_title_link_9201844&quot; href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/challenge.html&quot;&gt;&lt;span&gt;年轻的工程师如何月入伍万XD&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a id=&quot;post_title_link_5883413&quot; href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/topicStudy.html&quot;&gt;&lt;span&gt;有些事儿，工程师可能今生仅此一次&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;a id=&quot;post_title_link_4876902&quot; href=&quot;https://www.cnblogs.com/zhengyun_ustc/p/upgrade.html&quot;&gt;&lt;span&gt;技术高手如何炼成&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/7438/201806/7438-20180630173759167-235769275.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;-欢迎扫码关注老兵笔记-&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Sat, 30 Jun 2018 09:35:00 +0000</pubDate>
-<dc:creator>旁观者</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhengyun_ustc/p/upgrade2.html</dc:identifier>
-</item>
-<item>
-<title>FMDB源码解析 - 国孩</title>
-<link>http://www.cnblogs.com/guohai-stronger/p/9246653.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/guohai-stronger/p/9246653.html</guid>
-<description>&lt;p&gt;上一篇博客讲述SQLite的使用，本篇将讲述FMDB源码，后面也会讲解&lt;span&gt;SQLite在使用与FMDB的区别&lt;/span&gt;。本篇读下来大约20-30分钟，建议大家先收藏一下。&lt;/p&gt;
-
-&lt;p&gt;FMDB是以OC方式封装SQLite中C语言的API，也是iOS中SQLite数据库的框架，在目前研发项目中使用的也是比较广泛的。下面直入正题&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;一、FMDB源码结构&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;首先我们来看一下FMDB的源码的结构与组成，如下图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1305302/201806/1305302-20180630101300453-739950042.png&quot; alt=&quot;&quot; width=&quot;309&quot; height=&quot;307&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;我们可以从结构上看出FMDB在共有5个文件组成，其中FMDB.h用于管理其他5个文件，下面分别讲述5个文件的用处&lt;/p&gt;
-&lt;p&gt;（1）FMDatabase：代表一个单独的SQLite操作实例，数据库通过它增删改查操作；&lt;/p&gt;
-&lt;p&gt;（2）FMResultSet：代表查询后的结果集；&lt;/p&gt;
-&lt;p&gt;（3）FMDatabaseQueue：代表串行队列，对多线程操作提供了支持；&lt;/p&gt;
-&lt;p&gt;（4）FMDatabaseAdditions：本类用于扩展FMDatabase，用于查找表是否存在，版本号等功能；&lt;/p&gt;
-&lt;p&gt;（5）FMDatabasePool：此方式官方是不推荐使用，代表是任务池，也是对多线程提供了支持。&lt;/p&gt;
-&lt;p&gt;下面将具体讲述每一个类的核心代码是怎么样的？&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;二、FMDB源码解析&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.1 FMDatabase源码解析&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2.1.1 打开数据库连接&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;- (BOOL)open;是对SQLite中sqlite3_open()函数的封装使用&lt;/p&gt;
-&lt;p&gt;下面看一下具体使用&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
--&lt;span&gt; (BOOL)open {
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_isOpen) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; YES;
-    }
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_db) {
-        [self close];
-    }
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; now open database&lt;/span&gt;
-    &lt;span&gt;int&lt;/span&gt; err = sqlite3_open([self sqlitePath], (sqlite3**)&amp;amp;&lt;span&gt;_db );
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(err !=&lt;span&gt; SQLITE_OK) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;error opening!: %d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, err);
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;当执行这段代码的时候，数据库正在被其他线程访问，就需要给他设置重试时间，&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; (_maxBusyRetryTimeInterval &amp;gt; &lt;span&gt;0.0&lt;/span&gt;&lt;span&gt;) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; set the handler&lt;/span&gt;
-&lt;span&gt;        
-        [self setMaxBusyRetryTimeInterval:_maxBusyRetryTimeInterval];
-    }
-    
-    _isOpen &lt;/span&gt;=&lt;span&gt; YES;
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; YES;
-}
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;下面我们看一下setMaxBusyRetryTimeInterval的实现方法&lt;/span&gt;
-- (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)&lt;span&gt;setMaxBusyRetryTimeInterval&lt;/span&gt;:(NSTimeInterval)timeout {
-    
-    _maxBusyRetryTimeInterval &lt;/span&gt;=&lt;span&gt; timeout;
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;_db) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (timeout &amp;gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;) {
-        sqlite3_busy_handler(_db, &lt;/span&gt;&amp;amp;FMDBDatabaseBusyHandler, (__bridge &lt;span&gt;void&lt;/span&gt; *&lt;span&gt;)(self));
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; turn it off otherwise&lt;/span&gt;
-&lt;span&gt;        sqlite3_busy_handler(_db, nil, nil);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面是打开数据库连接，上面红色字体标注的方法setMaxBusyRetryTimeInterval（）设置重试时间，相当于SQLite中调用&lt;span&gt;int sqlite3_busy_handler(sqlite3*,int(*)(void*,int),void*);&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt; 针对int sqlite3_busy_handler(sqlite3*,int(*)(void*,int),void*);该函数&lt;/p&gt;
-&lt;p&gt;（1）第一个参数：哪个数据库需要设置busy_handler&lt;/p&gt;
-&lt;p&gt;（2）第二个参数：需要回调的busy handler，调用次函数时，需要传参，是sqlite3_busy_handler第三个参数&lt;/p&gt;
-&lt;p&gt;（3）第三个参数：int参数代表锁事件，该函数被调用次数，如果返回为0，不会再次访问数据库，返回非0，将不断尝试访问数据库。&lt;/p&gt;
-&lt;p&gt;当获取不到锁时，会执行回调函数的次数以此来延时，等待其他线程等操作完数据库，这样获得操作数据库。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.2 查询数据库&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;executeQuery函数是数据库比较重要的方法。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1305302/201806/1305302-20180630111921793-1353763731.png&quot; alt=&quot;&quot; width=&quot;595&quot; height=&quot;50&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;在看实现文件&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-- (FMResultSet *)executeQuery:(NSString*&lt;span&gt;)sql, ... {
-    va_list args;
-    va_start(args, sql);
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;整个方法关键是下面一句&lt;/span&gt;
-    &lt;span&gt;id&lt;/span&gt; result =&lt;span&gt;&lt;span&gt; [self executeQuery:sql withArgumentsInArray:nil orDictionary:nil orVAList:args];&lt;/span&gt;
-    
-    va_end(args);
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;从上面可以看出：调用executeQuery函数，实际上是调用&lt;/p&gt;
-&lt;p&gt;- (FMResultSet *)executeQuery:(NSString *)sql withArgumentsInArray:(NSArray*)arrayArgs orDictionary:(NSDictionary *)dictionaryArgs orVAList:(va_list)args函数，下面看下此函数的实现方式。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;58&quot;&gt;
-&lt;pre&gt;
-- (FMResultSet *)executeQuery:(NSString *)sql withArgumentsInArray:(NSArray*)arrayArgs orDictionary:(NSDictionary *&lt;span&gt;)dictionaryArgs orVAList:(va_list)args {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断数据库是否存在&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;[self databaseExists]) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    }
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断数据库是否已经在使用当中&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_isExecutingStatement) {
-        [self warnInUse];
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    }
-    
-    _isExecutingStatement &lt;/span&gt;=&lt;span&gt; YES;
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc                  = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    sqlite3_stmt &lt;/span&gt;*pStmt     = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    FMStatement &lt;/span&gt;*statement  = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    FMResultSet &lt;/span&gt;*rs         = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;打印sql语句&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; (_traceExecution &amp;amp;&amp;amp;&lt;span&gt; sql) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@ executeQuery: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, self, sql);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取缓存数据&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_shouldCacheStatements) {
-        statement &lt;/span&gt;=&lt;span&gt; [self cachedStatementForQuery:sql];
-        pStmt &lt;/span&gt;= statement ? [statement statement] : &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-        [statement reset];
-    }
-    
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;没有缓存数据，直接查询数据库&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;pStmt) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;对sql语句进行预处理，生成预处理过的“sql语句”pStmt。&lt;/span&gt;
-        rc = sqlite3_prepare_v2(_db, [sql UTF8String], -&lt;span&gt;1&lt;/span&gt;, &amp;amp;pStmt, &lt;span&gt;0&lt;/span&gt;&lt;span&gt;);
-        
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (SQLITE_OK != rc) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;出错处理&lt;/span&gt;
-            &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Error: %d \&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%@\&lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;, [self lastErrorCode], [self lastErrorMessage]);
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Path: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, _databasePath);
-            }
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_crashOnErrors) {
-                NSAssert(&lt;/span&gt;&lt;span&gt;false&lt;/span&gt;, &lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Error: %d \&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%@\&lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;, [self lastErrorCode], [self lastErrorMessage]);
-                abort();
-            }
-            
-            sqlite3_finalize(pStmt);
-            _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; nil;
-        }
-    }
-    
-    &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt; obj;
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; idx = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; queryCount = sqlite3_bind_parameter_count(pStmt); &lt;span&gt;//&lt;/span&gt;&lt;span&gt; pointed out by Dominic Yu (thanks!)
-    
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If dictionaryArgs is passed in, that means we are using sqlite's named parameter support
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;对dictionaryArgs参数的处理，类似于下面&quot;:age&quot;参数形式&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (dictionaryArgs) {
-        
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (NSString *dictionaryKey &lt;span&gt;in&lt;/span&gt;&lt;span&gt; [dictionaryArgs allKeys]) {
-            
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Prefix the key with a colon.&lt;/span&gt;
-            NSString *parameterName = [[NSString alloc] initWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;:%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, dictionaryKey];
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_traceExecution) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@ = %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, parameterName, [dictionaryArgs objectForKey:dictionaryKey]);
-            }
-            
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Get the index for the parameter name.&lt;/span&gt;
-            &lt;span&gt;int&lt;/span&gt; namedIdx =&lt;span&gt; sqlite3_bind_parameter_index(pStmt, [parameterName UTF8String]);
-            
-            FMDBRelease(parameterName);
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (namedIdx &amp;gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;) {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Standard binding from here.&lt;/span&gt;
-&lt;span&gt;                [self bindObject:[dictionaryArgs objectForKey:dictionaryKey] toColumn:namedIdx inStatement:pStmt];
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; increment the binding count, so our check below works out&lt;/span&gt;
-                idx++&lt;span&gt;;
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Could not find index for %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, dictionaryKey);
-            }
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;对于arrayArgs参数和不定参数的处理，类似于&quot;?&quot;参数形式&lt;/span&gt;
-        
-        &lt;span&gt;while&lt;/span&gt; (idx &amp;lt;&lt;span&gt; queryCount) {
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (arrayArgs &amp;amp;&amp;amp; idx &amp;lt; (&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)[arrayArgs count]) {
-                obj &lt;/span&gt;=&lt;span&gt; [arrayArgs objectAtIndex:(NSUInteger)idx];
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (args) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;不定参数形式&lt;/span&gt;
-                obj = va_arg(args, &lt;span&gt;id&lt;/span&gt;&lt;span&gt;);
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;We ran out of arguments&lt;/span&gt;
-                &lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
-            }
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_traceExecution) {
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ([obj isKindOfClass:[NSData &lt;span&gt;class&lt;/span&gt;&lt;span&gt;]]) {
-                    NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;data: %ld bytes&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, (unsigned &lt;span&gt;long&lt;/span&gt;)[(NSData*&lt;span&gt;)obj length]);
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                    NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;obj: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, obj);
-                }
-            }
-            
-            idx&lt;/span&gt;++&lt;span&gt;;
-            
-            [self bindObject:obj toColumn:idx inStatement:pStmt];
-        }
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (idx != queryCount) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果绑定的参数数目不对，则进行出错处理&lt;/span&gt;
-        NSLog(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error: the bind count is not correct for the # of variables (executeQuery)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-        sqlite3_finalize(pStmt);
-        _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; nil;
-    }
-    
-    FMDBRetain(statement); &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to balance the release below&lt;/span&gt;
-    
-    &lt;span&gt;if&lt;/span&gt; (!statement) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;生成FMStatement对象&lt;/span&gt;
-        statement =&lt;span&gt; [[FMStatement alloc] init];
-        [statement setStatement:pStmt];
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;缓存的处理，key为sql语句，值为statement&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt; (_shouldCacheStatements &amp;amp;&amp;amp;&lt;span&gt; sql) {
-            [self setCachedStatement:statement forQuery:sql];
-        }
-    }
-    
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; the statement gets closed in rs's dealloc or [rs close];&lt;/span&gt;
-    rs =&lt;span&gt; [FMResultSet resultSetWithStatement:statement usingParentDatabase:self];
-    [rs setQuery:sql];
-    
-    NSValue &lt;/span&gt;*openResultSet =&lt;span&gt; [NSValue valueWithNonretainedObject:rs];
-    [_openResultSets addObject:openResultSet];
-    
-    [statement setUseCount:[statement useCount] &lt;/span&gt;+ &lt;span&gt;1&lt;/span&gt;&lt;span&gt;];
-    
-    FMDBRelease(statement);
-    
-    _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; rs;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;发现上面那个函数有四个参数，看到源码之后，我们一一讲述四个参数：&lt;/p&gt;
-&lt;p&gt;（1）第一个参数sql：代表我们要查询的sql语句；&lt;/p&gt;
-&lt;p&gt;（2）第二个参数arrayArgs：代表数组类型的参数，举例如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-FMResultSet *resultSet = [_db executeQuery:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT * FROM t_student WHERE age &amp;gt; ?&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; withArgumentsInArray:@[@&lt;span&gt;25&lt;/span&gt;]];
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（3）第三个参数dictionaryArgs：代表字典类型的参数，举例如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-    FMResultSet *resultSet = [_db executeQuery:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT * FROM t_student WHERE age &amp;gt; :age&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; withParameterDictionary:@{&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:@&lt;span&gt;25&lt;/span&gt;}];
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（4）第四个参数args：代表可变类型的参数，举例如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-FMResultSet *resultSet = [_db executeQuery:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT * FROM t_student WHERE age &amp;gt; ?&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,@(&lt;span&gt;20&lt;/span&gt;)];
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面是查询基本源码讲解，大家可以详细里面的源码实现，里面也有讲解。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.3 更新数据库&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;针对FMDB数据库增删改都属于对数据库的更新操作，FMDB通过executeUpdate系列函数来实现对数据库的更新操作。&lt;/p&gt;
-&lt;p&gt;- (BOOL)executeUpdate:(NSString*)sql, ...;系列函数，我们来看一下executeUpdate函数的实现。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-- (BOOL)executeUpdate:(NSString*&lt;span&gt;)sql, ... {
-    va_list args;
-    va_start(args, sql);
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;主要是下面这个函数&lt;/span&gt;
-    BOOL result =&lt;span&gt; [self &lt;span&gt;executeUpdate:sql error:nil withArgumentsInArray:nil orDictionary:nil orVAList:args];&lt;/span&gt;
-    
-    va_end(args);
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;我们再来看一下红色标出的代码实现，- (BOOL)executeUpdate:(NSString*)sql error:(NSError**)outErr withArgumentsInArray:(NSArray*)arrayArgs orDictionary:(NSDictionary *)dictionaryArgs orVAList:(va_list)args函数实现。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;83&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#pragma&lt;/span&gt; mark Execute updates
-
-- (BOOL)executeUpdate:(NSString*)sql error:(NSError**)outErr withArgumentsInArray:(NSArray*)arrayArgs orDictionary:(NSDictionary *&lt;span&gt;)dictionaryArgs orVAList:(va_list)args {
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;[self databaseExists]) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_isExecutingStatement) {
-        [self warnInUse];
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    
-    _isExecutingStatement &lt;/span&gt;=&lt;span&gt; YES;
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc                   = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    sqlite3_stmt &lt;/span&gt;*pStmt      = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    FMStatement &lt;/span&gt;*cachedStmt  = &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (_traceExecution &amp;amp;&amp;amp;&lt;span&gt; sql) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@ executeUpdate: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, self, sql);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_shouldCacheStatements) {
-        cachedStmt &lt;/span&gt;=&lt;span&gt; [self cachedStatementForQuery:sql];
-        pStmt &lt;/span&gt;= cachedStmt ? [cachedStmt statement] : &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-        [cachedStmt reset];
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;pStmt) {
-        rc &lt;/span&gt;= sqlite3_prepare_v2(_db, [sql UTF8String], -&lt;span&gt;1&lt;/span&gt;, &amp;amp;pStmt, &lt;span&gt;0&lt;/span&gt;&lt;span&gt;);
-        
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (SQLITE_OK !=&lt;span&gt; rc) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Error: %d \&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%@\&lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;, [self lastErrorCode], [self lastErrorMessage]);
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Path: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, _databasePath);
-            }
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_crashOnErrors) {
-                NSAssert(&lt;/span&gt;&lt;span&gt;false&lt;/span&gt;, &lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Error: %d \&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;%@\&lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;, [self lastErrorCode], [self lastErrorMessage]);
-                abort();
-            }
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-                &lt;/span&gt;*outErr =&lt;span&gt; [self errorWithMessage:[NSString stringWithUTF8String:sqlite3_errmsg(_db)]];
-            }
-            
-            sqlite3_finalize(pStmt);
-            
-            _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-        }
-    }
-    
-    &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt; obj;
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; idx = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; queryCount =&lt;span&gt; sqlite3_bind_parameter_count(pStmt);
-    
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If dictionaryArgs is passed in, that means we are using sqlite's named parameter support&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (dictionaryArgs) {
-        
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (NSString *dictionaryKey &lt;span&gt;in&lt;/span&gt;&lt;span&gt; [dictionaryArgs allKeys]) {
-            
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Prefix the key with a colon.&lt;/span&gt;
-            NSString *parameterName = [[NSString alloc] initWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;:%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, dictionaryKey];
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_traceExecution) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@ = %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, parameterName, [dictionaryArgs objectForKey:dictionaryKey]);
-            }
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Get the index for the parameter name.&lt;/span&gt;
-            &lt;span&gt;int&lt;/span&gt; namedIdx =&lt;span&gt; sqlite3_bind_parameter_index(pStmt, [parameterName UTF8String]);
-            
-            FMDBRelease(parameterName);
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (namedIdx &amp;gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;) {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Standard binding from here.&lt;/span&gt;
-&lt;span&gt;                [self bindObject:[dictionaryArgs objectForKey:dictionaryKey] toColumn:namedIdx inStatement:pStmt];
-                
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; increment the binding count, so our check below works out&lt;/span&gt;
-                idx++&lt;span&gt;;
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                NSString &lt;/span&gt;*message = [NSString stringWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Could not find index for %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, dictionaryKey];
-                
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                    NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, message);
-                }
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-                    &lt;/span&gt;*outErr =&lt;span&gt; [self errorWithMessage:message];
-                }
-            }
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        
-        &lt;/span&gt;&lt;span&gt;while&lt;/span&gt; (idx &amp;lt;&lt;span&gt; queryCount) {
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (arrayArgs &amp;amp;&amp;amp; idx &amp;lt; (&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)[arrayArgs count]) {
-                obj &lt;/span&gt;=&lt;span&gt; [arrayArgs objectAtIndex:(NSUInteger)idx];
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (args) {
-                obj &lt;/span&gt;= va_arg(args, &lt;span&gt;id&lt;/span&gt;&lt;span&gt;);
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;We ran out of arguments&lt;/span&gt;
-                &lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
-            }
-            
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_traceExecution) {
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ([obj isKindOfClass:[NSData &lt;span&gt;class&lt;/span&gt;&lt;span&gt;]]) {
-                    NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;data: %ld bytes&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, (unsigned &lt;span&gt;long&lt;/span&gt;)[(NSData*&lt;span&gt;)obj length]);
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                    NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;obj: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, obj);
-                }
-            }
-            
-            idx&lt;/span&gt;++&lt;span&gt;;
-            
-            [self bindObject:obj toColumn:idx inStatement:pStmt];
-        }
-    }
-    
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (idx !=&lt;span&gt; queryCount) {
-        NSString &lt;/span&gt;*message = [NSString stringWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error: the bind count (%d) is not correct for the # of variables in the query (%d) (%@) (executeUpdate)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, idx, queryCount, sql];
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, message);
-        }
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [self errorWithMessage:message];
-        }
-        
-        sqlite3_finalize(pStmt);
-        _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    
-    &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt; Call sqlite3_step() to run the virtual machine. Since the SQL being
-     ** executed is not a SELECT statement, we assume no data will be returned.
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-    
-    rc      &lt;/span&gt;=&lt;span&gt; sqlite3_step(pStmt);
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (SQLITE_DONE ==&lt;span&gt; rc) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; all is well, let's return.&lt;/span&gt;
-&lt;span&gt;    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (SQLITE_INTERRUPT ==&lt;span&gt; rc) {
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error calling sqlite3_step. Query was interrupted (%d: %s) SQLITE_INTERRUPT&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg(_db));
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (rc ==&lt;span&gt; SQLITE_ROW) {
-        NSString &lt;/span&gt;*message = [NSString stringWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;A executeUpdate is being called with a query string '%@'&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql];
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, message);
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-        }
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [self errorWithMessage:message];
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [self errorWithMessage:[NSString stringWithUTF8String:sqlite3_errmsg(_db)]];
-        }
-        
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (SQLITE_ERROR ==&lt;span&gt; rc) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error calling sqlite3_step (%d: %s) SQLITE_ERROR&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg(_db));
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (SQLITE_MISUSE ==&lt;span&gt; rc) {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; uh oh.&lt;/span&gt;
-            &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error calling sqlite3_step (%d: %s) SQLITE_MISUSE&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg(_db));
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; wtf?&lt;/span&gt;
-            &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Unknown error calling sqlite3_step (%d: %s) eu&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg(_db));
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-            }
-        }
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (_shouldCacheStatements &amp;amp;&amp;amp; !&lt;span&gt;cachedStmt) {
-        cachedStmt &lt;/span&gt;=&lt;span&gt; [[FMStatement alloc] init];
-        
-        [cachedStmt setStatement:pStmt];
-        
-        [self setCachedStatement:cachedStmt forQuery:sql];
-        
-        FMDBRelease(cachedStmt);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; closeErrorCode;
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (cachedStmt) {
-        [cachedStmt setUseCount:[cachedStmt useCount] &lt;/span&gt;+ &lt;span&gt;1&lt;/span&gt;&lt;span&gt;];
-        closeErrorCode &lt;/span&gt;=&lt;span&gt; sqlite3_reset(pStmt);
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt; Finalize the virtual machine. This releases all memory and other
-         ** resources allocated by the sqlite3_prepare() call above.
-         &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-        closeErrorCode &lt;/span&gt;=&lt;span&gt; sqlite3_finalize(pStmt);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (closeErrorCode !=&lt;span&gt; SQLITE_OK) {
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_logsErrors) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Unknown error finalizing or resetting statement (%d: %s)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, closeErrorCode, sqlite3_errmsg(_db));
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;DB Query: %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, sql);
-        }
-    }
-    
-    _isExecutingStatement &lt;/span&gt;=&lt;span&gt; NO;
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (rc == SQLITE_DONE || rc ==&lt;span&gt; SQLITE_OK);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;我们看完了发现它和executeQuery函数有很多相似的地方，源码标注大家可以看一下executeQuery的标注，也是有几个参数，参数的形式也差不多，就是多了一个error，错误的输出语句。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.4 执行多条sql&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;一次性来执行多条的sql语句对于数据库来说也是常用的操作。FMDB通过使用executeStatements函数来执行多条sql语句&lt;/p&gt;
-&lt;p&gt;- (BOOL)executeStatements:(NSString *)sql;系列函数来操作，下面看一下函数实现方式&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-- (BOOL)executeStatements:(NSString *&lt;span&gt;)sql {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; [self &lt;span&gt;executeStatements&lt;/span&gt;:sql withResultBlock:nil];
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面通过调用executeStatements函数调用，我们再进一步看executeStatements的实现方式。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-- (BOOL)executeStatements:(NSString *&lt;span&gt;)sql withResultBlock:(__attribute__((noescape)) FMDBExecuteStatementsCallbackBlock)block {
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; rc;
-    &lt;/span&gt;&lt;span&gt;char&lt;/span&gt; *errmsg =&lt;span&gt; nil;
-    
-    rc &lt;/span&gt;= sqlite3_exec([self sqliteHandle], [sql UTF8String], block ? FMDBExecuteBulkSQLCallback : nil, (__bridge &lt;span&gt;void&lt;/span&gt; *)(block), &amp;amp;&lt;span&gt;errmsg);
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (errmsg &amp;amp;&amp;amp;&lt;span&gt; [self logsErrors]) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error inserting batch: %s&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, errmsg);
-        sqlite3_free(errmsg);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (rc ==&lt;span&gt; SQLITE_OK);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面函数，发现有SQLite，其实对sqlite3_exec函数的封装，完成对多条sql语句的查找。这样讲可能不是很清晰，举例一下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;多个SQL执行语句入一个字符串中执行&lt;/span&gt;
- - (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)executeStatementsTest{
-    NSString &lt;/span&gt;*sql =
-    &lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;CREATE TABLE IF NOT EXISTS t_student_tmp (id integer PRIMARY KEY AUTOINCREMENT, name text NOT NULL, age integer NOT NULL);&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-    &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;INSERT INTO t_student_tmp (name, age) VALUES ('yixiang', 10);&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-    &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;INSERT INTO t_student_tmp (name, age) VALUES ('yixiangXX', 20);&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-    BOOL success &lt;/span&gt;=&lt;span&gt; [_db executeStatements:sql];
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (success) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;执行成功&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-    }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;执行失败&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-    }
-    
-    sql &lt;/span&gt;= &lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;SELECT * FROM t_student;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-    &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;SELECT * FROM t_student_tmp;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-    success &lt;/span&gt;= [_db executeStatements:sql withResultBlock:^&lt;span&gt;int&lt;/span&gt;(NSDictionary *&lt;span&gt;resultsDictionary) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,resultsDictionary);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;查询结果都在resultsDictionary&lt;/span&gt;
-        &lt;span&gt;return&lt;/span&gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-    }];
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (success) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;查询成功&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-    }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;查询失败&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-    }
-    
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.1.6 加解密&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;在FMDatabase还有一个功能，就是对FMDB进行加解密处理，下面为实现方式&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#pragma&lt;/span&gt; mark Key routines
-
-- (BOOL)rekey:(NSString*&lt;span&gt;)key {
-    NSData &lt;/span&gt;*keyData = [NSData dataWithBytes:(&lt;span&gt;void&lt;/span&gt; *&lt;span&gt;)[key UTF8String] length:(NSUInteger)strlen([key UTF8String])];
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; [self rekeyWithData:keyData];
-}
-
-&lt;/span&gt;- (BOOL)rekeyWithData:(NSData *&lt;span&gt;)keyData {
-&lt;/span&gt;&lt;span&gt;#ifdef&lt;/span&gt;&lt;span&gt; SQLITE_HAS_CODEC
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;keyData) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc = sqlite3_rekey(_db, [keyData bytes], (&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)[keyData length]);
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (rc !=&lt;span&gt; SQLITE_OK) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;error on rekey: %d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc);
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, [self lastErrorMessage]);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (rc ==&lt;span&gt; SQLITE_OK);
-&lt;/span&gt;&lt;span&gt;#else&lt;/span&gt;
-&lt;span&gt;#pragma&lt;/span&gt; unused(keyData)
-    &lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-&lt;/span&gt;&lt;span&gt;#endif&lt;/span&gt;&lt;span&gt;
-}
-
-&lt;/span&gt;- (BOOL)setKey:(NSString*&lt;span&gt;)key {
-    NSData &lt;/span&gt;*keyData =&lt;span&gt; [NSData dataWithBytes:[key UTF8String] length:(NSUInteger)strlen([key UTF8String])];
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; [self setKeyWithData:keyData];
-}
-
-&lt;/span&gt;- (BOOL)setKeyWithData:(NSData *&lt;span&gt;)keyData {
-&lt;/span&gt;&lt;span&gt;#ifdef&lt;/span&gt;&lt;span&gt; SQLITE_HAS_CODEC
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;keyData) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-    }
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc = sqlite3_key(_db, [keyData bytes], (&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)[keyData length]);
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (rc ==&lt;span&gt; SQLITE_OK);
-&lt;/span&gt;&lt;span&gt;#else&lt;/span&gt;
-&lt;span&gt;#pragma&lt;/span&gt; unused(keyData)
-    &lt;span&gt;return&lt;/span&gt;&lt;span&gt; NO;
-&lt;/span&gt;&lt;span&gt;#endif&lt;/span&gt;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;FMDB使用setKey：和 setKeyWithData：输入密码和鉴别身份，通过rekey：和rekeyWithData：来清除和密码和设置密码，在上面的源码大家可以发现，也是对sqlite3_key以及sqlite3_rekey函数的封装。&lt;/p&gt;
-&lt;p&gt;上面就是FMDB中FMDatabase类的主要核心代码，希望大家对FMDatabase认识有个提高。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.2 FMResultSet&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2.2.1 初始化对象&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;+ (instancetype)resultSetWithStatement:(FMStatement *)statement usingParentDatabase:(FMDatabase*)aDB;&lt;/p&gt;
-&lt;p&gt;通过上面方法可以看出里面有两个参数&lt;/p&gt;
-&lt;p&gt;（1）第一个参数：(FMStatement *)statement&lt;/p&gt;
-&lt;p&gt;该对象是对sqlite3_stmt的进一步封装，在sqlite3_stmt *所表示的内容已经不是我们经常使用过的sql语句啦，而是预处理过的语句。&lt;/p&gt;
-&lt;p&gt;（2）第二个参数：(FMDatabase*)aDB&lt;/p&gt;
-&lt;p&gt;代表结果集所拥有的FMDatabase操作对象。&lt;/p&gt;
-&lt;p&gt;下面看一下初始化对象的实现代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-+ (instancetype)resultSetWithStatement:(FMStatement *)statement usingParentDatabase:(FMDatabase*&lt;span&gt;)aDB {
-    
-    FMResultSet &lt;/span&gt;*rs =&lt;span&gt; [[FMResultSet alloc] init];
-    
-    [rs setStatement:statement];
-    [rs setParentDB:aDB];
-    
-    NSParameterAssert(&lt;/span&gt;!&lt;span&gt;[statement inUse]);
-    [statement setInUse:YES]; &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; weak reference&lt;/span&gt;
-    
-    &lt;span&gt;return&lt;/span&gt;&lt;span&gt; FMDBReturnAutoreleased(rs);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.2.2 遍历结果集合&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;- (BOOL)next;&lt;/p&gt;
-&lt;p&gt; FMDB通过- (BOOL)next函数完成遍历取结果集合。一起看一下- (BOOL)next;的实现代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
--&lt;span&gt; (BOOL)next {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; [self nextWithError:nil];
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面代码可以发现：- (BOOL)next函数是对SQLite中-(BOOL)nextWithError:(NSError **)outErr函数的封装，主要完成对对象的逐行取值的任务。在深入看下nextWithError函数实现。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;46&quot;&gt;
-&lt;pre&gt;
-- (BOOL)nextWithError:(NSError **&lt;span&gt;)outErr {
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc =&lt;span&gt; sqlite3_step([_statement statement]);
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (SQLITE_BUSY == rc || SQLITE_LOCKED ==&lt;span&gt; rc) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;%s:%d Database busy (%@)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, __FUNCTION__, __LINE__, [_parentDB databasePath]);
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Database busy&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [_parentDB lastError];
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (SQLITE_DONE == rc || SQLITE_ROW ==&lt;span&gt; rc) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; all is well, let's return.&lt;/span&gt;
-&lt;span&gt;    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (SQLITE_ERROR ==&lt;span&gt; rc) {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error calling sqlite3_step (%d: %s) rs&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg([_parentDB sqliteHandle]));
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [_parentDB lastError];
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; (SQLITE_MISUSE ==&lt;span&gt; rc) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; uh oh.&lt;/span&gt;
-        NSLog(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Error calling sqlite3_step (%d: %s) rs&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg([_parentDB sqliteHandle]));
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_parentDB) {
-                &lt;/span&gt;*outErr =&lt;span&gt; [_parentDB lastError];
-            }
-            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If 'next' or 'nextWithError' is called after the result set is closed,
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; we need to return the appropriate error.&lt;/span&gt;
-                NSDictionary* errorMessage = [NSDictionary dictionaryWithObject:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;parentDB does not exist&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; forKey:NSLocalizedDescriptionKey];
-                &lt;/span&gt;*outErr = [NSError errorWithDomain:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;FMDatabase&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; code:SQLITE_MISUSE userInfo:errorMessage];
-            }
-            
-        }
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; wtf?&lt;/span&gt;
-        NSLog(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Unknown error calling sqlite3_step (%d: %s) rs&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, rc, sqlite3_errmsg([_parentDB sqliteHandle]));
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (outErr) {
-            &lt;/span&gt;*outErr =&lt;span&gt; [_parentDB lastError];
-        }
-    }
-    
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (rc !=&lt;span&gt; SQLITE_ROW) {
-        [self close];
-    }
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (rc ==&lt;span&gt; SQLITE_ROW);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.2.3 获取行列的值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;通过查看源码发现有以下几处：&lt;/p&gt;
-&lt;p&gt;（1）- (int)intForColumnIndex:(int)columnIdx;&lt;/p&gt;
-&lt;p&gt;（2）- (long)longForColumnIndex:(int)columnIdx;&lt;/p&gt;
-&lt;p&gt;（3）- (long long int)longLongIntForColumnIndex:(int)columnIdx;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;上面三个是根据列的索引获取该列的值&lt;/span&gt;。再看三个函数的实现代码&lt;/p&gt;
-&lt;p&gt;（1）- (int)intForColumnIndex:(int)columnIdx;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;int&lt;/span&gt;)intForColumnIndex:(&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)columnIdx {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; sqlite3_column_int([_statement statement], columnIdx);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（2）- (long)longForColumnIndex:(int)columnIdx&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;long&lt;/span&gt;)longForColumnIndex:(&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)columnIdx {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; (&lt;span&gt;long&lt;/span&gt;&lt;span&gt;)sqlite3_column_int64([_statement statement], columnIdx);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（3）- (long long int)longLongIntForColumnIndex:(int)columnIdx&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;long&lt;/span&gt; &lt;span&gt;long&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;)longLongIntForColumnIndex:(&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)columnIdx {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; sqlite3_column_int64([_statement statement], columnIdx);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;通过上面三个函数，可以发现上面三个函数实际上是对sqlite3_column_ *函数的封装。&lt;/p&gt;
-&lt;p&gt;(4)- (int)intForColumn:(NSString*)columnName;&lt;/p&gt;
-&lt;p&gt;(5)- (long)longForColumn:(NSString*)columnName;&lt;/p&gt;
-&lt;p&gt;(6)- (long long int)longLongIntForColumn:(NSString*)columnName;&lt;/p&gt;
-&lt;p&gt;上面三个方法&lt;span&gt;是根据列的名称取该列的值&lt;/span&gt;。下面看一下三个函数具体实现，只举一个即可，其他都是一样实现方式。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;int&lt;/span&gt;)intForColumn:(NSString*&lt;span&gt;)columnName {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; [self &lt;span&gt;intForColumnIndex&lt;/span&gt;:[self columnIndexForName:columnName]];
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;再深入看一下intForColumnIndex实现方式，回到上面啦，（方法（1）看上）。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;int&lt;/span&gt;)intForColumnIndex:(&lt;span&gt;int&lt;/span&gt;&lt;span&gt;)columnIdx {
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; sqlite3_column_int([_statement statement], columnIdx);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.2.4 获取行中所有元素&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;- (NSDictionary*)resultDictionary：返回值类型为字典。下面是实现方式：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-- (NSDictionary*&lt;span&gt;)resultDictionary {
-    
-    NSUInteger num_cols &lt;/span&gt;=&lt;span&gt; (NSUInteger)sqlite3_data_count([_statement statement]);
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (num_cols &amp;gt; &lt;span&gt;0&lt;/span&gt;&lt;span&gt;) {
-        NSMutableDictionary &lt;/span&gt;*dict =&lt;span&gt; [NSMutableDictionary dictionaryWithCapacity:num_cols];
-        
-        &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; columnCount =&lt;span&gt; sqlite3_column_count([_statement statement]);
-        
-        &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; columnIdx = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (columnIdx = &lt;span&gt;0&lt;/span&gt;; columnIdx &amp;lt; columnCount; columnIdx++&lt;span&gt;) {
-            
-            NSString &lt;/span&gt;*columnName =&lt;span&gt; [NSString stringWithUTF8String:sqlite3_column_name([_statement statement], columnIdx)];
-            &lt;/span&gt;&lt;span&gt;id&lt;/span&gt; objectValue =&lt;span&gt; [self objectForColumnIndex:columnIdx];
-            [dict setObject:objectValue forKey:columnName];
-        }
-        
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; dict;
-    }
-    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Warning: There seem to be no columns in this set.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-    }
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; nil;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.2.5 KVC讲解&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;- (void)kvcMagic:(id)object：FMDB中只能对string类型进行支持&lt;/p&gt;
-&lt;p&gt;下面是kvcMagic:(id)object实现方式&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;void&lt;/span&gt;)kvcMagic:(&lt;span&gt;id&lt;/span&gt;)&lt;span&gt;object&lt;/span&gt;&lt;span&gt; {
-   &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 使用了KVC，将数据库中的每一行数据对应到每一个对象中，对象的属性要和数据库的列名保持一直。&lt;/span&gt;
-    &lt;span&gt;int&lt;/span&gt; columnCount =&lt;span&gt; sqlite3_column_count([_statement statement]);
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; columnIdx = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
-    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (columnIdx = &lt;span&gt;0&lt;/span&gt;; columnIdx &amp;lt; columnCount; columnIdx++&lt;span&gt;) {
-        
-        &lt;/span&gt;&lt;span&gt;const&lt;/span&gt; &lt;span&gt;char&lt;/span&gt; *c = (&lt;span&gt;const&lt;/span&gt; &lt;span&gt;char&lt;/span&gt; *&lt;span&gt;)sqlite3_column_text([_statement statement], columnIdx);
-        
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; check for a null row&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (c) {
-            NSString &lt;/span&gt;*s =&lt;span&gt; [NSString stringWithUTF8String:c];
-            
-            [&lt;/span&gt;&lt;span&gt;object&lt;/span&gt;&lt;span&gt; setValue:s forKey:[NSString stringWithUTF8String:sqlite3_column_name([_statement statement], columnIdx)]];
-        }
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.3 FMDatabaseQueue&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;FMDB中比较突出优点就是对多线程的处理，而FMDB中对多线程的支持多亏FMDatabaseQueue类。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2.3.1 初始化队列&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;+ (instancetype)databaseQueueWithPath:(&lt;span class=&quot;hljs-built_in&quot;&gt;NSString*)aPath&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;实现代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-+ (instancetype)databaseQueueWithPath:(NSString *&lt;span&gt;)aPath {
-    FMDatabaseQueue &lt;/span&gt;*q =&lt;span&gt; [[self alloc] &lt;span&gt;initWithPath&lt;/span&gt;:aPath];
-    
-    FMDBAutorelease(q);
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; q;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面函数调用了- (instancetype)initWithPath:(NSString*)aPath flags:(int)openFlags vfs:(NSString *)vfsName函数实现如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-- (instancetype)initWithPath:(NSString*)aPath flags:(&lt;span&gt;int&lt;/span&gt;)openFlags vfs:(NSString *&lt;span&gt;)vfsName {
-    self &lt;/span&gt;=&lt;span&gt; [super init];
-    
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (self !=&lt;span&gt; nil) {
-        
-        _db &lt;/span&gt;= [[[self &lt;span&gt;class&lt;/span&gt;&lt;span&gt;] databaseClass] databaseWithPath:aPath];
-        FMDBRetain(_db);
-        
-&lt;/span&gt;&lt;span&gt;#if&lt;/span&gt; SQLITE_VERSION_NUMBER &amp;gt;= 3005000&lt;span&gt;
-        BOOL success &lt;/span&gt;=&lt;span&gt; [_db openWithFlags:openFlags vfs:vfsName];
-&lt;/span&gt;&lt;span&gt;#else&lt;/span&gt;&lt;span&gt;
-        BOOL success &lt;/span&gt;=&lt;span&gt; [_db open];
-&lt;/span&gt;&lt;span&gt;#endif&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;success) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Could not create database queue for path %@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, aPath);
-            FMDBRelease(self);
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;0x00&lt;/span&gt;&lt;span&gt;;
-        }
-        
-        _path &lt;/span&gt;=&lt;span&gt; FMDBReturnRetained(aPath);
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;生成一个串行队列&lt;/span&gt;
-        _queue = dispatch_queue_create([[NSString stringWithFormat:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;fmdb.%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, self] UTF8String], NULL);
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;给串行队列生成一个标识&lt;/span&gt;
-        dispatch_queue_set_specific(_queue, kDispatchQueueSpecificKey, (__bridge &lt;span&gt;void&lt;/span&gt; *&lt;span&gt;)self, NULL);
-        _openFlags &lt;/span&gt;=&lt;span&gt; openFlags;
-        _vfsName &lt;/span&gt;=&lt;span&gt; [vfsName copy];
-    }
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; self;
-}    &lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.3.2 串行执行数据库的操作&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;下面看一段代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;void&lt;/span&gt;)inDatabase:(&lt;span&gt;void&lt;/span&gt; (^)(FMDatabase *&lt;span&gt;db))block {
-    &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt; 使用dispatch_get_specific目的来查看当前queue是否是之前我们设定的那个_queue，如是的话，那么使用kDispatchQueueSpecificKey作为参数就这样传给dispatch_get_specific的话，返回的值是不为空，而且返回值应该就是上面initWithPath:函数中绑定的那个FMDatabaseQueue对象。有人说除了当前queue还有可能有其他什么queue？这就是FMDatabaseQueue的用途，你可以创建多个FMDatabaseQueue对象来并发执行不同的SQL语句。
-     &lt;span&gt;另外为什么要判断是不是当前执行的这个queue呢？是为了防止死锁，防止多线程操作出现死锁&lt;/span&gt;！
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-    FMDatabaseQueue &lt;/span&gt;*currentSyncQueue = (__bridge &lt;span&gt;id&lt;/span&gt;&lt;span&gt;)dispatch_get_specific(kDispatchQueueSpecificKey);
-    assert(currentSyncQueue &lt;/span&gt;!= self &amp;amp;&amp;amp; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;inDatabase: was called reentrantly on the same queue, which would lead to a deadlock&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-
-    FMDBRetain(self);
-
-    dispatch_sync(_queue, &lt;/span&gt;^() {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;串行执行block&lt;/span&gt;
-&lt;span&gt;
-        FMDatabase &lt;/span&gt;*db =&lt;span&gt; [self database];
-        block(db);
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ([db hasOpenResultSets]) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;调试代码&lt;/span&gt;
-            NSLog(&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Warning: there is at least one open result set around after performing [FMDatabaseQueue inDatabase:]&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-
-&lt;/span&gt;&lt;span&gt;#if&lt;/span&gt; defined(DEBUG) &amp;amp;&amp;amp; DEBUG&lt;span&gt;
-            NSSet &lt;/span&gt;*openSetCopy = FMDBReturnAutoreleased([[db valueForKey:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;_openResultSets&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;] copy]);
-            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (NSValue *rsInWrappedInATastyValueMeal &lt;span&gt;in&lt;/span&gt;&lt;span&gt; openSetCopy) {
-                FMResultSet &lt;/span&gt;*rs = (FMResultSet *&lt;span&gt;)[rsInWrappedInATastyValueMeal pointerValue];
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;query: '%@'&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, [rs query]);
-            }
-&lt;/span&gt;&lt;span&gt;#endif&lt;/span&gt;&lt;span&gt;
-        }
-    });
-
-    FMDBRelease(self);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;通过上面代码发现，对于一个queue就是一个串行队列，即使你开启多线程，依然是串行执行的。&lt;/p&gt;
-&lt;p&gt;如果大家对队列使用不是很熟悉，可以看一下以前博客可以帮助大家对这方面理解 &lt;a href=&quot;https://www.cnblogs.com/guohai-stronger/p/9038567.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/guohai-stronger/p/9038567.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;为了方便大家理解，下面举一个例子：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;47&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/*&lt;/span&gt;&lt;span&gt;*
- *  FMDatabaseQueue实现多线程的案例
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-- (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)FMDatabaseQueueMutilThreadTest{
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1、获取数据库文件的路径&lt;/span&gt;
-    NSString *doc =&lt;span&gt; [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
-    NSString &lt;/span&gt;*fileName = [doc stringByAppendingPathComponent:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;students.sqlite&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;];
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;使用queue1&lt;/span&gt;
-    FMDatabaseQueue *queue1 =&lt;span&gt; [FMDatabaseQueue databaseQueueWithPath:fileName];
-
-    [queue1 inDatabase:&lt;/span&gt;^(FMDatabase *&lt;span&gt;db) {
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i=&lt;span&gt;0&lt;/span&gt;; i&amp;lt;&lt;span&gt;10&lt;/span&gt;; i++&lt;span&gt;) {
-            NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;queue1---%zi--%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,i,[NSThread currentThread]);
-        }
-    }];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, &lt;/span&gt;&lt;span&gt;0&lt;/span&gt;), ^&lt;span&gt;{
-        [queue1 inDatabase:&lt;/span&gt;^(FMDatabase *&lt;span&gt;db) {
-            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i=&lt;span&gt;11&lt;/span&gt;; i&amp;lt;&lt;span&gt;20&lt;/span&gt;; i++&lt;span&gt;) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;queue1---%zi--%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,i,[NSThread currentThread]);
-            }
-        }];
-    });
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, &lt;/span&gt;&lt;span&gt;0&lt;/span&gt;), ^&lt;span&gt;{
-        [queue1 inDatabase:&lt;/span&gt;^(FMDatabase *&lt;span&gt;db) {
-            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i=&lt;span&gt;20&lt;/span&gt;; i&amp;lt;&lt;span&gt;30&lt;/span&gt;; i++&lt;span&gt;) {
-                NSLog(&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;queue1---%zi--%@&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,i,[NSThread currentThread]);
-            }
-        }];
-    });
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;通过打印出来结果，看下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1305302/201806/1305302-20180630165246988-9992188.png&quot; alt=&quot;&quot; width=&quot;507&quot; height=&quot;497&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;通过上面发现，虽然开启了多个线程，依然是串行处理数据。&lt;/p&gt;
-&lt;p&gt;实际上：FMDatabaseQueue它通过内部创建了一个叫Serial的dispatch_queue_t来处理inDatabase和inTransaction传入的Blocks代码块。FMDatabaseQueue的目的是让我们避免发生并发访问数据库所造成的问题，因为我们对数据库的访问和操作是随机的，如果在里面内置一个Serial队列之后，FMDatabaseQueue这样就变成线程安全的了，达到了线程安全的目的。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;对于同一个queue内部是串行执行，而对于不同的queue，它们是并发执行的。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.3.3 关于事物&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;对于事物，在数据库中，也是保护数据库的安全一种方式。对于一条sql语句，要么全success，要么全fail。下面是实现代码：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-- (&lt;span&gt;void&lt;/span&gt;)inTransaction:(&lt;span&gt;void&lt;/span&gt; (^)(FMDatabase *db, BOOL *&lt;span&gt;rollback))block {
-    [self beginTransaction:NO withBlock:block];
-}
-&lt;/span&gt;- (&lt;span&gt;void&lt;/span&gt;)beginTransaction:(BOOL)useDeferred withBlock:(&lt;span&gt;void&lt;/span&gt; (^)(FMDatabase *db, BOOL *&lt;span&gt;rollback))block {
-    FMDBRetain(self);
-    dispatch_sync(_queue, &lt;/span&gt;^() { &lt;span&gt;//&lt;/span&gt;&lt;span&gt;串行执行，保证线程安全。&lt;/span&gt;
-&lt;span&gt;
-        BOOL shouldRollback &lt;/span&gt;=&lt;span&gt; NO;
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (useDeferred) {
-            [[self database] beginDeferredTransaction];&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 使用延时性事务&lt;/span&gt;
-&lt;span&gt;        }
-        &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-            [[self database] beginTransaction];&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 默认使用独占性事务&lt;/span&gt;
-&lt;span&gt;        }
-
-        block([self database], &lt;/span&gt;&amp;amp;shouldRollback);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行block&lt;/span&gt;
-
-        &lt;span&gt;if&lt;/span&gt; (shouldRollback) {  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据shouldRollback判断 判断是否回滚，还是提交。&lt;/span&gt;
-&lt;span&gt;            [[self database] rollback];
-        }
-        &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-            [[self database] commit];
-        }
-    });
-
-    FMDBRelease(self);
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.4 FMDatabaseAdditions&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2.4.1 validateSQL&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;-(BOOL)validateSQL:(NSString*)sql error:(NSError**)error;通过此方法。校验sql语句是否合法。下面是实现代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-- (BOOL)validateSQL:(NSString*)sql error:(NSError**&lt;span&gt;)error {
-    sqlite3_stmt &lt;/span&gt;*pStmt =&lt;span&gt; NULL;
-    BOOL validationSucceeded &lt;/span&gt;=&lt;span&gt; YES;
-    
-    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rc = sqlite3_prepare_v2([self sqliteHandle], [sql UTF8String], -&lt;span&gt;1&lt;/span&gt;, &amp;amp;pStmt, &lt;span&gt;0&lt;/span&gt;&lt;span&gt;);
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (rc !=&lt;span&gt; SQLITE_OK) {
-        validationSucceeded &lt;/span&gt;=&lt;span&gt; NO;
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (error) {
-            &lt;/span&gt;*error =&lt;span&gt; [NSError errorWithDomain:NSCocoaErrorDomain
-                                         code:[self lastErrorCode]
-                                     userInfo:[NSDictionary dictionaryWithObject:[self lastErrorMessage]
-                                                                          forKey:NSLocalizedDescriptionKey]];
-        }
-    }
-    
-    sqlite3_finalize(pStmt);
-    
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; validationSucceeded;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;2.4.2 其他&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;columnExists：判断column是否存在；&lt;/p&gt;
-&lt;p&gt;tableExists：判断表是否存在。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2.5 FMDatabasePool&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;对于FMDatabasePool，苹果本身并不建议使用，所以我们在这没有必要进行讲解，大家也可以不必追究其内容的实现。&lt;/p&gt;
-
-&lt;p&gt;上面就是FMDB源码解析的全部内容，大家主要对2.1，2.2，2.3内容进行详细看就可以啦，2.4和2.5了解即可。希望上面的FMDB源码讲解对大家对FMDB认识有所加强，欢迎大家指正。&lt;/p&gt;
-&lt;p&gt;我们已经讲完了SQLite和FMDB源码解析，下一篇我们将讲述SQLite和FMDB在使用上的区别。&lt;/p&gt;
-
-</description>
-<pubDate>Sat, 30 Jun 2018 09:29:00 +0000</pubDate>
-<dc:creator>国孩</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/guohai-stronger/p/9246653.html</dc:identifier>
-</item>
-<item>
-<title>Apollo 1  融合 Spring 的三个入口 - 莫那-鲁道</title>
-<link>http://www.cnblogs.com/stateis0/p/9247963.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/stateis0/p/9247963.html</guid>
-<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
-&lt;p&gt;Spring 作为 Java 世界非官方标准框架，任何一个中间件想要得到良好的发展，必须完美支持 Spring 的各种特性，即：无缝融入 Spring。&lt;/p&gt;
-&lt;p&gt;Apollo 作为分布式配置中心，服务于 Java 应用程序，Java 应用程序可以通过 Apollo 提供的 Client 获取远程配置信息。而如何将这个 Client 高度融合到用户的应用程序中呢？&lt;/p&gt;
-&lt;p&gt;这就需要针对 Spring 提供给我们的接口进行扩展。&lt;/p&gt;
-&lt;p&gt;在之前的文章中，已经大致聊过 Spring 的一些扩展接口：&lt;a href=&quot;https://www.jianshu.com/p/685ced8abe92&quot;&gt;深入理解Spring 之 Spring 进阶开发必知必会 之 Spring 扩展接口&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;而想融入 Spring，首先得找到入口，然后才能注册相关的类进行自己系统的初始化。&lt;br/&gt;所以，如何找到并处理入口成了一门学问，我们今天看看 apollo 如何处理的。&lt;/p&gt;
-&lt;h2 id=&quot;第一种入口xml&quot;&gt;第一种入口：XML&lt;/h2&gt;
-&lt;p&gt;XML 是传统 Java 项目的配置文件，特别是 Spring MVC 项目。虽然现在都是使用的自动化配置，但仍然有一些遗留项目使用 XML，因此，支持 XML 是大部分中间件的必须工作。&lt;/p&gt;
-&lt;p&gt;支持 XML 需要准守 Spring 的几个约定：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;继承 &lt;code&gt;NamespaceHandlerSupport&lt;/code&gt; 抽象类，重写 init 方法，调用 registerBeanDefinitionParser 方法，并传入自己继承的 &lt;code&gt;AbstractSingleBeanDefinitionParser&lt;/code&gt; 子类用于解析标签，重写他的 getBeanClass 方法，返回一个 Bean，用于注册相关的 Bean。&lt;/li&gt;
-&lt;li&gt;classpath 下创建 META-INF 目录，创建 &lt;code&gt;spring.handlers&lt;/code&gt; 文件，将 xml 配置中的 URL 指向 &lt;code&gt;NamespaceHandlerSupport&lt;/code&gt;。&lt;/li&gt;
-&lt;li&gt;META-INF 目录下，创建 &lt;code&gt;apollo-1.0.0.xsd&lt;/code&gt; xsd 文件，用于解释自定义标签。&lt;/li&gt;
-&lt;li&gt;META-INF 目录下，继续创建 &lt;code&gt;spring.schemas&lt;/code&gt; 文件，将 xml 配置中的 xsd URL 指向 xsd 文件。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;如果你的 xml 配置中，引用了 apollo 的标签，Spring 将会根据 xml 中的 URL 找到 &lt;code&gt;spring.handlers&lt;/code&gt; 中的 &lt;code&gt;NamespaceHandlerSupport&lt;/code&gt; 类，并对标签进行解析。也会从 getBeanClass 得到一个设置的 bean，在这个 bean 里，做了 apollo 关键类的注册。&lt;/p&gt;
-&lt;h2 id=&quot;第二种入口import-注解&quot;&gt;第二种入口：@Import 注解&lt;/h2&gt;
-&lt;p&gt;相对于基于XML的配置，基于Java的配置是目前比较流行的方式。&lt;/p&gt;
-&lt;p&gt;@Import 注解的使用方式：&lt;/p&gt;
-&lt;ol readability=&quot;2.5&quot;&gt;&lt;li readability=&quot;4&quot;&gt;
-&lt;p&gt;定义一个自己的启动注解。并标注 @import 注解, 其实就是 xml 中的 import 标签，在该注解中，可以配置一个类，这个类就会注册进 Spring 的容器，成为 Bean，你就可以在这个 bean 里做文章。&lt;br/&gt;在 apollo 中，使用方式如下：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;sourceCode java&quot;&gt;
-&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;fu&quot;&gt;@Retention&lt;/span&gt;(RetentionPolicy.&lt;span class=&quot;fu&quot;&gt;RUNTIME&lt;/span&gt;) &lt;span class=&quot;fu&quot;&gt;@Target&lt;/span&gt;(ElementType.&lt;span class=&quot;fu&quot;&gt;TYPE&lt;/span&gt;) &lt;span class=&quot;fu&quot;&gt;@Documented&lt;/span&gt;
-&lt;span class=&quot;fu&quot;&gt;@Import&lt;/span&gt;(ApolloConfigRegistrar.&lt;span class=&quot;fu&quot;&gt;class&lt;/span&gt;)
-&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;@interface&lt;/span&gt; EnableApolloConfig {
-  String[] &lt;span class=&quot;fu&quot;&gt;value&lt;/span&gt;() &lt;span class=&quot;kw&quot;&gt;default&lt;/span&gt; {ConfigConsts.&lt;span class=&quot;fu&quot;&gt;NAMESPACE_APPLICATION&lt;/span&gt;};
-  &lt;span class=&quot;dt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;order&lt;/span&gt;() &lt;span class=&quot;kw&quot;&gt;default&lt;/span&gt; Ordered.&lt;span class=&quot;fu&quot;&gt;LOWEST_PRECEDENCE&lt;/span&gt;;
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;从上面可以看出 &lt;code&gt;ApolloConfigRegistrar&lt;/code&gt; 类是 apollo 注册进的 bean。这个 bean 用于处理 @EnableApolloConfig 注解，同时注册 apollo 关键 Bean 到 Spring 容器中。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;用户只需在 Spring 系统中的某个类上，标注 @EnableApolloConfig ，就可以通过 Spring 的方式（自动更新，注解等）使用 apollo 功能。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;第三种入口springboot-starter&quot;&gt;第三种入口：SpringBoot Starter&lt;/h2&gt;
-&lt;p&gt;目前最流行的框架就是 Spring Boot ，兼容 SpringBoot 是一个大趋势。&lt;/p&gt;
-&lt;p&gt;Spring Boot 提供 &lt;code&gt;spring-boot-autoconfigure&lt;/code&gt; 让第三方框架兼容 Boot，称之为 starter。&lt;/p&gt;
-&lt;p&gt;创建一个 starter 需要遵守几个约定：&lt;/p&gt;
-&lt;ol readability=&quot;0.5&quot;&gt;&lt;li&gt;maven 引入 &lt;code&gt;spring-boot-autoconfigure&lt;/code&gt; artifact.&lt;/li&gt;
-&lt;li&gt;创建一个类，实现&lt;code&gt;ApplicationContextInitializer&lt;/code&gt; 接口，重写 initialize 方法，该方法在容器初始化的时候调用。&lt;/li&gt;
-&lt;li&gt;META-INF 创建 &lt;code&gt;spring.factories&lt;/code&gt; 文件，Boot 启动时会自动扫描这个文件。需要在这个文件中写入一个步骤 2 创建的类，类似 &lt;code&gt;org.springframework.context.ApplicationContextInitializer=\com.ctrip.framework.apollo.spring.boot.ApolloApplicationContextInitializer&lt;/code&gt;。这个类的作用是提前（容器初始化前）加载关键配置到 Spring 环境。&lt;/li&gt;
-&lt;li readability=&quot;6.5&quot;&gt;
-&lt;p&gt;在 &lt;code&gt;spring.factories&lt;/code&gt; 文件中，还需要让 boot 的 &lt;code&gt;EnableAutoConfiguration&lt;/code&gt; 自动配置类指向一个自定义类。&lt;strong&gt;这是 SpringBoot starter 的关键&lt;/strong&gt;，例如：&lt;code&gt;org.springframework.boot.autoconfigure.EnableAutoConfiguration=com.ctrip.framework.apollo.spring.boot.ApolloAutoConfiguration&lt;/code&gt;。ApolloAutoConfiguration 就会加入的 apollo 的配置 bean 中。你可以在这个配置 bean 中，创建一个关键 bean ，用于处理系统相关的初始化类。例如 apollo 的方式：&lt;/p&gt;
-&lt;div class=&quot;sourceCode&quot; readability=&quot;10&quot;&gt;
-&lt;pre class=&quot;sourceCode java&quot;&gt;
-&lt;code class=&quot;sourceCode java&quot;&gt;&lt;span class=&quot;fu&quot;&gt;@Configuration&lt;/span&gt;
-&lt;span class=&quot;fu&quot;&gt;@ConditionalOnProperty&lt;/span&gt;(PropertySourcesConstants.&lt;span class=&quot;fu&quot;&gt;APOLLO_BOOTSTRAP_ENABLED&lt;/span&gt;)
-&lt;span class=&quot;fu&quot;&gt;@ConditionalOnMissingBean&lt;/span&gt;(PropertySourcesProcessor.&lt;span class=&quot;fu&quot;&gt;class&lt;/span&gt;)&lt;span class=&quot;co&quot;&gt;// 当Spring Context中不存在该Bean时&lt;/span&gt;
-&lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;class&lt;/span&gt; ApolloAutoConfiguration {
-  &lt;span class=&quot;fu&quot;&gt;@Bean&lt;/span&gt;
-  &lt;span class=&quot;kw&quot;&gt;public&lt;/span&gt; ConfigPropertySourcesProcessor &lt;span class=&quot;fu&quot;&gt;configPropertySourcesProcessor&lt;/span&gt;() {
-&lt;span class=&quot;kw&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;kw&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;fu&quot;&gt;ConfigPropertySourcesProcessor&lt;/span&gt;();
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;在 apollo 中，&lt;code&gt;ConfigPropertySourcesProcessor&lt;/code&gt; 就是用来注册系统关键 bean 的。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;本文重点介绍了 3 种入口：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;XML 方式，通过在 getBeanClass 方法返回系统关键 Bean。&lt;/li&gt;
-&lt;li&gt;@Import 注解，通过在注解中定义 Bean，然后在该 Bean 中处理。&lt;/li&gt;
-&lt;li&gt;SpringBoot Starter 方式，通过 &lt;code&gt;spring.factories&lt;/code&gt; 文件中定义自动配置类，可以注册系统关键 bean。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;在以后的开发中，如果想融入 Spring，就可以通过这 3 种方式自行处理。&lt;/p&gt;
-</description>
-<pubDate>Sat, 30 Jun 2018 09:09:00 +0000</pubDate>
-<dc:creator>莫那-鲁道</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/stateis0/p/9247963.html</dc:identifier>
 </item>
 </channel>
 </rss>
