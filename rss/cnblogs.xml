@@ -9,6 +9,1710 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>MySQL中间件之ProxySQL(6)：管理后端节点 - 骏马金龙</title>
+<link>http://www.cnblogs.com/f-ck-need-u/p/9286922.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/f-ck-need-u/p/9286922.html</guid>
+<description>&lt;p&gt;为了让ProxySQL能够找到后端的MySQL节点，需要将后端的MySQL Server加入到ProxySQL中。ProxySQL的一切配置行为都是在修改main库中的对应的表，所以添加节点到ProxySQL中实际上也是通过修改相关表来实现的。&lt;/p&gt;
+&lt;p&gt;管理后端节点有几个过程：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;将后端MySQL Server的主从复制结构配置好。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;将后端MySQL Server节点加入到ProxySQL中。相关的表为&lt;code&gt;mysql_servers&lt;/code&gt;。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;监控后端节点。相关的表是全局变量表&lt;code&gt;global_vairbles&lt;/code&gt;，相关的变量为&lt;code&gt;mysql-monitor_&lt;/code&gt;开头的变量。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;配置读、写组。相关的表为&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;配置MySQL用户，用于发送SQL语句。相关的表为&lt;code&gt;mysql_users&lt;/code&gt;。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;几个注意点：&lt;/p&gt;
+&lt;ul readability=&quot;3.5&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;(1).ProxySQL是通过监控后端节点的&lt;code&gt;read_only&lt;/code&gt;值来自动调整节点所属组的，例如&lt;code&gt;read_only=1&lt;/code&gt;的节点会移动到读组，&lt;code&gt;read_only=0&lt;/code&gt;的节点会移动到写组。所以，在配置读、写组之前，需要先监控后端节点。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;(2).对于传统的主从复制，默认的&lt;code&gt;read_only=0&lt;/code&gt;，所以在第一步中，各slave节点的配置文件中需要加上&lt;code&gt;read_only=1&lt;/code&gt;。对于组复制、Galera，因为会自动强制设置非写节点的&lt;code&gt;read_only=1&lt;/code&gt;，所以无需额外配置该属性。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;2&quot;&gt;
+&lt;p&gt;(3).ProxySQL支持传统主从复制结构(即异步、半同步、gtid复制)的后端，读、写组相关的表是&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;。还支持MySQL组复制结构的后端，相关的表是&lt;code&gt;mysql_group_replication_hostgroups&lt;/code&gt;，还支持Galera(如percona XtraDB cluster)结构的后端，不过ProxySQL是通过scheduler调度&lt;code&gt;proxysql_galera_checker.sh&lt;/code&gt;脚本来支持Galera的，而且目前还没有&lt;code&gt;mysql_galera_hostgroups&lt;/code&gt;(ProxySQL 2.0才新增该表)。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;本文暂时只解释&lt;code&gt;mysql_servers&lt;/code&gt;和&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;，组复制相关的表在在后面介绍&quot;ProxySQL+组复制&quot;的文章中再介绍。&lt;/p&gt;
+&lt;p&gt;完成了上面的过程后，节点就一切正常了，然后就可以去配置ProxySQL的路由规则、查询缓存、SQL语句重写等功能。这些在后面的文章会详细介绍。&lt;/p&gt;
+&lt;p&gt;在开始本文下面的配置之前，请确保已经明白如何使用&lt;a href=&quot;https://www.cnblogs.com/f-ck-need-u/p/9281199.html&quot; title=&quot;MySQL中间件之ProxySQL(3)：Admin管理接口&quot;&gt;Admin管理接口&lt;/a&gt;，以及&lt;a href=&quot;https://www.cnblogs.com/f-ck-need-u/p/9280793.html&quot; title=&quot;MySQL中间件之ProxySQL(4)：多层配置系统&quot;&gt;ProxySQL的多层配置系统&lt;/a&gt;。&lt;/p&gt;
+
+
+&lt;p&gt;假如后端有3个节点，使用的是传统的异步复制(1 master, 2 slave)。这3个节点的IP地址为：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;192.168.100.22
+192.168.100.23
+192.168.100.24&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;要加入3个后端MySQL节点，只需向mysql_servers表插入3行对应的记录即可。以下是使用了一大堆默认值的insert语句：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;insert into mysql_servers(hostgroup_id,hostname,port) 
+values(10,'192.168.100.22',3306);
+
+insert into mysql_servers(hostgroup_id,hostname,port) 
+values(10,'192.168.100.23',3306);
+
+insert into mysql_servers(hostgroup_id,hostname,port) 
+values(10,'192.168.100.24',3306);
+
+load mysql servers to runtime;
+save mysql servers to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面的insert语句表示将后端MySQL节点&lt;code&gt;192.168.100.xx:3306&lt;/code&gt;加入到&lt;code&gt;hostgroup_id=10&lt;/code&gt;的组中。&lt;/p&gt;
+&lt;p&gt;其实mysql_servers表有很多字段，很多字段都有默认值，正如上面的insert语句，除了3个字段，其它使用的全是字段的默认值。&lt;/p&gt;
+&lt;p&gt;以下是mysql_servers表的字段属性。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;|       字段          | 数据类型  | 允许null  | 默认值 |
+|---------------------|----------|-----------|--------|
+| hostgroup_id  (pk)  | int      | not null  | 0      |
+| hostname      (pk)  | varchar  | not null  | 无     |
+| port          (pk)  | int      | not null  | 3306   |
+| status              | varchar  | not null  | online |
+| weight              | int      | not null  | 1      |
+| compression         | int      | not null  | 0      |
+| max_connections     | int      | not null  | 1000   |
+| max_replication_lag | int      | not null  | 0      |
+| use_ssl             | int      | not null  | 0      |
+| max_latency_ms      | int      | not null  | 0      |
+| comment             | varchar  | not null  | ''     |&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;可见，新添加一个节点时，唯一必须指定的字段就是hostname值。如果不指定&lt;code&gt;hostgroup_id&lt;/code&gt;，那么节点将自动加入到&lt;code&gt;hostgroup_id=0&lt;/code&gt;的组中。&lt;/p&gt;
+&lt;p&gt;各字段的意义如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;hostgroup_id&lt;/strong&gt;：该后端MySQL实例所在的主机组。注意，同一MySQL节点可属于多个主机组。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;hostname,port&lt;/strong&gt;：后端MySQL监听的地址和端口。就是默认3306端口的意义&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;status&lt;/strong&gt;：
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;ONLINE&lt;/strong&gt;：该后端MySQL节点完全正常。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;SHUNNED&lt;/strong&gt;：该后端MySQL节点将暂时被ProxySQL自动避开(忽略)，原因可能是一个较短时间内发生了大量连接错误，也可能是该slave与master的数据延迟太大(replication lag)。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OFFLINE_SOFT&lt;/strong&gt;：当某后端MySQL被设置为 OFFLINE_SOFT 时，ProxySQL将不会向它发送新的请求，但该节点正在执行的事务会继续执行，直到所有事务执行完毕后会进入非激活状态。也就是说，和该后端的连接会保持到事务执行完毕。这可以实现后端节点的graceful停止、重启。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;OFFLINE_HARD&lt;/strong&gt;：当某后端MySQL被设置为 OFFLINE_HARD 时，ProxySQL将不会向它发送新的请求，该节点正在执行的事务也会立即中断。也就是直接将该后端杀掉。等价于删除该节点，或临时将其移除出组(例如出于维护的目的)。&lt;br/&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;weight&lt;/strong&gt;：节点在组中的权重值越高，ProxySQL会发送越多请求给它们。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;compression&lt;/strong&gt;：如果该字段的值设置为大于0，ProxySQL和该后端新建的连接中，ProxySQL将会先压缩数据再传输。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;max_connections&lt;/strong&gt;：和该后端允许建立的最大连接数。当达到最大数量时，即使该后端的权重很大，也不会和它新建连接。默认值为1000，表示每个后端最多能同时接受1000个连接。请确保该后端的&lt;code&gt;max_connections&lt;/code&gt;值是合理的，以避免MySQL超负荷时ProxySQL继续向其发送请求。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;max_replication_lag&lt;/strong&gt;：如果值大于0，ProxySQL的Monitor模块将会定期检查该&lt;strong&gt;slave&lt;/strong&gt;的复制是否延后于master，如果延迟的值大于该字段的值，ProxySQL将会暂时避开该节点，直到该slave赶上master。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;use_ssl&lt;/strong&gt;：如果设置为1，则和该后端MySQL建立SSL连接。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;max_latency_ms&lt;/strong&gt;：Monitory模块定期向该后端发起ping检查，如果该节点的ping时间大于该字段的值，则将其排除在连接池之外(尽管该节点仍处于ONLINE状态)。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;comment&lt;/strong&gt;：该表的说明信息，可随便定义。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;关于该表各字段的用法，请参见&lt;a href=&quot;https://github.com/malongshuai/proxysql/wiki/MySQL-Server-Configuration&quot; title=&quot;在ProxySQL中配置后端MySQL Server&quot;&gt;官方手册&lt;/a&gt;(我已翻译)。&lt;/p&gt;
+&lt;p&gt;以下是上面插入数据成功后的结果：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select * from mysql_servers\G
+*************************** 1. row ***************************
+       hostgroup_id: 10
+           hostname: 192.168.100.22
+               port: 3306
+             status: ONLINE
+             weight: 1
+        compression: 0
+    max_connections: 1000
+max_replication_lag: 0
+            use_ssl: 0
+     max_latency_ms: 0
+            comment: 
+*************************** 2. row ***************************
+       hostgroup_id: 10
+           hostname: 192.168.100.23
+               port: 3306
+             status: ONLINE
+             weight: 1
+        compression: 0
+    max_connections: 1000
+max_replication_lag: 0
+            use_ssl: 0
+     max_latency_ms: 0
+            comment: 
+*************************** 3. row ***************************
+       hostgroup_id: 10
+           hostname: 192.168.100.24
+               port: 3306
+             status: ONLINE
+             weight: 1
+        compression: 0
+    max_connections: 1000
+max_replication_lag: 0
+            use_ssl: 0
+     max_latency_ms: 0
+            comment: &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;需要注意的是，同一个节点是可以同时存在于多个组中的。最典型的情形是master既充当写节点，也充当读节点，这时它就同时存在于写组和读组。&lt;/p&gt;
+
+
+&lt;p&gt;ProxySQL通过Monitor模块监控后端MySQL Server的&lt;code&gt;read_only&lt;/code&gt;值来自动调整节点所属的组。所以，在配置读、写组之前，必须先配置好监控。&lt;/p&gt;
+&lt;p&gt;本文只简单介绍该模块的监控类型，以及如何配置监控。对于Monitor模块理论的详细介绍，请参见以下两篇文章：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://github.com/malongshuai/proxysql/wiki/Monitor-Module&quot; title=&quot;Monitor模块官方手册翻译&quot;&gt;Monitor模块官方手册翻译&lt;/a&gt;：关于Monitor模块和相关变量。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/f-ck-need-u/p/9281909.html&quot; title=&quot;Monitor模块线程池、连接池&quot;&gt;Monitor模块使用的线程池、连接池&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id=&quot;monitor模块可以监控什么东西&quot;&gt;3.1 Monitor模块可以监控什么东西&lt;/h2&gt;
+&lt;p&gt;首先看下Monitor库中的表：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; show tables from monitor;
++------------------------------------+
+| tables                             |
++------------------------------------+
+| mysql_server_connect_log           |
+| mysql_server_group_replication_log |
+| mysql_server_ping_log              |
+| mysql_server_read_only_log         |
+| mysql_server_replication_lag_log   |
++------------------------------------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Monitor监控4种指标：connect、ping、read_only和replication lag。下面稍作介绍。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1.connect监控&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;ProxySQL连接到各后端是否成功，成功/失败的连接将记录到表&lt;code&gt;mysql_server_connect_log&lt;/code&gt;中。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2.ping监控&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;这是一种心跳检测。Monitor模块向所有后端MySQL节点发起ping检查，ping成功/失败的情况将记录到表&lt;code&gt;mysql_server_ping_log&lt;/code&gt;中。当ping某后端的失败次数达到了&lt;code&gt;mysql-monitor_ping_max_failures&lt;/code&gt;时表示失去心跳，将发送一个信号给MySQL的主机组管理器来杀掉和该后端节点的所有连接。&lt;/p&gt;
+&lt;p&gt;请和connect监控区分开，connect监控是通过建立连接来检测和后端节点连接的连通性。ping监控是心跳检测，ProxySQL通过MySQL的一个ping API发送给后端MySQL服务上，然后等待ping回复，虽然是ping检测，但也是需要建立连接的。&lt;/p&gt;
+&lt;p&gt;所以，有两个确定连接不可用公式：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;mysql-monitor_ping_max_failures * mysql-monitor_connect_timeout&lt;/li&gt;
+&lt;li&gt;mysql-monitor_ping_max_failures * mysql-monitor_ping_timeout&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;3.read_only监控&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;检查&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;表中所有节点的&lt;code&gt;read_only&lt;/code&gt;值，并记录到&lt;code&gt;mysql_server_read_only_log&lt;/code&gt;。如果&lt;code&gt;read_only=1&lt;/code&gt;，表示只读，是一个slave，这样的节点将会&lt;strong&gt;自动移入&lt;/strong&gt;&lt;code&gt;reader_hostgroup&lt;/code&gt;中，如果&lt;code&gt;read_only=0&lt;/code&gt;，表示可写，可能是master，这样的节点将会&lt;strong&gt;自动移入&lt;/strong&gt;&lt;code&gt;writer_hostgroup&lt;/code&gt;中。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;4.replication lag监控&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;对&lt;code&gt;mysql_servers&lt;/code&gt;表中所有配置了&lt;code&gt;max_replication_lag&lt;/code&gt;的后端slave节点都检查复制延迟，通过&lt;code&gt;show slave status&lt;/code&gt;返回结果中的&lt;code&gt;Seconds_Behind_Master&lt;/code&gt;字段，判断slave和master之间的延迟程度，并记录到&lt;code&gt;mysql_server_replication_lag_log&lt;/code&gt;表中。&lt;/p&gt;
+&lt;p&gt;如果Seconds_Behind_Master &amp;gt; max_replication_lag，表示该slave延迟很严重，ProxySQL会&lt;strong&gt;自动避开&lt;/strong&gt;这种slave节点，直到Seconds_Behind_Master &amp;lt; max_replication_lag。&lt;/p&gt;
+&lt;p&gt;Monitor监控上述指标时，会使用MySQL节点上的用户连接到后端节点，所以，需要先在后端节点上创建负责监控的用户。监控connect、ping和read_only这3项指标时，该用户只需具有&lt;code&gt;USAGE&lt;/code&gt;权限，如果要监控replication lag指标，则需要&lt;code&gt;replication client&lt;/code&gt;权限。&lt;/p&gt;
+
+&lt;h2 id=&quot;配置connect和ping监控&quot;&gt;3.2 配置connect和ping监控&lt;/h2&gt;
+&lt;p&gt;首先，在后端节点上创建用于监控的用户，顺便为其授予&lt;code&gt;replication client&lt;/code&gt;权限。只需在一个写节点(例如master)上创建即可，它会复制到其它节点上。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;create user monitor@'192.168.100.%' identified by 'P@ssword1!';
+grant replication client on *.* to monitor@'192.168.100.%';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后，在ProxySQL上配置这个监控用户，配置方式是修改全局变量。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;set mysql-monitor_username='monitor';
+set mysql-monitor_password='P@ssword1!';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;由于ProxySQL上所有的配置修改都是在修改main库中对应的表，上面的变量在&lt;code&gt;main.global_variables&lt;/code&gt;中，所以上面两个set语句和下面两个update语句是等价的。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;update global_variables set variable_value='monitor'
+ where variable_name='mysql-monitor_username';
+
+update global_variables set variable_value='P@ssword1!'
+ where variable_name='mysql-monitor_password';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在将配置load到runtime之前，可以先查看下connect和ping对应的log表。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select * from mysql_server_connect_log;
++----------------+------+------------------+-------------------------+---------------+
+| hostname       | port | time_start_us    | connect_success_time_us | connect_error |
++----------------+------+------------------+-------------------------+---------------+
+| 192.168.100.22 | 3306 | 1530968712977867 | 4174                    | NULL          |
+| 192.168.100.23 | 3306 | 1530968712988986 | 4908                    | NULL          |
+| 192.168.100.24 | 3306 | 1530968713000074 | 3044                    | NULL          |
+| 192.168.100.22 | 3306 | 1530968772978982 | 3407                    | NULL          |
+| 192.168.100.23 | 3306 | 1530968772989627 | 3404                    | NULL          |
+| 192.168.100.24 | 3306 | 1530968773000778 | 3444                    | NULL          |
++----------------+------+------------------+-------------------------+---------------+
+
+admin&amp;gt; select * from mysql_server_ping_log;
++----------------+------+------------------+----------------------+-------------+
+| hostname       | port | time_start_us    | ping_success_time_us | ping_error  |
++----------------+------+------------------+----------------------+-------------+
+| 192.168.100.22 | 3306 | 1530968712666540 | 452                  | NULL        |
+| 192.168.100.23 | 3306 | 1530968712668779 | 458                  | NULL        |
+| 192.168.100.24 | 3306 | 1530968712671541 | 324                  | NULL        |
+| 192.168.100.22 | 3306 | 1530968722667071 | 1190                 | NULL        |
+| 192.168.100.23 | 3306 | 1530968722669574 | 1162                 | NULL        |
+| 192.168.100.24 | 3306 | 1530968722673162 | 1380                 | NULL        |
++----------------+------+------------------+----------------------+-------------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;不难发现，监控操作在load到runtime之前就已经生效了。这是有意为之的：通过这种方式，可以在节点添加到生产环境之前执行一些基本的健康检查。&lt;/p&gt;
+&lt;p&gt;监控的节点一切正常后(error=NULL)，将配置load到runtime。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;load mysql variables to runtime;
+save mysql variables to disk;&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;配置read_only监控和读写组&quot;&gt;3.3 配置read_only监控和读/写组&lt;/h2&gt;
+&lt;p&gt;目前read_only和replication_lag的监控日志还是空。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select * from mysql_server_read_only_log;
+Empty set (0.00 sec)
+
+admin&amp;gt; select * from mysql_server_replication_lag_log;
+Empty set (0.00 sec)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这是因为还没有对ProxySQL中的节点分组：writer_hostgroup、reader_hostgroup。&lt;/p&gt;
+&lt;p&gt;设置分组信息，需要修改的是main库中的&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;表(组复制则是&lt;code&gt;mysql_group_replication_hostgroups&lt;/code&gt;)，该表只有3个字段：第一个字段名为writer_hostgroup，第二个字段为reader_hostgroup，第三个字段为注释字段，可随意写。&lt;/p&gt;
+&lt;p&gt;例如，指定写组的id为10，读组的id为20。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;insert into mysql_replication_hostgroups values(10,20);
+
+admin&amp;gt; select * from mysql_replication_hostgroups;
++------------------+------------------+----------+
+| writer_hostgroup | reader_hostgroup | comment  |
++------------------+------------------+----------+
+| 10               | 20               | cluster1 |
++------------------+------------------+----------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在该配置加载到RUNTIME生效之前，先查看下各mysql server所在的组。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select hostgroup_id,hostname,port,status,weight from mysql_servers; 
++--------------+----------------+------+--------+--------+
+| hostgroup_id | hostname       | port | status | weight |
++--------------+----------------+------+--------+--------+
+| 10           | 192.168.100.22 | 3306 | ONLINE | 1      |
+| 10           | 192.168.100.23 | 3306 | ONLINE | 1      |
+| 10           | 192.168.100.24 | 3306 | ONLINE | 1      |
++--------------+----------------+------+--------+--------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;3个节点都在&lt;code&gt;hostgroup_id=10&lt;/code&gt;的组中。&lt;/p&gt;
+&lt;p&gt;现在，将刚才&lt;code&gt;mysql_replication_hostgroups&lt;/code&gt;表的修改加载到RUNTIME生效。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;load mysql servers to runtime;
+save mysql servers to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;一加载，Monitor模块就会开始监控后端的read_only值，当监控到read_only值后，就会按照read_only的值将某些节点自动移动到读/写组。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;例如，此处所有节点都在&lt;code&gt;id=10&lt;/code&gt;的写组，slave1和slave2都是slave，它们的&lt;code&gt;read_only=1&lt;/code&gt;，这两个节点将会移动到&lt;code&gt;id=20&lt;/code&gt;的组。如果一开始这3节点都在&lt;code&gt;id=20&lt;/code&gt;的读组，那么移动的将是Master节点，会移动到&lt;code&gt;id=10&lt;/code&gt;的写组。&lt;/p&gt;
+&lt;p&gt;看结果：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select hostgroup_id,hostname,port,status,weight from mysql_servers;
++--------------+----------------+------+--------+--------+
+| hostgroup_id | hostname       | port | status | weight |
++--------------+----------------+------+--------+--------+
+| 10           | 192.168.100.22 | 3306 | ONLINE | 1      |
+| 20           | 192.168.100.23 | 3306 | ONLINE | 1      |
+| 20           | 192.168.100.24 | 3306 | ONLINE | 1      |
++--------------+----------------+------+--------+--------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;配置好read_only的监控后，Monitor模块会每隔一段时间监控一次read_only值。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;admin&amp;gt; select * from mysql_server_read_only_log;
++----------------+------+------------------+-----------------+-----------+--------+
+| hostname       | port | time_start_us    | success_time_us | read_only | error  |
++----------------+------+------------------+-----------------+-----------+--------+
+| 192.168.100.22 | 3306 | 1530970372197917 | 8487            | 0         | NULL   |
+| 192.168.100.23 | 3306 | 1530970372198992 | 7907            | 1         | NULL   |
+| 192.168.100.24 | 3306 | 1530970372199835 | 8064            | 1         | NULL   |
+| 192.168.100.22 | 3306 | 1530970373698824 | 10078           | 0         | NULL   |
+| 192.168.100.23 | 3306 | 1530970373699825 | 9845            | 1         | NULL   |
+| 192.168.100.24 | 3306 | 1530970373700786 | 10745           | 1         | NULL   |
++----------------+------+------------------+-----------------+-----------+--------+&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;配置replication-lag监控&quot;&gt;3.4 配置replication lag监控&lt;/h2&gt;
+&lt;p&gt;Monitor模块会监控后端主机组中各slave的数据是否延迟于master，这个延迟行为称为&lt;code&gt;replication lag&lt;/code&gt;，俗称拖后腿。&lt;/p&gt;
+&lt;p&gt;如果某个slave节点上的数据比master落后很多(临界值见下文)，表示这个slave节点处理速度慢，数据较旧。ProxySQL采用一种称为&lt;strong&gt;自动避开&lt;/strong&gt;(automatic shunned)的方式，&lt;strong&gt;临时避开&lt;/strong&gt;这个落后的节点。当ProxySQL避开某节点后，ProxySQL不会把SQL语句路由给这个节点。&lt;/p&gt;
+&lt;p&gt;ProxySQL有几种情况可能会触发自动避开节点的行为：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;和后端的连接断开。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;slave落后于master过多。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;和后端建立连接时，错误次数过多。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;second_behind_master=null时，即slave的SQL线程未运行，或者slave未连接到master。(不过这种自动避开的情况是可控的，见全局变量&lt;a href=&quot;https://github.com/malongshuai/proxysql/wiki/Global-variables#mysql-monitor_slave_lag_when_null&quot;&gt;mysql-monitor_slave_lag_when_null&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;本文介绍关于replication lag的内容。&lt;/p&gt;
+&lt;p&gt;Monitor模块会每隔一段时间(&lt;code&gt;mysql-monitor_replication_lag_interval&lt;/code&gt;)去检查一次拖后腿情况，检测的方式是获取&lt;code&gt;show slave status&lt;/code&gt;中的&lt;code&gt;Seconds_Behind_Master&lt;/code&gt;字段值，然后和&lt;code&gt;mysql_servers&lt;/code&gt;表中&lt;code&gt;max_replication_lag&lt;/code&gt;字段的值比较：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Seconds_Behind_Master &amp;lt; max_replication_lag：表示落后程度尚在允许范围内。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;Seconds_Behind_Master &amp;gt; max_replication_lag：表示落后太多，这样的节点应该避开。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;只有&lt;strong&gt;传统复制结构的slave节点才需要设置&lt;/strong&gt;&lt;code&gt;max_replication_lag&lt;/code&gt;字段，master无需设置，组复制和galera也无需设置，因为这两种复制结构中&lt;code&gt;show slave status&lt;/code&gt;的结果为空。例如，将读组中的所有节点都设置最多落后于master 10秒钟。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;update mysql_servers set max_replication_lag=10 where hostgroup_id=20;
+load mysql servers to runtime;
+save mysql servers to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;需要注意的是，Seconds_Behind_Master的值并不总是可靠的，见 https://dev.mysql.com/doc/refman/5.7/en/show-slave-status.html 。&lt;/p&gt;
+
+
+&lt;p&gt;配置好后端MySQL节点、监控、分组后，接下来要配置的是MySQL的用户。&lt;/p&gt;
+&lt;p&gt;需要注意，ProxySQL中有3套用户：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;连接Admin管理接口(默认6032端口)使用一套用户名/密码。&lt;br/&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;分为管理员和普通用户，管理员用户具有写权限，能配置ProxySQL，普通用户只有几个库的读权限。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;管理员用户/密码通过变量&lt;code&gt;admin-admin_credentials&lt;/code&gt;设置，普通用户/密码通过变量&lt;code&gt;admin-stats_credentials&lt;/code&gt;设置。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;这部分用户名不能出现在mysql_users表中。&lt;br/&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;Monitor模块监控后端时，需要使用一个MySQL用户连接后端进行监控。&lt;br/&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;需要先在后端MySQL组中创建好这个用户监控的用户。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;监控connect、ping和read_only时，只需&lt;code&gt;USAGE&lt;/code&gt;权限，监控replication lag时需要&lt;code&gt;replication client&lt;/code&gt;权限。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;通过变量&lt;code&gt;mysql-monitor_username&lt;/code&gt;和&lt;code&gt;mysql-monitor_password&lt;/code&gt;将监控用户加入到ProxySQL中。&lt;br/&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;前端连接ProxySQL(默认6033端口)、ProxySQL连接后端MySQL时使用一套用户名/密码。&lt;br/&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;当前端app发送SQL请求时，需要使用这套用户。然后ProxySQL将SQL语句路由给某后端节点，需要使用同一个用户和后端建立连接并将SQL语句发送出去。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;需要现在后端MySQL组中创建好这套用户，因为ProxySQL需要连接后端，所以一般授权所有权限，例如root。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;通过mysql_users表将这些用户加入到ProxySQL中，每一行对应一个用户。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&quot;添加mysql-users到proxysql&quot;&gt;4.1 添加MySQL users到ProxySQL&lt;/h2&gt;
+&lt;p&gt;例如，使用root用户来处理SQL请求。先在后端的写节点(如master节点)上授权root，该操作会复制给其它节点。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;grant all on *.* to root@'192.168.100.%' identified by 'P@ssword1!';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后，向ProxySQL的&lt;code&gt;mysql_users&lt;/code&gt;插入这个用户即可。这个表的字段很多，大多数字段都有默认值，以下是大部分使用默认值的插入语句：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;insert into mysql_users(username,password,default_hostgroup) 
+values ('root','P@ssword1!',10);
+
+load mysql users to runtime;
+save mysql users to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面指定了root用户的用户名、密码以及该用户默认的路由目标组。&lt;/p&gt;
+&lt;p&gt;ProxySQL有多种粒度的路由规则，每个用户都有默认的路由目标组，当使用该用户发送的SQL语句没有能够匹配的语句级路由规则，则会将该SQL语句路由给该用户默认的路由目标组。&lt;/p&gt;
+&lt;p&gt;例如，navicat工具使用root用户连接到了ProxySQL，发送了一个select语句，如果没有配置select语句的路由规则，那么这个select语句将默认路由给root用户的默认组。&lt;/p&gt;
+&lt;p&gt;下面先介绍一下&lt;code&gt;mysql_users&lt;/code&gt;表中的密码相关内容，然后再详细介绍&lt;code&gt;mysql_users&lt;/code&gt;表。&lt;/p&gt;
+
+&lt;h2 id=&quot;mysql_users表中用户的密码管理&quot;&gt;4.2 mysql_users表中用户的密码管理&lt;/h2&gt;
+&lt;p&gt;ProxySQL向&lt;code&gt;mysql_users&lt;/code&gt;表添加用户时，支持明文密码和hash加密密码。这个hash密码和mysql的&lt;code&gt;password()&lt;/code&gt;的算法是一样的。&lt;/p&gt;
+&lt;p&gt;但是，ProxySQL内部使用的是SQLite3引擎，不支持&lt;code&gt;password()&lt;/code&gt;。所以，想要向ProxySQL中使用hash加密密码，可以先通过mysql的&lt;code&gt;password()&lt;/code&gt;函数创建一个hash密码，然后copy到mysql_users表中。&lt;/p&gt;
+&lt;p&gt;例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[root@s4 ~]#  mysql -uroot -pP@ssword1! -e 'select password(&quot;P@ssword1!&quot;);' 
+mysql: [Warning] Using a password on the command line interface can be insecure.
++-------------------------------------------+
+| password(&quot;P@ssword1!&quot;)                    |
++-------------------------------------------+
+| *50572A5FABC7DA9CEE5EB5977EDDE59E38967422 |
++-------------------------------------------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后插入到ProxySQL的mysql_users表：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;insert into mysql_users(username,password,default_hostgroup) 
+values ('root','*50572A5FABC7DA9CEE5EB5977EDDE59E38967422',10);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;ProxySQL和MySQL对密码的处理方式都是：以&quot;*&quot;开头的密码，表示是hash加密密码。&lt;/p&gt;
+&lt;p&gt;在MySQL和ProxySQL中，使用&lt;code&gt;SHA1(SHA1('clear_password'))&lt;/code&gt;对clear_password进行加密。无法根据加密的hash密码推导回原始的明文密码。&lt;/p&gt;
+&lt;p&gt;当客户端连接到ProxySQL时，ProxySQL将使用该加密的密码对用户进行认证。如果该客户端是第一次认证，则ProxySQL会推导出一部分的hash密码&lt;code&gt;SHA1('clear_password')&lt;/code&gt;。推导出的信息会存储到runtime的内部数据结构中，以便ProxySQL连接后端MySQL时使用。&lt;/p&gt;
+&lt;p&gt;从1.2.3版本开始，引入了一个布尔类型的全局变量&lt;code&gt;admin-hash_passwords&lt;/code&gt;，默认为true。该变量表示，内存数据库的&lt;code&gt;mysql_users&lt;/code&gt;表中的明文密码，在&lt;code&gt;load mysql users to runtime&lt;/code&gt;时，对明文密码进行hash加密，并保存到runtime数据结构中。有了这个特性，可以以另一种方式保存加密密码：只需将其刷回内存数据库即可。&lt;/p&gt;
+&lt;p&gt;例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Admin&amp;gt; SELECT username,password FROM mysql_users;
++----------+-----------+
+| username | password  |
++----------+-----------+
+| user1    | password1 |     # 明文密码
+| user2    | password2 |
++----------+-----------+
+
+Admin&amp;gt; LOAD MYSQL USERS TO RUNTIME;    # 加载到runtime数据结构
+
+Admin&amp;gt; SELECT username,password FROM mysql_users;
++----------+-----------+
+| username | password  |
++----------+-----------+
+| user1    | password1 |    # 还是明文密码
+| user2    | password2 |
++----------+-----------+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这个时候，runtime数据结构中的密码是加密密码，而内存数据库中的密码是明文密码。&lt;/p&gt;
+&lt;p&gt;将runtime数据结构数据刷回内存数据库，即可将加密密码保存到内存数据库中，然后还可以将加密的密码持久化到disk。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Admin&amp;gt; save mysql users to memory;
+
+Admin&amp;gt; SELECT username,password FROM mysql_users;
++----------+-------------------------------------------+
+| username | password                                  |
++----------+-------------------------------------------+
+| user1    | *668425423DB5193AF921380129F465A6425216D0 |
+| user2    | *DC52755F3C09F5923046BD42AFA76BD1D80DF2E9 |
++----------+-------------------------------------------+
+
+Admin&amp;gt; save mysql users to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;唯一需要注意的是，&lt;code&gt;admin-hash-passwords&lt;/code&gt;变量是&lt;code&gt;admin-&lt;/code&gt;变量而非&lt;code&gt;mysql-&lt;/code&gt;变量，这意味着修改了这个变量后(虽然基本不会去修改)，load/save操作的目标是&quot;admin variables&quot;，而非&quot;mysql variables&quot;。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;load admin variables to runtime;
+save admin variables to disk;&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;mysql_users表详细解释&quot;&gt;4.3 mysql_users表详细解释&lt;/h2&gt;
+&lt;p&gt;以下是&lt;code&gt;mysql_users&lt;/code&gt;表的属性。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;|     字段名             | 数据类型 | 可为空?  | 默认值 |
+|-----------------------|---------|----------|-------|
+|username    (pk,uk)    | VARCHAR | NOT NULL |       |
+|password               | VARCHAR | NULL     |       |
+|active                 | INT     | NOT NULL | 1     |
+|use_ssl                | INT     | NOT NULL | 0     |
+|default_hostgroup      | INT     | NOT NULL | 0     |
+|default_schema         | VARCHAR | NULL     |       |
+|schema_locked          | INT     | NOT NULL | 0     |
+|transaction_persistent | INT     | NOT NULL | 1     |
+|fast_forward           | INT     | NOT NULL | 0     |
+|backend      (pk)      | INT     | NOT NULL | 1     |
+|frontend     (uk)      | INT     | NOT NULL | 1     |
+|max_connections        | INT     | NOT NULL | 10000 |&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;各字段的意义：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;username, password&lt;/strong&gt;：前端连接到ProxySQL以及ProxySQL连接到后端时使用的用户凭据。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;active&lt;/strong&gt;：&lt;code&gt;active=0&lt;/code&gt;的用户会保留在库中，但不会加载到runtime数据结构中，只有&lt;code&gt;active=1&lt;/code&gt;用户才是有效用户。该字段默认值为1。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;default_hostgroup&lt;/strong&gt;：如果该用户发送的查询语句无法匹配任何规则，则该查询会路由到该字段指定的默认组中。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;default_schema&lt;/strong&gt;：建立连接时默认将切换到该schema。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;schema_locked&lt;/strong&gt;：目前还不支持该功能。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;transaction_persistent&lt;/strong&gt;：如果正在和ProxySQL建立连接的客户端使用的用户设置了该字段，那么当该用户开启一个事务后，该客户端后续的请求都将路由到同一主机组中(无视查询规则)，使得事务在这个组中是持久的，避免同一事务分散到其它组，直到事务结束才可能会路由到其它主机组。注意，&lt;strong&gt;有些老版本中，这个字段默认值为0，强烈建议修改为1&lt;/strong&gt;。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;fast_forward&lt;/strong&gt;：如果设置了该字段，ProxySQL将绕过查询处理层(重写语句、缓存)，直接将原请求语句转发给后端节点。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;frontend&lt;/strong&gt;：如果设置为1，前端将可以使用该用户(username,password)连接到ProxySQL。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;backend&lt;/strong&gt;：如果设置为1，ProxySQL将可以使用该用户(username,password)连接到后端节点。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;max_connections&lt;/strong&gt;：使用该用户&quot;建立到ProxySQL的连接&quot;的最大数量。默认值为10000，所以每个用户最多和ProxySQL建立10000个连接。注意，这是前端到ProxySQL的连接限制，ProxySQL和某个后端节点的最大连接数量是通过&lt;code&gt;mysql_servers&lt;/code&gt;中的&lt;code&gt;max_connections&lt;/code&gt;字段控制的。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;注意，当前版本的ProxySQL要求所有的用户均设置frontend和backend为1(即所有用户都可以进行&lt;code&gt;frontend --&amp;gt; ProxySQL&lt;/code&gt;以及&lt;code&gt;ProxySQL --&amp;gt; backend&lt;/code&gt;的连接认证)。将来版本中，ProxySQL将分离这两部分连接的用户凭据。这样前端将永远不知道后端的用户凭据，它们只能通过中间的ProxySQL发送请求，无法直接和后端节点建立连接，从而提高安全性。&lt;/p&gt;
+&lt;p&gt;关于快速转发fast_forward：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;不要求用一个不同的端口：正常的ProxySQL逻辑和&quot;fast forward&quot;的逻辑使用的是完全相同的代码/模块。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;fast forward是基于每用户的：根据连接到ProxySQL用户的设置，决定该用户是否启用、禁用fast forward功能。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;fast forward算法的启用是在用户认证之后：ProxySQL仍然需要先对客户端使用的用户进行认证，尽管客户端的请求会直接原样转发给后端，但ProxySQL仍然会和前端先建立好连接。这意味着，如果前端和ProxySQL的连接发生错误，也会被处理。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;fast forward不支持SSL连接。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;如果使用压缩功能，必须在两端都启用压缩。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&quot;事务持久化transaction_persistent&quot;&gt;4.4 事务持久化：transaction_persistent&lt;/h2&gt;
+&lt;p&gt;mysql_users表中的&lt;code&gt;transaction_persistent&lt;/code&gt;字段，当它的值为1时，表示事务持久化：当某连接使用该用户开启了一个事务后，那么在事务提交/回滚之前，所有的语句都路由到同一个组中，避免语句分散到不同组。在以前的版本中，默认值为0，不知道从哪个版本开始，它的默认值为1。我们期望的值为1，所以&lt;strong&gt;强烈建议插入用户后先检查下这个字段的值是否为1&lt;/strong&gt;，如果为0，则执行下面的语句修改为1。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;update mysql_users set transaction_persistent=1 where username='root';
+update mysql_users set transaction_persistent=1 where username='sqlsender';
+load mysql users to runtime;
+save mysql users to disk;&lt;/code&gt;
+&lt;/pre&gt;
+
+
+&lt;p&gt;添加后端节点、监控后端节点、添加MySQL用户是使用ProxySQL所必须完成的步骤。这3个步骤虽然需要操作的过程不多，但是涉及的内容还是比较多的。&lt;/p&gt;
+&lt;p&gt;强烈建议将mysql_servers、mysql_users、mysql_replication_hostgroups这3个表的所有字段都了解一遍。不仅如此，要熟练使用ProxySQL，还应该对main库中的表的各个字段都比较熟悉，至少要知道它们什么意思。&lt;/p&gt;
+&lt;p&gt;下面，将添加后端节点、监控后端节点、添加MySQL用户的操作过程抽取出来，算是个步骤总结：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;######### 1.添加后端节点
+#
+#
+insert into mysql_servers(hostgroup_id,hostname,port) values
+    (10,'192.168.100.22',3306),
+    (10,'192.168.100.23',3306),
+    (10,'192.168.100.24',3306);
+
+load mysql servers to runtime;
+save mysql servers to disk;
+
+# 查看下各节点是否都是 ONLINE 
+select * from mysql_servers\G
+
+
+######### 2.在后端MySQL上创建监控用户和处理SQL语句的用户
+#
+# 在后端master节点上执行以下语句
+#
+create user monitor@'192.168.100.%' identified by 'P@ssword1!';
+grant replication client on *.* to monitor@'192.168.100.%';
+grant all on *.* to root@'192.168.100.%' identified by 'P@ssword1!';
+
+
+######### 3.在ProxySQL中配置监控用户
+#
+#
+set mysql-monitor_username='monitor';
+set mysql-monitor_password='P@ssword1!';
+
+# 以上两个set语句等价于下面两个update：
+update global_variables set variable_value='monitor'
+ where variable_name='mysql-monitor_username';
+
+update global_variables set variable_value='P@ssword1!'
+ where variable_name='mysql-monitor_password';
+
+load mysql variables to runtime;
+save mysql variables to disk;
+
+# 查看下connect和ping的监控是否正常
+select * from mysql_server_connect_log order by time_start_us desc limit 6;
+select * from mysql_server_ping_log order by time_start_us desc limit 6;
+
+
+######### 4.配置读、写组
+#
+#
+insert into mysql_replication_hostgroups values(10,20);
+load mysql servers to runtime;
+save mysql servers to disk;
+
+
+######### 5.在ProxySQL中配置MySQL用户
+#
+#
+insert into mysql_users(username,password,default_hostgroup) 
+values ('root','P@ssword1!',10);
+load mysql users to runtime;
+save mysql users to memory;
+save mysql users to disk;
+
+update mysql_users set transaction_persistent=1 where username='root';
+load mysql users to runtime;
+save mysql users to disk;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在后面的文章中，我会介绍以下percona版本的ProxySQL，percona ProxySQL提供了一个管理工具，它能通过额外的配置文件自动化配置上面一大堆的操作，大大简化了初始搭建使用ProxySQL的过程。&lt;/p&gt;
+</description>
+<pubDate>Mon, 09 Jul 2018 19:34:00 +0000</pubDate>
+<dc:creator>骏马金龙</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/f-ck-need-u/p/9286922.html</dc:identifier>
+</item>
+<item>
+<title>Mybatis学习系列（六）延迟加载 - 仍是少年</title>
+<link>http://www.cnblogs.com/ashleyboy/p/9286814.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ashleyboy/p/9286814.html</guid>
+<description>&lt;p&gt;延迟加载其实就是将数据加载时机推迟，比如推迟嵌套查询的执行时机。在Mybatis中经常用到关联查询，但是并不是任何时候都需要立即返回关联查询结果。比如查询订单信息，并不一定需要及时返回订单对应的产品信息，查询商品分类信息并不一定要及时返回该类别下有哪些产品，这种情况一下需要一种机制，当需要查看时，再执行查询，返回需要的结果集，这种需求在Mybatis中可以使用延迟加载机制来实现。延迟加载可以实现先查询主表，按需实时做关联查询，返回关联表结果集，一定程度上提高了效率。&lt;/p&gt;
+&lt;h2&gt;Mapper.xml映射文件&lt;/h2&gt;
+&lt;p&gt;以商品类别category和商品product为例，一个类别下可以有多个商品，一个商品属于一种类别。&lt;/p&gt;
+&lt;p&gt;编写lazyLoadMapper.xml映射文件&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;?&lt;/span&gt;&lt;span&gt;xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;?&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;!&lt;/span&gt;&lt;span&gt;DOCTYPE mapper 
+    PUBLIC &quot;-//mybatis.org//DTD Mapper 3.0//EN&quot; 
+    &quot;http://mybatis.org/dtd/mybatis-3-mapper.dtd&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mapper &lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;com.sl.mapper.LazyLoadMapper&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 分类信息查询 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;lazyLoadTest&quot;&lt;/span&gt;&lt;span&gt;  resultMap&lt;/span&gt;&lt;span&gt;=&quot;lazyLoadProductsByCategoryTest&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
+            select * from category where id=#{id}
+        &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;resultMap &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;lazyLoadProductsByCategoryTest&quot;&lt;/span&gt;&lt;span&gt; type&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Category&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;id &lt;/span&gt;&lt;span&gt;column&lt;/span&gt;&lt;span&gt;=&quot;id&quot;&lt;/span&gt;&lt;span&gt; property&lt;/span&gt;&lt;span&gt;=&quot;Id&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;column&lt;/span&gt;&lt;span&gt;=&quot;name&quot;&lt;/span&gt;&lt;span&gt; property&lt;/span&gt;&lt;span&gt;=&quot;Name&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;result &lt;/span&gt;&lt;span&gt;column&lt;/span&gt;&lt;span&gt;=&quot;remark&quot;&lt;/span&gt;&lt;span&gt; property&lt;/span&gt;&lt;span&gt;=&quot;Remark&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 一个分类对应多个产品，此处使用collection &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;collection &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;productList&quot;&lt;/span&gt;&lt;span&gt; ofType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt;  column&lt;/span&gt;&lt;span&gt;=&quot;id&quot;&lt;/span&gt;&lt;span&gt; select&lt;/span&gt;&lt;span&gt;=&quot;selectProductsByCategoryId&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;collection&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;resultMap&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        
+        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 嵌套查询返回商品信息，延迟加载将要执行的sql &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectProductsByCategoryId&quot;&lt;/span&gt;&lt;span&gt;  resultType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
+            select * from products where categoryid=#{id} 
+        &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mapper&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2&gt;启用延迟加载和按需加载&lt;/h2&gt;
+&lt;p&gt;Mybatis配置文件中通过两个属性lazyLoadingEnabled和aggressiveLazyLoading来控制延迟加载和按需加载。&lt;/p&gt;
+&lt;p&gt;lazyLoadingEnabled：是否启用延迟加载，mybatis默认为false，不启用延迟加载。lazyLoadingEnabled属性控制全局是否使用延迟加载，特殊关联关系也可以通过嵌套查询中fetchType属性单独配置（fetchType属性值lazy或者eager）。&lt;/p&gt;
+&lt;p&gt;aggressiveLazyLoading：是否按需加载属性，默认值false，lazyLoadingEnabled属性启用时只要加载对象，就会加载该对象的所有属性；关闭该属性则会按需加载，即使用到某关联属性时，实时执行嵌套查询加载该属性。&lt;/p&gt;
+&lt;p&gt;SqlMapConfig.xml中修改配置，注册lazyLoadMapper.xml&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;settings&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 启用延迟加载特性，不配置默认关闭该特性&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;setting &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;lazyLoadingEnabled&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;setting&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 按需加载: false:使用关联属性，及时加载;    true,加载对象，则加载所有属性， &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;setting &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;aggressiveLazyLoading&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;settings&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mappers&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 注册Mapper.xml文件 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mapper &lt;/span&gt;&lt;span&gt;resource&lt;/span&gt;&lt;span&gt;=&quot;mapper/lazyLoadMapper.xml&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mapper&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;        
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mappers&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2&gt;运行测试&lt;/h2&gt;
+&lt;p&gt;添加mapper接口&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('be67b46e-400a-4fa3-8787-f3bb3443dc86')&quot; readability=&quot;32&quot;&gt;&lt;img id=&quot;code_img_closed_be67b46e-400a-4fa3-8787-f3bb3443dc86&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_be67b46e-400a-4fa3-8787-f3bb3443dc86&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('be67b46e-400a-4fa3-8787-f3bb3443dc86',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_be67b46e-400a-4fa3-8787-f3bb3443dc86&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;59&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.sl.mapper;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.List;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.Category;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.Product;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; LazyLoadMapper {
+    
+    
+    Category lazyLoadTest(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id);
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;嵌套查询&lt;/span&gt;
+    List&amp;lt;Product&amp;gt; selectProductsByCategoryId(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; cId);
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;测试方法&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('d54aa678-16c7-4781-a2f3-c7946e6c5e7f')&quot; readability=&quot;32.5&quot;&gt;&lt;img id=&quot;code_img_closed_d54aa678-16c7-4781-a2f3-c7946e6c5e7f&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_d54aa678-16c7-4781-a2f3-c7946e6c5e7f&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('d54aa678-16c7-4781-a2f3-c7946e6c5e7f',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_d54aa678-16c7-4781-a2f3-c7946e6c5e7f&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;60&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.sl.test;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.IOException;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.InputStream;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.math.BigDecimal;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.text.DateFormat;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.text.ParseException;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.text.SimpleDateFormat;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.apache.ibatis.io.Resources;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.apache.ibatis.session.SqlSession;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.apache.ibatis.session.SqlSessionFactory;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.apache.ibatis.session.SqlSessionFactoryBuilder;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.junit.Before;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.junit.Test;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.mapper.LazyLoadMapper;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.mapper.ProductMapper;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.mapper.UnitMapper;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.Category;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.Product;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.ProductDetailInfo;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.ProductInfo;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.ProductVo;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.sl.po.User;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.ArrayList;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.Date;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.HashMap;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.Iterator;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.List;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.Map;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestLazyLoadMapperClient {
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 定义会话SqlSession&lt;/span&gt;
+    SqlSession session = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+
+    @Before
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; init() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; IOException {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 定义mabatis全局配置文件&lt;/span&gt;
+        String resource = &quot;SqlMapConfig.xml&quot;&lt;span&gt;;
+        InputStream inputStream &lt;/span&gt;=&lt;span&gt; Resources.getResourceAsStream(resource);
+        SqlSessionFactoryBuilder builder &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlSessionFactoryBuilder();
+        SqlSessionFactory factory &lt;/span&gt;=&lt;span&gt; builder.build(inputStream);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 根据sqlSessionFactory产生会话sqlsession&lt;/span&gt;
+        session =&lt;span&gt; factory.openSession();
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 延迟加载&lt;/span&gt;
+&lt;span&gt;    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testoneToManyTestCollectionSelect() {
+
+        LazyLoadMapper mapper &lt;/span&gt;= session.getMapper(LazyLoadMapper.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+
+        Category category &lt;/span&gt;= mapper.lazyLoadTest(1&lt;span&gt;);
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;System.out.println(category);&lt;/span&gt;
+&lt;span&gt;        System.out.println(category.getName());
+
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (category.getProductList().size() &amp;gt; 0&lt;span&gt;) {
+            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (Product pro : category.getProductList()) {
+                System.out.println(pro);
+            }
+        }
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 关闭会话&lt;/span&gt;
+&lt;span&gt;        session.close();
+    }
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;运行程序查看sql执行记录：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180710012931297-820214672.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当前配置：启用延迟加载lazyLoadingEnabled=true和按需加载aggressiveLazyLoading=false&lt;/p&gt;
+&lt;p&gt;Step1: 执行Mapper方法lazyLoadTest，实际只执行了select * from category where id=#{id}&lt;/p&gt;
+&lt;p&gt;Step2: 执行System.out.println(category.getName())，加载属性，由于启用按需加载aggressiveLazyLoading=false，name属性此前已加载好，所以此处无数据库交互&lt;/p&gt;
+&lt;p&gt;Step3: 执行category.getProductList().size()，加载属性productList，按需加载需要执行延迟加载sql脚本select * from products where categoryid=#{id}，与数据库交互&lt;/p&gt;
+
+&lt;p&gt;将aggressiveLazyLoading属性设为为true，即：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;setting &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;aggressiveLazyLoading&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;再一下执行过程：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180710013036922-736316620.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;此时的配置：启用延迟加载lazyLoadingEnabled=true和关闭按需加载aggressiveLazyLoading=true（即加载对象则加载所有属性）&lt;/p&gt;
+&lt;p&gt;Step1: 执行Mapper方法lazyLoadTest，实际只执行了select * from category where id=#{id}&lt;/p&gt;
+&lt;p&gt;Step2: 执行System.out.println(category.getName())，访问name属性，由于启用按需加载aggressiveLazyLoading=true，关闭按需加载，则加载category对象时加载该对象的所有属性，执行延迟加载sql脚本select * from products where categoryid=#{id}，与数据库交互&lt;/p&gt;
+&lt;p&gt;Step3: 执行category.getProductList().size()，访问productList属性，该 性step2已加载好，此处无需数据库交互&lt;/p&gt;
+&lt;p&gt;对比上下两个step2可以发现 aggressiveLazyLoading=true /false的区别。&lt;/p&gt;
+
+</description>
+<pubDate>Mon, 09 Jul 2018 17:32:00 +0000</pubDate>
+<dc:creator>仍是少年</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ashleyboy/p/9286814.html</dc:identifier>
+</item>
+<item>
+<title>二叉树(前序，中序，后序，层序)遍历递归与循环的python实现 - Byron_Wu</title>
+<link>http://www.cnblogs.com/bjwu/p/9284534.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/bjwu/p/9284534.html</guid>
+<description>&lt;p&gt;&lt;img src=&quot;https://iclykofte.com/wp-content/uploads/2017/01/binary-tree.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;二叉树的遍历是在面试使比较常见的项目了。对于二叉树的前中后层序遍历，每种遍历都可以递归和循环两种实现方法，且每种遍历的递归实现都比循环实现要简洁。下面做一个小结。&lt;/p&gt;
+&lt;h2 id=&quot;一中序遍历&quot;&gt;一、中序遍历&lt;/h2&gt;
+&lt;p&gt;前中后序三种遍历方法对于左右结点的遍历顺序都是一样的（先左后右），唯一不同的就是根节点的出现位置。对于中序遍历来说，根结点的遍历位置在中间。&lt;/p&gt;
+&lt;p&gt;所以中序遍历的顺序：&lt;strong&gt;左中右&lt;/strong&gt;&lt;/p&gt;
+&lt;h4 id=&quot;递归实现&quot;&gt;1.1 递归实现&lt;/h4&gt;
+&lt;p&gt;每次递归，只需要判断结点是不是None，否则按照左中右的顺序打印出结点value值。&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def inorderTraversal(self, root):
+        &quot;&quot;&quot;
+        :type root: TreeNode
+        :rtype: List[int]
+        &quot;&quot;&quot;
+        if not root:
+            return [] 
+        return self.inorderTraversal(root.left) + [root.val] + self.inorderTraversal(root.right)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;循环实现&quot;&gt;1.2 循环实现&lt;/h4&gt;
+&lt;p&gt;循环比递归要复杂得多，因为你得在一个函数中遍历到所有结点。但是有句话很重要：&lt;/p&gt;
+&lt;center&gt;&lt;strong&gt;对于树的遍历，循环操作基本上要用到栈(stack)这个结构&lt;/strong&gt;&lt;/center&gt;
+&lt;p&gt;对于中序遍历的循环实现，每次将当前结点(curr)的左子结点push到栈中，直到当前结点(curr)为None。这时，pop出栈顶的第一个元素，设其为当前结点，并输出该结点的value值，且开始遍历该结点的右子树。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://obiwong.is-programmer.com/user_files/obiwong/Image/thisfile.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;例如，对于上图的一个二叉树，其循环遍历过程如下表：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;2&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;[1]&lt;/td&gt;
+&lt;td&gt;2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;3&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;[1,2]&lt;/td&gt;
+&lt;td&gt;4&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;4&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;[1,2,4]&lt;/td&gt;
+&lt;td&gt;None&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;5&lt;/td&gt;
+&lt;td&gt;[4]&lt;/td&gt;
+&lt;td&gt;[1,2]&lt;/td&gt;
+&lt;td&gt;4 -&amp;gt; None(4的右结点)&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;6&lt;/td&gt;
+&lt;td&gt;[4,2]&lt;/td&gt;
+&lt;td&gt;[1]&lt;/td&gt;
+&lt;td&gt;2 -&amp;gt; 5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;7&lt;/td&gt;
+&lt;td&gt;[4,2]&lt;/td&gt;
+&lt;td&gt;[1,5]&lt;/td&gt;
+&lt;td&gt;None(5的左结点)&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;8&lt;/td&gt;
+&lt;td&gt;[4,2,5]&lt;/td&gt;
+&lt;td&gt;[1]&lt;/td&gt;
+&lt;td&gt;5 -&amp;gt; None(5的右结点)&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;9&lt;/td&gt;
+&lt;td&gt;[4,2,5,1]&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;3&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;10&lt;/td&gt;
+&lt;td&gt;[4,2,5,1]&lt;/td&gt;
+&lt;td&gt;[3]&lt;/td&gt;
+&lt;td&gt;None&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;11&lt;/td&gt;
+&lt;td&gt;[4,2,5,1,3]&lt;/td&gt;
+&lt;td&gt;[]&lt;/td&gt;
+&lt;td&gt;None&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;可见，规律为：当前结点curr不为None时，每一次循环将当前结点curr入栈；当前结点curr为None时，则出栈一个结点，且打印出栈结点的value值。整个循环在stack和curr皆为None的时候结束。&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def inorderTraversal(self, root):
+        stack = []
+        sol = []
+        curr = root
+        while stack or curr:
+            if curr:
+                stack.append(curr)
+                curr = curr.left
+            else:
+                curr = stack.pop()
+                sol.append(curr.val)
+                curr = curr.right
+        return sol&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;二前序遍历和后序遍历&quot;&gt;二、前序遍历和后序遍历&lt;/h2&gt;
+&lt;p&gt;按照上面的说法，前序遍历指根结点在最前面输出，所以前序遍历的顺序是：&lt;strong&gt;中左右&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;后序遍历指根结点在最后面输出，所以后序遍历的顺序是：&lt;strong&gt;左右中&lt;/strong&gt;&lt;/p&gt;
+&lt;h4 id=&quot;递归实现-1&quot;&gt;2.1 递归实现&lt;/h4&gt;
+&lt;p&gt;递归实现与中序遍历几乎完全一样，改变一下打印的顺序即可：&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def preorderTraversal(self, root):  ##前序遍历
+        &quot;&quot;&quot;
+        :type root: TreeNode
+        :rtype: List[int]
+        &quot;&quot;&quot;
+        if not root:
+            return [] 
+        return  [root.val] + self.inorderTraversal(root.left) + self.inorderTraversal(root.right)
+        
+    def postorderTraversal(self, root):  ##后序遍历
+        &quot;&quot;&quot;
+        :type root: TreeNode
+        :rtype: List[int]
+        &quot;&quot;&quot;
+        if not root:
+            return [] 
+        return  self.inorderTraversal(root.left) + self.inorderTraversal(root.right) + [root.val]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;改动的地方只有return时函数的打印顺序。&lt;/p&gt;
+&lt;h4 id=&quot;循环实现-1&quot;&gt;2.2 循环实现&lt;/h4&gt;
+&lt;p&gt;为什么把前序遍历和后序遍历放在一起呢？Leetcode上前序遍历是medium难度，后序遍历可是hard难度呢！&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;实际上，后序遍历不就是前序遍历的“反过程”嘛！&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;先看前序遍历。我们仍然使用栈stack，由于前序遍历的顺序是&lt;strong&gt;中左右&lt;/strong&gt;，所以我们每次先打印当前结点curr，并将右子结点push到栈中，然后将左子结点设为当前结点。入栈和出栈条件（当前结点curr不为None时，每一次循环将当前结点curr入栈；当前结点curr为None时，则出栈一个结点）以及循环结束条件（整个循环在stack和curr皆为None的时候结束）与中序遍历一模一样。&lt;/p&gt;
+&lt;p&gt;再看后序遍历。由于后序遍历的顺序是&lt;strong&gt;左右中&lt;/strong&gt;，我们把它反过来，则遍历顺序变成&lt;strong&gt;中左右&lt;/strong&gt;，是不是跟前序遍历只有左右结点的差异了呢？然而左右的差异仅仅就是.left和.right的差异，在代码上只有机械的差别。&lt;/p&gt;
+&lt;p&gt;我们来看代码：&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def preorderTraversal(self, root):  ## 前序遍历
+        stack = []
+        sol = []
+        curr = root
+        while stack or curr:
+            if curr:
+                sol.append(curr.val)
+                stack.append(curr.right)
+                curr = curr.left
+            else:
+                curr = stack.pop()
+        return sol
+        
+    def postorderTraversal(self, root): ## 后序遍历
+        stack = []
+        sol = []
+        curr = root
+        while stack or curr:
+            if curr:
+                sol.append(curr.val)
+                stack.append(curr.left)
+                curr = curr.right
+            else:
+                curr = stack.pop()
+        return sol[::-1]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;代码的主体部分基本就是.right和.left交换了顺序，且后序遍历在最后输出的时候进行了反向（因为要从&lt;strong&gt;中右左&lt;/strong&gt;变为&lt;strong&gt;左右中&lt;/strong&gt;）&lt;/p&gt;
+&lt;h2 id=&quot;三层序遍历&quot;&gt;三、层序遍历&lt;/h2&gt;
+&lt;p&gt;层序遍历也可以叫做宽度优先遍历：先访问树的第一层结点，再访问树的第二层结点...然后一直访问到最下面一层结点。在同一层结点中，以从左到右的顺序依次访问。&lt;/p&gt;
+&lt;h4 id=&quot;递归实现-2&quot;&gt;3.1 递归实现&lt;/h4&gt;
+&lt;p&gt;递归函数需要有一个参数level，该参数表示当前结点的层数。遍历的结果返回到一个二维列表sol=[[]]中，sol中的每一个子列表保存了对应index层的从左到右的所有结点value值。&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def levelOrder(self, root):
+        &quot;&quot;&quot;
+        :type root: TreeNode
+        :rtype: List[List[int]]
+        &quot;&quot;&quot;
+        def helper(node, level):
+            if not node:
+                return
+            else:
+                sol[level-1].append(node.val)
+                if len(sol) == level:  # 遍历到新层时，只有最左边的结点使得等式成立
+                    sol.append([])
+                helper(node.left, level+1)
+                helper(node.right, level+1)
+        sol = [[]]
+        helper(root, 1)
+        return sol[:-1]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;PS：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Q：如果仍然按层遍历，但是每层从右往左遍历怎么办呢？&lt;/p&gt;
+&lt;p&gt;A：将上面的代码left和right互换即可&lt;/p&gt;
+&lt;p&gt;Q：如果仍然按层遍历，但是我要第一层从左往右，第二层从右往左，第三从左往右...这种zigzag遍历方式如何实现？&lt;/p&gt;
+&lt;p&gt;A：将&lt;code&gt;sol[level-1].append(node.val)&lt;/code&gt;进行一个层数奇偶的判断，一个用&lt;code&gt;append()&lt;/code&gt;，一个用&lt;code&gt;insert(0,)&lt;/code&gt;&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;    if level%2==1:
+        sol[level-1].append(node.val)
+    else:
+        sol[level-1].insert(0, node.val)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;循环实现-2&quot;&gt;3.2 循环实现&lt;/h4&gt;
+&lt;p&gt;这里的循环实现不能用栈了，得用队列queue。因为每一层都需要从左往右打印，而每打印一个结点都会在队列中依次添加其左右两个子结点，每一层的顺序都是一样的，故必须采用先进先出的数据结构。&lt;/p&gt;
+&lt;p&gt;以下代码的打印结果为一个一维列表，没有采用二维列表的形式。&lt;/p&gt;
+&lt;pre class=&quot;py&quot;&gt;
+&lt;code&gt;class Solution:
+    def levelOrder(self, root):
+        if not root:
+            return []
+        sol = []
+        curr = root
+        queue = [curr]
+        while queue:
+            curr = queue.pop(0)
+            sol.append(curr.val)
+            if curr.left:
+                queue.append(curr.left)
+            if curr.right:
+                queue.append(curr.right)
+        return sol&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;其实，如果需要打印成zigzag形式（相邻层打印顺序相反），则可以采用栈stack数据结构，正好符合先进后出的形式。不过在代码上还要进行其他改动。&lt;/p&gt;
+</description>
+<pubDate>Mon, 09 Jul 2018 17:24:00 +0000</pubDate>
+<dc:creator>Byron_Wu</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/bjwu/p/9284534.html</dc:identifier>
+</item>
+<item>
+<title>golang基础--map字典 - failymao</title>
+<link>http://www.cnblogs.com/failymao/p/9286858.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/failymao/p/9286858.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;map 类似python语言中的dict（字典类型），以key-value形式存储数据&lt;/strong&gt;&lt;/p&gt;
+&lt;ul readability=&quot;1&quot;&gt;&lt;li&gt;Key必须是支持&lt;code&gt;==&lt;/code&gt;或&lt;code&gt;！=&lt;/code&gt;比较运算的类型，不可以是函数，map或slice&lt;/li&gt;
+&lt;li&gt;map查找比线性搜素快很多，但比使用索引访问数据的类型慢100倍&lt;/li&gt;
+&lt;li readability=&quot;5&quot;&gt;
+&lt;p&gt;map使用make()函数创建，支持 &lt;code&gt;:=&lt;/code&gt;赋值的简单写法&lt;/p&gt;
+&lt;pre class=&quot;go&quot;&gt;
+&lt;code&gt;//基本操作
+func main() {
+    //var m map[int]string //定义一个map变量
+    //m = map[int]string{}      //第一种方式
+    //m = make(map[int]string)  //第二种方式：使用make
+    m := make(map[int]string) //第三种方式make直接初始化
+    m[1] = &quot;ok&quot;               //赋值一对key-value
+    a := m[1]                 //获取一个key对应的value值
+    delete(m, 1)              //删除map中的某一个kefmt.Println(m)y
+    fmt.Println(m)
+    fmt.Println(a)
+    fmt.Println(m)
+}
+
+/*output
+map_init----&amp;gt;   map[]
+map_add----&amp;gt;    map[1:ok]
+map_get----&amp;gt;    ok
+map_del----&amp;gt;    map[]
+*/&lt;/code&gt;
+&lt;/pre&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;嵌套map: 类似python中的嵌套字典，取值，赋值时需要层层递进 ，且每次赋值时需要对内层map执行make初始化。&lt;/strong&gt;&lt;/p&gt;
+&lt;ul readability=&quot;4.5&quot;&gt;&lt;li readability=&quot;12&quot;&gt;
+&lt;p&gt;示例代码&lt;/p&gt;
+&lt;pre class=&quot;go&quot;&gt;
+&lt;code&gt;package main
+import &quot;fmt&quot;
+
+func main() {
+    var m map[int]map[int]string     //嵌套字典
+    m = make(map[int]map[int]string) //初始化map--最外层
+    m[1] = make(map[int]string)      //make初始化嵌套字典，第一个键对应的map类型
+    m[1][1] = &quot;ok&quot;                   //key1_value1赋值
+    b, ok := m[1][1]                 //使用多返回值，第二值返回值时bool类型，如果前一个有返回值，返回true,反之返回false
+    fmt.Println(b, ok)
+    fmt.Println(m)
+    a, ok := m[2][1] //由于key2，对应的value2赋值前没有make初始化，所以，
+    fmt.Println(a, ok)
+    if !ok {
+        m[2] = make(map[int]string)
+    }
+    m[2][1] = &quot;Good&quot;
+    a, ok = m[2][1]
+    fmt.Println(a, ok)
+    fmt.Println(m)
+}
+
+/*输出
+a, ok---&amp;gt;   ok true
+m ---&amp;gt;      map[1:map[1:ok]]
+a, ok---&amp;gt;        false
+a, ok---&amp;gt;   Good true           //初始化后
+*/&lt;/code&gt;
+&lt;/pre&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;for 迭代操作，类似python，dict操作，for k,v in dic.&lt;/strong&gt;&lt;/p&gt;
+&lt;ul readability=&quot;1&quot;&gt;&lt;li readability=&quot;5&quot;&gt;
+&lt;p&gt;示例代码&lt;/p&gt;
+&lt;pre class=&quot;go&quot;&gt;
+&lt;code&gt;//for 迭代操作slice
+package main
+import &quot;fmt&quot;
+
+func main() {
+    sum := make([]map[int]string, 5) //初始化一个slice,元素是map类型
+    for i := range sum {
+        sum[i] = make(map[int]string, 1)
+        sum[i][1] = &quot;ok&quot;
+        fmt.Println(sum[i])
+    }
+    fmt.Println(sum)
+}
+
+/*输出
+i=0---&amp;gt;     map[1:ok]
+i=1---&amp;gt;     map[1:ok]
+i=2---&amp;gt;     map[1:ok]
+i=3---&amp;gt;     map[1:ok]
+i=4---&amp;gt;     map[1:ok]
+sum---&amp;gt;     [map[1:ok] map[1:ok] map[1:ok] map[1:ok] map[1:ok]]
+*/&lt;/code&gt;
+&lt;/pre&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;map，间接排序，通过slice，对key进行排序。&lt;/strong&gt;&lt;/p&gt;
+&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;6&quot;&gt;
+&lt;p&gt;示例代码&lt;/p&gt;
+&lt;pre class=&quot;go&quot;&gt;
+&lt;code&gt;//间接排序,对key进行排序
+package main
+
+import &quot;fmt&quot;
+import &quot;sort&quot; //排序包
+
+func main() {
+    m := map[int]string{1: &quot;a&quot;, 2: &quot;b&quot;, 3: &quot;c&quot;, 4: &quot;d&quot;}
+    s := make([]int, len(m))
+    i := 0
+    for k := range m {
+        s[i] = k
+        i++
+    }
+    sort.Ints(s)
+    fmt.Println(s)
+}
+/*输出
+[1 2 3 4]
+*/&lt;/code&gt;
+&lt;/pre&gt;&lt;/li&gt;
+&lt;/ul&gt;</description>
+<pubDate>Mon, 09 Jul 2018 16:59:00 +0000</pubDate>
+<dc:creator>failymao</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/failymao/p/9286858.html</dc:identifier>
+</item>
+<item>
+<title>Python类的内置方法 - zzzzou</title>
+<link>http://www.cnblogs.com/zzzlw/p/9286828.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zzzlw/p/9286828.html</guid>
+<description>&lt;p class=&quot;toc&quot;&gt;目录&lt;/p&gt;
+&lt;p&gt;**（为了方便和美观，省略了各内置方法前后的__双下划线）**&lt;/p&gt;
+&lt;hr/&gt;&lt;h3 id=&quot;newinit&quot;&gt;1、new、init&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;__new__&lt;/code&gt;方法是真正的类构造方法，用于产生实例化对象（空属性）。重写&lt;code&gt;__new__&lt;/code&gt;方法可以控制对象的产生过程。&lt;br/&gt;&lt;code&gt;__init__&lt;/code&gt;方法是初始化方法，负责对实例化对象进行属性值初始化，此方法必须返回None，&lt;code&gt;__new__&lt;/code&gt;方法必须返回一个对象。重写&lt;code&gt;__init__&lt;/code&gt;方法可以控制对象的初始化过程。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 使用new来处理单例模式
+
+class Student:
+    __instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls.__instance:
+            cls.__instance = object.__new__(cls)
+        return cls.__instance
+
+    def sleep(self):
+        print('sleeping...')
+
+stu1 = Student()
+stu2 = Student()
+
+print(id(stu1), id(stu2))  # 两者输出相同
+print(stu1 is stu2)  # True&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;个人感觉，&lt;code&gt;__new__&lt;/code&gt;一般很少用于普通的业务场景，更多的用于元类之中，因为可以更底层的处理对象的产生过程。而&lt;code&gt;__init__&lt;/code&gt;的使用场景更多。&lt;/p&gt;
+&lt;h3 id=&quot;strrepr&quot;&gt;2、str、repr&lt;/h3&gt;
+&lt;p&gt;两者的目的都是为了显式的显示对象的一些必要信息，方便查看和调试。&lt;code&gt;__str__&lt;/code&gt;被&lt;code&gt;print&lt;/code&gt;默认调用，&lt;code&gt;__repr__&lt;/code&gt;被控制台输出时默认调用。即，使用&lt;code&gt;__str__&lt;/code&gt;控制用户展示，使用&lt;code&gt;__repr__&lt;/code&gt;控制调试展示。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 默认所有类继承object类，object类应该有一个默认的str和repr方法，打印的是对象的来源以及对应的内存地址
+
+class Student:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+stu = Student('zlw', 26)
+print(stu)  # &amp;lt;__main__.Student object at 0x0000016ED4BABA90&amp;gt;
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 自定义str来控制print的显示内容，str函数必须return一个字符串对象
+# 使用repr = str来偷懒控制台和print的显示一致
+
+class Student:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+    def __str__(self):
+        return f'{self.__class__}, {self.name}, {self.age}'
+    
+    __repr__ = __str__
+
+stu = Student('zlw', 26)
+print(stu)  # &amp;lt;class '__main__.Student'&amp;gt;, zlw, 26
+
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;call&quot;&gt;3、call&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;__call__&lt;/code&gt;方法提供给对象可以被执行的能力，就像函数那样，而本质上，函数就是对象，函数就是一个拥有&lt;code&gt;__call__&lt;/code&gt;方法的对象。拥有&lt;code&gt;__call__&lt;/code&gt;方法的对象，使用&lt;code&gt;callable&lt;/code&gt;可以得到&lt;code&gt;True&lt;/code&gt;的结果，可以使用&lt;code&gt;（）&lt;/code&gt;执行，执行时，可以传入参数，也可以返回值。所以我们可以使用&lt;code&gt;__call__&lt;/code&gt;方法来实现实例化对象作为装饰器：&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;
+# 检查一个函数的输入参数个数, 如果调用此函数时提供的参数个数不符合预定义，则无法调用。
+
+# 单纯函数版本装饰器
+def args_num_require(require_num):
+    def outer(func):
+        def inner(*args, **kw):
+            if len(args) != require_num:
+                print('函数参数个数不符合预定义，无法执行函数')
+                return None
+
+            return func(*args, **kw)
+        return inner
+    return outer
+
+@args_num_require(2)
+def show(*args):
+    print('show函数成功执行!')
+
+show(1)  # 函数参数个数不符合预定义，无法执行函数
+show(1,2) # show函数成功执行!
+show(1,2,3)  # 函数参数个数不符合预定义，无法执行函数&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;
+# 检查一个函数的输入参数个数,
+# 如果调用此函数时提供的参数个数不符合预定义，则无法调用。
+
+# 实例对象版本装饰器
+class Checker:
+    def __init__(self, require_num):
+        self.require_num = require_num
+
+    def __call__(self, func):
+        self.func = func
+
+        def inner(*args, **kw):
+            if len(args) != self.require_num:
+                print('函数参数个数不符合预定义，无法执行函数')
+                return None
+
+            return self.func(*args, **kw)
+        return inner
+
+@Checker(2)
+def show(*args):
+    print('show函数成功执行!')
+
+show(1)  # 函数参数个数不符合预定义，无法执行函数
+show(1,2) # show函数成功执行!
+show(1,2,3)  # 函数参数个数不符合预定义，无法执行函数&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;del&quot;&gt;4、del&lt;/h3&gt;
+&lt;p&gt;&lt;code&gt;__del__&lt;/code&gt;用于当对象的引用计数为0时自动调用。&lt;br/&gt;&lt;code&gt;__del__&lt;/code&gt;一般出现在两个地方：1、手工使用del减少对象引用计数至0，被垃圾回收处理时调用。2、程序结束时调用。&lt;br/&gt;&lt;code&gt;__del__&lt;/code&gt;一般用于需要声明在对象被删除前需要处理的资源回收操作&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 手工调用del 可以将对象引用计数减一，如果减到0，将会触发垃圾回收
+
+class Student:
+
+    def __del__(self):
+        print('调用对象的del方法，此方法将会回收此对象内存地址')
+
+stu = Student()  # 调用对象的__del__方法回收此对象内存地址
+
+del stu
+
+print('下面还有程序其他代码')&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;class Student:
+
+    def __del__(self):
+        print('调用对象的del方法，此方法将会回收此对象内存地址')
+
+stu = Student()  # 程序直接结束，也会调用对象的__del__方法回收地址&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;iternext&quot;&gt;5、iter、next&lt;/h3&gt;
+&lt;p&gt;这2个方法用于将一个对象模拟成&lt;strong&gt;序列&lt;/strong&gt;。内置类型如列表、元组都可以被迭代，文件对象也可以被迭代获取每一行内容。重写这两个方法就可以实现自定义的迭代对象。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 定义一个指定范围的自然数类，并可以提供迭代
+
+class Num:
+    def __init__(self, max_num):
+        self.max_num = max_num
+        self.count = 0
+        
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.count &amp;lt; self.max_num:
+            self.count += 1
+            return self.count
+        else:
+            raise StopIteration('已经到达临界')
+        
+num = Num(10)
+for i in num:
+    print(i)  # 循环打印1---10&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;getitemsetitemdelitem&quot;&gt;6、getitem、setitem、delitem&lt;/h3&gt;
+&lt;p&gt;重写此系列方法可以模拟对象成列表或者是字典，即可以使用&lt;code&gt;key-value&lt;/code&gt;的类型。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;class StudentManager:
+    li = []
+    dic = {}
+
+    def add(self, obj):
+        self.li.append(obj)
+        self.dic[obj.name] = obj
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            # 通过下标得到对象
+            return self.li[item]
+        elif isinstance(item, slice):
+            # 通过切片得到一串对象
+            start = item.start
+            stop = item.stop
+            return [student for student in self.li[start:stop]]
+        elif isinstance(item, str):
+            # 通过名字得到对象
+            return self.dic.get(item, None)
+        else:
+            # 给定的key类型错误
+            raise TypeError('你输入的key类型错误!')
+
+class Student:
+    manager = StudentManager()
+
+    def __init__(self, name):
+        self.name = name
+
+        self.manager.add(self)
+
+    def __str__(self):
+        return f'学生: {self.name}'
+
+    __repr__ = __str__
+
+
+stu1 = Student('小明')
+stu2 = Student('大白')
+stu3 = Student('小红')
+stu4 = Student('胖虎')
+
+# 当做列表使用
+print(Student.manager[0])  # 学生: 小明
+print(Student.manager[-1])  # 学生: 胖虎
+print(Student.manager[1:3])  # [学生: 大白, 学生: 小红]
+
+# 当做字典使用
+print(Student.manager['胖虎'])  # 学生: 胖虎&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;getattrsetattrdelattr&quot;&gt;7、getattr、setattr、delattr&lt;/h3&gt;
+&lt;p&gt;当使用&lt;code&gt;obj.x = y&lt;/code&gt;的时候触发对象的&lt;code&gt;setattr&lt;/code&gt;方法，当&lt;code&gt;del obj.x&lt;/code&gt;的时候触发对象的&lt;code&gt;delattr&lt;/code&gt;方法。&lt;br/&gt;当尝试访问对象的一个不存在的属性时 &lt;code&gt;obj.noexist&lt;/code&gt; 会触发&lt;code&gt;getattr&lt;/code&gt;方法，&lt;code&gt;getattr&lt;/code&gt;方法是属性查找中优先级最低的。&lt;br/&gt;可以重写这3个方法来控制对象属性的访问、设置和删除。&lt;br/&gt;**特别注意：如果定义了getattr，而没有任何代码（即只有pass），则所有不存在的属性值都是None而不会报错,可以使用super().__getattr__()方法来处理**&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;class Student:
+    def __getattr__(self, item):
+        print('访问一个不存在的属性时候触发')
+        return '不存在'
+
+    def __setattr__(self, key, value):
+        print('设置一个属性值的时候触发')
+        # self.key = value  # 这样会无限循环
+        self.__dict__[key] = value
+
+    def __delattr__(self, item):
+        print('删除一个属性的时候触发')
+        if self.__dict__.get(item, None):
+            del self.__dict__[item]
+
+stu = Student()
+stu.name = 'zlw'  # 设置一个属性值的时候触发
+print(stu.noexit)  # 访问一个不存在的属性时候触发 , 返回'不存在'
+del stu.name  # 删除一个属性的时候触发&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;getatrribute&quot;&gt;8、getatrribute&lt;/h3&gt;
+&lt;p&gt;这是一个&lt;strong&gt;属性访问截断器&lt;/strong&gt;，即，在你访问属性时，这个方法会把你的访问行为截断，并优先执行此方法中的代码，此方法应该是属性查找顺序中优先级最高的。&lt;br/&gt;&lt;strong&gt;属性查找顺序：&lt;br/&gt;实例的getattribute--&amp;gt;实例对象字典--&amp;gt;实例所在类字典--&amp;gt;实例所在类的父类(MRO顺序）字典--&amp;gt;实例所在类的getattr--&amp;gt;报错&lt;/strong&gt;&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;class People:
+    a = 200
+
+class Student(People):
+    a = 100
+
+    def __init__(self, a):
+        self.a = a
+
+    def __getattr__(self, item):
+        print('没有找到:', item)
+
+    def __getattribute__(self, item):
+        print('属性访问截断器')
+        if item == 'a':
+            return 1
+        return super().__getattribute__(item)
+
+stu = Student(1)
+print(stu.a)  # 1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;enterexit&quot;&gt;9、enter、exit&lt;/h3&gt;
+&lt;p&gt;这两个方法的重写可以让我们对一个对象使用&lt;code&gt;with&lt;/code&gt;方法来处理工作前的准备，以及工作之后的清扫行为。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;
+class MySQL:
+    def connect(self):
+        print('启动数据库连接，申请系统资源')
+
+    def execute(self):
+        print('执行sql命令，操作数据')
+
+    def finish(self):
+        print('数据库连接关闭，清理系统资源')
+
+    def __enter__(self):  # with的时候触发，并赋给as变量
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):  # 离开with语句块时触发
+        self.finish()
+
+with MySQL() as mysql:
+    mysql.execute()
+    
+# 结果:
+# 启动数据库连接，申请系统资源
+# 执行sql命令，操作数据
+# 数据库连接关闭，清理系统资源&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;getsetdelete描述符研究中待补充&quot;&gt;10、get、set、delete、描述符(研究中，待补充）&lt;/h3&gt;
+</description>
+<pubDate>Mon, 09 Jul 2018 16:34:00 +0000</pubDate>
+<dc:creator>zzzzou</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zzzlw/p/9286828.html</dc:identifier>
+</item>
+<item>
+<title>单元测试-002UI自动化测试 - 胡锦涛_Steven</title>
+<link>http://www.cnblogs.com/StevenHuSir/p/UnitTest_AutoTest.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/StevenHuSir/p/UnitTest_AutoTest.html</guid>
+<description>&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;一般来说，测试是发布之前的最后一道关卡。如果代码不能在测试中发现，那么BUG就会抵达用户，所以测试的完整性和可靠想十分重要。目前，大多数App 还停留在人工测试的阶段，但测试人员不会写代码，在很多测试场景下，人工测试的效率太低，容易出错。例如：&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;1&amp;gt;一个App的核心功能，在每一次发布版本前的测试必定会跑一边所有到测试用例，不管对应的版本在当前版本有没有变化，如果这次测出新的BUG，测试人员在下一次发版本测试的时候，又不得不做这些重复的操作。&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;2&amp;gt;开发在写API请求相关代码的时候没有做数据容错，测试在人工测试的时候都是正常的数据，所以测试通过。上线了之后，后台配置数据的时候出了点小问题，导致大面积崩溃，Crash&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;自动化测试&lt;/span&gt;&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;自动化测试就是写一些测试代码，&lt;strong&gt;&lt;span&gt;用代码代替人工去完成模块和业务的测试&lt;/span&gt;&lt;/strong&gt;。(&lt;span&gt;自动编译代码&lt;/span&gt;&lt;span class=&quot;Apple-converted-space&quot;&gt;TDD测试驱动代码&lt;/span&gt;)&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;自动化测试有很多优点:&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;     测试速度快，避免重复性的工作。&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;     &lt;span&gt;避免regression(回归)，让开发更有信心去修改和重构代码&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;     有了自动化测试，持续集成（CI）会变得更可可靠&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;     迫使开发人员写出更高质量的代码。（自动化测试不通过，代码不允许合并）&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;自动化测试也有一些缺点:&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;      &lt;span&gt;开发和维护成本高;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;      不能完全替代人工测试;&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;      无法完全保证测试的准确性 - 让代码去判断一段逻辑是否正确很容易，但是，让代码判断一个控件显示是否正确却没那么容易。&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;/*&lt;/span&gt;&lt;span&gt;
+在做自动化测试之前，首先要问自己几个问题？
+这个测试业务的变动是否频繁？
+这个测试业务是否属于核心功能？
+编写测试代码的成本有多少？
+自动化测试能保证测试结果的准确么？
+通常，我们会选择那些业务稳定，需要频繁测试的部分来编写自动化测试脚本，其余的采用人工测试，人工测试仍然是iOS App开发中不可缺少的一部分。
+&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;UI测试：&lt;span class=&quot;s2&quot;&gt;UI测试是模拟用户操作，进而从业务处层面测试。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s2&quot;&gt;关于UI测试，有几个核心类需要掌握&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p2&quot;&gt;&lt;strong&gt;&lt;span&gt;XCUIApplication&lt;/span&gt;&lt;/strong&gt; :测试应用代理  https://developer.apple.com/documentation/xctest/xcuiapplication&lt;/p&gt;
+&lt;p class=&quot;p2&quot;&gt;&lt;strong&gt;&lt;span&gt;XCUIElement&lt;/span&gt;&lt;/strong&gt; :一个UI上课件的视图对象 https://developer.apple.com/documentation/xctest/xcuielement&lt;/p&gt;
+&lt;p class=&quot;p2&quot;&gt;&lt;strong&gt;&lt;span&gt;XCUIElementQuery&lt;/span&gt;&lt;/strong&gt;:查找XCUIElement https://developer.apple.com/documentation/xctest/xcuielementquery&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;UI测试还有一个核心功能是&lt;strong&gt;&lt;span&gt;UI Recording&lt;/span&gt;&lt;/strong&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;选中一个UI测试用例，然后点击图中的小红点既可以开始UI Recoding。你会发现&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;随着点击模拟器，自动合成了测试代码。（通常自动合成代码后，还需要手动的去调整）&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p2&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1425839/201807/1425839-20180709234746836-1781558495.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;&lt;strong&gt;&lt;span&gt;点击小红点即可自动编译-生成代码&lt;/span&gt;&lt;/strong&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;在写UI测试用例的时候要注意：测试行为而不是测试代码.&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;对应测试代码如下：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+- (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)setUp {
+    [super setUp];
+    self.continueAfterFailure &lt;/span&gt;=&lt;span&gt; NO;
+    [[[XCUIApplication alloc] init] launch];
+}
+&lt;/span&gt;- (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)tearDown {
+    [super tearDown];
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+- (&lt;span&gt;void&lt;/span&gt;&lt;span&gt;)testLogin{
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;XCUIApplication --&amp;gt; application&lt;/span&gt;
+    XCUIApplication *app =&lt;span&gt; [[XCUIApplication alloc] init];
+    [[[XCUIApplication alloc] init].buttons[&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;Login&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;] tap];
+    XCUIElement &lt;/span&gt;*selfElement = [[[[app.otherElements containingType:XCUIElementTypeNavigationBar identifier:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;login&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;] childrenMatchingType:XCUIElementTypeOther].element childrenMatchingType:XCUIElementTypeOther].element childrenMatchingType:XCUIElementTypeOther].element;
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;XCUIElementTypeTextField&lt;/span&gt;
+    XCUIElementQuery *textFiledQ =&lt;span&gt; [selfElement childrenMatchingType:XCUIElementTypeTextField];
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;UI 元素&lt;/span&gt;
+    XCUIElement *accountE = [textFiledQ elementBoundByIndex:&lt;span&gt;0&lt;/span&gt;&lt;span&gt;];
+    XCUIElement &lt;/span&gt;*passwordE = [textFiledQ elementBoundByIndex:&lt;span&gt;1&lt;/span&gt;&lt;span&gt;];
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Query -&amp;gt; 元素
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;XCUIElementTypeButton&lt;/span&gt;
+    XCUIElementQuery *buttonQ =&lt;span&gt; [selfElement childrenMatchingType:XCUIElementTypeButton];
+    XCUIElement &lt;/span&gt;*loginE = [buttonQ elementBoundByIndex:&lt;span&gt;0&lt;/span&gt;&lt;span&gt;];
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输入账号&lt;/span&gt;
+&lt;span&gt;    [accountE tap];
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; value attribute&lt;/span&gt;
+    [accountE typeText:&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;123456&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;];
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输入密码&lt;/span&gt;
+&lt;span&gt;    [passwordE tap];
+    [passwordE typeText:&lt;/span&gt;&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;12345&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;];
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;删除&lt;/span&gt;
+    XCUIElement *key_delete = app.keys[&lt;span&gt;@&quot;&lt;/span&gt;&lt;span&gt;delete&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;];
+    [key_delete doubleTap];
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;点击登录&lt;/span&gt;
+&lt;span&gt;    [loginE tap];
+    
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行效果如下图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1425839/201807/1425839-20180710000748144-1743803497.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;补充&lt;/span&gt;：&lt;span&gt;&lt;span&gt;列举一些&lt;/span&gt;常用的断言&lt;/span&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;67&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;XCTFail(format…) 生成一个失败的测试；
+
+XCTAssertNil(a1, format...)为空判断，a1为空时通过，反之不通过；
+
+XCTAssertNotNil(a1, format…)不为空判断，a1不为空时通过，反之不通过；
+
+XCTAssert(expression, format...)当expression求值为TRUE时通过；
+
+XCTAssertTrue(expression, format...)当expression求值为TRUE时通过；
+
+XCTAssertFalse(expression, format...)当expression求值为False时通过；
+
+XCTAssertEqualObjects(a1, a2, format...)判断相等，&lt;/span&gt;&lt;span&gt;[&lt;/span&gt;&lt;span&gt;a1 isEqual:a2&lt;/span&gt;&lt;span&gt;]&lt;/span&gt;&lt;span&gt;值为TRUE时通过，其中一个不为空时，不通过；
+
+XCTAssertNotEqualObjects(a1, a2, format...)判断不等，&lt;/span&gt;&lt;span&gt;[&lt;/span&gt;&lt;span&gt;a1 isEqual:a2&lt;/span&gt;&lt;span&gt;]&lt;/span&gt;&lt;span&gt;值为False时通过，
+
+XCTAssertEqual(a1, a2, format...)判断相等（当a1和a2是 C语言标量、结构体或联合体时使用,实际测试发现NSString也可以）；
+
+XCTAssertNotEqual(a1, a2, format...)判断不等（当a1和a2是 C语言标量、结构体或联合体时使用）；
+
+XCTAssertEqualWithAccuracy(a1, a2, accuracy, format...)判断相等，（double或float类型）提供一个误差范围，当在误差范围（&lt;/span&gt;&lt;span&gt;+/-&lt;/span&gt;&lt;span&gt;accuracy）以内相等时通过测试；
+
+XCTAssertNotEqualWithAccuracy(a1, a2, accuracy, format...) 判断不等，（double或float类型）提供一个误差范围，当在误差范围以内不等时通过测试；
+
+XCTAssertThrows(expression, format...)异常测试，当expression发生异常时通过；反之不通过；（很变态）
+
+XCTAssertThrowsSpecific(expression, specificException, format...) 异常测试，当expression发生specificException异常时通过；反之发生其他异常或不发生异常均不通过；
+
+XCTAssertThrowsSpecificNamed(expression, specificException, exception_name, format...)异常测试，当expression发生具体异常、具体异常名称的异常时通过测试，反之不通过；
+
+XCTAssertNoThrow(expression, format…)异常测试，当expression没有发生异常时通过测试；
+
+XCTAssertNoThrowSpecific(expression, specificException, format...)异常测试，当expression没有发生具体异常、具体异常名称的异常时通过测试，反之不通过；
+
+XCTAssertNoThrowSpecificNamed(expression, specificException, exception_name, format...)异常测试，当expression没有发生具体异常、具体异常名称的异常时通过测试，反之不通过&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+</description>
+<pubDate>Mon, 09 Jul 2018 16:16:00 +0000</pubDate>
+<dc:creator>胡锦涛_Steven</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/StevenHuSir/p/UnitTest_AutoTest.html</dc:identifier>
+</item>
+<item>
+<title>ParisGabriel：Python全栈工程师（0基础到精通）教程 第十一课 - ParisGabriel</title>
+<link>http://www.cnblogs.com/ParisGabriel/p/9286805.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ParisGabriel/p/9286805.html</guid>
+<description>
+&lt;div align=&quot;left&quot;&gt;
+&lt;div align=&quot;left&quot;&gt;&lt;span&gt;　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　ParisGabriel&lt;/span&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt; &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt; 　　　　　　　　　　　　　　感谢 大家的支持  你们的阅读评价就是我最好的更新动力  我会坚持吧排版做的越来越好 &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div align=&quot;left&quot;&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709225751471-608583048.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/div&gt;
+
+&lt;div align=&quot;left&quot; readability=&quot;7&quot;&gt; 　　　　　　　　　　　　　　　　　　　　&lt;img id=&quot;aimg_Gc8tb&quot; class=&quot;zoom&quot; src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180708123626547-869442520.png&quot; alt=&quot;&quot; width=&quot;413&quot; height=&quot;136&quot; border=&quot;0&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　　　　　　　　　　　　每天坚持 一天一篇 点个订阅吧  灰常感谢    当个死粉也阔以&lt;/span&gt;&lt;span&gt;&lt;img src=&quot;https://static.52pojie.cn/static/image/smiley/default/mad.gif&quot; alt=&quot;&quot; border=&quot;0&quot;/&gt;&lt;img src=&quot;https://static.52pojie.cn/static/image/smiley/default/mad.gif&quot; alt=&quot;&quot; border=&quot;0&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;　　　　　　　　　　　　　　　　　　　&lt;span&gt;　　　　　　　&lt;span&gt;Python人工智能从入门到精通&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;列表创建函数：&lt;/strong&gt;&lt;br/&gt;　　list（可迭代对象）&lt;br/&gt;&lt;strong&gt;序列有5种：&lt;/strong&gt;&lt;br/&gt;　　star 字符串&lt;br/&gt;　　list 列表&lt;br/&gt;　　tuple 元组&lt;br/&gt;　　bytes   后面讲 &lt;br/&gt;　　bytearray  后面讲 &lt;br/&gt;　　序列运算符：&lt;br/&gt;　　in 、 not in&lt;br/&gt;　　&amp;gt;&lt;br/&gt;　　&amp;gt;=&lt;br/&gt;　　&amp;lt;&lt;br/&gt;　　&amp;lt;=&lt;br/&gt;　　+&lt;br/&gt;　　*&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;列表的索引可以增加、删除、修改、列表的元素值&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;切片赋值：&lt;/strong&gt;&lt;br/&gt;　　步长不等于1时切片赋值，赋值运算符的右侧的可迭代对象提供的元素&lt;br/&gt;　　的个数&lt;strong&gt;一定要等于切片切出的片数&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;del语句：&lt;/strong&gt;&lt;br/&gt;　　用于删除列表的元素&lt;br/&gt;　&lt;strong&gt;　del&lt;/strong&gt; 列表 [索引]&lt;br/&gt;　&lt;strong&gt;　del&lt;/strong&gt; 列表 [切片]&lt;br/&gt;Python3中常用的序列相关函数：&lt;br/&gt;　　&lt;strong&gt;len（x）&lt;/strong&gt; 返回序列的长度&lt;br/&gt;　　&lt;strong&gt;max （x）&lt;/strong&gt; 返回最大元素&lt;br/&gt;　　&lt;strong&gt;min（x）&lt;/strong&gt; 返回序列最小元素&lt;br/&gt;　　&lt;strong&gt;sum（x）&lt;/strong&gt; 返回序列中所有原素的和&lt;br/&gt;　　&lt;strong&gt;any（x）&lt;/strong&gt; 真值测试，如果列表中有一个值为真返回true&lt;br/&gt;　　&lt;strong&gt;all（x）&lt;/strong&gt; 真值测试，如果列表中所有值为真返回true&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;列表的方法（method）&lt;/strong&gt;：&lt;br/&gt;&lt;strong&gt;help（list）&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;[ ]内的参数代表可以省略&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;　　　　&lt;span&gt;方法&lt;/span&gt; 　　　　　　　　　　　　　　　　　　　　　　 &lt;span&gt;意义&lt;/span&gt;&lt;br/&gt;&lt;strong&gt;L.index&lt;/strong&gt;(v [, begin[, end]])　　　　   　 返回对应元素的索引下标, &lt;strong&gt;begin：&lt;/strong&gt;为开始索引，&lt;strong&gt;end&lt;/strong&gt;：为结束索引,当 value 不存在时触发ValueError错误&lt;br/&gt;&lt;strong&gt;L.insert&lt;/strong&gt;(index, obj) 　　　　　　　　 将某个元素插放到列表中指定的位置 &lt;strong&gt;index&lt;/strong&gt;：索引 &lt;strong&gt;obj&lt;/strong&gt;：要插入的元素&lt;br/&gt;&lt;strong&gt;L.count&lt;/strong&gt;(x) 　　　　　　　　　　　　 返回列表中元素的个数 &lt;strong&gt;x&lt;/strong&gt;：元素&lt;br/&gt;&lt;strong&gt;L.remove&lt;/strong&gt;(x) 　　　　　　　　　　　从列表中删除第一次出现在列表中的值 &lt;strong&gt;x：&lt;/strong&gt;元素（例如列表内有2个3 删除第一个 依次进行）&lt;br/&gt;&lt;strong&gt;L.copy&lt;/strong&gt;() 　　　　　　　　　　　　   复制此列表（只复制一层，不会复制深层对象)&lt;br/&gt;&lt;strong&gt;L.append&lt;/strong&gt;(x) 　　　　　　　　　　    向列表中追加单个元素 可以追加可迭代对象元素&lt;br/&gt;&lt;strong&gt;L.extend&lt;/strong&gt;(list)　　　　　　　　　　    向列表追加另一个列表&lt;br/&gt;&lt;strong&gt;L.clear&lt;/strong&gt;() 　　　　　　　　　　　　   清空列表,等同于 &lt;strong&gt;L[:] = []&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;L.sort&lt;/strong&gt;(reverse=False) 　　  　　　　 将列表中的元素进行排序，默认顺序按值的&lt;strong&gt;小到大的顺序排列&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;L.reverse&lt;/strong&gt;() 　　　　　　　　　　    列表的&lt;strong&gt;反转&lt;/strong&gt;，用来改变原列表的&lt;strong&gt;先后顺序&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;L.pop&lt;/strong&gt;([index])　　　　　　　　　　 删除索引对应的元素，如果不加索引，默认删除最后元素，同时返回删除元素的引用关系（相当于取出元素不归还，可以用变量来接受）&lt;br/&gt;&lt;strong&gt;字符串的文本解析方法：&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;S.split&lt;/strong&gt;（sep=None）　　　  将字符串使用sep作为分隔符分割字符串，返回分隔后的字符串列表，当不给定参数时，用空白字符作为分隔符分隔&lt;br/&gt;&lt;strong&gt;S.join&lt;/strong&gt;（iterable） 　　　　　用可迭代对象中的字符串，返回一个中间用S分隔组合的字符串 S=esp 要插入分割链接的字符 iterable：可迭代对象&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;潜拷贝和深拷贝：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;潜拷贝&lt;/strong&gt;shallow copy：&lt;br/&gt;　　help（list.copy）&lt;br/&gt;　　拷贝指在复制过程中，只复制&lt;span&gt;一层&lt;/span&gt;变量，不会复制&lt;span&gt;深成变量绑定的对象&lt;/span&gt;的复制过程&lt;br/&gt;　　例如：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;48&quot;&gt;
+&lt;pre&gt;
+&amp;gt;&amp;gt;&amp;gt; L = [3.1,3.2&lt;span&gt;]
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; L1 = [1, 2&lt;span&gt;, L]
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; L2 =&lt;span&gt; L1.copy()
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; L1
+[&lt;/span&gt;1, 2, [3.1, 3.2&lt;span&gt;]]
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; L2
+[&lt;/span&gt;1, 2, [3.1, 3.2&lt;span&gt;]]
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; L2[2][0] = 3.14
+&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; L1
+[&lt;/span&gt;1, 2, [3.14, 3.2&lt;span&gt;]]
+&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; L2
+[&lt;/span&gt;1, 2, [3.14, 3.2]]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709225117760-1338462601.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;深拷贝&lt;/strong&gt; deep copy：&lt;br/&gt;　　import copy # 导入copy 模块&lt;br/&gt;　　例如：&lt;br/&gt;　　L = [3.1, 3.2]&lt;br/&gt;　　L1 = [1, 2, L]&lt;br/&gt;　　L2 = L1.deep copy()&lt;br/&gt;　　L2[2][0] = 3.14&lt;br/&gt;　　print(L1) #[1, 2, [3.1, 3.2]]&lt;br/&gt;　　print(L2) #1, 2, [3.14, 3.2]]&lt;/p&gt;
+&lt;p&gt;　　深拷贝&lt;span&gt;通常只对可变对象&lt;/span&gt;进行复制 ，不可变对象通常不会复制（这里深拷贝需要 import copy中的deepcopy  后面讲）&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;小结：&lt;/strong&gt;&lt;br/&gt;　　L1 = [1, 2, [3.1, 3.2]]&lt;/p&gt;
+&lt;p&gt;这里只是纯粹的调用关系  可以通过内存地址查看&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709225537941-1231206426.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　L2 = L1 　　　　　　　　 # 不拷贝 同时绑定一个对象&lt;br/&gt;　　L3 = L1.copy（）　　　　# 潜拷贝等同于 L3 = L1[:]&lt;br/&gt;　　import copy&lt;br/&gt;　　L4 = copy.deepcopy（L1） #深拷贝&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;列表推导式&lt;/strong&gt; list comprehension：&lt;br/&gt;　　列表推导式是用可迭代对象生成列表的表达式&lt;br/&gt;&lt;strong&gt;语法：&lt;/strong&gt;&lt;br/&gt;　　[表达式 for 变量 in 可迭代对象]&lt;br/&gt;　　或&lt;br/&gt;　　[表达式 for 变量 in 可迭代对象 if 真值表达式]&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;说明：&lt;/strong&gt;&lt;br/&gt;　　for in 表达式的 if 子句可以省略，省略后将对所有生成的对象进行求值处理&lt;br/&gt;　　如：生成1~9的平方的列表&lt;br/&gt;　　L= [x ** 2 for x in range(1,10)]&lt;br/&gt;&lt;span&gt;列表推到式的嵌套：&lt;/span&gt;&lt;br/&gt;&lt;strong&gt;语法:&lt;/strong&gt;&lt;br/&gt;L=[表达式&lt;br/&gt;    for 变量1 in 可迭代对象1 if 真值表达式1&lt;br/&gt;        for 变量2 in 可迭代对象2 if 真值表达式2 ]&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;OK 今天的练习比较多 但是都很简单  争取把每个题都要理解他的原理 不懂得对照上面的参数进行核对一下就可以&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;想要入门IT就必须多写多练 写的代码也多 你就越熟练  越熟练经验越多  尝试不同的思路去分析  &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;什么时候写的想吐 什么时候才算会了  我们一起加油  &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709223236979-1710354272.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;练习:&lt;/strong&gt;&lt;br/&gt;&lt;/p&gt;
+&lt;p&gt;1.&lt;/p&gt;
+&lt;p&gt;已知有列表:&lt;br/&gt;L = [3, 5]&lt;/p&gt;
+&lt;p&gt;1) 用索引和切片等操作，将原列表改变为:&lt;br/&gt;L = [1, 2, 3, 4, 5, 6]&lt;br/&gt;2) 将列表反转,删除最后一个元素后打印此列表&lt;br/&gt;...&lt;br/&gt;print(L) # [6, 5, 4, 3, 2]&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+L = [3, 5&lt;span&gt;]
+L[:] &lt;/span&gt;= range(1, 7&lt;span&gt;)
+L[::&lt;/span&gt;-1] = range(1, 7)&lt;span&gt;#&lt;/span&gt;&lt;span&gt; L[:] = [range(6, 0, -1)]&lt;/span&gt;
+&lt;span&gt;del&lt;/span&gt; L[-1&lt;span&gt;]
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709230442731-841777932.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;2.&lt;br/&gt;1. 写程序，让用户输入一些整数，当输入-1时结束输入，将这些数存于列表L中&lt;br/&gt;1) 打印用户共输入了几个数？&lt;br/&gt;2) 打印您输入的数的最大数是多少&lt;br/&gt;3) 打印您输入的数的最小数是多少&lt;br/&gt;4) 打印您输入的这些数的平均值是多少？&lt;/p&gt;
+&lt;p&gt; 答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+L =&lt;span&gt; []
+&lt;/span&gt;&lt;span&gt;while&lt;/span&gt;&lt;span&gt; True:
+    a &lt;/span&gt;= int(input(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;please input at will integer (input '-1' over):&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;))
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; a &amp;lt;&lt;span&gt; 0:
+        &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;
+    L.append(a)
+L.sort()
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;you input line number&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, len(L))
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;top1:&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, L[-1&lt;span&gt;])
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;lower1:&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, L[0])
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; average number :&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, sum(L) / len(L))
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709232955277-1792381487.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;3.&lt;/p&gt;
+&lt;p&gt;1.已知有一个字符串&lt;br/&gt;s = “100， 200， 300， 500， 800”&lt;br/&gt;将其转换为整数的列表存于L列表中&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+s = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;100,200,300,500,800&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+L &lt;/span&gt;= s.split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709234143250-1815666216.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;2.生成前40个婓波那契数（fibonacci）&lt;br/&gt;1 1 2 3 5 8 13 .....&lt;br/&gt;要求将这些数字保存在列表中&lt;br/&gt;打印这些数&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+L = [1, 1&lt;span&gt;]
+a &lt;/span&gt;= 1&lt;span&gt;
+b &lt;/span&gt;= 1
+&lt;span&gt;while&lt;/span&gt;&lt;span&gt; True:
+    a &lt;/span&gt;+=&lt;span&gt; b
+    b &lt;/span&gt;+=&lt;span&gt; a
+    L &lt;/span&gt;+=&lt;span&gt; [a, b]
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; len(L) &amp;gt; 38&lt;span&gt;:
+        &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;
+&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;方法二
+L &lt;/span&gt;= [1, 1&lt;span&gt;]
+a &lt;/span&gt;= 1&lt;span&gt;
+b &lt;/span&gt;=&lt;span&gt; 0
+i &lt;/span&gt;=&lt;span&gt; 0
+&lt;/span&gt;&lt;span&gt;while&lt;/span&gt; i &amp;lt; 40&lt;span&gt;:
+    a &lt;/span&gt;= a +&lt;span&gt; b
+    b &lt;/span&gt;= a -&lt;span&gt; b
+    L.append(b)
+    i &lt;/span&gt;+= 1
+&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709235109959-1607347331.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;4.&lt;/p&gt;
+&lt;p&gt;L= [1, 3, 2, 1, 6, 4, 2, ......98, 82]&lt;br/&gt;将列表中出现的重复数字存入另一个列表L2中&lt;br/&gt;要求：重复出现多次的数字在L2中只保留一份 （去重）&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+L =&lt;span&gt; []
+&lt;/span&gt;&lt;span&gt;while&lt;/span&gt;&lt;span&gt; True:
+    a &lt;/span&gt;= int(input(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;please input at will integer (input '-1' over):&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;))
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; a &amp;lt;&lt;span&gt; 0:
+        &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;
+    L.append(a)
+L2 &lt;/span&gt;=&lt;span&gt; []
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt;&lt;span&gt; L:
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; x &lt;span&gt;not&lt;/span&gt; &lt;span&gt;in&lt;/span&gt;&lt;span&gt; L2:
+        L2.append(x)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(L)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L2)
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180709235756918-2075091502.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;5.&lt;br/&gt;输入多行文字，存入列表中,&lt;br/&gt;每次输入回车后算一行&lt;br/&gt;任意输入多行，当输入回车(即输入空行时结束输入)&lt;br/&gt;1) 按原输入内容在屏幕上输出内容&lt;br/&gt;2) 打印出您共输入了多少行文字&lt;br/&gt;3) 打印出您共输入了多少个字符&lt;/p&gt;
+&lt;p&gt;答案;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+L =&lt;span&gt; []
+i &lt;/span&gt;=&lt;span&gt; 0
+&lt;/span&gt;&lt;span&gt;while&lt;/span&gt;&lt;span&gt; True:
+    a &lt;/span&gt;= input(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;please input at will string direct Enter over:&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; a == &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;:
+        &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;
+    i &lt;/span&gt;+=&lt;span&gt; len(a)
+    L.append(a)
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt;&lt;span&gt; L:
+    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(x)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;您共输入的行数：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, len(L))
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;您共输入的字符：&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, i)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180710000245930-1035966277.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;6.&lt;br/&gt;1. 有字符串&quot;hello&quot;&lt;br/&gt;请用此字符串生成:&lt;br/&gt;'h e l l o' 和 'h-e-l-l-o'&lt;br/&gt;2. 写一个程序，让用户输入很多正整数，当输入小于零的数时结束输入,&lt;br/&gt;1) 打印这些数中最大的一个数&lt;br/&gt;2) 打印这些数中第二大的一个数&lt;br/&gt;3) 删除最小的一个数&lt;br/&gt;4) 打印剩余数的和&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+s = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;heool&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+L &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;.join(s)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(L)
+L &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;.join(s)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180710000539435-706426041.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;7.&lt;br/&gt;用列表推导式生成1~100内奇数的列表&lt;br/&gt;结果是: [1, 3, 5, 7, ..... 99]&lt;/p&gt;
+&lt;p&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+L = [x &lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt; range(1, 100, 2&lt;span&gt;)]
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+L = [x &lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt; range(1, 100) &lt;span&gt;if&lt;/span&gt; x % 2 !=&lt;span&gt; 0]
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180710001000241-419798429.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;8.&lt;br/&gt;生成一个数值为 1 ~ 9的平方的列表，去掉所有的奇数的平方&lt;br/&gt;答案：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+L = [x**2 &lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt; range(2, 10, 2&lt;span&gt;)]
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+L = [x**2 &lt;span&gt;for&lt;/span&gt; x &lt;span&gt;in&lt;/span&gt; range(2, 10) &lt;span&gt;if&lt;/span&gt; x % 2 ==&lt;span&gt; 0]
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(L)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;　　　　　　　　　　　　　Python人工智能从入门到精通&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1430617/201807/1430617-20180710001145549-179776999.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;加油！&lt;/p&gt;
+
+</description>
+<pubDate>Mon, 09 Jul 2018 16:14:00 +0000</pubDate>
+<dc:creator>ParisGabriel</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ParisGabriel/p/9286805.html</dc:identifier>
+</item>
+<item>
 <title>Apollo 5 教你怎么把自己的配置放到 Spring 环境中 - 莫那-鲁道</title>
 <link>http://www.cnblogs.com/stateis0/p/9286772.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/stateis0/p/9286772.html</guid>
@@ -517,1064 +2221,6 @@ xiaoming &lt;/span&gt;= pickle.load(open(&lt;span&gt;&quot;&lt;/span&gt;&lt;span
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/liudi2017/p/9286742.html</dc:identifier>
-</item>
-<item>
-<title>干了这杯Java之HashMap - 阿克西斯教成员污米饭</title>
-<link>http://www.cnblogs.com/imeng/p/9286737.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/imeng/p/9286737.html</guid>
-<description>&lt;p&gt;类:&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public class HashMap&amp;lt;K,V&amp;gt; extends AbstractMap&amp;lt;K,V&amp;gt;
-    implements Map&amp;lt;K,V&amp;gt;, Cloneable, Serializable&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;继承自AbstractMap 实现了Map,Cloneable,Serializable接口&lt;/li&gt;
-&lt;li&gt;可以被序列化&lt;/li&gt;
-&lt;li&gt;可以被Clone&lt;/li&gt;
-&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;//默认初始容量为16
-static final int DEFAULT_INITIAL_CAPACITY = 1 &amp;lt;&amp;lt; 4; // aka 16
-//最大容量
-static final int MAXIMUM_CAPACITY = 1 &amp;lt;&amp;lt; 30
-//默认扩容因子
-static final float DEFAULT_LOAD_FACTOR = 0.75f
-//红黑树转链表的阀值
-static final int TREEIFY_THRESHOLD = 8;
-//链表转红黑树阀值
-static final int UNTREEIFY_THRESHOLD = 6;
-//存储方式由链表转成红黑树的容量的最小阈值
-static final int MIN_TREEIFY_CAPACITY = 64;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;初始化&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;Map&amp;lt;String, Object&amp;gt; map = new HashMap&amp;lt;&amp;gt;();
-
-public HashMap(int initialCapacity, float loadFactor) {
-    if (initialCapacity &amp;lt; 0)
-        throw new IllegalArgumentException(&quot;Illegal initial capacity: &quot; + initialCapacity);
-    if (initialCapacity &amp;gt; MAXIMUM_CAPACITY)
-        initialCapacity = MAXIMUM_CAPACITY;
-    if (loadFactor &amp;lt;= 0 || Float.isNaN(loadFactor))
-        throw new IllegalArgumentException(&quot;Illegal load factor: &quot; + loadFactor);
-    this.loadFactor = loadFactor;
-    this.threshold = tableSizeFor(initialCapacity);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;new HashMap&amp;lt;&amp;gt;()的时候，会进入HashMap(int initialCapacity, float loadFactor)方法&lt;/li&gt;
-&lt;li&gt;initialCapacity为0xB&lt;/li&gt;
-&lt;li&gt;loadFactor默认为0.75&lt;/li&gt;
-&lt;li&gt;第一步判断initialCapacity的值是不是小于0或大于1 &amp;lt;&amp;lt; 30,第二步判断loadFactor是不是大于0和是否为浮点数,第三步设置实例的loadFactor为0.75,第四步设置容量为16&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;tableSizeFor&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;//返回大于或等于cap且为2的幂的数值
-static final int tableSizeFor(int cap) {
-    int n = cap - 1;
-    n |= n &amp;gt;&amp;gt;&amp;gt; 1;
-    n |= n &amp;gt;&amp;gt;&amp;gt; 2;
-    n |= n &amp;gt;&amp;gt;&amp;gt; 4;
-    n |= n &amp;gt;&amp;gt;&amp;gt; 8;
-    n |= n &amp;gt;&amp;gt;&amp;gt; 16;
-    return (n &amp;lt; 0) ? 1 : (n &amp;gt;= MAXIMUM_CAPACITY) ? MAXIMUM_CAPACITY : n + 1;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;cap-1:如果cap不减去1,cap=2的幂时,结果为cap的2倍,不符合预期&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;hash方法&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;static final int hash(Object key) {
-    int h;
-    return (key == null) ? 0 : (h = key.hashCode()) ^ (h &amp;gt;&amp;gt;&amp;gt; 16);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;hashCode的高位16bit与低16bit参与异或运算&lt;/li&gt;
-&lt;li&gt;null放在第0位&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;Node对象&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;/pre&gt;
-&lt;p&gt;put方法&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public V put(K key, V value) {
-    return putVal(hash(key), key, value, false, true);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;final V putVal(int hash, K key, V value, boolean onlyIfAbsent,
-                   boolean evict) {
-    Node&amp;lt;K,V&amp;gt;[] tab; Node&amp;lt;K,V&amp;gt; p; int n, i;
-    if ((tab = table) == null || (n = tab.length) == 0)
-        //扩容,第一次扩容长度16
-        n = (tab = resize()).length;
-    //(n - 1) &amp;amp; hash的长度必定在0-n之间 
-    //(n - 1) &amp;amp; hash等于hash % n,与运算比取模快
-    //n - 1的2进制为01111...,N为2的次方
-    if ((p = tab[i = (n - 1) &amp;amp; hash]) == null)
-        tab[i] = newNode(hash, key, value, null);
-    else {
-        Node&amp;lt;K,V&amp;gt; e; K k;
-        //hash和equals或=相同时,替换
-        if (p.hash == hash &amp;amp;&amp;amp;
-            ((k = p.key) == key || (key != null &amp;amp;&amp;amp; key.equals(k))))
-            e = p;
-        else if (p instanceof TreeNode)//节点为树节点的时候,在红黑树上添加
-            e = ((TreeNode&amp;lt;K,V&amp;gt;)p).putTreeVal(this, tab, hash, key, value);
-        else {
-            //链表
-            for (int binCount = 0; ; ++binCount) {
-                //添加在链表末尾
-                if ((e = p.next) == null) {
-                    p.next = newNode(hash, key, value, null);
-                    //当binCount&amp;gt;=7的时候转换为红黑树
-                    if (binCount &amp;gt;= TREEIFY_THRESHOLD - 1) // -1 for 1st
-                        treeifyBin(tab, hash);
-                    break;
-                }
-                //已经存在
-                if (e.hash == hash &amp;amp;&amp;amp;
-                    ((k = e.key) == key || (key != null &amp;amp;&amp;amp; key.equals(k))))
-                    break;
-                //下一个对象
-                p = e;
-            }
-        }
-        //已经存在key
-        if (e != null) {
-            V oldValue = e.value;
-            if (!onlyIfAbsent || oldValue == null)
-                e.value = value;
-            afterNodeAccess(e);
-            return oldValue;
-        }
-    }
-    ++modCount;
-    //扩容
-    if (++size &amp;gt; threshold)
-        resize();
-    afterNodeInsertion(evict);
-    return null;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;取模 x % 2^n == x &amp;amp; (2^n - 1)&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;扩容&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;final Node&amp;lt;K,V&amp;gt;[] resize() {
-    Node&amp;lt;K,V&amp;gt;[] oldTab = table;
-    int oldCap = (oldTab == null) ? 0 : oldTab.length;
-    int oldThr = threshold;
-    int newCap, newThr = 0;
-    if (oldCap &amp;gt; 0) {
-        if (oldCap &amp;gt;= MAXIMUM_CAPACITY) {
-            threshold = Integer.MAX_VALUE;
-            return oldTab;
-        }
-        else if ((newCap = oldCap &amp;lt;&amp;lt; 1) &amp;lt; MAXIMUM_CAPACITY &amp;amp;&amp;amp;
-                 oldCap &amp;gt;= DEFAULT_INITIAL_CAPACITY)
-            newThr = oldThr &amp;lt;&amp;lt; 1; // double threshold
-    }
-    else if (oldThr &amp;gt; 0) // initial capacity was placed in threshold
-        newCap = oldThr;
-    else {               // zero initial threshold signifies using defaults
-        newCap = DEFAULT_INITIAL_CAPACITY;
-        newThr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
-    }
-    if (newThr == 0) {
-        float ft = (float)newCap * loadFactor;
-        newThr = (newCap &amp;lt; MAXIMUM_CAPACITY &amp;amp;&amp;amp; ft &amp;lt; (float)MAXIMUM_CAPACITY ?
-                  (int)ft : Integer.MAX_VALUE);
-    }
-    threshold = newThr;
-    @SuppressWarnings({&quot;rawtypes&quot;,&quot;unchecked&quot;})
-        Node&amp;lt;K,V&amp;gt;[] newTab = (Node&amp;lt;K,V&amp;gt;[])new Node[newCap];
-    table = newTab;
-    if (oldTab != null) {
-        for (int j = 0; j &amp;lt; oldCap; ++j) {
-            Node&amp;lt;K,V&amp;gt; e;
-            if ((e = oldTab[j]) != null) {
-                oldTab[j] = null;
-                if (e.next == null)
-                    newTab[e.hash &amp;amp; (newCap - 1)] = e;
-                else if (e instanceof TreeNode)
-                    ((TreeNode&amp;lt;K,V&amp;gt;)e).split(this, newTab, j, oldCap);
-                else { // preserve order
-                    Node&amp;lt;K,V&amp;gt; loHead = null, loTail = null;
-                    Node&amp;lt;K,V&amp;gt; hiHead = null, hiTail = null;
-                    Node&amp;lt;K,V&amp;gt; next;
-                    do {
-                        next = e.next;
-                        if ((e.hash &amp;amp; oldCap) == 0) {
-                            if (loTail == null)
-                                loHead = e;
-                            else
-                                loTail.next = e;
-                            loTail = e;
-                        }
-                        else {
-                            if (hiTail == null)
-                                hiHead = e;
-                            else
-                                hiTail.next = e;
-                            hiTail = e;
-                        }
-                    } while ((e = next) != null);
-                    if (loTail != null) {
-                        loTail.next = null;
-                        newTab[j] = loHead;
-                    }
-                    if (hiTail != null) {
-                        hiTail.next = null;
-                        newTab[j + oldCap] = hiHead;
-                    }
-                }
-            }
-        }
-    }
-    return newTab;
-}&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Mon, 09 Jul 2018 15:37:00 +0000</pubDate>
-<dc:creator>阿克西斯教成员污米饭</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/imeng/p/9286737.html</dc:identifier>
-</item>
-<item>
-<title>idea中新增package总是嵌套的解决方法 - 求知若渴&amp;虚怀若愚</title>
-<link>http://www.cnblogs.com/codething/p/9286734.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/codething/p/9286734.html</guid>
-<description>&lt;p&gt;在idea中创建package,为了方便会将com.xx.xx作为一个package,下面添加对应的子package。比如service，config等。但是当我创建是总是会嵌套在下面变成了com.xx.xx.config。解决的办法就是创建好com.xx.xx向这个新建好的空的package中添加一个文件。然后再创建子package时就不会出现上面的情况了。原因对对于空的package下面新建新的package时idea会默认折叠起来，导致会显示为嵌套的格式。起始idea中也提供了一个默认的packageinfo.java对象,可以在创建好package后放在里面占个位置.&lt;img src=&quot;https://images2018.cnblogs.com/blog/820933/201807/820933-20180709233540177-1576615463.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Mon, 09 Jul 2018 15:36:00 +0000</pubDate>
-<dc:creator>求知若渴&amp;amp;虚怀若愚</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/codething/p/9286734.html</dc:identifier>
-</item>
-<item>
-<title>吴恩达《深度学习》第一门课（4）深层神经网络 - ysyouaremyall</title>
-<link>http://www.cnblogs.com/ys99/p/9286683.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ys99/p/9286683.html</guid>
-<description>&lt;h2&gt;4.1深层神经网络&lt;/h2&gt;
-&lt;p&gt;（1）到底是深层还是浅层是一个相对的概念，不必太纠结，以下是一个四层的深度神经网络：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709220041863-1779583270.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;（2）一些符号定义：&lt;/p&gt;
-&lt;p&gt;a&lt;sup&gt;[0]&lt;/sup&gt;=x（输入层也叫做第0层）&lt;/p&gt;
-&lt;p&gt;L=4：表示网络的层数&lt;/p&gt;
-&lt;p&gt;g:表示激活函数&lt;/p&gt;
-&lt;p&gt;第l层输出用a&lt;sup&gt;[l]&lt;/sup&gt;，最终的输出用a&lt;sup&gt;[L]&lt;/sup&gt;表示&lt;/p&gt;
-&lt;p&gt;n&lt;sup&gt;[1]&lt;/sup&gt;=5:表示第一层有五个神经元，第l层神经元个数用n&lt;sup&gt;[l]&lt;/sup&gt;表示&lt;/p&gt;
-&lt;h2&gt;4.2前向传播和反向传播&lt;/h2&gt;
-&lt;p&gt;（1）前向传播：输入a&lt;sup&gt;[l-1]&lt;/sup&gt;,输出是a&lt;sup&gt;[l]&lt;/sup&gt;,缓存为z&lt;sup&gt;[l]&lt;/sup&gt;，步骤如下：（&lt;em&gt;&lt;strong&gt;下面第一个式子应该是a&lt;sup&gt;[l-1]&lt;/sup&gt;&lt;/strong&gt;&lt;/em&gt;）&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709221723941-1360753037.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709221742075-1016722684.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;向量化：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709221801895-988702678.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709221813683-1148104221.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;（2）反向传播:输入da&lt;sup&gt;[l]&lt;/sup&gt;,输出da&lt;sup&gt;[l-1]&lt;/sup&gt;,dw&lt;sup&gt;[l]&lt;/sup&gt;,db&lt;sup&gt;[l]&lt;/sup&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709223234350-197089327.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;（4）&lt;span&gt;da&lt;sup&gt;[l-1]&lt;/sup&gt;=w&lt;sup&gt;[l]T&lt;/sup&gt;·dz&lt;sup&gt;[l]&lt;/sup&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;由第四个式子带入到第一各式子中得&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709223552155-1374791395.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;向量化：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709223624768-68693909.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; （3）总结：第一层可能是Relu激活函数，第二层为另一个Relu函数，第三层可能是sigmoid函数（如果做二分类的话），输出值为a[L],用来计算损失，这样就可以以向后迭代进行反向传播就到来求dw[3],db[3],dw[2],db[2],dw[1],db[1].在计算的时候，缓存会把z[1]z[2]z[3]传递过来，然后回传da[2],da[1],可以用来计算da[0],但是不会使用它。整个过程如下图所示&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709223757025-590583269.png&quot; alt=&quot;&quot; width=&quot;617&quot; height=&quot;334&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;4.3深层网络的前向传播&lt;/h2&gt;
-&lt;p&gt;（1）前向传播归纳为：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709224638991-1251696106.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;向量化实现过程：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709224706646-464123654.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;4.4核对矩阵的维数&lt;/h2&gt;
-&lt;p&gt;（1）w的维度是（下一层的维数，上一层的维数），即w&lt;sup&gt;[l]&lt;/sup&gt;:(n&lt;sup&gt;[l]&lt;/sup&gt;,n&lt;sup&gt;[l-1]&lt;/sup&gt;)&lt;/p&gt;
-&lt;p&gt;（2）b的维度时（下一层的维数，1）&lt;/p&gt;
-&lt;p&gt;（3）z&lt;sup&gt;[l]&lt;/sup&gt;,a&lt;sup&gt;[l]&lt;/sup&gt;:(n&lt;sup&gt;[l]&lt;/sup&gt;,1)&lt;/p&gt;
-&lt;p&gt;（4）dw&lt;sup&gt;[l]&lt;/sup&gt;和w&lt;sup&gt;[l]&lt;/sup&gt;维度相同，db&lt;sup&gt;[l]&lt;/sup&gt;和b&lt;sup&gt;[l]&lt;/sup&gt;维度相同，且w,b向量化维度不变，但z,a以及x的维度会向量化后发生改变。&lt;/p&gt;
-&lt;p&gt;向量化后：&lt;/p&gt;
-&lt;p&gt;Z&lt;sup&gt;[l]&lt;/sup&gt;:(n&lt;sup&gt;[l]&lt;/sup&gt;,m)，A&lt;sup&gt;[l]&lt;/sup&gt;同Z&lt;sup&gt;[l]&lt;/sup&gt;&lt;/p&gt;
-&lt;h2&gt;4.5为什么使用深层表示&lt;/h2&gt;
-&lt;p&gt;增加网络的深度比广度更有效。&lt;/p&gt;
-&lt;h2&gt;4.6搭建神经网络块&lt;/h2&gt;
-&lt;p&gt;（1）针对一层的正向和反向传播：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709231012942-159215239.png&quot; alt=&quot;&quot; width=&quot;319&quot; height=&quot;365&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;（2）整个过程示意图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709231050941-1573375448.png&quot; alt=&quot;&quot; width=&quot;662&quot; height=&quot;351&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;4.7参数VS超参数&lt;/h2&gt;
-&lt;p&gt;（1）W，b是参数&lt;/p&gt;
-&lt;p&gt;（2）学习率、迭代次数、层数、每层的单元数、momentum、mini batch size、regularization perameters等能影响W、b的都称为超参数，超参数的选择需要不断尝试和靠经验，以及一些策略。&lt;/p&gt;
-&lt;h2&gt;4.8深度学习和大脑的关联性&lt;/h2&gt;
-&lt;p&gt;深度学习和大脑其实没什么直接关系。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1326691/201807/1326691-20180709224629885-1061785492.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Mon, 09 Jul 2018 15:19:00 +0000</pubDate>
-<dc:creator>ysyouaremyall</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ys99/p/9286683.html</dc:identifier>
-</item>
-<item>
-<title>基于 websocket 实现的 im 实时通讯案例 - nicye</title>
-<link>http://www.cnblogs.com/kellynic/p/9286645.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/kellynic/p/9286645.html</guid>
-<description>&lt;p&gt;分享利用 redis 订阅与发布特性，巧妙的现实高性能im系统。为表诚意，先贴源码地址：https://github.com/2881099/im&lt;/p&gt;
-&lt;p&gt;下载源码后的运行方法：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;运行环境：.NETCore 2.1 + redis-server 2.8&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;blockquote readability=&quot;4.887417218543&quot;&gt;
-&lt;p&gt;&lt;a href=&quot;https://files.cnblogs.com/files/kellynic/Redis-x64-2.8.2402.zip&quot; rel=&quot;nofollow&quot;&gt;下载Redis-x64-2.8.2402.zip&lt;/a&gt;，点击 start.bat 运行；或者修改 imServer、web 下面 appsettings.json redis 配置，指向可用的redis-server&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;blockquote readability=&quot;3.2407407407407&quot;&gt;
-&lt;p&gt;cd imServer &amp;amp;&amp;amp; dotnet run --urls=&quot;&lt;a href=&quot;http://0.0.0.0:6001/&quot; rel=&quot;nofollow&quot;&gt;http://0.0.0.0:6001&lt;/a&gt;&quot;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;blockquote readability=&quot;3.0612244897959&quot;&gt;
-&lt;p&gt;cd web &amp;amp;&amp;amp; dotnet run --urls=&quot;&lt;a href=&quot;http://0.0.0.0:5555/&quot; rel=&quot;nofollow&quot;&gt;http://0.0.0.0:5555&lt;/a&gt;&quot;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;blockquote readability=&quot;3.5&quot;&gt;
-&lt;p&gt;打开多个浏览器，访问 &lt;a href=&quot;http://127.0.0.1:5555/&quot; rel=&quot;nofollow&quot;&gt;http://127.0.0.1:5555&lt;/a&gt; 发送群消息&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/31407/201807/31407-20180709230911687-816083149.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h3&gt;socket选型&lt;/h3&gt;
-&lt;p&gt;最二的办法是浏览器端使用websocket，其他端socket，这么混乱的设计最终将非常难维护。&lt;/p&gt;
-&lt;p&gt;所以强烈建议所有端都使用websocket协议，adorid/ios/h5/小程序全部支持websocket客户端。&lt;/p&gt;
-&lt;h3&gt;业务与通讯协议&lt;/h3&gt;
-&lt;p&gt;im系统一般涉及【我的好友】、【我的群】、【历史消息】等等。。&lt;/p&gt;
-&lt;p&gt;那么，imServer与业务方(web)该保持何种关系呢？&lt;/p&gt;
-&lt;p&gt;用户A向好友B发送消息，分析一下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;需要判断B是否为A好友；&lt;/li&gt;
-&lt;li&gt;需要判断A是否有权限；&lt;/li&gt;
-&lt;li&gt;等等。。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;诸如此类业务判断会很复杂，我们试想一下，如果使用imServer做业务协议，它是不是会变成巨无霸难以维护。&lt;/p&gt;
-&lt;p&gt;又假如获取历史记录，难道客户端要先websocket.send('gethistory')，再在onmessage里定位回调处理？&lt;/p&gt;
-&lt;p&gt;这样做十分之二。。。&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;咱这样设计，所有用户的主动行为走业务方(web)，imServer只负责即时消息推送。什么意思？&lt;/p&gt;
-&lt;p&gt;用户A向好友B发送消息：客户端请求业务方(web)接口，由业务方(web)后端向imServer发起推送请求，imServer收到指令后，向前端用户B的websocket发送数据，用户B收到了消息。&lt;/p&gt;
-&lt;p&gt;获取历史消息：客户端请求业务方(web)接口，返回json(历史消息)&lt;/p&gt;
-&lt;p&gt;回执：用户A如何知道消息发送状态（成功或失败或不在线）？imServer端向用户B发送消息时，把状态以消息的方式推给用户A即可（按上面的逻辑），具体请看源码吧。。。&lt;/p&gt;
-&lt;h3&gt;web通知imServer性能优化&lt;/h3&gt;
-&lt;p&gt;采用消息队列，redis的发布订阅最为轻量。&lt;/p&gt;
-&lt;h3&gt;实现多节点部署&lt;/h3&gt;
-&lt;p&gt;单个imServer实例支持多少websocket连接，几百个没问题吧，好。。。&lt;/p&gt;
-&lt;p&gt;如果系统在线用户有1万人，怎么办？？？&lt;/p&gt;
-&lt;p&gt;可以根据id的hash分区，比如部署4个imServer：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;imServer1 订阅 redisChanne1&lt;/li&gt;
-&lt;li&gt;imServer2 订阅 redisChanne2&lt;/li&gt;
-&lt;li&gt;imServer3 订阅 redisChanne3&lt;/li&gt;
-&lt;li&gt;imServer4 订阅 redisChanne4&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;业务方(web)端根据接收方的id的hash分区算法，定位到对应的redisChannel，这样publish就可以将消息定位到相应的imServer了&lt;/p&gt;
-</description>
-<pubDate>Mon, 09 Jul 2018 15:11:00 +0000</pubDate>
-<dc:creator>nicye</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/kellynic/p/9286645.html</dc:identifier>
-</item>
-<item>
-<title>聊聊Java 8 Lambda 表达式 - 浮云骑士LIN</title>
-<link>http://www.cnblogs.com/linlinismine/p/9283532.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/linlinismine/p/9283532.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;    早在2014年oracle发布了jdk 8,在里面增加了lambda模块。于是java程序员们又多了一种新的编程方式：函数式编程，也就是lambda表达式。我自己用lambda表达式也差不多快4年了，但在工作中却鲜有看到同事使用这种编程方式，即使有些使用了，但感觉好像对其特性也不是很了解。我看了一上网上的资料也不少，自己整理了一下顺便写下一些自己的看法，希望我的分享能带给别人一些帮助。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;    &lt;span&gt;函数式编程基本概念入门&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;   什么是函数式编程 &lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;     &lt;/strong&gt;   函数式编程（&lt;span class=&quot;LangWithName&quot;&gt;英语：&lt;span lang=&quot;en&quot;&gt;functional programming）或称函数程序设计，又称泛函编程，是一种&lt;a class=&quot;mw-redirect&quot; title=&quot;编程典范&quot; href=&quot;https://zh.wikipedia.org/wiki/%E7%B7%A8%E7%A8%8B%E5%85%B8%E7%AF%84&quot;&gt;编程典范&lt;/a&gt;，它将电脑运算视为&lt;a class=&quot;mw-redirect&quot; title=&quot;数学&quot; href=&quot;https://zh.wikipedia.org/wiki/%E6%95%B8%E5%AD%B8&quot;&gt;数学&lt;/a&gt;上的&lt;a class=&quot;mw-redirect&quot; title=&quot;函数 (数学)&quot; href=&quot;https://zh.wikipedia.org/wiki/%E5%87%BD%E6%95%B0_(%E6%95%B0%E5%AD%A6)&quot;&gt;函数&lt;/a&gt;计算，并且避免使用&lt;a class=&quot;new&quot; title=&quot;程序状态（页面不存在）&quot; href=&quot;https://zh.wikipedia.org/w/index.php?title=%E7%A8%8B%E5%BA%8F%E7%8A%B6%E6%80%81&amp;amp;action=edit&amp;amp;redlink=1&quot;&gt;程序状态&lt;/a&gt;以及&lt;a title=&quot;不可变对象&quot; href=&quot;https://zh.wikipedia.org/wiki/%E4%B8%8D%E5%8F%AF%E8%AE%8A%E7%89%A9%E4%BB%B6&quot;&gt;易变对象&lt;/a&gt;。函数编程语言最重要的基础是&lt;a title=&quot;Λ演算&quot; href=&quot;https://zh.wikipedia.org/wiki/%CE%9B%E6%BC%94%E7%AE%97&quot;&gt;λ演算&lt;/a&gt;（lambda calculus）。而且λ演算的函数可以接受函数当作输入（引数）和输出（传出值）。比起&lt;a title=&quot;指令式编程&quot; href=&quot;https://zh.wikipedia.org/wiki/%E6%8C%87%E4%BB%A4%E5%BC%8F%E7%B7%A8%E7%A8%8B&quot;&gt;指令式编程&lt;/a&gt;，函数式编程更加强调程序执行的结果而非执行的过程，倡导利用若干简单的执行单元让计算结果不断渐进，逐层推导复杂的运算，而不是设计一个复杂的执行过程。&lt;span class=&quot;LangWithName&quot;&gt;&lt;span lang=&quot;en&quot;&gt;这是维基百科给出的定义。从这个我们知道函数式编程是相对于&lt;a title=&quot;指令式编程&quot; href=&quot;https://zh.wikipedia.org/wiki/%E6%8C%87%E4%BB%A4%E5%BC%8F%E7%B7%A8%E7%A8%8B&quot;&gt;指令式编程&lt;/a&gt;的一种&lt;a class=&quot;mw-redirect&quot; title=&quot;编程典范&quot; href=&quot;https://zh.wikipedia.org/wiki/%E7%B7%A8%E7%A8%8B%E5%85%B8%E7%AF%84&quot;&gt;编程典范&lt;/a&gt;&lt;span class=&quot;LangWithName&quot;&gt;&lt;span lang=&quot;en&quot;&gt;，并且对而言具有一些优点。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;&lt;span class=&quot;LangWithName&quot;&gt;&lt;span lang=&quot;en&quot;&gt;  函数式编程的特性与优缺点&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span class=&quot;LangWithName&quot;&gt;&lt;span lang=&quot;en&quot;&gt;      &lt;strong&gt;特性&lt;/strong&gt;：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span class=&quot;LangWithName&quot;&gt;&lt;span lang=&quot;en&quot;&gt;      1、函数是&quot;第一等公民&quot;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt; &lt;/p&gt;
-&lt;p&gt;         什么是&quot;第一等公民&quot;？所谓&quot;第一等公民&quot;（first class），指的是函数与其他数据类型一样，处于平等地位，它不仅拥有一切传统函数的使用方式（声明和调用），可以赋值给其他变量（赋值），也可以作为参数，传入另一个函数（传参），或者作为别的函数的返回值（返回）。函数可以作为参数进行传递，意味我们可以把行为&quot;参数化&quot;，处理逻辑可以从外部传入，这样程序就可以设计得更灵活。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;     2、没有&quot;副作用&quot;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;     所谓&quot;副作用&quot;（side effect），指的是函数内部与外部互动（最典型的情况，就是修改全局变量的值），产生运算以外的其他结果。函数式编程强调没有&quot;副作用&quot;，意味着函数要保持独立，所有功能就是返回一个新的值，没有其他行为，尤其是不得修改外部变量的值。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    3、引用透明&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;    引用透明（Referential transparency），指的是函数的运行不依赖于外部变量或&quot;状态&quot;，只依赖于输入的参数，任何时候只要参数相同，引用函数所得到的返回值总是相同的。这里强调了一点&quot;输入&quot;不变则&quot;输出&quot;也不变，就像数学函数里面的f(x),只要输入的x一样那得到的结果也肯定定是一样的。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      优点：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    1、代码简洁，开发快速。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;     函数式编程大量使用函数，减少了代码的重复，因此程序比较短，开发速度较快。Paul Graham在《黑客与画家》一书中写道：同样功能的程序，极端情况下，Lisp代码的长度可能是C代码的二十分之一。如果程序员每天所写的代码行数基本相同，这就意味着，&quot;C语言需要一年时间完成开发某个功能，Lisp语言只需要不到三星期。反过来说，如果某个新功能，Lisp语言完成开发需要三个月，C语言需要写五年。&quot;当然，这样的对比故意夸大了差异，但是&quot;在一个高度竞争的市场中，即使开发速度只相差两三倍，也足以使得你永远处在落后的位置。&quot; &lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    2. 接近自然语言，易于理解&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       函数式编程的自由度很高，可以写出很接近自然语言的代码。以java为例把学生以性别分组：&lt;/p&gt;
-&lt;p&gt;       没用labmda表达式：       &lt;/p&gt;
-&lt;div class=&quot;para&quot; readability=&quot;12.5&quot;&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;37&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Map&amp;lt;String,List&amp;lt;Student&amp;gt;&amp;gt; studentsMap = new HashMap&amp;lt;&amp;gt;();
-        for(Student student : students){
-            List&amp;lt;Student&amp;gt; studentList = studentsMap.getOrDefault(student.getSex(), new ArrayList&amp;lt;&amp;gt;());
-            studentList.add(student);
-            studentsMap.put(student.getSex(),studentList);
-        }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　用了lambda表达式：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-        Map&amp;lt;String,List&amp;lt;Student&amp;gt;&amp;gt; studentsMap = students.stream().collect(Collectors.groupingBy(Student::getSex));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;       这基本就是自然语言的表达了，大家应该一眼就能明白它的意思吧。 &lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      3. 更方便的代码管理&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;      函数式编程不依赖、也不会改变外界的状态，只要给定输入参数，返回的结果必定相同。因此，每一个函数都可以被看做独立单元，很有利于进行单元测试（unit testing）和除错（debugging），以及模块化组合。 &lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      4. 易于&quot;并发编程&quot;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;      函数式编程不需要考虑&quot;死锁&quot;（deadlock），因为它不修改变量，所以根本不存在&quot;锁&quot;线程的问题。不必担心一个线程的数据，被另一个线程修改，所以可以很放心地把工作分摊到多个线程，部署&quot;并发编程&quot;（concurrency）。&lt;/p&gt;
-&lt;p&gt;     请看下面的代码：&lt;/p&gt;
-&lt;p&gt;     var s1 = Op1();&lt;/p&gt;
-&lt;p&gt;     var s2 = Op2();&lt;/p&gt;
-&lt;p&gt;     var s3 = concat(s1, s2);&lt;/p&gt;
-&lt;p&gt;     由于s1和s2互不干扰，不会修改变量，谁先执行是无所谓的，所以可以放心地增加线程，把它们分配在两个线程上完成。其他类型的语言就做不到这一点，因为s1可能会修改系统状态，而s2可能会用到这些状态，所以必须保证s2在s1之后运行，自然也就不能部署到其他线程上了。多核CPU是将来的潮流，所以函数式编程的这个特性非常重要。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      5. 代码的热升级&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; &lt;strong&gt;   &lt;/strong&gt;  函数式编程没有副作用，只要保证接口不变，内部实现是外部无关的。所以，可以在运行状态下直接升级代码，不需要重启，也不需要停机。&lt;a href=&quot;https://baike.baidu.com/item/Erlang&quot; target=&quot;_blank&quot;&gt;Erlang&lt;/a&gt;语言早就证明了这一点，它是瑞典爱立信公司为了管理电话系统而开发的，电话系统的升级当然是不能停机的。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;     缺点：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;     1、函数式编程常被认为严重耗费在CPU和存储器资源。主因有二：&lt;/p&gt;
-&lt;div class=&quot;para&quot; readability=&quot;11.854166666667&quot;&gt;
-&lt;div class=&quot;para&quot; readability=&quot;8.1369863013699&quot;&gt;    惰性求值亦为语言如&lt;a href=&quot;https://baike.baidu.com/item/Haskell&quot; target=&quot;_blank&quot;&gt;Haskell&lt;/a&gt;增加了额外的管理工作。&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;    &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    2、语言学习曲线陡峭，难度高&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;para&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;    函数式语言对开发者的要求比较高，学习曲线比较陡，而且很容易因为其灵活的语法控制不好程序的结构。&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;div class=&quot;para&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;     介绍完函数式编程的概念和优缺点之后，下面让我们来进入java8 lambda的编程世界~&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;      Lambda表达式的组成&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;      &lt;/strong&gt;&lt;span&gt; java 8 中Lambda 表达式由三个部分组成：第一部分为一个括号内用逗号分隔的形式参数，参数是函数式接口里面方法的参数；第二部分为一个箭头符号：-&amp;gt;；第三部分为方法体，可以是表达式和代码块。语法如下&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       1、方法体为表达式，该表达式的值作为返回值返回。&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-(parameters) -&amp;gt; expression
-(int a,int b) -&amp;gt; return a + b; //求和
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;       2、方法体为代码块，必须用 {} 来包裹起来，且需要一个 return 返回值，但若函数式接口里面方法返回值是 void，则无需返回值。&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-(parameters) -&amp;gt; { statements; }
-(int a) -&amp;gt; {System.out.println(&quot;a = &quot; + a);} //打印，无返回值
-(int a) -&amp;gt; {return a * a;} //求平方
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;     &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;      Lambda表达式的底层实现&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt; &lt;/strong&gt;   &lt;span&gt;  java 8 内部Lambda 表达式的实现方式在本质是以匿名内部类的形式的实现的，看下面代码。代码中我们定义了一个叫binaryOperator的Lambda表达式，看返回值它是一个IntBinaryOperator实例。&lt;/span&gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt; &lt;/span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-IntBinaryOperator binaryOperator = (int a, int b) -&amp;gt; {
-    return a + b;
-};
-int result = binaryOperator.applyAsInt(1, 2);
-System.out.println(&quot;result = &quot; + result); //3
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　   &lt;span&gt;我们再看一下IntBinaryOperator的定义 &lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-@FunctionalInterface
-public interface IntBinaryOperator {
-    /**
-     * Applies this operator to the given operands.
-     * @param left the first operand
-     * @param right the second operand
-     * @return the operator result
-     */
-    int applyAsInt(int left, int right);
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p class=&quot;p1&quot;&gt;&lt;span class=&quot;s1&quot;&gt;&lt;strong&gt;     &lt;/strong&gt;  &lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;   &lt;/span&gt;  &lt;span&gt;我们得知IntBinaryOperator是一个接口并且上面有一个@FunctionalInterface的注解，@FunctionalInterface标注了这是一个函数式接口，所以我们知道了(int &lt;span&gt;a, int b) -&amp;gt; {return a + b;}返回的一个IntBinaryOperator的匿名实现类。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;  &lt;span&gt;&lt;strong&gt;   Lambda表达式的函数式接口 &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;  &lt;span&gt;   上面提到了函数式接口，那这是一个什么样的概念呢？&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;      函数式接口(Functional Interface)是Java 8对一类特殊类型的接口的称呼。这类接口只定义了唯一的抽象方法的接口（除了隐含的Object对象的公共方法，因此最开始也就做SAM类型的接口（Single Abstract Method）。定义函数式接口的原因是在Java Lambda的实现中,开发组不想再为Lambda表达式单独定义一种特殊的Structural函数类型,称之为箭头类型（arrow type,依然想采用Java既有的类型(class, interface, method等).原因是增加一个结构化的函数类型会增加函数类型的复杂性，破坏既有的Java类型，并对成千上万的Java类库造成严重的影响。权衡利弊,因此最终还是利用SAM 接口作为 Lambda表达式的目标类型.另外对于函数式接口来说@FunctionalInterface并不是必须的,只要接口中只定义了唯一的抽象方法的接口那它就是一个实质上的函数式接口,就可以用来实现Lambda表达式。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;       在java 8中已经为我们定义了很多常用的函数式接口它们都放在java.util.function包下面,一般有以下常用的四大核心接口：&lt;/span&gt;&lt;/strong&gt;&lt;strong&gt;&lt;span&gt;       &lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;函数式接口&lt;/th&gt;
-&lt;th&gt;参数类型&lt;/th&gt;
-&lt;th&gt;返回类型&lt;/th&gt;
-&lt;th&gt;用途&lt;/th&gt;
-&lt;/tr&gt;&lt;/thead&gt;&lt;tbody readability=&quot;8.5&quot;&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;span&gt;Consumer&amp;lt;T&amp;gt;(消费型接口)&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;T&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;void&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;对类型为T的对象应用操作。void accept(T t)&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;span&gt;Supplier&amp;lt;T&amp;gt;(供给型接口)&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;无&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;T&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;返回类型为T的对象。 T get();&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;span&gt;Function&amp;lt;T, R&amp;gt;(函数型接口)&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;T&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;R&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;对类型为T的对象应用操作并返回R类型的对象。R apply(T t);&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;&lt;strong&gt;&lt;span&gt;Predicate&amp;lt;T&amp;gt;(断言型接口)&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;T&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;boolean&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;&lt;span&gt;确定类型为T的对象是否满足约束。boolean test(T t);&lt;/span&gt;&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;    Lambda表达式的应用场景&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;     1、&lt;/span&gt;使用() -&amp;gt; {} 替代匿名类&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
- Thread t1 = new Thread(new Runnable() {
-              @Override
-              public void run() {
-                  System.out.println(&quot;no use lambda&quot;);
-              }
-          });
-         
-Thread t2 = new Thread(() -&amp;gt; System.out.println(&quot;use lambda&quot;));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　我们看到相对而言Lambda表达式要比匿名类要优雅简洁很多~。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;     2、以流水线的方式处理数据&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;54&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-        List&amp;lt;Integer&amp;gt; integers = Arrays.asList(4, 5, 6,1, 2, 3,7, 8,8,9,10);
-
-        List&amp;lt;Integer&amp;gt; evens = integers.stream().filter(i -&amp;gt; i % 2 == 0)
-                .collect(Collectors.toList()); //过滤出偶数列表 [4,6,8,8,10]&lt;br/&gt;List&amp;lt;Integer&amp;gt; sortIntegers = integers.stream().sorted()
-                .limit(5).collect(Collectors.toList());//排序并且提取出前5个元素 [1,2,3,4,5]
-
-        List&amp;lt;Integer&amp;gt; squareList = integers.stream().map(i -&amp;gt; i * i).collect(Collectors.toList());//转成平方列表
-        
-        int sum = integers.stream().mapToInt(Integer::intValue).sum();//求和
-
-        Set&amp;lt;Integer&amp;gt; integersSet = integers.stream().collect(Collectors.toSet());//转成其它数据结构比如set
-
-        Map&amp;lt;Boolean, List&amp;lt;Integer&amp;gt;&amp;gt; listMap = integers.stream().collect(Collectors.groupingBy(i -&amp;gt; i % 2 == 0)); //根据奇偶性分组
-
-        List&amp;lt;Integer&amp;gt; list = integers.stream().filter(i -&amp;gt; i % 2 == 0).map(i -&amp;gt; i * i).distinct().collect(Collectors.toList());//复合操作
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　借助stream api和Lambda表达式，以住需要定义多个变量，编写数十行甚至数百行的代码的集合操作，现在都基本简化成了可以在一行之内完成~&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      3、更简单的数据并行处理&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-        List&amp;lt;Integer&amp;gt; squareList = integers.stream().parallel().map(i -&amp;gt; i * i).collect(Collectors.toList());//转成平方列表
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　   数据并行处理，只需要在原来的基础上加一个parallel()就可以开启~。顺便提一下这里parallel()开启的底层并行框架是fork/join,默认的并行数是Ncpu个。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      4、用内部迭代取代外部迭代&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       外部迭代：描述怎么干，代码里嵌套2个以上的for循环的都比较难读懂；只能顺序处理List中的元素；&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;41&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-List features = Arrays.asList(&quot;Lambdas&quot;, &quot;Default Method&quot;, &quot;Stream API&quot;, &quot;Date and Time API&quot;);
-for (String feature : features) {
-    System.out.println(feature); //外部迭代
-}
-
-List features = Arrays.asList(&quot;Lambdas&quot;, &quot;Default Method&quot;, &quot;Stream API&quot;,
- &quot;Date and Time API&quot;);
-features.stream.forEach(n -&amp;gt; System.out.println(n)); //内部迭代
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;       5、重构现有臃肿代码，更高的开发效率&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;     &lt;/strong&gt; 在Lambda表达式出现之前，我们的处理逻辑只能是以命令式编程的方式来实现，需要大量的代码去编写程序的每一步操作，定义非常多的变量，代码量和工作量都相对的巨大。如果用Lambda表达式我们看到以往数十行甚至上百行的代码都可以浓缩成几行甚至一行代码。这样处理逻辑就会相对简单，开发效率可以得到明显提高，维护工作也相对容易。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;       Lambda表达式中的Stream&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;        在java 8 中 Stream 不是集合元素，它不保存数据，它是有关算法和计算的，它更像一个高级版本的 Iterator。原始版本的 Iterator，用户只能显式地一个一个遍历元素并对其执行某些操作；高级版本的 Stream，用户只要给出需要对其包含的元素执行什么操作，比如 “过滤掉长度大于 10 的字符串”、“获取每个字符串的首字母”等，Stream 会隐式地在内部进行遍历，做出相应的数据转换。&lt;/p&gt;
-&lt;p&gt;        Stream 就如同一个迭代器（Iterator），单向，不可往复，数据只能遍历一次，遍历过一次后即用尽了，就好比流水从面前流过，一去不复返。而和迭代器又不同的是，Stream 可以并行化操作，迭代器只能命令式地、串行化操作。顾名思义，当使用串行方式去遍历时，每个 item 读完后再读下一个 item。而使用并行去遍历时，数据会被分成多个段，其中每一个都在不同的线程中处理，然后将结果一起输出。Stream 的并行操作依赖于 Java7 中引入的 Fork/Join 框架（JSR166y）来拆分任务和加速处理过程。&lt;/p&gt;
-&lt;p&gt;        Stream可以有限的也可以是无限的，流的构造方式有很多可以从常用的Collection(List,Array,Set and so on...),文件，甚至函数....&lt;/p&gt;
-&lt;p&gt;      由值创建流：&lt;/p&gt;
-&lt;p&gt;               Stream&amp;lt;String&amp;gt; stream = Stream.of(&quot;Java 8 &quot;, &quot;Lambdas &quot;, &quot;In &quot;, &quot;Action&quot;);&lt;/p&gt;
-&lt;p&gt;       由数组创建流： &lt;/p&gt;
-&lt;p&gt;               int[] numbers = {2, 3, 5, 7, 11, 13}; int sum = Arrays.stream(numbers).sum();&lt;span class=&quot;s1&quot;&gt;&lt;span&gt;       &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;page&quot; title=&quot;Page 127&quot;&gt;
-&lt;div class=&quot;layoutArea&quot; readability=&quot;36.734131736527&quot;&gt;
-&lt;div class=&quot;column&quot; readability=&quot;76.943113772455&quot;&gt;
-&lt;p&gt;       由文件创建流&lt;/p&gt;
-&lt;p&gt;               Stream&amp;lt;String&amp;gt; lines =Files.lines(Paths.get(&quot;data.txt&quot;), Charset.defaultCharset())&lt;/p&gt;
-&lt;p&gt;       上面的这些Stream都是有限的，我们可以用函数来创建一个无限Stream&lt;/p&gt;
-&lt;p&gt;               Stream.iterate(0, n -&amp;gt; n + 2).forEach(System.out::println);&lt;/p&gt;
-&lt;p&gt;        Stream也很懒惰，它只会在你真正需要数据的时候才会把数据给传给你，在你不需要时它一个数据都不会产生。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;       Lambda表达式的Best Practice&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;        1、保持Lambda表达式简短和一目了然&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-values.stream()
-  .mapToInt(e -&amp;gt; {     
-    int sum = 0;
-    for(int i = 1; i &amp;lt;= e; i++) {
-      if(e % i == 0) {
-        sum += i;
-      }
-    }   
-    return sum;
-  })
-  .sum());  //代码复杂难懂　
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-values.stream()
-  .mapToInt(e -&amp;gt; sumOfFactors(e))
-  .sum() //代码简洁一目了然
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　长长的Lambda表达式通常是危险的，因为代码越长越难以读懂，意图看起来也不明，并且代码也难以复用，测试难度也大。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      2、使用&lt;em&gt;@FunctionalInterface&lt;/em&gt; 注解&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;         如果你确定了某个interface是用于Lambda表达式，请一定要加上&lt;em&gt;@FunctionalInterface，&lt;/em&gt;表明你的意图&lt;em&gt;。&lt;/em&gt;不然将来说不定某个不知情的家伙比如你旁边的好基友，在这个interface上面加了另外一个抽像方法时，你的代码就悲剧了。&lt;/p&gt;
-&lt;p&gt;    &lt;strong&gt;  3、优先使用&lt;a href=&quot;https://docs.oracle.com/javase/8/docs/api/java/util/function/package-summary.html&quot;&gt;java.util.function&lt;/a&gt;包下面的函数式接口&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;     &lt;/strong&gt;    &lt;strong&gt;&lt;a href=&quot;https://docs.oracle.com/javase/8/docs/api/java/util/function/package-summary.html&quot;&gt;java.util.function&lt;/a&gt; &lt;/strong&gt;这个包下面提供了大量的功能性接口，可以满足大多数开发人员为lambda表达式和方法引用提供目标类型的需求。每个接口都是通用的和抽象的，使它们易于适应几乎任何lambda表达式。开发人员应该在创建新的功能接口之前研究这个包，避免重复定义接口。另外一点就是，里面的接口不会被别人修改~。&lt;/p&gt;
-&lt;p&gt;      &lt;strong&gt;4、不要在Lambda表达中执行有&quot;副作用&quot;的操作&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;        &quot;&lt;/strong&gt;副作用&quot;是严重违背函数式编程的设计原则，在工作中我经常看到有人在forEach操作里面操作外面的某个List或者设置某个Map这其实是不对的。&lt;/p&gt;
-&lt;p&gt;    &lt;strong&gt;  5、不要把Lambda表达式和匿名内部类同等对待&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;         &lt;/strong&gt;虽然我们可以用匿名内部类来实现Lambda表达式，也可以用Lambda表达式来替换内部类，但并不代表这两者是等价的。这两者在某一个重要概念是不同的：this指代的上下文是不一样的。当您使用内部类时，它将创建一个新的范围。通过实例化具有相同名称的新局部变量，可以从封闭范围覆盖局部变量。您还可以在内部类中使用这个关键字作为它实例的引用。但是，lambda表达式可以使用封闭范围。您不能在lambda的主体内覆盖范围内的变量&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-private String value = &quot;Enclosing scope value&quot;;
-
-public String scopeExperiment() {
-    Foo fooIC = new Foo() {
-        String value = &quot;Inner class value&quot;;
- 
-        @Override
-        public String method(String string) {
-            return this.value;
-        }
-    };
-    String resultIC = fooIC.method(&quot;&quot;);
- 
-    Foo fooLambda = parameter -&amp;gt; {
-        String value = &quot;Lambda value&quot;;
-        return this.value;
-    };
-    String resultLambda = fooLambda.method(&quot;&quot;);
- 
-    return &quot;Results: resultIC = &quot; + resultIC + 
-      &quot;, resultLambda = &quot; + resultLambda;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　 运行上面这段代码我们将到 resultIC = &quot;Inner class value&quot;，resultLambda = &quot;Enclosing scope value&quot;。也就是说在匿名内部类中this指的是自身的引用，在Lambda表达式中this指的是外部。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       6、多使用方法引用&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       在Lambda表达式中 a -&amp;gt; a.toLowerCase()和String::toLowerCase都能起到相同的作用，但两者相比，后者通常可读性更高并且代码会简短。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       7、尽量避免在Lambda的方法体中使用{}代码块&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;       &lt;/strong&gt;优先使用&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Foo foo = parameter -&amp;gt; buildString(parameter);
-private String buildString(String parameter) {
-    String result = &quot;Something &quot; + parameter;
-    //many lines of code
-    return result;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　    而不是&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Foo foo = parameter -&amp;gt; { String result = &quot;Something &quot; + parameter; 
-    //many lines of code 
-    return result; 
-};
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　&lt;strong&gt;　8、不要盲目的开启并行流&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       Lambda的并行流虽好，但也要注意使用场景。如果平常的业务处理比如过滤，提取数据，没有涉及特别大的数据和耗时操作，则真的不需要开启并行流。我在工作中看到有些人一个只有几十个元素的列表的过滤操作也开启了并行流，其实这样做会更慢。因为多行线程的开启和同步这些花费的时间往往比你真实的处理时间要多很多。但一些耗时的操作比如I/O访问，DB查询，远程调用，这些如果可以并行的话，则开启并行流是可提升很大性能的。因为并行流的底层原理是fork/join，如果你的数据分块不是很好切分，也不建议开启并行流。举个例子ArrayList的Stream可以开启并行流，而LinkedList则不建议，因为LinkedList每次做数据切分要遍历整个链表，这本身就已经很浪费性能，而ArrayList则不会。&lt;/p&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Mon, 09 Jul 2018 14:21:00 +0000</pubDate>
-<dc:creator>浮云骑士LIN</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/linlinismine/p/9283532.html</dc:identifier>
-</item>
-<item>
-<title>SpirngBoot之整合Swagger2 - 苦水润喉</title>
-<link>http://www.cnblogs.com/zhangyinhua/p/9286391.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhangyinhua/p/9286391.html</guid>
-<description>&lt;h3 id=&quot;前言&quot;&gt;前言&lt;/h3&gt;
-&lt;p&gt;swagger,中文“拽”的意思。它是一个功能强大的api框架，它的集成非常简单，不仅提供了在线文档的查阅，&lt;br/&gt;而且还提供了在线文档的测试。另外swagger很容易构建restful风格的api。&lt;/p&gt;
-&lt;h2 id=&quot;一swagger概述&quot;&gt;一、Swagger概述&lt;/h2&gt;
-&lt;p&gt;Swagger是一组围绕OpenAPI规范构建的开源工具，可帮助设计、构建、记录和使用REST API。&lt;br/&gt;简单说下，它的出现就是为了方便进行测试后台的restful形式的接口，实现动态的更新，当我们在后台的接口&lt;br/&gt;修改了后，swagger可以实现自动的更新，而不需要认为的维护这个接口进行测试。&lt;/p&gt;
-&lt;h2 id=&quot;二swagger常用注解&quot;&gt;二、Swagger常用注解&lt;/h2&gt;
-&lt;p&gt;swagger通过注解表明该接口会生成文档，包括接口名、请求方法、参数、返回信息的等等。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;@Api：修饰整个类，描述Controller的作用&lt;br/&gt;&lt;/li&gt;
-&lt;li&gt;@ApiOperation：描述一个类的一个方法，或者说一个接口&lt;/li&gt;
-&lt;li&gt;@ApiParam：单个参数描述&lt;/li&gt;
-&lt;li&gt;@ApiModel：用对象来接收参数&lt;/li&gt;
-&lt;li&gt;@ApiProperty：用对象接收参数时，描述对象的一个字段&lt;/li&gt;
-&lt;li&gt;@ApiResponse：HTTP响应其中1个描述&lt;/li&gt;
-&lt;li&gt;@ApiResponses：HTTP响应整体描述&lt;/li&gt;
-&lt;li&gt;@ApiIgnore：使用该注解忽略这个API&lt;/li&gt;
-&lt;li&gt;@ApiError ：发生错误返回的信息&lt;/li&gt;
-&lt;li&gt;@ApiParamImplicitL：一个请求参数&lt;/li&gt;
-&lt;li&gt;@ApiParamsImplicit 多个请求参数&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;三springboot整合swagger&quot;&gt;三、SpringBoot整合Swagger&lt;/h2&gt;
-&lt;h3 id=&quot;添加依赖&quot;&gt;3.1 添加依赖&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;dependency&amp;gt;
-            &amp;lt;groupId&amp;gt;io.springfox&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;springfox-swagger2&amp;lt;/artifactId&amp;gt;
-            &amp;lt;version&amp;gt;2.7.0&amp;lt;/version&amp;gt;
-&amp;lt;/dependency&amp;gt;
-&amp;lt;dependency&amp;gt;
-            &amp;lt;groupId&amp;gt;io.springfox&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;springfox-swagger-ui&amp;lt;/artifactId&amp;gt;
-            &amp;lt;version&amp;gt;2.7.0&amp;lt;/version&amp;gt;
-&amp;lt;/dependency&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;添加swaggerconfiguration&quot;&gt;3.2 添加SwaggerConfiguration&lt;/h3&gt;
-&lt;p&gt;通过@Configuration注解，表明它是一个配置类，@EnableSwagger2开启swagger2。&lt;br/&gt;apiINfo()配置一些基本的信息。apis()指定扫描的包会生成文档。&lt;br/&gt;再通过createRestApi函数创建Docket的Bean之后，apiInfo()用来创建该Api的基本信息（这些基本信息会&lt;br/&gt;展现在文档页面中）。select()函数返回一个ApiSelectorBuilder实例用来控制哪些接口暴露给Swagger来&lt;br/&gt;展现，本例采用指定扫描的包路径来定义，Swagger会扫描该包下所有Controller定义的API，并产生文档内容&lt;br/&gt;（除了被@ApiIgnore指定的请求）。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;package com.lance.learn.springbootswagger.configuration;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import springfox.documentation.builders.ApiInfoBuilder;
-import springfox.documentation.builders.PathSelectors;
-import springfox.documentation.builders.RequestHandlerSelectors;
-import springfox.documentation.service.ApiInfo;
-import springfox.documentation.service.Contact;
-import springfox.documentation.spi.DocumentationType;
-import springfox.documentation.spring.web.plugins.Docket;
-import springfox.documentation.swagger2.annotations.EnableSwagger2;
-
-/**
- * @author lance(ZYH)
- * @function Swagger启动配置类
- * @date 2018-07-09 21:24
- */
-@Configuration
-@EnableSwagger2
-public class SwaggerConfiguration {
-
-    /**
-     * swagger2的配置文件，这里可以配置swagger2的一些基本的内容，比如扫描的包等等
-     * @return
-     */
-    @Bean
-    public Docket createRestfulApi(){
-        return new Docket(DocumentationType.SWAGGER_2)
-                .pathMapping(&quot;/&quot;)
-                .select()
-                .apis(RequestHandlerSelectors.basePackage(&quot;com.lance.learn.springbootswagger.controller&quot;))  //暴露接口地址的包路径
-                .paths(PathSelectors.any())
-                .build();
-    }
-
-    /**
-     * 构建 api文档的详细信息函数,注意这里的注解引用的是哪个
-     * @return
-     */
-    private ApiInfo apiInfo(){
-        return new ApiInfoBuilder()
-                //页面标题
-                .title(&quot;Spring Boot 测试使用 Swagger2 构建RESTful API&quot;)
-                //创建人
-                .contact(new Contact(&quot;LanveToBigData&quot;, &quot;http://www.cnblogs.com/zhangyinhua/&quot;, &quot;917484312@qq.com&quot;))
-                //版本号
-                .version(&quot;1.0&quot;)
-                //描述
-                .description(&quot;API 描述&quot;)
-                .build();
-    }
-
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;controller文档内容&quot;&gt;3.3 Controller文档内容&lt;/h3&gt;
-&lt;p&gt;描述主要来源于函数等命名产生，对用户并不友好，我们通常需要自己增加一些说明来丰富文档内容。&lt;br/&gt;如下所示，我们通过@ApiOperation注解来给API增加说明、通过@ApiImplicitParams、@ApiImplicitParam&lt;br/&gt;注解来给参数增加说明。&lt;br/&gt;1）实例一&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;package com.lance.learn.springbootswagger.controller;
-
-import com.lance.learn.springbootswagger.bean.Book;
-import io.swagger.annotations.ApiImplicitParam;
-import io.swagger.annotations.ApiImplicitParams;
-import io.swagger.annotations.ApiOperation;
-import org.springframework.web.bind.annotation.*;
-import springfox.documentation.annotations.ApiIgnore;
-
-import java.util.*;
-
-/**
- * @author lance(ZYH)
- * @function
- * @date 2018-07-09 21:39
- */
-@RestController
-@RequestMapping(value = &quot;/bookcurd&quot;)
-public class BookController {
-    Map&amp;lt;Long, Book&amp;gt; books = Collections.synchronizedMap(new HashMap&amp;lt;Long, Book&amp;gt;());
-
-    @ApiOperation(value=&quot;获取图书列表&quot;, notes=&quot;获取图书列表&quot;)
-    @RequestMapping(value={&quot;&quot;}, method= RequestMethod.GET)
-    public List&amp;lt;Book&amp;gt; getBook() {
-        List&amp;lt;Book&amp;gt; book = new ArrayList&amp;lt;&amp;gt;(books.values());
-        return book;
-    }
-
-    @ApiOperation(value=&quot;创建图书&quot;, notes=&quot;创建图书&quot;)
-    @ApiImplicitParam(name = &quot;book&quot;, value = &quot;图书详细实体&quot;, required = true, dataType = &quot;Book&quot;)
-    @RequestMapping(value=&quot;&quot;, method=RequestMethod.POST)
-    public String postBook(@RequestBody Book book) {
-        books.put(book.getId(), book);
-        return &quot;success&quot;;
-    }
-    @ApiOperation(value=&quot;获图书细信息&quot;, notes=&quot;根据url的id来获取详细信息&quot;)
-    @ApiImplicitParam(name = &quot;id&quot;, value = &quot;ID&quot;, required = true, dataType = &quot;Long&quot;,paramType = &quot;path&quot;)
-    @RequestMapping(value=&quot;/{id}&quot;, method=RequestMethod.GET)
-    public Book getBook(@PathVariable Long id) {
-        return books.get(id);
-    }
-
-    @ApiOperation(value=&quot;更新信息&quot;, notes=&quot;根据url的id来指定更新图书信息&quot;)
-    @ApiImplicitParams({
-            @ApiImplicitParam(name = &quot;id&quot;, value = &quot;图书ID&quot;, required = true, dataType = &quot;Long&quot;,paramType = &quot;path&quot;),
-            @ApiImplicitParam(name = &quot;book&quot;, value = &quot;图书实体book&quot;, required = true, dataType = &quot;Book&quot;)
-    })
-    @RequestMapping(value=&quot;/{id}&quot;, method= RequestMethod.PUT)
-    public String putUser(@PathVariable Long id, @RequestBody Book book) {
-        Book book1 = books.get(id);
-        book1.setName(book.getName());
-        book1.setPrice(book.getPrice());
-        books.put(id, book1);
-        return &quot;success&quot;;
-    }
-    @ApiOperation(value=&quot;删除图书&quot;, notes=&quot;根据url的id来指定删除图书&quot;)
-    @ApiImplicitParam(name = &quot;id&quot;, value = &quot;图书ID&quot;, required = true, dataType = &quot;Long&quot;,paramType = &quot;path&quot;)
-    @RequestMapping(value=&quot;/{id}&quot;, method=RequestMethod.DELETE)
-    public String deleteUser(@PathVariable Long id) {
-        books.remove(id);
-        return &quot;success&quot;;
-    }
-
-    @ApiIgnore//使用该注解忽略这个API
-    @RequestMapping(value = &quot;/hi&quot;, method = RequestMethod.GET)
-    public String  jsonTest() {
-        return &quot; hi you!&quot;;
-    }
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;2）实例二&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;package com.lance.learn.springbootswagger.controller;
-
-import com.lance.learn.springbootswagger.bean.User;
-import io.swagger.annotations.ApiImplicitParam;
-import io.swagger.annotations.ApiImplicitParams;
-import io.swagger.annotations.ApiOperation;
-import org.springframework.web.bind.annotation.*;
-
-import java.util.*;
-
-/**
- * @author lance(ZYH)
- * @function
- * @date 2018-07-09 22:00
- */
-
-@RestController
-@RequestMapping(value=&quot;/users&quot;)
-public class UserDetailController {
-    static Map&amp;lt;Long, User&amp;gt; users = Collections.synchronizedMap(new HashMap&amp;lt;Long, User&amp;gt;());
-
-    @ApiOperation(value=&quot;获取用户列表&quot;, notes=&quot;&quot;)
-    @RequestMapping(value={&quot;&quot;}, method= RequestMethod.GET)
-    public List&amp;lt;User&amp;gt; getUserList() {
-        List&amp;lt;User&amp;gt; r = new ArrayList&amp;lt;User&amp;gt;(users.values());
-        return r;
-    }
-
-    @ApiOperation(value=&quot;创建用户&quot;, notes=&quot;根据User对象创建用户&quot;)
-    @ApiImplicitParam(name = &quot;user&quot;, value = &quot;用户详细实体user&quot;, required = true, dataType = &quot;User&quot;)
-    @RequestMapping(value=&quot;&quot;, method=RequestMethod.POST)
-    public String postUser(@RequestBody User user) {
-        users.put(user.getId(), user);
-        return &quot;success&quot;;
-    }
-
-    @ApiOperation(value=&quot;获取用户详细信息&quot;, notes=&quot;根据url的id来获取用户详细信息&quot;)
-    @ApiImplicitParam(name = &quot;id&quot;, value = &quot;用户ID&quot;, required = true, dataType = &quot;Long&quot;)
-    @RequestMapping(value=&quot;/{id}&quot;, method=RequestMethod.GET)
-    public User getUser(@PathVariable Long id) {
-        return users.get(id);
-    }
-
-    @ApiOperation(value=&quot;更新用户详细信息&quot;, notes=&quot;根据url的id来指定更新对象，并根据传过来的user信息来更新用户详细信息&quot;)
-    @ApiImplicitParams({
-            @ApiImplicitParam(name = &quot;id&quot;, value = &quot;用户ID&quot;, required = true, dataType = &quot;Long&quot;),
-            @ApiImplicitParam(name = &quot;user&quot;, value = &quot;用户详细实体user&quot;, required = true, dataType = &quot;User&quot;)
-    })
-    @RequestMapping(value=&quot;/{id}&quot;, method=RequestMethod.PUT)
-    public String putUser(@PathVariable Long id, @RequestBody User user) {
-        User u = new User();
-        users.put(id, u);
-        return &quot;success&quot;;
-    }
-
-    @ApiOperation(value=&quot;删除用户&quot;, notes=&quot;根据url的id来指定删除对象&quot;)
-    @ApiImplicitParam(name = &quot;id&quot;, value = &quot;用户ID&quot;, required = true, dataType = &quot;Long&quot;)
-    @RequestMapping(value=&quot;/{id}&quot;, method=RequestMethod.DELETE)
-    public String deleteUser(@PathVariable Long id) {
-        users.remove(id);
-        return &quot;success&quot;;
-    }
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;web界面查看&quot;&gt;3.4 web界面查看&lt;/h3&gt;
-&lt;p&gt;&lt;img src=&quot;https://i.imgur.com/EqIH7J2.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;四项目代码地址&quot;&gt;四、项目代码地址&lt;/h2&gt;
-&lt;p&gt;https://github.com/LanceToBigData/SpringBootLearning/tree/develop/SpringBoot-Swagger&lt;/p&gt;
-</description>
-<pubDate>Mon, 09 Jul 2018 14:10:00 +0000</pubDate>
-<dc:creator>苦水润喉</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhangyinhua/p/9286391.html</dc:identifier>
-</item>
-<item>
-<title>【原创】CA证书申请+IIS配置HTTPS+默认访问https路径 - BruceLee1123</title>
-<link>http://www.cnblogs.com/lichunting/p/9274422.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/lichunting/p/9274422.html</guid>
-<description>&lt;p&gt;&lt;span&gt;一．CA证书申请&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;(一). 新StartSSL注册帐号&lt;/h2&gt;
-&lt;p&gt;    1．    StartSSL官网&lt;/p&gt;
-&lt;blockquote readability=&quot;1.875&quot;&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;官方网站：&lt;a href=&quot;https://www.startssl.com/&quot;&gt;https://www.startssl.com/&lt;/a&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;    2．    进入到StartSSL后，直接点击注册账号,然后进入邮箱注册页面。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180706163421130-1306840228.png&quot; alt=&quot;&quot; width=&quot;751&quot; height=&quot;353&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180706163738691-661403354.png&quot; alt=&quot;&quot; width=&quot;750&quot; height=&quot;337&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180706163751530-239351208.png&quot; alt=&quot;&quot; width=&quot;743&quot; height=&quot;334&quot;/&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    3．    点击发送验证码，进入如下页面，从邮箱中获取验证码，并在下图中填写到指定位置，点击Sign Up。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709091306053-1667997405.png&quot; alt=&quot;&quot; width=&quot;736&quot; height=&quot;395&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    4．    成功验证了邮箱地址后，StartSSL会自动往你的浏览器中安装唯一一个属于自己管理StartSSL的个人证书。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709091404987-1648105550.png&quot; alt=&quot;&quot; width=&quot;733&quot; height=&quot;197&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;5．    在浏览器中查看SSL证书，可以看到该个人管理SSL证书是有有效期的。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709091610550-56185210.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    6．    点击该证书安装成功页面的Login Now按钮或者返回到StartSSL网站，点击“Login”然后就可以使用个人证书登录了。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709091827150-532193693.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;7．    这是StartSSL的用户控制中心。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709091910957-1049495450.png&quot; alt=&quot;&quot; width=&quot;739&quot; height=&quot;292&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;(二). 申请StartSSL免费SSL&lt;/h2&gt;
-&lt;p&gt;    1．    进入到StartSSL用户管理中心，然后找到免费SSL证书的申请页面。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709105902869-1000365982.png&quot; alt=&quot;&quot; width=&quot;740&quot; height=&quot;296&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    2．    在此之前首先先验证一个使用这个证书的域名, 会把验证码发送到域名注册邮箱里，点击Validations Wizard，并选中第一个，点击Continue。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110351485-1487227582.png&quot; alt=&quot;&quot; width=&quot;738&quot; height=&quot;348&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    3．    输入要验证的域名点击Continue。 &lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110401324-755900351.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;   4．    选择一个该域名下的管理邮箱，发送验证码，并输入获取的验证码，验证域名。 &lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110501527-892882213.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    5．    域名验证完成后，会在用户管理中心页面右侧域名验证显示已经验证的域名。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110512215-1117668955.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110517730-1777138179.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    6．    进入到StartSSL用户管理中心，然后找到免费SSL证书的申请页面。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110529704-1276380355.png&quot; alt=&quot;&quot; width=&quot;751&quot; height=&quot;300&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;7．    点击进入如下页面，并输入需要获取证书的域名，这里写的是二级域名。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110545894-383832807.png&quot; alt=&quot;&quot; width=&quot;744&quot; height=&quot;461&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;8．    然后填写证书签名请求，如下图所示。这时需要到部署https的服务器上的的IIS中填写 证书签名请求。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110559913-391616538.png&quot; alt=&quot;&quot; width=&quot;743&quot; height=&quot;374&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;9．    登录服务器，打开IIS，在IIS根目录上右侧有个服务器证书, 点击后打开。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110612443-359274692.png&quot; alt=&quot;&quot; width=&quot;685&quot; height=&quot;654&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    10．   点击右侧 创建证书申请。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110621175-284185680.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;    &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110638205-1511399144.png&quot; alt=&quot;&quot; width=&quot;506&quot; height=&quot;359&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;     11．   点击下一步，加密提供程序和位长选择如图所示的两个。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110649613-36778672.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;     12．   选择桌面的位置，创建一个名为key.txt的文件。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110659302-358961089.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;     13．   点击完成，会在桌面生成 证书签名请求 字符串，将该文件中的内容复制到步骤8中的CSR填写框中。 &lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110714830-357557628.png&quot; alt=&quot;&quot; width=&quot;651&quot; height=&quot;271&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    14．   点击Submit，将会生成证书，可以点击&lt;span&gt;here&lt;/span&gt;位置下载生成的证书。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110727483-2010327163.png&quot; alt=&quot;&quot; width=&quot;723&quot; height=&quot;248&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110738573-2145841972.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;(三). StartSSL免费SSL下载使用 &lt;/h2&gt;
-&lt;p&gt;        1．    以下是StartSSL免费SSL的Tool Box，有几个非常有用的功能，一个是证书列表，解密密钥、生成PKCS#12文件。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110749696-1357866735.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;       2．    点击Tool Box下的Certificate List菜单可以查看申请的证书列表。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110801068-1403890665.png&quot; alt=&quot;&quot; width=&quot;660&quot; height=&quot;301&quot;/&gt; &lt;/p&gt;
-&lt;p&gt; 3．    点击Retrieve，也可下载生成的证书。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110811406-133279060.png&quot; alt=&quot;&quot; width=&quot;752&quot; height=&quot;274&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    4．    下载下来的StartSSL免费SSL证书包，里面有四个包，分别对应不同的Web环境：Apache、Nginx、Windows IIS和其它。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110824218-181654534.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;h2&gt;(一). 完成证书申请，导入证书&lt;/h2&gt;
-&lt;p&gt;    1．    登录服务器，打开IIS，在IIS根目录上右侧有个服务器证书, 点击后打开，点击完成证书申请。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110835781-539977307.png&quot; alt=&quot;&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;    2．    将下载下来的证书中，IIS压缩包里的证书拷贝到服务器桌名，并在此指定带有域名名称的证书文件点击确定。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110844633-1314317995.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    3．    点击确定，即可在列表最后中查看导入的证书信息。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709110857929-1582208038.png&quot; alt=&quot;&quot; width=&quot;652&quot; height=&quot;136&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    4．    右键单击查看，即可查看证书的相关信息，证书颁发给申请时填写的域名，并且可以看到 您有一个与该证书对应的私钥。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111031814-1354494249.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    5．    至此，证书导入成功。&lt;/p&gt;
-&lt;h2&gt;(二). 部署Https网站&lt;/h2&gt;
-&lt;p&gt;    1．    在IIS主页，右键网站菜单，添加网站。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111049594-11933731.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    2．    点击确定，启动网站，并查看网站是否发布成功。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111059452-1635410798.png&quot; alt=&quot;&quot; width=&quot;662&quot; height=&quot;394&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    3．    为该网站绑定证书，以使用https。找到我们需要部署的网站，在服务器网站栏里，点击绑定。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111111391-259314664.png&quot; alt=&quot;&quot; width=&quot;682&quot; height=&quot;465&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    4．    然后我们点添加，添加选择https，默认为443端口，并选择刚才导入的证书点击确定。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111119545-1950568496.png&quot; alt=&quot;&quot; width=&quot;460&quot; height=&quot;292&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111134919-1776283977.png&quot; alt=&quot;&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;    5．    如下图所示，则绑定完成。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111143702-629133948.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111156433-975408772.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    6．    如果添加成功之后。打开对应的那个网站，找到SSL服务器证书，你会发现有一个证书（启用选项会可选，之前是灰色的）。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111214007-1863895506.png&quot; alt=&quot;&quot; width=&quot;717&quot; height=&quot;625&quot;/&gt;&lt;/p&gt;
-
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111225382-208813524.png&quot; alt=&quot;&quot; width=&quot;426&quot; height=&quot;201&quot;/&gt;  &lt;/p&gt;
-&lt;p&gt;    7．    然后使用https协议访问该网站域名，https协议显示为绿色，至此https网站部署成功。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111234323-1208527752.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;strong&gt;【注意】&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;strong&gt;A. &lt;/strong&gt; &lt;strong&gt;：在配置https的服务器的Windows防火墙上允许443（绑定https时默认为443端口）的端口的访问。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;span&gt;&lt;strong&gt;B. &lt;/strong&gt; &lt;strong&gt;配置https网站时，443端口不可占用。&lt;/strong&gt;&lt;/span&gt; &lt;/p&gt;
-
-&lt;h2&gt;(一). IIS安装URL重写模块&lt;/h2&gt;
-&lt;p&gt;    1．    IIS7.5下载地址。&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;&lt;strong&gt;中文32位：&lt;/strong&gt;&lt;/p&gt;
-&lt;p align=&quot;left&quot;&gt;http://download.microsoft.com/download/4/9/C/49CD28DB-4AA6-4A51-9437-AA001221F606/rewrite_x86_zh-CN.msi&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;中文64位：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;http://download.microsoft.com/download/4/E/7/4E7ECE9A-DF55-4F90-A354-B497072BDE0A/rewrite_x64_zh-CN.msi&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;英文：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;http://www.iis.net/downloads/microsoft/url-rewrite&lt;/p&gt;
-&lt;p&gt;    2．    安装IIS7.5 URL重写组件。 &lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111252723-1762159068.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111301335-405851282.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    3．    下载安装完成之后会发现我们的IIS界面多了个URL重写的组件。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111314232-1571810040.png&quot; alt=&quot;&quot; width=&quot;665&quot; height=&quot;596&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    4．  &lt;/strong&gt; &lt;strong&gt;注意：URL重写唯一就是能够实现全站http跳转https。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;所以，在部署之前，请检查网站根目录是否有web.config文件，如有，请先备份这里的web.config文件，因为以下的配置可能会和web.config里面跳转冲突，个人建议是直接删除处理，毕竟旧的不去新的不来，哈哈哈（建议先备份）。&lt;/p&gt;
-&lt;h2&gt;(二). IIS编辑入站规则&lt;/h2&gt;
-&lt;p&gt;    1．    双击URL重写打开，点击添加规则。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111341691-244101834.png&quot; alt=&quot;&quot; width=&quot;617&quot; height=&quot;339&quot;/&gt;&lt;/p&gt;
-
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p&gt;    2．    名称填写Redirect to https，使用正规表达式，模式填写 （.*）。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111356195-923074308.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;    3．    然后接下来选择添加条件。第一个填{HTTPS} 与模式匹配 ^OFF$ ，第二个填{HTTPS_HOST} 与模式不匹配 ^(localhost)。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt; &lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111404961-1862039748.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111438116-1186437228.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111447997-235125015.png&quot; alt=&quot;&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;    4．    操作类型选择重定向，然后选择属性为https://{HTTP_HOST}/{R:1} 重定向类型选择303。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111457660-992656859.png&quot; alt=&quot;&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;    5．    最后一步，检查下点保存即可。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111508894-328357056.png&quot; alt=&quot;&quot; width=&quot;713&quot; height=&quot;724&quot;/&gt; &lt;/p&gt;
-&lt;p&gt;    6．    然后，我们使用浏览器访问网站，直接输入xxx.xxx.com或者&lt;a href=&quot;http://xx.xxx.com/&quot;&gt;http://xx.xxx.com&lt;/a&gt;或者&lt;a href=&quot;https://xxx.xxx.com/&quot;&gt;https://xxx.xxx.com&lt;/a&gt;都是访问的&lt;a href=&quot;https://xxx.xxx.com/&quot;&gt;https://xxx.xxx.com&lt;/a&gt;，这表示配置URL重写成功。&lt;/p&gt;
-&lt;p&gt;    7．    web.config中对应的配置。&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111521309-1820374760.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/597599/201807/597599-20180709111647374-1977712688.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Mon, 09 Jul 2018 13:30:00 +0000</pubDate>
-<dc:creator>BruceLee1123</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/lichunting/p/9274422.html</dc:identifier>
 </item>
 </channel>
 </rss>
