@@ -9,6 +9,807 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>必须理解的分布式系统中雷同的集群技术及原理 - 无痴迷，不成功</title>
+<link>http://www.cnblogs.com/justmine/p/9275730.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/justmine/p/9275730.html</guid>
+<description>&lt;h2 id=&quot;写在前面&quot;&gt;写在前面&lt;/h2&gt;
+&lt;p&gt;在当今信息爆炸的时代，单台计算机已经无法负载日益增长的业务发展，虽然也有性能强大的超级计算机，但是这种高端机不仅费用高昂，也不灵活，一般的企业是负担不起的，而且也损失不起，那么将一群廉价的普通计算机组合起来，让它们协同工作就像一台超级计算机一样地对外提供服务，就成了顺其自然的设想，但是这又增加了软件的复杂度，要求开发的软件需要具备横向扩展能力，比如：Kafka、Elasticsearch、Zookeeper等就属于这一类软件，它们天生都是&quot;分布式的&quot;，即可以通过添加机器节点来共同地分摊数据存储和负载压力。&lt;/p&gt;
+&lt;h2 id=&quot;为什么需要集群&quot;&gt;为什么需要集群？&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;分布在不同区域的计算机，彼此之间通过网络建立通信，相互协作作为一个整体对外提供服务，这就是集群&lt;/strong&gt;，如果我们开发的系统具备这样的能力，那么理论上就具备无限横向扩容的能力，系统的吞吐量就会随着机器数增加而增长，那么未来当系统出现高负载的时候，就可以很好地应对这种情况。&lt;/p&gt;
+&lt;h2 id=&quot;为什么cap不能同时满足&quot;&gt;为什么CAP不能同时满足？&lt;/h2&gt;
+&lt;p&gt;通过上面分析，我们知道实现集群，其实就是采用多台计算机来共同承担和负载系统压力，那么就涉及到多台计算机需要参与一起处理数据，为了保证可用性，一般都会在每台计算机上备份一份数据，这样只要有一个节点保持同步状态，那么数据就不会丢失，比如kafka分区多副本、Elasticsearch的副本分片，由于同一数据块及其副本位于不用的机器，随着时间的推移，再加上不可靠的网络通信，所有机器上的数据必然会不完全一致，这个时候假如发生一种极端情况，所有的机器宕机了，又如何保证数据不丢失呢（&lt;strong&gt;其实只有两种方法&lt;/strong&gt;）？&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;保证可用性：选择第一台恢复正常服务的机器（不一定拥有全部数据）作为可信的数据来源，快速恢复集群，即停机时间优于同步。&lt;/li&gt;
+&lt;li&gt;保证数据一致性：等待第一台拥有全部数据的机器恢复正常，再恢复集群，即同步优于停机时间，比如禁用kafka的&lt;strong&gt;unclean leader选举&lt;/strong&gt;机制就是这种策略。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;其实当大多数机器不可用时，就需要在可用性和一致性之间进行妥协了，所以另一个更符合分布式系统的Base理论又被创造出来了。&lt;/p&gt;
+&lt;h2 id=&quot;如何解决分布式存储问题&quot;&gt;如何解决分布式存储问题？&lt;/h2&gt;
+&lt;p&gt;当由多台计算机组成的集群对外提供服务时，其实就是对外提供读、写的能力。&lt;/p&gt;
+&lt;h3 id=&quot;数据块技术data-block&quot;&gt;数据块技术（data block）&lt;/h3&gt;
+&lt;p&gt;为了将数据合理、均匀地写到各个机器上，提高集群写能力；为了将读请求负载均衡到不同的节点，提高集群的读能力；为了解耦数据存储和物理节点，提高分布式读写并行处理的能力，聪明的工程师引入了一个逻辑数据存储单位，统称为&lt;strong&gt;数据块&lt;/strong&gt;，比如Kafka的分区(partion)、Elasticsearch的分片(shard)，这样的虚拟化大大提高了集群读写的灵活性。&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;备注：所以啊，名字不重要，知其所以然最重要。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;协调节点coordination-node&quot;&gt;协调节点（coordination node）&lt;/h3&gt;
+&lt;p&gt;实际上当集群作为一个整体处理数据时，可能每一个节点都会收到读写请求，但是数据又是分散在不同的节点上，所以就需要每个节点都清楚地知道集群中任意一个数据块的位置，然后再将请求转发到相应的节点，这就是“协调节点”的工作。比如：Elasticsearch的master节点管理集群范围内的所有变更，主分片管理数据块范围内的所有变更。&lt;/p&gt;
+&lt;h3 id=&quot;大多数投票机制quorum&quot;&gt;大多数投票机制（quorum）&lt;/h3&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;百度百科：quorum，翻译法定人数，指举行会议、通过议案、进行选举或组织某种专门机构时，法律所规定的必要人数，未达法定人数无效。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;由于网络分区的存在，这个机制被广泛地应用于分布式系统中，比如集群节点之间选举Master；数据块之间选举Header等；在分布式存储中，也被称为Quorum读写机制，即写入的时候，保证大多数节点都写入成功（一般的做法会选举一个主数据块(header)，保证它写成功，然后再同步到冗余的副本数据块）；读取的时候保证读取大多数节点的数据（一般的做法是由协调节点分发请求到不同的节点，然后将所有检索到的数据进行全局汇总排序后再返回）；由于读写都是大多数，那么中间肯定存在最新的重叠数据，这样就能保证一定能读到最新的数据。&lt;/p&gt;
+&lt;p&gt;从上面分析可以得出，只要大多数节点处于活跃可用状态，那么整个集群的可用性就不会受到影响；只要大多数据块处于活跃可用的状态，那么就能持续地提供读写服务；只要有一个数据块完成了同步状态，那么数据就不会丢失；这其实就是通过一种冗余机制来尝试处理fail/recover模式的故障，通俗点讲就是容忍单点故障，至少需要部署3个节点；容忍2点故障，至少需要部署5个节点，&lt;strong&gt;机器节点越多分区容忍性就越强&lt;/strong&gt;，顿悟了吧，嘿嘿，所以&lt;strong&gt;保证集群可用的前提就是有奇数个节点、奇数个数据块保持活跃可用状态，不然就无法选举出master或header&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;大多数投票机制运用起来也非常灵活，当分布式系统追求强一致性时，需要等待所有的数据快及其副本全部写入成功才算完成一次写操作，即写全部(write all)，可以理解一种&lt;strong&gt;事务保证&lt;/strong&gt;，要么全部写入，要么一个都不写入，比如：kafka从0.11.0.0 版本开始， 当producer发送消息到多个topic partion时，就运用了这种机制，来保证消息交付的exactly-once语义，是不是很帅，而且这种情况下，从任意一个节点都能读到最新的数据，读性能最高；当分布式系统追求最终一致性时，只需等待主数据块(leader)写入成功即可，再由主数据块通过消息可达的方式同步到副本数据块。&lt;/p&gt;
+&lt;p&gt;为了能够满足不同场景下对数据可靠性和系统吞吐量的要求，最大化数据持久性和系统可用性，很多组件都提供了配置项，允许用户定义这个大多数的法定数量，下面我们就来谈谈一些常用组件的配置：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Elasticsearch&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1082769/201807/1082769-20180710111213498-1398083309.png&quot;/&gt;&lt;br/&gt;由上图可以看到，整个集群由三个运行了Elasticsearch实例的节点组成，有两个主分片，每个分片又有两个副分片，总共有6个分片拷贝，Elasticsearch内部自动将相同的分片放到了不同的节点，非常合理和理想。&lt;br/&gt;&lt;strong&gt;当我们新建一个文档时&lt;/strong&gt;：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1、客户端向 Node 1 发送新建文档的写请求。&lt;/li&gt;
+&lt;li&gt;2、节点使用文档的 _id 确定文档属于分片 0 。请求会被转发到 Node 3，因为分片 0 的主分片目前被分配在 Node 3 上。&lt;/li&gt;
+&lt;li&gt;3、Node 3 在主分片上面执行请求。如果成功了，它将请求并行转发到 Node 1 和 Node 2 的副本分片上。一旦所有的副本分片都报告成功, Node 3 将向协调节点报告成功，协调节点向客户端报告成功。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;这就是Elasticsearch处理写请求的典型步骤顺序，同时每种业务场景对数据可靠性的要求和系统性能也不一样，所以Elasticsearch提供了Consistence配置项：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1、one：主分片处于活跃可用状态就可以处理写请求。&lt;br/&gt;系统吞吐量最高，但数据可能会丢失，对数据可靠性要求不是很高的场景非常适合，比如实时的时序数据处理（日志）。&lt;/li&gt;
+&lt;li&gt;2、all：主分片和所有副本分片处于活跃可用状态才允许处理写请求。&lt;br/&gt;系统吞吐量最低，但数据不会丢失。处理关键的业务数据非常合适。&lt;/li&gt;
+&lt;li&gt;3、quorum：必须有大多数的分片拷贝处于活跃可用状态才允许处理写请求。&lt;br/&gt;平衡系统吞吐量和数据可靠性，一般业务系统都使用这个配置。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;Kafka&lt;/strong&gt;&lt;br/&gt;当向Kafka 写数据时，producers可以通过设置ack来自定义数据可靠性的级别：&lt;/p&gt;
+&lt;p&gt;如果所有的节点都挂掉，还有Unclean leader选举机制的保证，建议大家下去阅读&lt;a href=&quot;http://kafka.apachecn.org/documentation.html#design&quot;&gt;kafka《官方指南》设计部分&lt;/a&gt;，深入理解kafka是如何通过引入ISR集合来变通大多数投票机制，从而更好地保证消息交付的不同语义。&lt;/p&gt;
+&lt;h2 id=&quot;什么是集群脑裂&quot;&gt;什么是集群脑裂？&lt;/h2&gt;
+&lt;p&gt;对于分布式系统，自动处理故障的关键就是能够精准地知道节点的存活状态(alive)。有时候，节点不可用，不一定就是其本身挂掉了，极有可能是暂时的网络故障；在这种情况下，如果马上选举一个master节点，那么等到网络通信恢复正常的时候，岂不是同时存在两个master，这种现象被形象地称为“集群脑裂”，先留给大家下去思考吧。呵呵，明天要早起，碎觉了，大家晚安。&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;备注：设计一个正在高可用的分布式系统，需要考虑的故障情况往往会很复杂，大多数组件都只是处理了fail/recover模式的故障，即容忍一部分节点不可用，然后等待恢复；并不能处理拜占庭故障(Byzantine)，即节点间的信任问题，也许区块链可以解决吧，大家可以下去多多研究，然后我们一起讨论，共同学习，一起进步。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;写在最后&quot;&gt;写在最后&lt;/h2&gt;
+&lt;p&gt;分享了这么多，请大家总结一下大多数投票机制的优点和缺点？欢迎评论区留言，哈哈，真的要睡觉了，晚安。&lt;/p&gt;
+</description>
+<pubDate>Thu, 12 Jul 2018 23:10:00 +0000</pubDate>
+<dc:creator>无痴迷，不成功</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/justmine/p/9275730.html</dc:identifier>
+</item>
+<item>
+<title>聊聊架构设计做些什么来谈如何成为架构师 - Zachary_Fan</title>
+<link>http://www.cnblogs.com/Zachary-Fan/p/architecturetoarchitect.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/Zachary-Fan/p/architecturetoarchitect.html</guid>
+<description>
+&lt;p&gt;　　又有2周时间没冒泡了，最近实在没有大块的时间来写文章，就当找个理由。。。&lt;/p&gt;
+&lt;p&gt;　　也因为碎片化的时间多了，所以开始刷某乎了，关注了架构相关的板块，也顺手回答了一些问题。发现有很多同道中人正在经历着我前两年经历的阶段，对于做架构没有相对具象的一些理解，更没有系统化的认识。所以把最近回答的一些内容整理一下，权当记录，留给3年后的自己~&lt;/p&gt;
+&lt;p&gt;　　按惯例，容许我装X开头~&lt;/p&gt;
+
+
+&lt;h2&gt;一、架构的定义&lt;/h2&gt;
+&lt;p&gt;　　在软件开发领域，自从架构这个词被广泛传播之后，产生的架构模式也非常多，架构关注点也在增加。但回到“道”的层面，架构的定义或者说本质还是：&lt;/p&gt;
+&lt;p&gt;　　架构，又名软件架构，是有关软件整体结构与组件的&lt;strong&gt;抽象描述&lt;/strong&gt;，用于&lt;strong&gt;指导&lt;/strong&gt;大型软件系统各个方面的设计。&lt;/p&gt;
+&lt;p&gt;　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　————摘自《百度百科》&lt;/p&gt;
+
+
+&lt;h2&gt;二、架构是做什么？&lt;/h2&gt;
+&lt;p&gt;　　很多做业务功能的增删改查开发感受到无趣的小伙伴常把做架构想象成一片乐土，没有嘈杂的业务声音干扰，可以专心做一番牛X的技术。会把架构单纯的理解成，&lt;strong&gt;牛X的性能、牛X的TPS、高可用，支撑了多少PV&lt;/strong&gt;等等。但是其实这些只是架构很小的一部分，并不是全部。在互联网时代之前都是C/S程序的天下，那个时候并没有对性能等有像现在这样的关注度，但是就已经有架构之说了。 世上本无架构，只是由于团队越大越需要对整体的规则做约定，好让大家往同一个方向发力，避免各自为战，产生大量的内耗，所以才逐渐形成了架构。这条路就是“世上本无路，只是因为走的人多了变成了路”。&lt;/p&gt;
+&lt;p&gt;　　为什么说一个软件架构是很重要的呢？当我们的团队人数只有2、3个人，甚至只有1个人单枪匹马的情况下，可能架构凸显的作用不是那么的明显，但是如果团队大了之后相信下面的这些现象会比较常见：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;新上一个系统，往往不是独立存在的，一般都需要与现存的系统进行交互，而需要集成交互的地方可能还很多，哪些集成是本系统需要实现的？同时，一般会划分为多个阶段开发，怎样界定系统的边界呢？&lt;/li&gt;
+&lt;li&gt;软件系统是一个由多个模块组成的整体。因此当上游开发与我们负责的模块衔接老是出问题时，自己再做更多的努力也无法扭转上游模块的质量差带来的负面效果。（我想大家这时候肯定是抓狂的。）&lt;/li&gt;
+&lt;li&gt;每次看到别人写的代码，老觉得自己来写的话肯定不会这么写。比他写的更好。（我们做技术的，自我感觉良好是个常态：）。）&lt;/li&gt;
+&lt;li&gt;在某些场景下，自己脑子里有多套方案来实现，但是对孰优孰劣没太大感觉，最终基本上就是拍脑袋选了一个。&lt;/li&gt;
+&lt;li&gt;某块代码维护的次数多了，特别是中间由多个人接手过后，代码风格各异，难以理解。&lt;/li&gt;
+&lt;li&gt;相似的代码在好几个地方出现，特别是一些非业务性的代码，比如日志处理等。再甚是在大型的分布式系统中，不同子程序使用了不同的同类型中间件，同样导致维护成本大增。&lt;/li&gt;
+&lt;li&gt;在2个相依赖项目边界处的设计产生了分歧，并且站在各自的角度看都有道理。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　&lt;strong&gt;任何事物都是有两面性的，并不是说上面的这些问题，我们通过架构就要往另外一个极端去走&lt;/strong&gt;。比如在大型的分布式系统中，不同子程序的确有必要在某些时刻选择同类型的其它中间件。如Kafka和RabbitMQ虽都是MQ，但在特定的场景下能发挥的价值是无法相互替代的。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;所以我们做架构有一点也是比较重要的，就是去Balance，选择一个投入产出比最优的方案。&lt;/strong&gt;关于这点第四段中会多说几句。&lt;/p&gt;
+&lt;p&gt;　　除此之外，架构的主要目的是为了让大家往同一个方向，在同一个标准之上去发散扩张。&lt;strong&gt;一是把控硬性的下限标准，提高整体的最短版，二是提高上限水平位，也就是天花板位置，提供更大的发展空间&lt;/strong&gt;。好比造一幢大楼，把框架结构设计好搭好，让大家形成一个共识，什么是承重墙不能破坏，什么是创变空间可以自定义。在这样的基础下各自发展。这个看上去是个限制，但却是做架构最重要的任务，所谓&lt;strong&gt;再多的文档，再多的最佳实践都比不上一条约束&lt;/strong&gt;。降低复杂度、降低理解难度，是实实在在的收益。最怕的就是凭空假设带来的过度浪费。&lt;/p&gt;
+&lt;p&gt;　　更甚之，我们做架构追求的理想国度是一个大家拥有一致共识的世界，架构是大家都像吃饭喝水这样习以为常的习惯。去理解或者接手其它人负责的项目的时候就好像是自己写的一样。这个时候就消灭架构了，就好比现在没有人会教你如何吃饭一样。（就当YY一下吧：）。）&lt;/p&gt;
+
+
+&lt;h2&gt;三、做架构的最佳实践&lt;/h2&gt;
+&lt;p&gt;　　上面提到更多的是做架构的目的，那么要做好架构，主要就是要做好抽象，做抽象的方式是类比，做类比的方式可以使用用例图。所以建议大家多画图，通过画图来将大脑中抽象的结果直观的体现在前面，再来进一步分析合理性。主要推荐2种图的类别，一种就是前面提到的用例图。如下图：&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/397048/201807/397048-20180712104243712-615972405.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　另外一种是鲁棒图，如图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/397048/201807/397048-20180711142055454-2006805669.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　整个过程的主要目的是：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;描述其与外部实体（系统和最终用户）的交互。&lt;/li&gt;
+&lt;li&gt;标识系统和外部实体间的信息和控制流。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　最后附一篇之前整理的《软件开发中会用到的图》的文章地址，有兴趣的同学可以扩展阅读下：&lt;a href=&quot;https://www.cnblogs.com/Zachary-Fan/p/developdiagram.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/Zachary-Fan/p/developdiagram.html&lt;/a&gt;。&lt;/p&gt;
+
+&lt;p&gt;　　理想的世界里，我们程序的边界设计恰好匹配于业务边界。然而我们作为工程师首先要承担业务需求的压力，只能挤时间去做这些非业务性工作。也因此老项目的业务边界也并不总是如新项目那样明晰。&lt;/p&gt;
+&lt;p&gt;　　这意味着做任何架构的改动要考虑优先级，特别在拆分业务领域之前认真地思考业务的边界。排定优先级，考量拆分的收益与风险。划分业务的边界，则需要更多的思考拆分后的未来将如何沟通协作，然后再考虑技术因素。在技术因素前，主要考量这几点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;是否拥有独立的团队来维护，以及是否拥有发展为一项独立业务的潜力。（非必要的情况下，一定要避免共享内核的开发方式）&lt;/li&gt;
+&lt;li&gt;围绕领域而非 feature，有明确的维护团队，避免过于细粒度。&lt;/li&gt;
+&lt;li&gt;拆分或者组合之后，能否改善现有的协作流程。&lt;/li&gt;
+&lt;li&gt;能否帮助区分核心、非核心业务，改善稳定性。 &lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　上面这些完成了之后，便是选择合适的中间件、技术框架来满足技术层面的要求，这个的选拔主要以下面几点来考量：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;如果是直接引入第三方的中间件的话，成熟度如何？是否有大公司在用？（有大公司的口碑背书的肯定大大加分）&lt;/li&gt;
+&lt;li&gt;近期的社区活跃度如何？（用于考量是否有更多的人在一起踩坑，降低各自遇到坑的数量和概率）&lt;/li&gt;
+&lt;li&gt;硬指标，当前场景的硬性要求是否满足。如性能、对关键部分或者未来的可扩展性等。&lt;/li&gt;
+&lt;li&gt;软指标，复杂度、可维护性等。这里可以罗列几个竞品的优劣势。&lt;/li&gt;
+&lt;li&gt;最重要的是要自己去亲自验证上面的几点，并且做一定的模拟工作。&lt;/li&gt;
+&lt;li&gt;如果曾经用过或者有其中一部分的经验可复用，这是加分项，毕竟在使用的过程中才发现hold不住它，那是灾难性的！&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;四、什么是好架构&lt;/h2&gt;
+&lt;p&gt;　　之前有听到过一句话，概括的很精辟。好的架构必须需要贴合业务，那么把业务+技术演变成一个数学公式来表达可以理解为：2个数字的和等于10，求如何组合能得到最大的乘积。那不是3*7，也不是4*6，而是5*5。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/397048/201807/397048-20180711174113097-926651278.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　所以架构不是生搬硬套，为了架构（搞事情）而架构，赶时髦，或者说装X。我们应避免通过个人的主观意愿来主导。比如自己觉得某个中间件好，就”拿着锤子到处找钉子“，这一敲下来，看着不错，但是带来的成本和风险被忽略了。可能有更好的解决方案，或者完全没必要在当下敲这一钉子下去。&lt;em id=&quot;__mceDel&quot;&gt;　　&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;　　好的架构需要评判投入产出比，收益更高的就是更好的架构，就如下图的公式。产出可以理解为我们因此获得的好处（诸如可靠性、安全性、可扩展性、可维护性、可伸缩性、性能等），成本是我们改造花费的投入，如人力物力和时间。特别注意的是风险这点，是很重要也是很容易被大家忽略的一点，是起到指数级作用的。选择的方案再好，如果都是一些hold不住的技术，那么风险就是无穷大，导致减号右侧无限趋近于0，最终的结果就是收益是负数，投入的成本打水漂，甚至还要加上其它额外的付出。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://images2018.cnblogs.com/blog/397048/201807/397048-20180711165703301-331955446.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h2&gt;五、如何成为架构师&lt;/h2&gt;
+&lt;p&gt;　　上面提到的这些关注点都是架构师的职责，另外特别重要的一点是，架构师必须要是个有追求的“&lt;strong&gt;好码农&lt;/strong&gt;”！！！（划重点）。软件架构师不像建筑师，其面对的本身是一个抽象的事物，如果再脱离了实操，这基本和纸上谈兵无异。所以实际工作中的难点、要点都得清楚，并且能够给出解决方案或者方向。另外只有熟悉实操才能更准确的评估成本&lt;/p&gt;
+&lt;p&gt;　　成为了一个真正的“好码农”就向架构师迈出第一步了。而后呢，需要不断以&lt;strong&gt;深 --&amp;gt; 广 --&amp;gt; 深 --&amp;gt; 广&lt;/strong&gt;的节奏去开疆扩土，扩大自己的知识领域，当然需要以贴近当前工作内容的知识为主，这是第二步。到了这还没完，还有打造三板斧：业务能力、沟通能力、个人魅力。&lt;/p&gt;
+&lt;p&gt;　　题外话，在国内，纯技术的架构师没有应用型的架构师吃的开。所以此文皆以应用型架构师的职能要求为参考。&lt;/p&gt;
+
+
+&lt;h2&gt;六、结语&lt;/h2&gt;
+&lt;p&gt;　　回到文章开头，架构的表现形式有很多，从本质上单体应用的架构设计思想和分布式系统是一致的，所谓服务化其实也是模块化的思想，只是维度的不同，导致用到的一些工具或者环境不同，但这都是“术”层面的东西。光学这些招数，永远也学不完。架构之路漫长，继续前行，共勉。&lt;/p&gt;
+
+
+&lt;p&gt;作者：&lt;a href=&quot;http://www.cnblogs.com/Zachary-Fan&quot; target=&quot;_blank&quot;&gt;Zachary_Fan&lt;/a&gt;&lt;br/&gt;出处：&lt;a href=&quot;https://www.cnblogs.com/Zachary-Fan/p/architecturetoarchitect.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/Zachary-Fan/p/architecturetoarchitect.html&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;p&gt;如果你想及时得到个人自写文章的消息推送，欢迎扫描下面的二维码~。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/397048/201706/397048-20170620064950210-569784315.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 12 Jul 2018 22:51:00 +0000</pubDate>
+<dc:creator>Zachary_Fan</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/Zachary-Fan/p/architecturetoarchitect.html</dc:identifier>
+</item>
+<item>
+<title>EntityFramework Core是否可以映射私有属性呢？了解一下。 - Jeffcky</title>
+<link>http://www.cnblogs.com/CreateMyself/p/9302771.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/CreateMyself/p/9302771.html</guid>
+<description>&lt;h2&gt;前言&lt;/h2&gt;
+&lt;p&gt;最近几天身体有点抱恙，说话都需要勇气，痛哭。今天简短的写一点探索性的内容，仅供了解，感谢您的阅读。&lt;/p&gt;
+&lt;h2&gt;EF Core映射私有属性&lt;/h2&gt;
+&lt;p&gt;在EF 6.x系列中写过一篇文章可以映射私有属性，说明EF的灵活性以及可扩展性，那么问题来了在EF Core是否同样可以呢，我们来试试。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Blog
+    {
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; Id { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Name { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Url { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; DateTime CreatedTime { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; DateTime ModifiedTime { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt; Status { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;bool&lt;/span&gt; IsDeleted { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;如上代码，我们将Name设置私有属性，接下来我们利用EF Core提供给我们的APi来访问是否可以进行映射到数据库表中呢？我们来尝试一下。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; BlogConfiguration : IEntityTypeConfiguration&amp;lt;Blog&amp;gt;&lt;span&gt;
+    {
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Configure(EntityTypeBuilder&amp;lt;Blog&amp;gt;&lt;span&gt; builder)
+        {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; nonPublicProperties = &lt;span&gt;builder.Metadata&lt;/span&gt;.ClrType.GetProperties(BindingFlags.NonPublic |&lt;span&gt; BindingFlags.Instance);
+            &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt; (&lt;span&gt;var&lt;/span&gt; p &lt;span&gt;in&lt;/span&gt;&lt;span&gt; nonPublicProperties)
+            {
+                builder.Property(p.Name).HasColumnType(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;VARCHAR(50)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            }
+            builder.Property(p &lt;/span&gt;=&amp;gt; p.CreatedTime).HasColumnType(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;DATETIME&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).HasDefaultValueSql(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;GETDATE()&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+        }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+        &lt;span&gt;protected&lt;/span&gt; &lt;span&gt;override&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.ApplyConfiguration(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; BlogConfiguration());
+            &lt;/span&gt;&lt;span&gt;base&lt;/span&gt;&lt;span&gt;.OnModelCreating(modelBuilder);
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在EF Core中如若我们需要访问元数据，则需要借助于在映射配置中即如上builder中的Metadata属性来访问，比如访问属性、主键、外键、导航属性皆可，接下来我们迁移看看。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/589642/201807/589642-20180713015117141-1607430116.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;通过迁移生成的SQL语句我们就可得出结论：&lt;span&gt;在EF Core中映射私有属性和EF 6.x如出一辙，只不过使用方式略有不同罢了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;当然实际场景中，若属性为私有，那就没有映射到数据库中的必要了，这里只是作为探讨。下面我们再来看看实际场景，比如上述中的Name属性为计算属性，那么此时我们会进行如下映射：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; BlogConfiguration : IEntityTypeConfiguration&amp;lt;Blog&amp;gt;&lt;span&gt;
+    {
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Configure(EntityTypeBuilder&amp;lt;Blog&amp;gt;&lt;span&gt; builder)
+        {
+            builder.Property(p &lt;/span&gt;=&amp;gt; p.Name).IsRequired().HasComputedColumnSql(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;((N'cnblogs'+CONVERT([CHAR](8),[CreatedTime],(112)))+RIGHT(REPLICATE(N'0',(6))+CONVERT([NVARCHAR],[Id],(0)),(6)))&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            builder.Property(p &lt;/span&gt;=&amp;gt; p.CreatedTime).HasColumnType(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;DATETIME&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).HasDefaultValueSql(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;GETDATE()&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+        }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;此时我们在控制台进行如下提交：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+            &lt;span&gt;var&lt;/span&gt; context = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; EFCoreDbContext();
+            context.Add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Blog()
+            {
+                IsDeleted &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;,
+                Status &lt;/span&gt;= &lt;span&gt;0&lt;/span&gt;&lt;span&gt;,
+                ModifiedTime &lt;/span&gt;=&lt;span&gt; DateTime.Now,
+                Url &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;http://www.cnblogs.com/createmyself&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+                Name &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;2222&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+            });
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = context.SaveChanges();
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;因为我们将上述Name配置为计算属性，但是此时Name属性中的SET访问器是公共的，所以可能会有误操作对其进行赋值，当然即使手动赋值，最终依然能正确提交，结果不受任何影响，只能说这样可读性不太好，既然Name为计算属性即数据库自动为其赋了值，那么我们为何不将SET访问器设置为私有的呢，保持其只读而不可设置呢，改造如下即可：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+ &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Name { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;private&lt;/span&gt; &lt;span&gt;set&lt;/span&gt;; }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 如上设置Name为私有即不能手动为其赋值，那么我们可以视为计算属性或者传参赋值，如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+        &lt;span&gt;private&lt;/span&gt;&lt;span&gt; Blog() { }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Blog(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; name)
+        {
+            Name &lt;/span&gt;=&lt;span&gt; name;
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在EF Core中利用构造函数传参，那么必须显式存在无参构造函数，否则抛出异常，你懂的。再进一步讲，我们也可将Name属性作为只作为字段来访问，配置成如下即可。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Configure(EntityTypeBuilder&amp;lt;Blog&amp;gt;&lt;span&gt; builder)
+        {
+            &lt;/span&gt;&lt;span&gt;var property =&lt;/span&gt;&lt;span&gt;&lt;span&gt; builder.Metadata.FindProperty(nameof(Blog.Name));
+            property.SetPropertyAccessMode(PropertyAccessMode.Field);&lt;/span&gt;
+
+            builder.Property(p &lt;/span&gt;=&amp;gt; p.Name).HasColumnType(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;VARCHAR(50)&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            builder.Property(p &lt;/span&gt;=&amp;gt; p.CreatedTime).HasColumnType(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;DATETIME&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).HasDefaultValueSql(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;GETDATE()&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2&gt;总结&lt;/h2&gt;
+&lt;p&gt;本节稍微探讨了下EF Core中如何映射私有属性，虽然没有什么实际作用，可作为了解。想必很多时候，我们都会将属性GET或者SET访问器都设置为公共的，虽然简便但可读性并那么强，是计算属性、还是字段等等，都应显式设置，这样可读性会更好。&lt;/p&gt;
+</description>
+<pubDate>Thu, 12 Jul 2018 18:39:00 +0000</pubDate>
+<dc:creator>Jeffcky</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/CreateMyself/p/9302771.html</dc:identifier>
+</item>
+<item>
+<title>相机IMU融合四部曲（一）：D-LG-EKF详细解读 - 极品巧克力</title>
+<link>http://www.cnblogs.com/ilekoaiq/p/9302532.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ilekoaiq/p/9302532.html</guid>
+<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;相机IMU融合四部曲（一）：D-LG-EKF详细解读&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;极品巧克力&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;前言&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;前两篇文章《Google Cardbord的九轴融合算法》，《Madgwick算法详细解读》，讨论的都是在SO3上的传感器融合，即，输出的只是纯旋转的姿态。只有旋转，而没有位移，也就是目前的一些普通的VR盒子的效果。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而《相机IMU融合四部曲》要讨论的是，在SE3上面的传感器融合，在既有旋转又有位移的情况下，该如何对多传感器进行融合。也就是，工程实践中的，如何把基于相机算出来的位姿，与IMU的位姿融合在一起。既有旋转又有位移，可以反映玩家在三维空间中的运动，也就是目前的高端VR的效果，比如HTC Vive，Oculus以及微软的Hololens, MR头盔。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234047262-1185823221.png&quot; alt=&quot;&quot;/&gt;&lt;span&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234047845-973171833.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234048414-1187002469.png&quot; alt=&quot;&quot;/&gt;&lt;span&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234048877-527901970.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;本系列文章分为四篇，分别从理论和实践层面进行详细阐述。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;理论部分主要介绍相机和IMU在SE3上的融合，基于误差状态的卡尔曼滤波，IMU的在线标定，松耦合方法，紧耦合方法等。实践部分，则是这些理论的具体实现，在VR中的实际融合效果，以及针对实验结果的改进方案，实践中总结的经验等。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;以下为第一篇，我结合参考文献《Discrete extended Kalman filter on lie groups》，对SE3的融合理论进行详细推导，总结成本文，与各位分享。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;本文目标读者：传感器融合算法工程师。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;一.基础理论&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;首先，有SE3上的伴随性质，这与《视觉SLAM十四讲》里面的公式4.48一样。伴随性质与BCH近似的目的一样，都是要让相乘的李代数融成一个李代数。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234049260-632000381.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;还可以转换成其它的形式。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234049522-1705637232.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;然后是BCH公式。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234049870-867933793.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;另外一个公式。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234050153-1072529879.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;关于&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234050511-1963627319.png&quot; alt=&quot;&quot;/&gt;的计算，参考《机器人状态估计》。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;不过，我觉得，上面这个公式，作者可能写错了，比如，当&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234050744-2074971277.png&quot; alt=&quot;&quot;/&gt;很大，而&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234051036-1644807138.png&quot; alt=&quot;&quot;/&gt;时，代入上式，得到&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234051364-1116155436.png&quot; alt=&quot;&quot;/&gt;，这样就得到了&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234051735-2004350725.png&quot; alt=&quot;&quot;/&gt;，这样就可以进一步得出&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234052065-1434847600.png&quot; alt=&quot;&quot;/&gt;，所以上面的公式是有错误的。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，作者想表达的应该是，BCH近似公式。应该写成如下形式，当&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234052282-2057710034.png&quot; alt=&quot;&quot;/&gt;和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234052594-545401763.png&quot; alt=&quot;&quot;/&gt;都为小量时，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234052890-447035694.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;然后，假设在均值0附近的李代数满足高斯分布，均值处的李群为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234053137-391478796.png&quot; alt=&quot;&quot;/&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234053422-58110093.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;又因为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234053705-1494248360.png&quot; alt=&quot;&quot;/&gt;，参考《on-manifold详细解读》，把&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234053902-317860407.png&quot; alt=&quot;&quot;/&gt;的中的表示旋转的&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234054148-936050191.png&quot; alt=&quot;&quot;/&gt;的范围限制住，可以得出&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234054425-177874662.png&quot; alt=&quot;&quot;/&gt;和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234054623-1489373488.png&quot; alt=&quot;&quot;/&gt;是一一对应的关系，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234054837-287313588.png&quot; alt=&quot;&quot;/&gt;，所以，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234055092-1738954182.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而，如果是在位姿&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234055323-1690003040.png&quot; alt=&quot;&quot;/&gt;的附近进行同样的误差分布呢，则可以表示为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234055525-1850343956.png&quot; alt=&quot;&quot;/&gt;，用公式表示如下，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234055830-1765535849.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;还可以推导出，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234056032-1033893612.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234056255-398169368.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;但不能认为，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234056537-392964089.png&quot; alt=&quot;&quot;/&gt;是绕着&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234056776-1308510580.png&quot; alt=&quot;&quot;/&gt;进行高斯分布的。因为李代数也都是相对的，根据BCH公式，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234057030-509610996.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;因为不一定是个微小值，所以不能用BCH近似。所以，通过上面公式可以看出，如果没有&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234057494-688768754.png&quot; alt=&quot;&quot;/&gt;的话，则&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234057843-1398053873.png&quot; alt=&quot;&quot;/&gt;服从的分布和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234058085-342707833.png&quot; alt=&quot;&quot;/&gt;一样，会是高斯分布。但是，在&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234058347-1217208779.png&quot; alt=&quot;&quot;/&gt;的情况下，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234058552-1166157470.png&quot; alt=&quot;&quot;/&gt;会随着&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234058779-1567327376.png&quot; alt=&quot;&quot;/&gt;值的改变而改变。在不同位置对高斯曲线会有不同的改变，所以，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234058962-1523663358.png&quot; alt=&quot;&quot;/&gt;也就不会服从高斯分布，并且对应的协方差也会随之改变。参考《李代数及其协方差都是相对的》。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;二.D-LG-EKF&lt;/h2&gt;
+&lt;h3&gt;2.1系统模型&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234059386-765689968.png&quot; alt=&quot;&quot;/&gt;&lt;span&gt;是第&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234059604-847240970.png&quot; alt=&quot;&quot;/&gt;时刻的状态，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234059857-1110976171.png&quot; alt=&quot;&quot;/&gt;是外界输入，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234100173-1412507689.png&quot; alt=&quot;&quot;/&gt;是噪声，则对下一个状态的预测为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234100621-1217306095.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其中，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234100829-414356748.png&quot; alt=&quot;&quot;/&gt;表示的是，这个输入所造成的位姿变换的李代数。要注意的是，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234101037-251736390.png&quot; alt=&quot;&quot;/&gt;并不直接代表&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234101288-875496462.png&quot; alt=&quot;&quot;/&gt;上的噪声，虽然它的来源是&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234101573-1619427880.png&quot; alt=&quot;&quot;/&gt;上的噪声，它需要根据&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234101947-1649274869.png&quot; alt=&quot;&quot;/&gt;上的噪声，通过&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234102187-273148449.png&quot; alt=&quot;&quot;/&gt;的实际表达式，转换出来。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;因为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234102418-1048019651.png&quot; alt=&quot;&quot;/&gt;和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234102659-1422102098.png&quot; alt=&quot;&quot;/&gt;都是已知的，假设只在&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234102947-1282842772.png&quot; alt=&quot;&quot;/&gt;的作用下，状态&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234103245-2047946997.png&quot; alt=&quot;&quot;/&gt;变成了&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234103572-705529507.png&quot; alt=&quot;&quot;/&gt;。则，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234103859-1004126709.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234104079-1514873980.png&quot; alt=&quot;&quot;/&gt;所表示的就是，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234104314-262178902.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;因为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234104522-1309456667.png&quot; alt=&quot;&quot;/&gt;和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234104806-13668872.png&quot; alt=&quot;&quot;/&gt;都是已知的，所以可以通过这个状态变换，计算得到&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234105017-1985273324.png&quot; alt=&quot;&quot;/&gt;。参考《视觉SLAM十四讲》的图4-1，可以将&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234105260-1620996786.png&quot; alt=&quot;&quot;/&gt;转换为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234105463-1367620498.png&quot; alt=&quot;&quot;/&gt;。所以，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234105680-2056251295.png&quot; alt=&quot;&quot;/&gt;也就可以得到了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;测量方程。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234105888-1781689083.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;2.2传播&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;假设在&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234106302-935853888.png&quot; alt=&quot;&quot;/&gt;时刻的状态的后验概率分布服从，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234106527-1308044751.png&quot; alt=&quot;&quot;/&gt;。即，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234106916-1694351858.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;如果没有噪声的话，则对下一个状态均值的预测&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234107122-1216900989.png&quot; alt=&quot;&quot;/&gt;为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234107490-478500466.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而根据之前的公式，对&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234107705-568455165.png&quot; alt=&quot;&quot;/&gt;预测的分布满足，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234107916-1252315461.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，设下一个状态的误差分布为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234108142-1518679618.png&quot; alt=&quot;&quot;/&gt;，则它要满足，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234108350-282455761.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;可以得出，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234108640-930423809.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;参考《李代数扰动的理解》，当&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234109171-932633829.png&quot; alt=&quot;&quot;/&gt;时，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234109382-120428495.png&quot; alt=&quot;&quot;/&gt;，所以，上式可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234109674-978103267.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;要注意的是，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234109886-107508051.png&quot; alt=&quot;&quot;/&gt;，因为这里的&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234110388-1021784015.png&quot; alt=&quot;&quot;/&gt;其实表示的是一种分布，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234110628-174515569.png&quot; alt=&quot;&quot;/&gt;，所以，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234110998-74617331.png&quot; alt=&quot;&quot;/&gt;，所以，原式还可以转换成，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234111284-1050548207.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;上式的右边都是已知的，所以就是代表了从&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234111501-1786901995.png&quot; alt=&quot;&quot;/&gt;到&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234111799-171031971.png&quot; alt=&quot;&quot;/&gt;的变换关系。首先，根据伴随性质，得到，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234112133-1794909470.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;再根据BCH近似公式，上式可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234112564-1890843798.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;令&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234112889-2128678685.png&quot; alt=&quot;&quot;/&gt; ，则直接使用BCH公式，上式可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234113160-532830279.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;又因为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234113457-1209925133.png&quot; alt=&quot;&quot;/&gt;和&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234113757-1479357862.png&quot; alt=&quot;&quot;/&gt;都是小量，所以&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234113995-185991519.png&quot; alt=&quot;&quot;/&gt;可以忽略掉，上式可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234114273-354069570.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以， &lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234114580-1306150348.png&quot; alt=&quot;&quot;/&gt;与&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234114801-1189818626.png&quot; alt=&quot;&quot;/&gt;的关系又可以表示为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234115103-1411933696.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;对上面的变换关系，在&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234115418-402217249.png&quot; alt=&quot;&quot;/&gt;处进行线性化，也就是进行一阶泰勒展开，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234115641-338736506.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;则，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234115959-648242411.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;因为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234116234-1457898845.png&quot; alt=&quot;&quot;/&gt;，所以&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234116489-1107850690.png&quot; alt=&quot;&quot;/&gt;，代入上式，得到，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234116750-1444384426.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，最终得到，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234117013-581208931.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而另外一个，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234117362-915506596.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234117711-1916682975.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;然后，根据实际的运动方程，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234117949-1459496886.png&quot; alt=&quot;&quot;/&gt;的表达式，算出&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234118209-29106336.png&quot; alt=&quot;&quot;/&gt;的解析式，再求出&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234118439-1152621263.png&quot; alt=&quot;&quot;/&gt;。（或者，也可以用数值扰动的方法，求&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234118679-738542532.png&quot; alt=&quot;&quot;/&gt;。），然后得到&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234118913-861963255.png&quot; alt=&quot;&quot;/&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;继续之前的变换关系进行一阶泰勒展开，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234119276-1425334355.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其中，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234119600-966727790.png&quot; alt=&quot;&quot;/&gt;是一个微小量，可以忽略掉。所以，就得到了&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234119904-1973385279.png&quot; alt=&quot;&quot;/&gt;与&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234120127-191418756.png&quot; alt=&quot;&quot;/&gt;之间的线性转换关系。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234120364-7531828.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;用&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234120586-1186096324.png&quot; alt=&quot;&quot;/&gt;表示&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234120932-839773820.png&quot; alt=&quot;&quot;/&gt;，得到，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234121211-1029676470.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;再计算扰动的均值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234121455-1742874978.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234121789-1676849663.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;然后，再计算&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234122010-1037683996.png&quot; alt=&quot;&quot;/&gt;的协方差&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234122252-1192306092.png&quot; alt=&quot;&quot;/&gt;。协方差的计算，参考《机器人状态估计》的第二章。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234122537-1312611212.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，最后得到，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234122799-2020756657.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234123337-1171402156.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234123651-1169505199.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;2.3更新&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;对预测出来的扰动和实际测量出来的扰动，进行融合。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;对测量值的处理，可以直接是传感器的测量值，比如加速度计的测量值，然后再考虑这个测量值上的高斯噪声。将预测出来的测量值与实际的测量值进行融合，然后再反馈给状态。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;对测量值的处理，也可以转换成李代数的形式。就像是madgwick算法一样，以之前的姿态为初值，优化姿态，使得通过姿态计算出来的测量值与实际测量值最接近。而在本文中，采用的就是这种方法。（如果测量值只是加速度计或磁场计的测量向量的话，就更简单了，因为madgwick要优化出四元数，而本文只要李代数就可以了。以之前的姿态为初值，优化姿态，使得通过姿态计算出来的加速度计向量与实际加速度计向量最接近，而这两个向量之间的相对位姿变化，只需要叉乘一下就可以了，不需要通过优化。如果测量值是其它的，比如图像上的特征点位置，那就只能通过优化的方法，优化出测量位姿，或者采用上一种测量值融合的方法。或者，也可以与视觉SLAM结合起来，直接以图像计算出来的姿态或位姿为测量值。）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;设第k时刻位姿的真实值为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234123922-377889883.png&quot; alt=&quot;&quot;/&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;首先，有个预测的位姿&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234124169-31848085.png&quot; alt=&quot;&quot;/&gt;，它的协方差为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234124437-1788936928.png&quot; alt=&quot;&quot;/&gt;。则意味着概率，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234124647-1393679653.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234124875-1166843138.png&quot; alt=&quot;&quot;/&gt;&lt;span&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;基于这个预测的位姿，预测出来的传感器的测量值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234125092-1149657110.png&quot; alt=&quot;&quot;/&gt;，然后有传感器的实际测量值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234125357-1116083805.png&quot; alt=&quot;&quot;/&gt;。用&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234125564-3610990.png&quot; alt=&quot;&quot;/&gt;作为位姿初值，优化（或叉乘）出新的位姿，使得预测测量值与实际测量值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234125810-465134616.png&quot; alt=&quot;&quot;/&gt;最接近。用&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234126013-328787145.png&quot; alt=&quot;&quot;/&gt;，表示优化出来的位姿相对于预测位姿的位姿。所以，实际测量值位姿可以表示为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234126250-1254812154.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234126464-1726037343.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234126693-1841546021.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其中，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234126900-1952611051.png&quot; alt=&quot;&quot;/&gt;是传感器的测量值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234127130-1997400508.png&quot; alt=&quot;&quot;/&gt;的噪声，传递到&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234127380-1468048426.png&quot; alt=&quot;&quot;/&gt;之后，再分离到右边去。&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234127584-1933319283.png&quot; alt=&quot;&quot;/&gt;可以通过这个过程中的变换，从实际传感器的测量值协方差，转换过来。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，这就意味着，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234127836-932750686.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，综合目前的信息，可以得到，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234128069-1454437798.png&quot; alt=&quot;&quot;/&gt;，就是要求一个&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234128304-1744769310.png&quot; alt=&quot;&quot;/&gt;，使得&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234128544-122508431.png&quot; alt=&quot;&quot;/&gt;最大。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234128931-2070353719.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其中，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234129361-1665812067.png&quot; alt=&quot;&quot;/&gt;是个未知数，用&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234129673-35979660.png&quot; alt=&quot;&quot;/&gt;，转换成用未知数&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234129912-1459381555.png&quot; alt=&quot;&quot;/&gt;来表示。然后，上式就可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234130174-1563054296.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;但这样子也解不出来。参考《李代数高斯分布的求导》，对上式中的部分，在&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234130527-742249256.png&quot; alt=&quot;&quot;/&gt;处进行线性化，一阶泰勒展开。则可以转换为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234130831-1685499384.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;同理，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234131128-1831817484.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;其中，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234131481-490937929.png&quot; alt=&quot;&quot;/&gt;的计算，用数值扰动的方法。当然，也可以用解析的方法，把公式都展开来推导。（或者，参考《MSF详细解读》里面的方法，为了算H矩阵，直接就认为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234131785-945973564.png&quot; alt=&quot;&quot;/&gt;，这样子算H矩阵很方便，其余的与原来方法一样。如果是上式的话，则&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234132097-437644704.png&quot; alt=&quot;&quot;/&gt;）。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;接下来，为了转换成卡尔曼滤波的形式，用&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234132533-1680592442.png&quot; alt=&quot;&quot;/&gt;来表示。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，原式就可以表示为，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234132839-1238470246.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这样子，参考《从贝叶斯到卡尔曼滤波》，就可以转换成卡尔曼滤波的形式了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234133116-970292611.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，得到了融合后的扰动&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234133377-1433212850.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234133662-658880609.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;同时，&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234134184-680146556.png&quot; alt=&quot;&quot;/&gt;满足，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234134450-98404601.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，预测出来的位姿&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234134705-20051347.png&quot; alt=&quot;&quot;/&gt;，乘以这个融合后的扰动均值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234135283-2031610058.png&quot; alt=&quot;&quot;/&gt;，就得到了融合后的位姿&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234135525-1217138498.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234136000-217418788.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，新的位姿的李代数为&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234136280-1037481526.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234136530-567866213.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;则新位姿附近的李代数扰动&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234136959-587114038.png&quot; alt=&quot;&quot;/&gt;要满足，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234137342-1191367466.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，新的扰动&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234137766-219629975.png&quot; alt=&quot;&quot;/&gt;的均值&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234138048-602286775.png&quot; alt=&quot;&quot;/&gt;和协方差&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234138466-621255473.png&quot; alt=&quot;&quot;/&gt;，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234138909-677181869.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;协方差，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234139429-1960660623.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;所以，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234139950-536836042.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234140358-745050618.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;三.总结&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;总结起来，流程就是，&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/699318/201807/699318-20180712234141205-657379079.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;四.参考文献&lt;/h2&gt;
+&lt;ol readability=&quot;0.5&quot;&gt;&lt;li readability=&quot;4&quot;&gt;
+&lt;p&gt;&lt;span&gt;Bourmaud G, Megret R, Giremus A, et al. Discrete Extended Kalman Filter on Lie groups[C]// Signal Processing Conference. EURASIP, 2013:1-5.&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+</description>
+<pubDate>Thu, 12 Jul 2018 15:48:00 +0000</pubDate>
+<dc:creator>极品巧克力</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ilekoaiq/p/9302532.html</dc:identifier>
+</item>
+<item>
+<title>Mybatis学习系列（七）缓存机制 - 仍是少年</title>
+<link>http://www.cnblogs.com/ashleyboy/p/9302507.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ashleyboy/p/9302507.html</guid>
+<description>&lt;h2&gt;Mybatis缓存介绍&lt;/h2&gt;
+&lt;p&gt;MyBatis提供一级缓存和二级缓存机制。&lt;/p&gt;
+&lt;p&gt;一级缓存是Sqlsession级别的缓存，Sqlsession类的实例对象中有一个hashmap用于缓存数据。不同的Sqlsession实例缓存的hashmap数据区域互不影响。Mybatis默认启用一级缓存，在同一个sqlsession中多次执行相同的sql语句，第一次执行后会将数据缓存起来，后面的查询将会从缓存中读取。当一个sqlsession结束后（close），该sqlsession中缓存的数据也将不存在。&lt;/p&gt;
+&lt;p&gt;二级缓存是Mapper级别的缓存，多个sqlsession实例操作同一个Mapper配置可共享二级缓存。Mybatis默认没有启用二级缓存，需要手动配置开启二级缓存。&lt;/p&gt;
+&lt;p&gt;一张图看看一集缓存和二级缓存的区别：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180712232235647-1388551123.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;一级缓存&lt;/h2&gt;
+&lt;p&gt;一级缓存区域按sqlsession划分，当执行查询时会先从缓存区域查找，如果存在则直接返回数据，否则从数据库查询，并将结果集写入缓存区。 Mybatis一级缓存是在sqlsession内部维护一个hashmap用于存储，缓存key为hashcode+sqlid+sql，value则为查询的结果集。一级缓存在执行sqlsession.commit()后将会被清空。&lt;/p&gt;
+&lt;p&gt;一级缓存示例：&lt;/p&gt;
+&lt;p&gt;编写cacheMapper.xml配置文件&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mapper &lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;com.sl.mapper.CacheMapper&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;cache&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
+        select * from products where id = #{id}
+    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mapper&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Mapper接口：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('cf0ab208-3306-4427-9515-595e108d26f1')&quot; readability=&quot;31.5&quot;&gt;&lt;img id=&quot;code_img_closed_cf0ab208-3306-4427-9515-595e108d26f1&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_cf0ab208-3306-4427-9515-595e108d26f1&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('cf0ab208-3306-4427-9515-595e108d26f1',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_cf0ab208-3306-4427-9515-595e108d26f1&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;58&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; CacheMapper {
+    
+    Product selectProductById(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id);
+    
+    @Options(flushCache&lt;/span&gt;=&lt;span&gt;FlushCachePolicy.TRUE)
+    &lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; updateProductById(Product product);
+    
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;测试方法：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestCacheMapperClient {
+&lt;br/&gt;SqlSessionFactory factory &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    @Before
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; init() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; IOException {
+        String resource &lt;/span&gt;= &quot;SqlMapConfig.xml&quot;&lt;span&gt;;
+        InputStream inputStream &lt;/span&gt;=&lt;span&gt; Resources.getResourceAsStream(resource);
+        SqlSessionFactoryBuilder builder &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlSessionFactoryBuilder();
+        factory &lt;/span&gt;=&lt;span&gt; builder.build(inputStream);
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 一级缓存&lt;/span&gt;
+&lt;span&gt;    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testSelectProductById() {
+
+        SqlSession session &lt;/span&gt;=&lt;span&gt; factory.openSession();
+        CacheMapper mapper &lt;/span&gt;= session.getMapper(CacheMapper.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+
+        Product product &lt;/span&gt;= mapper.selectProductById(1&lt;span&gt;);
+
+        System.out.println(product.getName());
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行commit 将清空一级缓存
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;session.commit();
+        
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;再次执行查询 从一级缓存读取       &lt;/span&gt;
+        Product product2 = mapper.selectProductById(1&lt;span&gt;);
+        
+        System.out.println(product.getName());
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 关闭会话&lt;/span&gt;
+&lt;span&gt;        session.close();
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;执行第一次执行selectProductById，查询数据库，第二次执行，从缓存中读取&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180712232459784-898641100.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果在两次查询中间执行commit，即上面的注释掉的session.commit()，则运行结果如下，显然清空了一级缓存，再次执行数据库查询&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180712232510961-150630346.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;二级缓存&lt;/h2&gt;
+&lt;p&gt;二级缓存按照mapper划分，一个mapper有一个自己的二级缓存（按照namespace区分不同缓存区域，如果多个mapper的namespace相同，则公用一个缓存区域），当多个sqlsession类实例加载相同的Mapper文件，执行mapper配置文件中的sql查询时，这些sqlsession可共享一个二级缓存。Mybatis默认没有启用二级缓存，需要自行配置。&lt;/p&gt;
+&lt;p&gt;二级缓存示例：&lt;/p&gt;
+&lt;p&gt;1. 启用二级缓存：&lt;/p&gt;
+&lt;p&gt;在mybatis置文件SqlMapConfig.xml中加入一下配置&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;setting &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;cacheEnabled&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在Mapper.xml配置文件中添加cache标签&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;cache &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;  &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; 表示此mapper开启二级缓存。&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;还可以配置其他参数，如：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;cache  &lt;/span&gt;&lt;span&gt;flushInterval&lt;/span&gt;&lt;span&gt;=&quot;60000&quot;&lt;/span&gt;&lt;span&gt;  size&lt;/span&gt;&lt;span&gt;=&quot;512&quot;&lt;/span&gt;&lt;span&gt;  readOnly&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt; eviction&lt;/span&gt;&lt;span&gt;=&quot;FIFO&quot;&lt;/span&gt;&lt;span&gt;  type&lt;/span&gt;&lt;span&gt;=”xxxxx” &lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;flushInterval：刷新时间间隔，单位毫秒，不设置则没有刷新时间间隔，在执行配置了flushCache标签的sql时刷新（清空）&lt;/p&gt;
+&lt;p&gt;size：缓存原数个数，默认1024&lt;/p&gt;
+&lt;p&gt;readOnly：是否只读,默认false:mybatis将克隆一份数据返回，true:直接返回缓存数据的引用（不安全，程序如果修改，直接改了缓存项）&lt;/p&gt;
+&lt;p&gt;eviction：缓存的回收策略（LRU 、FIFO、 SOFT 、WEAK ），默认LRU&lt;/p&gt;
+&lt;p&gt;type：指定自定义缓存的全类名(实现Cache接口即可)&lt;/p&gt;
+&lt;p&gt;2. 结果集映射对象实现序列化接口&lt;/p&gt;
+&lt;p&gt;使用Mybatis二级缓存需要将sql结果集映射的pojo对象实现java.io.Serializable接口，否则将出现序列化错误。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Product &lt;span&gt;implements&lt;/span&gt; Serializable{ …}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;3.编写cacheMapper.xml配置文件&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mapper &lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;com.sl.mapper.CacheMapper&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;cache&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+   &lt;br/&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; useCache=&quot;false&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+        select * from products where id = #{id}
+    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    
+    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; update – 映射更新语句 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;update &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;updateProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt; flushCache&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; flushCache=&quot;true&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+        update products set
+        Name = #{Name},IsNew=#{IsNew} 
+        where id=#{id}
+    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;update&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mapper&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;4.Mapper.java接口&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; CacheMapper {
+    Product selectProductById(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt;&lt;span&gt; id);
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;@Options(flushCache=FlushCachePolicy.TRUE)  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;清空 二级缓存&lt;/span&gt;
+    &lt;span&gt;int&lt;/span&gt;&lt;span&gt; updateProductById(Product product);\
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;5.测试方法：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestCacheMapperClient {&lt;br/&gt;SqlSessionFactory factory &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+
+    @Before
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; init() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; IOException {
+        String resource &lt;/span&gt;= &quot;SqlMapConfig.xml&quot;&lt;span&gt;;
+        InputStream inputStream &lt;/span&gt;=&lt;span&gt; Resources.getResourceAsStream(resource);
+        SqlSessionFactoryBuilder builder &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SqlSessionFactoryBuilder();
+        factory &lt;/span&gt;=&lt;span&gt; builder.build(inputStream);
+    }&lt;br/&gt;&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;二级缓存&lt;/span&gt;
+&lt;span&gt;    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; testSelectProductById2() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; IOException {
+
+        SqlSession session1 &lt;/span&gt;=&lt;span&gt; factory.openSession();
+        CacheMapper mapper1 &lt;/span&gt;= session1.getMapper(CacheMapper.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+
+        Product product &lt;/span&gt;= mapper1.selectProductById(1&lt;span&gt;);
+
+        System.out.println(product.getName());
+        
+        &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;**********同一session 共享一级缓存**************&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;CacheMapper mapper2 = session1.getMapper(CacheMapper.class);
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Product product2 = mapper2.selectProductById(1);
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;System.out.println(product2.getName());
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行commit 将清空一级缓存,无法情况二级缓存&lt;/span&gt;
+&lt;span&gt;        session1.commit();
+        session1.close();
+        
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;清空二级缓存 
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Mapper接口注解@Options(flushCache=FlushCachePolicy.TRUE) 或者Mapper.xml配置属性 flushCache=&quot;true&quot;&lt;/span&gt;
+        SqlSession session4 =&lt;span&gt; factory.openSession();
+        CacheMapper mapper4 &lt;/span&gt;= session4.getMapper(CacheMapper.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+        
+        Product up &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Product();
+        up.setId(&lt;/span&gt;1&lt;span&gt;);
+        up.setIsNew(&lt;/span&gt;&lt;span&gt;true&lt;/span&gt;&lt;span&gt;);
+        up.setName(&lt;/span&gt;&quot;缓存测试2&quot;&lt;span&gt;);
+
+        &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; count =&lt;span&gt; mapper4.updateProductById(up);
+        session4.commit();
+        session4.close();
+        
+        &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;********不同session实例 共享二级缓存***********&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+        SqlSession session3 &lt;/span&gt;=&lt;span&gt; factory.openSession();
+        
+        CacheMapper mapper3 &lt;/span&gt;= session3.getMapper(CacheMapper.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+
+        Product product3 &lt;/span&gt;= mapper3.selectProductById(1&lt;span&gt;);
+
+        System.out.println(product3.getName());
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 关闭会话&lt;/span&gt;
+&lt;span&gt;        session3.close();
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;测试结果，上面updateProductById方法在配置sql中清空了二级缓存，所以后面mapper3.selectProductById(1)仍然执行数据库查询。&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/577318/201807/577318-20180712232940188-707260314.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;6. 禁用二级缓存&lt;/p&gt;
+&lt;p&gt;Mybatis还提供属性用于对指定的查询禁用二级缓存，在Mapper.xml配置文件中可是使用useCache=false禁止当前select使用二级缓存，即：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; &amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt; useCache&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; useCache=&quot;false&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+            select * from products where id = #{id}
+ &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在Mapper.Java接口中可是通过注解来禁用二级缓存，即：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+    @Options(useCache=&lt;span&gt;false&lt;/span&gt;&lt;span&gt;)
+    Product selectProductById(&lt;/span&gt;&lt;span&gt;int&lt;/span&gt; id);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;7.缓存刷新&lt;/p&gt;
+&lt;p&gt;当mybatis执行数据更新sql语句后，DB数据与缓存数据可能已经不一致，如果不执行刷新缓存则可能出现脏读的情况，Mybatis同样提供xml配置和注解两种方式来实现缓存刷新&lt;/p&gt;
+&lt;p&gt;Xml配置形式：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;update &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;updateProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt; flushCache&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; flushCache=&quot;true&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+            update products set
+            Name = #{Name},IsNew=#{IsNew} 
+            where id=#{id}
+&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;update&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;注解形式：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+@Options(flushCache=FlushCachePolicy.TRUE)  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;清空 二级缓存&lt;/span&gt;
+&lt;span&gt;int&lt;/span&gt; updateProductById(Product product);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h2&gt;使用Redis做Mybatis二级缓存&lt;/h2&gt;
+&lt;p&gt;Mybatis默认启用二级缓存是服务器本地缓存，在程序部署到多台服务器时可能出现数据不一致的情况，这种情况下最好能有个集中式缓存来解决此问题。MyBatis的二级缓存允许自定义实现，Mybatis提供二级缓存接口，我们可以通过实现org.apache.ibatis.cache.Cache接口来整合第三方缓存，比如redis、memcache等。&lt;/p&gt;
+&lt;p&gt;Demo实现步骤：&lt;/p&gt;
+&lt;p&gt;1.  添加jar包依赖&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;        &amp;lt;!--&lt;/span&gt;&lt;span&gt; redis client &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;redis.clients&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;groupId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;jedis&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;artifactId&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;${jedis.version}&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;version&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;dependency&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;2. 实现 Mybatis二级缓存org.apache.ibatis.cache.Cache接口&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('6d2a5364-02be-4dd0-b707-13b045c08640')&quot; readability=&quot;34.5&quot;&gt;&lt;img id=&quot;code_img_closed_6d2a5364-02be-4dd0-b707-13b045c08640&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_6d2a5364-02be-4dd0-b707-13b045c08640&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('6d2a5364-02be-4dd0-b707-13b045c08640',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_6d2a5364-02be-4dd0-b707-13b045c08640&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;64&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.sl.redis;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.concurrent.locks.ReadWriteLock;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.concurrent.locks.ReentrantReadWriteLock;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.apache.ibatis.cache.Cache;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; redis.clients.jedis.Jedis;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; redis.clients.jedis.JedisPool;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; redis.clients.jedis.JedisPoolConfig;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; RedisCache &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; Cache
+{
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; Jedis redisClient =&lt;span&gt; createClient();
+    
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; ReadWriteLock readWriteLock = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ReentrantReadWriteLock();
+ 
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; String id;
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; RedisCache(&lt;span&gt;final&lt;/span&gt;&lt;span&gt; String id) {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (id == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; IllegalArgumentException(&quot;Cache instances require an ID&quot;&lt;span&gt;);
+        }
+        
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.id =&lt;span&gt; id;
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; String getId() {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.id;
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt; getSize() {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; Integer.valueOf(redisClient.dbSize().toString());
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putObject(Object key, Object value) {
+        
+        redisClient.set(SerializeHelper.serialize(key.toString()), SerializeHelper.serialize(value));
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; Object getObject(Object key) {
+        Object value &lt;/span&gt;=&lt;span&gt; SerializeHelper.unserialize(redisClient.get(SerializeHelper.serialize(key.toString())));
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; value;
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; Object removeObject(Object key) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; redisClient.expire(SerializeHelper.serialize(key.toString()), 0&lt;span&gt;);
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; clear() {
+        
+        redisClient.flushDB();
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; ReadWriteLock getReadWriteLock() {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; readWriteLock;
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;protected&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; Jedis createClient() {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            JedisPool pool &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; JedisPool(&lt;span&gt;new&lt;/span&gt; JedisPoolConfig(),&quot;localhost&quot;&lt;span&gt;);
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; pool.getResource();
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+            e.printStackTrace();
+        }
+        &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; RuntimeException(&quot;初始化连接池错误&quot;&lt;span&gt;);
+    }
+    
+
+}
+
+&lt;/span&gt;&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.sl.redis;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.ByteArrayInputStream;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.ByteArrayOutputStream;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.ObjectInputStream;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.io.ObjectOutputStream;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; SerializeHelper {
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;&lt;span&gt;[] serialize(Object object) {
+        ObjectOutputStream oos &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        ByteArrayOutputStream baos &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 序列化&lt;/span&gt;
+            baos = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ByteArrayOutputStream();
+            oos &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ObjectOutputStream(baos);
+            oos.writeObject(object);
+            &lt;/span&gt;&lt;span&gt;byte&lt;/span&gt;[] bytes =&lt;span&gt; baos.toByteArray();
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; bytes;
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+            e.printStackTrace();
+        }
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    }
+ 
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; Object unserialize(&lt;span&gt;byte&lt;/span&gt;&lt;span&gt;[] bytes) {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (bytes == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        ByteArrayInputStream bais &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 反序列化&lt;/span&gt;
+            bais = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ByteArrayInputStream(bytes);
+            ObjectInputStream ois &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ObjectInputStream(bais);
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; ois.readObject();
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+            e.printStackTrace();
+        }
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;3. 修改Mapper.xml配置文件，通过type属型指定自定义二级缓存实现  type=&quot;com.sl.redis.RedisCache&quot;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mapper &lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;=&quot;com.sl.mapper.CacheMapper&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;cache &lt;/span&gt;&lt;span&gt;type&lt;/span&gt;&lt;span&gt;=&quot;com.sl.redis.RedisCache&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+        
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt; &lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; useCache=&quot;false&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+            select * from products where id = #{id}
+        &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        
+        &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; update – 映射更新语句 &lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;update &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;updateProductById&quot;&lt;/span&gt;&lt;span&gt; parameterType&lt;/span&gt;&lt;span&gt;=&quot;com.sl.po.Product&quot;&lt;/span&gt;&lt;span&gt; flushCache&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; flushCache=&quot;true&quot; 禁用二级缓存或者在Mapper接口上通过注解禁用&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;&lt;span&gt;
+            update products set
+            Name = #{Name},IsNew=#{IsNew} 
+            where id=#{id}
+        &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;update&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;mapper&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;测试方法同上。&lt;/p&gt;
+&lt;p&gt;以上通过重写Mybatis二级缓存接口Cache类中的方法，将mybatis中默认的二级缓存空间替换成Redis。mybatis的二级缓存默认存储1024个对象（通过size可配置），缓存容易造成脏读数据，影响数据的准确性，实际开发中往往放弃直接使用默认二级缓存。&lt;/p&gt;
+</description>
+<pubDate>Thu, 12 Jul 2018 15:47:00 +0000</pubDate>
+<dc:creator>仍是少年</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ashleyboy/p/9302507.html</dc:identifier>
+</item>
+<item>
 <title>css画三角形以及实现带三角的阴影效果 - 小飞侠flyA</title>
 <link>http://www.cnblogs.com/ljzy/p/9302536.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/ljzy/p/9302536.html</guid>
@@ -24,150 +825,6 @@
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/ljzy/p/9302536.html</dc:identifier>
-</item>
-<item>
-<title>有关搜索方法的学习过程 - Hakold</title>
-<link>http://www.cnblogs.com/hakold/p/9302474.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hakold/p/9302474.html</guid>
-<description>&lt;p&gt;最近看到一些有关学习如何更高效得去搜索的视频和文章&lt;/p&gt;
-&lt;p&gt;因此从中得出了一点小小的心得，记录下来，方便以后学习的过程中去运用这些方法来更高效得去搜索和学习。&lt;/p&gt;
-&lt;p&gt;如何去高效搜索？&lt;/p&gt;
-&lt;p&gt;其实其中有很多方法，但是重要的是，如何去提高自己的搜索思路。&lt;/p&gt;
-&lt;p&gt;这个过程其实就是将问题简化、分类的过程。&lt;/p&gt;
-&lt;p&gt;在生活中，我们会遇到许多问题，在时间不充足的时候，思考问题并且找到解决方法可能往往是不实际的，运用现有的资源去最快找到解决思路，能够大大的提高我们日常的工作、学习效率，虽然这可能会弱化独立思考能力，但从效率上来说是可取的，并且学习别人的方法也能够去丰富自己的思考方法。&lt;/p&gt;
-&lt;p&gt;因此高效的搜索想要的资讯，是高效的有效途径。&lt;/p&gt;
-&lt;p&gt;现有的许多搜索引擎，如百度、谷歌、必应等。&lt;/p&gt;
-&lt;p&gt;但在国内，搜索方法可能会没那么多。但是，要在日常高效搜索还是可以的。&lt;/p&gt;
-&lt;p&gt;实际上用起来可能会比百度更舒服的搜索还有很多&lt;/p&gt;
-&lt;p&gt;我个人搜索时可能会用到&lt;/p&gt;
-&lt;p&gt;如：&lt;span&gt;搜索微信http://weixin.sogou.com/&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712224617927-751063912.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;搜狗知乎http://zhihu.sogou.com/&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712224657172-2125794554.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;br/&gt;甚至有一些导航网站包含了很多搜索方法&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;如：大数据导航http://www.ittime.com/&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712224743522-1512342665.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;但是有一个好的搜索引擎是完全不够的。我们要去精炼自己想要搜索的东西。&lt;/p&gt;
-&lt;p&gt;举个小例子，假如我遇到了一个问题是&lt;span&gt;“删除进入系统前出现的系统选项（win7 win8 win10选项）”&lt;/span&gt;。这样描述其实是模糊的。&lt;/p&gt;
-&lt;p&gt;那么如果我们把以上描述放入搜索栏去搜索会出现什么呢？&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712230342836-123833841.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;起码，6个标题中，有几个是错误的。但是，其中的这些标题，我们可以获取一些关键字去方便我们进一步搜索。例如&lt;span&gt;“开机选项”“开机引导”&lt;/span&gt;等&lt;/p&gt;
-&lt;p&gt;那么如果我们把需要搜索的问题，去把问题提炼一下，把关键字划出来去搜索，&lt;span&gt;“删除其他开机选项”“删除其他开机引导”&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712230931040-864685123.png&quot; alt=&quot;&quot;/&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712230944110-1587120465.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;结果出来，基本上都是能够去参考的标题了。&lt;/p&gt;
-
-&lt;p&gt;除了将问题提炼，其实还有一些搜索技巧，搜索指令去辅助我们搜索的。&lt;/p&gt;
-
-&lt;p&gt;举几个简单的例子吧&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;搜索有关文件类型的时候在搜索中添加 “filetype:”的命令 如搜索有关python的pdf文件时可以“python书籍 filetype:pdf”&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712231526426-1217536320.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;搜索的内容限定网站中的时候在搜索中添加&quot;site:&quot;命令 如在知乎中搜索有关煮饭的关键内容时可以这样搜索“煮饭 site:zhihu.com”&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712231609677-133424801.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;搜索特定时间的关键词信息时可以添加时间命令“20xx..20xx” 如搜索mongodb在2017到2018年的内容时可以这样搜索“mongodb 2017..2018”&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712231914240-176860208.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;搜索关键词限定在标题中的时候，如搜索标题含有liunx的内容时可以这样搜索“intitle:linux”&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712231935035-666791162.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;如果想要搜索的结果中不包含某些东西的时候，应当在搜索中加入“- 关键词”，如搜索的内容中不想含推广内容那么搜索时可以这样搜索“超级课堂 -推广 -广告”&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;做个对比吧&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712232023218-1453053491.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1434972/201807/1434972-20180712232039955-2014550546.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt; 以上是最近对于高效搜索的一些小笔记与心得。希望在这里与大家分享一下能够帮助到各位。&lt;/p&gt;
-
-</description>
-<pubDate>Thu, 12 Jul 2018 15:32:00 +0000</pubDate>
-<dc:creator>Hakold</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hakold/p/9302474.html</dc:identifier>
-</item>
-<item>
-<title>《从Paxos到Zookeeper：分布式一致性原理与实践》第一章读书笔记 - 武培轩</title>
-<link>http://www.cnblogs.com/wupeixuan/p/9302496.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wupeixuan/p/9302496.html</guid>
-<description>&lt;p&gt;第一章主要介绍了计算机系统从集中式向分布式系统演变过程中面临的挑战，并简要介绍了ACID、CAP和BASE等经典分布式理论，主要包含以下内容：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;集中式的特点&lt;/li&gt;
-&lt;li&gt;分布式的特点&lt;/li&gt;
-&lt;li&gt;分布式环境的各种问题&lt;/li&gt;
-&lt;li&gt;ACID&lt;/li&gt;
-&lt;li&gt;分布式事务&lt;/li&gt;
-&lt;li&gt;CAP和BASE理论&lt;/li&gt;
-&lt;/ol&gt;&lt;hr/&gt;&lt;p&gt;集中式的特点：部署结构简单（因为基于底层性能卓越的大型主机，不需考虑对服务多个节点的部署，也就不用考虑多个节点之间分布式协调问题）&lt;/p&gt;
-&lt;p&gt;分布式的特点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;分布性&lt;/li&gt;
-&lt;li&gt;对等性&lt;/li&gt;
-&lt;li&gt;并发性&lt;/li&gt;
-&lt;li&gt;缺乏全局时钟&lt;/li&gt;
-&lt;li&gt;故障总是会发生&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;分布式环境的各种问题：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;通信异常：主要是因为网络本身的不可靠性&lt;/li&gt;
-&lt;li&gt;网络分区：当网络发生异常时，导致部分节点之间的网络延时不断增大，最终导致部分节点可以通信，而另一部分节点不能。&lt;/li&gt;
-&lt;li&gt;三态（成功、失败与超时）&lt;/li&gt;
-&lt;li&gt;节点故障：组成分布式系统的服务器节点出现宕机或“僵死”现象&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;事务是由一系列对系统中数据进行访问与更新的操作所组成的一个程序执行逻辑单元，狭义上的事务特指数据库事务。&lt;/p&gt;
-&lt;p&gt;事务有四个特性，分别是原子性（Atomicity）、一致性（Consistency）、隔离性（Isolation）和持久性（Durability），简称为事务的ACID特性。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;原子性（Atomicity）：必须是一个原子的操作序列单元，只允许出现两种状态之一（全部成功执行，全部不执行）。&lt;/li&gt;
-&lt;li&gt;一致性（Consistency）：不能破坏数据库数据的完整性和一致性，一个事务在执行前后，数据库必须处于一致性状态。&lt;/li&gt;
-&lt;li&gt;隔离性（Isolation）：相互隔离的，一个事务的执行不能被其他事务干扰。&lt;/li&gt;
-&lt;li&gt;持久性（Durability）：也称为永久性，一旦事务提交，则其所做的修改将会永远保存到数据库中。即使系统发生崩溃，事务执行的结果也不能丢失。可以通过数据库备份和恢复来保证持久性。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;事务四种隔离级别有未授权读取、授权读取、可重复读取和串行化。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;未授权读取（READ UNCOMMITTED）：也称为读未提交，允许脏读取。&lt;/li&gt;
-&lt;li&gt;授权读取（READ COMMITTED）：也称为读已提交，允许不可重复读取。&lt;/li&gt;
-&lt;li&gt;可重复读取（REPEATABLE READ）：禁止了不可重复读取和脏读取，但是有可能出现幻影数据（指同样的事务操作，在前后两个两个时间段内执行对同一个数据项的读取，可能出现不一致的结果）。&lt;/li&gt;
-&lt;li&gt;串行化（SERIALIXABLE）：要求所有事务串行执行。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;四种隔离级别的对比&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;未授权读取&lt;/td&gt;
-&lt;td&gt;存在&lt;/td&gt;
-&lt;td&gt;不可以&lt;/td&gt;
-&lt;td&gt;存在&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;授权读取&lt;/td&gt;
-&lt;td&gt;不存在&lt;/td&gt;
-&lt;td&gt;不可以&lt;/td&gt;
-&lt;td&gt;存在&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;可重复读取&lt;/td&gt;
-&lt;td&gt;不存在&lt;/td&gt;
-&lt;td&gt;可以&lt;/td&gt;
-&lt;td&gt;存在&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;串行化&lt;/td&gt;
-&lt;td&gt;不存在&lt;/td&gt;
-&lt;td&gt;可以&lt;/td&gt;
-&lt;td&gt;不存在&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;事务隔离级别越高，就越能保证数据的完整性和一致性，但对并发性能的影响也越大。优先考虑将数据库的隔离级别设置为授权读取，能够避免脏读同时保证较好并发性能，会导致不可重复读、虚读和第二类丢失更新等并发问题，在可能出现这类问题的场合中，应主动采用悲观锁和乐观锁进行事务控制。&lt;/p&gt;
-&lt;p&gt;分布式事务是指事务的参与者、支持事务的服务器、资源服务器以及事务管理器分别位于分布式系统的不同节点之上。也可以被定义为一种嵌套型的事务，同时也具有了ACID事务特性。&lt;/p&gt;
-&lt;p&gt;CAP理论：一个分布式系统不可能同时满足一致性、可用性和分区容错性。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;一致性：数据在多个副本之间是否能够保持一致的特性。&lt;/li&gt;
-&lt;li&gt;可用性：系统提供的服务必须一致处于可用的状态，对于用户的每一个操作请求总是能够在有限的时间内返回结果。&lt;/li&gt;
-&lt;li&gt;分区容错性：分布式系统在遇到任何网络分区故障的时候，仍然需要能够保证对外提供满足一致性和可用性的服务，除非是整个网络环境都发生了故障。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;从CAP定理看出，一个分布式系统不可能同时满足一致性、可用性和分区容错性这三个需求。对于一个分布式系统，分区容错性是一个最基本的需求。&lt;/p&gt;
-&lt;p&gt;BASE理论：是Basically Available（基本可用）、Soft state（软状态）和Eventually consistent（最终一致性）三个短语的简写。核心思想是即使无法做到强一致性，但每个应用都可以根据自身的业务特点，采用适当的方式来使系统达到最终一致性。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;基本可用：分布式系统在出现不可预知故障的时候，允许损失部分可用性。&lt;/li&gt;
-&lt;li&gt;弱状态：也称软状态，允许系统在不同节点的数据副本之间进行数据同步存在延时。&lt;/li&gt;
-&lt;li&gt;最终一致性：系统中所有的数据副本，在经过一段时间的同步后，最终能够达到一个一致的状态。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最终一致性存在以下五类变种：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;因果一致性&lt;/li&gt;
-&lt;li&gt;读己之所写&lt;/li&gt;
-&lt;li&gt;会话一致性&lt;/li&gt;
-&lt;li&gt;单调读一致性&lt;/li&gt;
-&lt;li&gt;单调写一致性&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;总得来说BASE理论面向的是大型高可用可扩展的分布式系统，完全不同于ACID的强一致性模型，而是通过牺牲强一致性来获取可用性，并允许数据在一段时间内是不一致的，但最终达到一致状态。实际分布式场景中，ACID特性和BASE理论会结合在一起。&lt;/p&gt;
-</description>
-<pubDate>Thu, 12 Jul 2018 15:31:00 +0000</pubDate>
-<dc:creator>武培轩</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wupeixuan/p/9302496.html</dc:identifier>
 </item>
 <item>
 <title>轻量级的同步机制——volatile语义详解(可见性保证+禁止指令重排) - takumiCX</title>
@@ -257,35 +914,6 @@
 <dc:identifier>http://www.cnblogs.com/takumicx/p/9302398.html</dc:identifier>
 </item>
 <item>
-<title>【原创】分布式之数据库和缓存双写一致性方案解析(三) - 孤独烟</title>
-<link>http://www.cnblogs.com/rjzheng/p/9302316.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/rjzheng/p/9302316.html</guid>
-<description>&lt;h2 id=&quot;正文&quot;&gt;正文&lt;/h2&gt;
-&lt;p&gt;博主本来觉得，&lt;a href=&quot;https://www.cnblogs.com/rjzheng/p/9041659.html&quot;&gt;《分布式之数据库和缓存双写一致性方案解析》&lt;/a&gt;，一文已经十分清晰。然而这一两天，有人在微信上私聊我，觉得应该要采用&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;先删缓存，再更新数据库，再删缓存&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这一方案作为缓存更新策略，而不是先更新数据库，再删缓存。并且搬出了两篇大佬的文章，&lt;a href=&quot;https://mp.weixin.qq.com/s/7IgtwzGC0i7Qh9iTk99Bww&quot;&gt;《Cache Aside Pattern》&lt;/a&gt;，&lt;a href=&quot;https://mp.weixin.qq.com/s/gYQvP69sao8U0azuNRMG1w&quot;&gt;《缓存与数据库不一致，咋办？》&lt;/a&gt;，希望博主能加以说明。因为问的人太多了，所以才有了这篇文章的诞生。&lt;/p&gt;
-&lt;h2 id=&quot;正文-1&quot;&gt;正文&lt;/h2&gt;
-&lt;p&gt;在开始这篇文章之前，我们先自己思考一下以下两个更新策略&lt;/p&gt;
-&lt;h3 id=&quot;方案一&quot;&gt;方案一&lt;/h3&gt;
-&lt;p&gt;(1)删缓存&lt;br/&gt;(2)更数据库&lt;br/&gt;(3)删缓存&lt;/p&gt;
-&lt;h3 id=&quot;方案二&quot;&gt;方案二&lt;/h3&gt;
-&lt;p&gt;(1)更数据库&lt;br/&gt;(2)删缓存&lt;/p&gt;
-&lt;p&gt;大家看下面的文章前，自己先思考一下，&lt;strong&gt;方案一的步骤(1)有没有存在的必要？&lt;/strong&gt;&lt;br/&gt;先上一个&lt;strong&gt;结论&lt;/strong&gt;:方案二存在的缺点，方案一全部存在，且方案一比方案二多一个步骤，所以应该选方案二。&lt;/p&gt;
-&lt;p&gt;下面，针对&lt;a href=&quot;https://mp.weixin.qq.com/s/7IgtwzGC0i7Qh9iTk99Bww&quot;&gt;《Cache Aside Pattern》&lt;/a&gt;，&lt;a href=&quot;https://mp.weixin.qq.com/s/gYQvP69sao8U0azuNRMG1w&quot;&gt;《缓存与数据库不一致，咋办？》&lt;/a&gt;这两篇文章提出的论点，提出小小的质疑。这两篇文章认为方案二不行的原因，主要有以下两点&lt;br/&gt;&lt;strong&gt;(1)方案二在步骤(2)，出现删缓存失败的情况下，会出现数据不一致的情形，如下图所示&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;https://images.cnblogs.com/cnblogs_com/rjzheng/1202350/o_cache1.png&quot; alt=&quot;image&quot;/&gt;&lt;br/&gt;&lt;strong&gt;(2)方案二存在下面的主从同步，导致cache不一致问题，如下图所示&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;https://images.cnblogs.com/cnblogs_com/rjzheng/1202350/o_cache2.jpg&quot; alt=&quot;image&quot;/&gt;&lt;br/&gt;大致流程就是，线程A写，线程B读，会有以下流程出现&lt;br/&gt;(1)缓存刚好失效&lt;br/&gt;(2)线程A写入master数据库，slave还没同步&lt;br/&gt;(3)线程B发现缓存失效，去slave读到旧值&lt;br/&gt;(4)线程A删除缓存&lt;br/&gt;(5)线程B把旧值放入缓存&lt;/p&gt;
-&lt;p&gt;然而大家发现了么，这两篇文章提出的反对意见，在该文作者自己所提出的方案一里头也是存在的？&lt;br/&gt;&lt;strong&gt;(1)针对删缓存失败问题&lt;/strong&gt;&lt;br/&gt;方案一的步骤(3)也会可能出现删除缓存失败问题，可是作者没有加以详细说明。&lt;br/&gt;&lt;strong&gt;(2)针对数据不一致问题&lt;/strong&gt;&lt;br/&gt;线程A写，线程B读，会有以下流程出现&lt;br/&gt;(1)线程A删除缓存&lt;br/&gt;(2)线程A写入master数据库，slave还没同步&lt;br/&gt;(3)线程B发现缓存失效，去slave读到旧值&lt;br/&gt;(4)线程A删除缓存&lt;br/&gt;(5)线程B把旧值放入缓存&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;综上所述&lt;/strong&gt;，我们应该选择方案二，而不是方案一。方案二存在的缺点，方案一全部存在，且方案一步骤上多了一步，增加了不稳定因素。&lt;/p&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;该文章只是纠正了一下目前流传的观点的正确性，并没有针对任何人。技术的世界，只论技术。&lt;/p&gt;
-</description>
-<pubDate>Thu, 12 Jul 2018 15:01:00 +0000</pubDate>
-<dc:creator>孤独烟</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/rjzheng/p/9302316.html</dc:identifier>
-</item>
-<item>
 <title>编程语言吐槽之Java与C - kid551</title>
 <link>http://www.cnblogs.com/kid551/p/9302366.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/kid551/p/9302366.html</guid>
@@ -306,6 +934,9 @@
 &lt;p&gt;有的人说，Java真是简单，傻瓜式的语言，没啥意思。可这就完全搞错了重点，简单易学，正是能够快速表达客户需求的一个大前提。而精髓呢？精髓是看你如何运用这个工具，一方面能够精准地表述出实际的业务模型，另一方面是看你能够用这个工具，能够如何巧妙地组织各个模块，使得它们能够具备扩展性、可重用性，从而能够应对快速变化需求的挑战。&lt;/p&gt;
 &lt;p&gt;另一部分人说，C太不安全了、没法做好的异常、没法做精准的泛型、更无法做漂亮的继承。可是，C的应用范围就是底层啊。这里提到的一堆面向对象的理念，其实是现实世界的运作思维模式，但这个不是计算机机械式的思考方式。机械式的思考模式，就是汇编、就是语句跳转、就是内存分配。在这个体系里，其重点就是为higher level制造工具，为你设想的那些面向对象的思维概念制造工具。&lt;/p&gt;
 &lt;p&gt;这就好比是，你拿到的是一块原木，你非得去抱怨，它怎么不长成圆盘形，为什么不长成方形，为什么不长成螺丝帽的形状，这都不能用好吧？！这TM不废话么！你的工作不就是对这些天然的原木做工，把它们制作成可以供其它生产环节使用的工具么。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;一个是快速地开发出一个程序，另一个是开发出快速的程序&lt;/strong&gt;。这就是本质的差别。&lt;/p&gt;
+&lt;p&gt;前者需要的是贴近人的、现实的思维模式，需要用到的从现实到计算机的转换越少越好。&lt;/p&gt;
+&lt;p&gt;后者需要的是贴近计算机的思维模式，越是能够从计算机运转机制角度思考问题越好。&lt;/p&gt;
 
 
 
@@ -609,119 +1240,6 @@ def gogo():&lt;br/&gt;win32api.SetCursorPos([left, top])&lt;br/&gt;win32api.mous
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/zhanggaoxing/p/9302227.html</dc:identifier>
-</item>
-<item>
-<title>分块——优雅的暴力 - 苏卿念</title>
-<link>http://www.cnblogs.com/cn-suqingnian/p/9302143.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/cn-suqingnian/p/9302143.html</guid>
-<description>&lt;p&gt;前言：&lt;/p&gt;
-&lt;p&gt;　　首先，我们来考虑这样一个模型：有一段连续的序列a[1]~a[n]，然后现在我们需要执行几类操作：&lt;/p&gt;
-&lt;p&gt;出题人：&lt;strong&gt;  求出其中一段区间的和&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;智商180的某宝宝：哎呀，你怎么这么傻，直接记录这个序列的前缀和不就得了？&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712210727336-1355857736.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　记录a[1]~a[i]的和为sum[i]，然后显然有sum[i+1]=sum[i]+a[i+1]，我们要求a[l]~a[r]就直接sum[r]-sum[l-1]呗。&lt;/p&gt;
-&lt;p&gt;出题人：&lt;strong&gt;区间加上某个值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;由于某宝宝是大佬，两分钟后：我会一种叫线段树的东西(一种树形结构，可以维护区间求和和单点修改的优秀数据结构)！！！&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712211200759-547039340.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;出题人：&lt;strong&gt;查询一段区间上有多少个数&amp;lt;k (k&amp;gt;0且给定)    &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;某宝宝：&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712211442715-48119911.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;出题人：&lt;strong&gt;对了，忘了告诉你了，k每次都不一样，还有，极其的多。另外，为了防止装*不让写平衡树(另一种能干很多事情的优秀数据结构)+线段树，占用空间不能超过****Mb&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;某宝宝:&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712211800464-663167172.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;下面就分享一个菜鸟也能懂得算法：分块&lt;/p&gt;
-&lt;p&gt;分块，顾名思义，就是把一段序列分成一小块一小块得来处理，维护。&lt;/p&gt;
-&lt;p&gt;我们把一段当成一个整体，只记录维护整体的有关信息，就是分块。&lt;/p&gt;
-&lt;p&gt;首先，对于前言说得那道题，很朴素的做法就是：&lt;/p&gt;
-&lt;p&gt;　　1.从询问区间的l到r扫过去，每回加上扫到的值，即$ans=\sum^{r}_{i=l} a[i]$ &lt;/p&gt;
-&lt;p&gt;　　2.直接把$a[i]$重新赋值不就得了 a[i]=newa[i];&lt;/p&gt;
-&lt;p&gt;　　3.从询问区间的l到r扫过去,每回遇到&amp;lt;k的位置，答案+1&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712212552708-239308784.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;没错，这种做法很傻是不是？&lt;/p&gt;
-&lt;p&gt;但是，分块就是在这个基础上暴力优化的！！！&lt;/p&gt;
-&lt;p&gt;假设我们总共的序列长度为n，然后我们把它切成$\sqrt{n}$块，然后把每一块里的东西当成一个整体来看，&lt;/p&gt;
-&lt;p&gt;现在解释几个本文用到的术语：&lt;/p&gt;
-&lt;p&gt;完整块：被操作区间完全覆盖的块&lt;/p&gt;
-&lt;p&gt;不完整块：操作区间不完全覆盖的块&lt;/p&gt;
-&lt;p&gt;然后我们先看看怎么得出答案：&lt;/p&gt;
-&lt;p&gt;　　1.对于完整的块，我们希望有个东西能直接找出这整个块的和，于是&lt;strong&gt;每个块要维护这个块的所有元素的和。   &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;　　  .对于不完整块，因为元素比较少(最多有  总数n /  块数 = $\sqrt{n}$ 个) 这时候当n=1000000的时候最多有1000个，对比一下，我们可以直接暴力扫这个小块统计答案，&lt;/p&gt;
-&lt;p&gt;　　  .小技巧：如果这个不完整块被覆盖的长度&amp;gt;块维护的长度的一半，何不用这个块的和-没有被覆盖的元素的值呢？&lt;/p&gt;
-&lt;p&gt;　　2.这里，我们换种思路，&lt;strong&gt;记录一个lazy   &lt;/strong&gt;标记(为什么用lazy，因为我很懒),表示整个块被加上过多少了，&lt;/p&gt;
-&lt;p&gt;　　  .对于完整块，我们直接lazy+=加上的数x,块内的和ans+=x*元素个数(因为每个元素都被加上了x)&lt;/p&gt;
-&lt;p&gt;　　  .对于不完整块，直接暴力修改就好了，顺便可以把lazy标记清了。&lt;/p&gt;
-&lt;p&gt;　　3.哎呀，这个有点难度啊,&lt;/p&gt;
-&lt;p&gt;　　  .要在每个完整块内寻找小于一个值的元素数，&lt;/p&gt;
-&lt;p&gt;　　   显然我们不得不要求块内元素是&lt;strong&gt;有序的&lt;/strong&gt;，这样就能用二分(快速在一个有序的序列里查询的一个算法),对块内查询。&lt;/p&gt;
-&lt;p&gt;　　  .不完整的块暴力就好&lt;/p&gt;
-&lt;p&gt;　　  .这样的话需要提前对每块里面的元素做一遍排序就好.&lt;/p&gt;
-&lt;p&gt;　　  .但是当有修改的话，因为整个块同时加上(减去)一个数，每个数的相对大小是不会变的，但是如果是不完全块就会改变，这样的话，还是因为元素个数小，重新新排一下不就得了?&lt;/p&gt;
-
-&lt;p&gt;然后，这道题就用了一种看似高大上的方法做完了……比之前傻傻的暴力是不是好看很多呢？&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712215020021-1721166349.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;在很多地方，我们可以运用到分块的思想，化零为整，把维护每个数的值变成维护一些整体的值，&lt;/p&gt;
-&lt;p&gt;一个很常见的例子就是：为什么班主任要给班里分组？因为他可不想收作业或者回执的时候一个一个收啊qwq交给组长然后组长在交给老师多好啊qwq&lt;/p&gt;
-&lt;p&gt;这样，我们就不用一个一个的找了qwq&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1397637/201807/1397637-20180712215520522-1686359934.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后就讲完基础了。&lt;/p&gt;
-&lt;p&gt;稍稍进阶：&lt;/p&gt;
-&lt;p&gt;其实，每一块可以维护的不止上面说的那几种东西，我们可以维护当前区间最大公约数是多少，最大异或和是多少……&lt;/p&gt;
-&lt;p&gt;客观的来说，分块是可以维护很多的，只要想出来怎么预处理，对于有修改的模型怎么维护，统计答案的时候怎么累加就行。&lt;/p&gt;
-&lt;p&gt;希望对大家有所帮助。&lt;/p&gt;
-</description>
-<pubDate>Thu, 12 Jul 2018 14:04:00 +0000</pubDate>
-<dc:creator>苏卿念</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/cn-suqingnian/p/9302143.html</dc:identifier>
-</item>
-<item>
-<title>Javascript的事件模型和Promise实现 - 远方无风</title>
-<link>http://www.cnblogs.com/bill-shooting/p/9301817.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/bill-shooting/p/9301817.html</guid>
-<description>&lt;p data-anchor-id=&quot;1hru&quot;&gt;&lt;span&gt;&lt;strong&gt;1. Javascript的运行时模型——事件循环 &lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;JS的运行时是个单线程的运行时，它不像其他编程语言，比如C++，Java，C#这些可以进行多线程操作的语言。当它执行一个函数时，它只会一条路走到黑，不会在当前函数结束之前去调用其他的函数（除非当前函数主动调用其他函数）。它也不用担心会有其他线程打扰它，因为它的运行时只有一个线程。如果你还记得一些计算机原理的话，这种运行时只有一个栈，设计起来相当的简单。&lt;/span&gt;&lt;/p&gt;
-&lt;p data-anchor-id=&quot;5yjk&quot;&gt;&lt;span&gt;一条路走到黑的设计很棒，因为它足够简单，但是又是谁决定哪个函数从开始进入栈内执行呢？答案是JS的运行时还有一个事件等待队列与栈搭配，每当运行栈为空时（也就是当前函数运行结束），JS的运行时就从当前的事件队列中取出一个消息处理，执行与这个消息相关联的函数。这种行为可以用以下代码来说明：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; &lt;span&gt;while&lt;/span&gt;&lt;span&gt; (eventQueue.waitForMessage()) {
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;     let event =&lt;span&gt; eventQueue.pop();
-&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;     let handler =&lt;span&gt; event.handler;
-&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;     handler();                      &lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行事件关联的函数&lt;/span&gt;
-&lt;span&gt;5&lt;/span&gt;     context.scheduler.schedule();   &lt;span&gt;//&lt;/span&gt;&lt;span&gt;让调度器处理一下其他事务&lt;/span&gt;
-&lt;span&gt;6&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;有了运行栈和事件队列之后，我们的Javascript运行时已经初具雏形。不过Javascript中的变量都是对象，它们的大小通常很大，可不是一个小小的栈能放下的，如果我们熟悉C++，就会知道一般在C++中我们只在栈中存储基本类型（int, bool等）和指针，而指针所指的位置是内存堆中的一个地址，这也是JS的对象的存储地点。下面这张图可以形象地解释一下JS运行时的模型。&lt;/p&gt;
-&lt;p&gt;&lt;img title=&quot;JS内存模型&quot; src=&quot;https://developer.mozilla.org/files/4617/default.svg&quot; alt=&quot;&quot; width=&quot;294&quot; height=&quot;270&quot;/&gt;&lt;/p&gt;
-
-&lt;p data-anchor-id=&quot;q0e1&quot;&gt;&lt;span&gt;&lt;strong&gt;2. 事件循环模型的优点和缺点 &lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;strong&gt;先说优点&lt;/strong&gt;。除了实现上的简单，Javascript的最大优点就是&lt;strong&gt;完全异步，永不阻塞&lt;/strong&gt;。这句话可能有点令人迷糊，一个单线程的运行时怎么完全异步，永不阻塞？实际上虽然&lt;strong&gt;JS运行时单线程，但是浏览器是个多进程多线程的环境&lt;/strong&gt;，这一个点在后端也一样，虽然Node是个单线程JS运行时，但是后端还有其他进程和线程配合Node一起完成响应操作。&lt;/span&gt;&lt;/p&gt;
-&lt;p data-anchor-id=&quot;tvvr&quot;&gt;&lt;span&gt;以浏览器打开IndexedDB为例，当你执行&lt;span&gt;&lt;code&gt;indexedDB.open()&lt;/code&gt;&lt;/span&gt;的之后，当前的Javascript运行栈就结束了，JS可以处理其他事件的关联函数，所以JS不会阻塞。那原来的open操作交给谁了呢？浏览器会调用其他线程接管这个打开数据库的过程，当返回时，浏览器会在JS运行时的事件队列中添加一个&lt;span&gt;&lt;code&gt;打开成功&lt;/code&gt;&lt;/span&gt;或者&lt;span&gt;&lt;code&gt;打开失败&lt;/code&gt;&lt;/span&gt;的事件，同时将你当时添加的回调函数关联到事件。&lt;/span&gt;&lt;/p&gt;
-&lt;p data-anchor-id=&quot;v81o&quot;&gt;&lt;span&gt;&lt;strong&gt;再说缺点&lt;/strong&gt;。我们都知道JS的调用函数只会一条路走到黑，而且没有正常的方法能打断这一过程，如果这一路恰好比较长（比如进行了大量的数学运算），就会使JS进入一种类阻塞的状态，页面会无法响应。等等！刚说JS永不阻塞，这里怎么又冒出一个类阻塞呢？这时因为我们所说的阻塞一般都是指IO阻塞，也就是CPU等IO结束的过程，这种情况在JS中可以永远不会发生（注意这里是可以，不是一定，某些IO操作是有同步的API可以调用的）。所谓类阻塞状态呢，就是在执行CPU密集型任务，这是一种不可避免的过程。那为什么这种情况下页面会没有响应呢？这时因为浏览器虽然会把事件放入事件队列里，但是由于前一个函数还没执行完，页面响应事件关联的函数得不到执行，自然页面会表现出不响应的状态。&lt;/span&gt;&lt;/p&gt;
-&lt;p data-anchor-id=&quot;v81o&quot;&gt; &lt;/p&gt;
-&lt;p data-anchor-id=&quot;v81o&quot;&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;3. Promise的实现 &lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;Promise是JS处理回调的一种方式，也是利用JS的事件循环模型的一个编程范式包装，也是ES7中&lt;code&gt;await&lt;/code&gt; &lt;code&gt;async&lt;/code&gt;的基础。&lt;strong&gt;如果说回调是对JS事件模型最直接最拙劣的实现的话，Promise至少给回调加了件衣服，使它不再那么难看。但本质上讲，Promise还是描述JS事件循环模型的一种工具&lt;/strong&gt;。下面给个例子来说明它和JS事件模型的联系。&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; let getUrlAsync = (url) =&amp;gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     let promise = &lt;span&gt;new&lt;/span&gt; Promise((resolve, reject) =&amp;gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         const xhr = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; XMLHttpRequest();
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         xhr.open('GET'&lt;span&gt;, url);
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         xhr.onload = () =&amp;gt;&lt;span&gt; resolve(xhr.responseText);
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         xhr.onerror = () =&amp;gt;&lt;span&gt; reject(xhr.statusText);
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    });
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;return&lt;/span&gt;&lt;span&gt; promise;
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;};
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; getUrlAsync('http://exaple.com/text/11111'&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;     .then(res =&amp;gt;&lt;span&gt; console.log(res))
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;     .&lt;span&gt;catch&lt;/span&gt;(error =&amp;gt; console.log(error));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;当调用&lt;span&gt;&lt;code&gt;getUrlAsync&lt;/code&gt;&lt;/span&gt;时，JS运行时做以下事情： &lt;br/&gt;1. 会创建一个&lt;span&gt;&lt;code&gt;Promise&lt;/code&gt;&lt;/span&gt;对象，此时还是在&lt;span&gt;&lt;code&gt;getUrlAsync&lt;/code&gt;&lt;/span&gt;的栈帧里； &lt;br/&gt;2. 然后创建一个&lt;span&gt;&lt;code&gt;XMLHttpRequest&lt;/code&gt;&lt;/span&gt;对象，此时还是在&lt;span&gt;&lt;code&gt;getUrlAsync&lt;/code&gt;&lt;/span&gt;的栈帧里； &lt;br/&gt;3. 调用&lt;span&gt;&lt;code&gt;XMLHttpRequest&lt;/code&gt;&lt;/span&gt;的&lt;span&gt;&lt;code&gt;open&lt;/code&gt;&lt;/span&gt;方法，此时浏览器其他线程接管open过程，JS无需等待open结束； &lt;br/&gt;4. 给&lt;span&gt;&lt;code&gt;xhr&lt;/code&gt;&lt;/span&gt;的&lt;span&gt;&lt;code&gt;onload&lt;/code&gt;&lt;/span&gt;事件关联一个处理函数(委托），注意此时该事件并没有进入事件队列； &lt;br/&gt;5. 给&lt;span&gt;&lt;code&gt;xhr&lt;/code&gt;&lt;/span&gt;的&lt;span&gt;&lt;code&gt;onerror&lt;/code&gt;&lt;/span&gt;事件关联一个处理函数(委托），同样此时该事件没有进入运行时的事件队列； &lt;br/&gt;6. 传入&lt;span&gt;&lt;code&gt;res =&amp;gt; console.log(res)&lt;/code&gt;&lt;/span&gt;来具体化第4步中的委托； &lt;br/&gt;7. 传入&lt;span&gt;&lt;code&gt;error =&amp;gt; console.log(error)&lt;/code&gt;&lt;/span&gt;来具体化第5部中的委托，&lt;strong&gt;此时当前的运行栈就退出了，运行时将处理其他事件&lt;/strong&gt;。 &lt;br/&gt;在某一个时刻，浏览器控制的open方法返回，它&lt;strong&gt;会在JS运行时的事件队列中添加一个事件&lt;/strong&gt;，比如&lt;span&gt;&lt;code&gt;onload&lt;/code&gt;&lt;/span&gt; &lt;br/&gt;8. JS运行时循环到&lt;span&gt;&lt;code&gt;onload&lt;/code&gt;&lt;/span&gt;事件，并找到它的关联处理函数，在这个例子中就是&lt;span&gt;res =&amp;gt; console.log(res)&lt;/span&gt;，并运行这个函数。&lt;/p&gt;
-
-
-
-&lt;p&gt;&lt;span&gt;&lt;span&gt;最后吐槽一个博客园，还不支持Markdown吗？默认编辑器真的好难用。。。。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-</description>
-<pubDate>Thu, 12 Jul 2018 12:50:00 +0000</pubDate>
-<dc:creator>远方无风</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/bill-shooting/p/9301817.html</dc:identifier>
 </item>
 </channel>
 </rss>
