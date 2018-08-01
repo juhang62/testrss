@@ -9,6 +9,1039 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>通过案例了解Hystrix的各种基本使用方式 - hsm_computer</title>
+<link>http://www.cnblogs.com/JavaArchitect/p/9399209.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/JavaArchitect/p/9399209.html</guid>
+<description>&lt;h4&gt; 1 通过一些算术题了解系统发生错误的概率&lt;/h4&gt;
+&lt;p&gt;    我们一般用每秒查询率（Query Per Second，简称QPS）来衡量一个网站的流量，QPS是指一台服务器在一秒里能处理的查询次数，它可以被用来衡量服务器的性能。&lt;/p&gt;
+&lt;p&gt;    假设一个Web应用有20个基于微服务的子模块，比如某电商系统里有订单、合同管理和会员管理等子模块，该系统的平均QPS是1000，也就是说平均每秒有1000个访问量，这个数值属于中等水平，并不高。&lt;/p&gt;
+&lt;p&gt;    算术题一，请计算每天的访问总量？注：一般网站在凌晨1点到上午9点的访问量比较少，所以计算时按每天16个小时算。&lt;/p&gt;
+&lt;p&gt;    答：1000*60*60*16=57600000=5.76乘以10的8次方。&lt;/p&gt;
+&lt;p&gt;    算术题二：由于该系统中有20个子模块，在处理每次请求时，该模块有99.9999%的概率不出错（百万分之一的出错概率，这个概率很低了），而任何一个模块出错，整个系统就出错，那么问题是，每小时该系统出错的概率是多少？每天（按16小时算）是多少？每月（按30天算）又是多少？&lt;/p&gt;
+&lt;p&gt;    答：针对每次访问，一个模块正常工作的概率是99.9999%，那么每小时20个模块都不出错的概率是99.9999%的（20*3600）次方，大约是93%，换句话说，在一个小时内，该系统出错的概率是7%。&lt;/p&gt;
+&lt;p&gt;    我们再来算每天的正常工作概率，是93%的16次方，大约是31%，换句话说，每天出错的概率高达69%。同理我们能算出，每月出错的概率高达95%。&lt;/p&gt;
+&lt;p&gt;    通过这组数据，我们能看到，规模尚属中等的网站（相当于尚能正常盈利不亏本的网站）平均每月就会出现一次故障，对于哪些模块故障率高于百万分之一或平均QPS更高的网站，这个出故障周期会更频繁，所以说，对于互联网公司而言，服务容错组件是必配，而不是优化项。&lt;/p&gt;
+
+&lt;h4&gt;2 准备服务提供者&lt;/h4&gt;
+&lt;p&gt;    这里我们将在HystrixServerDemo项目里，提供两个供Hystrix调用的服务，其中一个是可用的，而在另外一个服务里，是通过sleep机制，故意让服务延迟返回，从而造成不可用的后果。&lt;/p&gt;
+&lt;p&gt;    这是一个基本的Spring Boot的服务，之前类似的博文里我们已经反复讲述过，所以这里仅给出实现要点，具体信息请大家自己参照代码。&lt;/p&gt;
+&lt;p&gt;    要点1，在pom.xml里引入spring boot的依赖项，关键代码如下。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+1    &amp;lt;dependency&amp;gt;
+2        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt; 
+3        &amp;lt;artifactId&amp;gt;spring-boot-starter-web&amp;lt;/artifactId&amp;gt; 
+4        &amp;lt;version&amp;gt;1.5.4.RELEASE&amp;lt;/version&amp;gt; 
+5    &amp;lt;/dependency&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    要点2，在ServerStarter.java里，开启服务，代码如下。      &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+1    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;省略必要的package和import代码&lt;/span&gt;
+2&lt;span&gt;    @SpringBootApplication
+&lt;/span&gt;3    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ServerStarter{
+&lt;/span&gt;4        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main( String[] args )
+&lt;/span&gt;5        {      SpringApplication.run(ServerStarter.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args); }
+&lt;/span&gt;6    }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    要点3，在控制器Controller.java里，编写两个提供服务的方法，代码如下。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+1&lt;span&gt;    @RestController
+&lt;/span&gt;2    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Controller {        
+&lt;/span&gt;3        @RequestMapping(value = &quot;/available&quot;, method =&lt;span&gt; RequestMethod.GET    )
+&lt;/span&gt;4        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; String availabieService() 
+&lt;/span&gt;5        { &lt;span&gt;return&lt;/span&gt; &quot;This Server works well.&quot;&lt;span&gt;; }
+&lt;/span&gt;6        
+7        @RequestMapping(value = &quot;/unavailable&quot;, method =&lt;span&gt; RequestMethod.GET    )
+&lt;/span&gt;8        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; String unavailableServicve () {
+&lt;/span&gt;9            &lt;span&gt;try&lt;/span&gt; { Thread.sleep(5000&lt;span&gt;); } 
+&lt;/span&gt;10            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) 
+&lt;/span&gt;11&lt;span&gt;            { e.printStackTrace(); }
+&lt;/span&gt;12            &lt;span&gt;return&lt;/span&gt; &quot;This service is unavailable.&quot;&lt;span&gt;;
+&lt;/span&gt;13&lt;span&gt;        }
+&lt;/span&gt;14    }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    其中在第3行提供了一个可用的服务，在第8行的unavailableServicve的服务里，是通过第9行的sleep方法，造成“服务延迟返回”的效果。&lt;/p&gt;
+&lt;h4&gt;3 以同步方式调用正常工作的服务&lt;/h4&gt;
+&lt;p&gt;    这里我们新建一个HystrixClientDemo项目，在其中开发各种Hystrix调用服务的代码。&lt;/p&gt;
+&lt;p&gt;在这个项目里，我们将通过Ribbon和Hystrix结合的方式，调用在上部分里提供的服务，所以在pom.xml文件里，我们将引入这两部分的依赖包，关键代码如下。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+1    &amp;lt;dependencies&amp;gt;    
+2        &amp;lt;dependency&amp;gt;
+3                &amp;lt;groupId&amp;gt;com.netflix.ribbon&amp;lt;/groupId&amp;gt;
+4                &amp;lt;artifactId&amp;gt;ribbon-httpclient&amp;lt;/artifactId&amp;gt;
+5                &amp;lt;version&amp;gt;2.2.0&amp;lt;/version&amp;gt;
+6        &amp;lt;/dependency&amp;gt;
+7         &amp;lt;dependency&amp;gt;
+8                &amp;lt;groupId&amp;gt;com.netflix.hystrix&amp;lt;/groupId&amp;gt;
+9                &amp;lt;artifactId&amp;gt;hystrix-core&amp;lt;/artifactId&amp;gt;
+10                &amp;lt;version&amp;gt;1.5.12&amp;lt;/version&amp;gt;
+11        &amp;lt;/dependency&amp;gt;
+12      &amp;lt;/dependencies&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    在上述代码的第2到第6行里，我们引入了Ribbon的依赖项，从第7到第11里，我们引入了Hystrix的依赖项。&lt;/p&gt;
+&lt;p&gt;    在NormalHystrixDemo.java里，我们将演示通过Hystrix调用正常服务的开发方式，代码如下。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+1    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;省略必要的package和import代码&lt;/span&gt;
+2    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;继承HystrixCommand&amp;lt;String&amp;gt;，所以run方法返回String类型对象&lt;/span&gt;
+3    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; NormalHystrixDemo &lt;span&gt;extends&lt;/span&gt; HystrixCommand&amp;lt;String&amp;gt;&lt;span&gt; {
+&lt;/span&gt;4        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;定义访问服务的两个对象&lt;/span&gt;
+5        RestClient client = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;6        HttpRequest request = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;7        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;在构造函数里指定命令组的名字 &lt;/span&gt;
+8        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; NormalHystrixDemo() {
+&lt;/span&gt;9       &lt;span&gt;super&lt;/span&gt;(HystrixCommandGroupKey.Factory.asKey(&quot;demo&quot;&lt;span&gt;));
+&lt;/span&gt;10&lt;span&gt;        }
+&lt;/span&gt;11        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;在initRestClient方法里设置访问服务的client对象&lt;/span&gt;
+12        &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; initRestClient() {
+&lt;/span&gt;13            client = (RestClient) ClientFactory.getNamedClient(&quot;HelloCommand&quot;&lt;span&gt;);
+&lt;/span&gt;14            &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;15                request = HttpRequest.newBuilder().uri(&lt;span&gt;new&lt;/span&gt; URI(&quot;/available&quot;&lt;span&gt;)).build();
+&lt;/span&gt;16            } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (URISyntaxException e) 
+&lt;/span&gt;17&lt;span&gt;             { e.printStackTrace(); }
+&lt;/span&gt;18        ConfigurationManager.getConfigInstance().setProperty(    &quot;HelloCommand.ribbon.listOfServers&quot;, &quot;localhost:8080&quot;&lt;span&gt;);
+&lt;/span&gt;19        }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    在第12行的initRestClient方法里，我们做好了以基于Ribbon的RestClient对象访问服务的准备工作，具体而言，在第13行里通过工厂初始化了client对象，在第18行，设置了待访问的url，在第15行，设置了待访问的服务名。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+20        &lt;span&gt;protected&lt;/span&gt;&lt;span&gt; String run() {
+&lt;/span&gt;21            System.out.println(&quot;In run&quot;&lt;span&gt;);
+&lt;/span&gt;22&lt;span&gt;            HttpResponse response;
+&lt;/span&gt;23            String result = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;24            &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;25                response =&lt;span&gt; client.executeWithLoadBalancer(request);
+&lt;/span&gt;26                System.out.println(&quot;Status for URI:&quot; + response.getRequestedURI()+ &quot; is :&quot; +&lt;span&gt; response.getStatus());
+&lt;/span&gt;27                result = response.getEntity(String.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;28            } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (ClientException e) 
+&lt;/span&gt;29&lt;span&gt;            { e.printStackTrace();} 
+&lt;/span&gt;30           &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {    e.printStackTrace();    }
+&lt;/span&gt;31            &lt;span&gt;return&lt;/span&gt; &quot;Hystrix Demo,result is: &quot; +&lt;span&gt; result;
+&lt;/span&gt;32        }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    我们在第20行定义了返回String类型的run方法， 这里的返回类型需要和第3行里本类继承的HystrixCommand对象的泛型一致。在其中，我们是通过第25行的代码调用服务，并在第31行，返回一个包括调用结果的String字符串。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+&lt;/span&gt;34            NormalHystrixDemo normalDemo = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; NormalHystrixDemo();
+&lt;/span&gt;35            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;初始化调用服务的环境&lt;/span&gt;
+36&lt;span&gt;            normalDemo.initRestClient();
+&lt;/span&gt;37            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 睡眠1秒&lt;/span&gt;
+38            &lt;span&gt;try&lt;/span&gt; {Thread.sleep(1000&lt;span&gt;);} 
+&lt;/span&gt;39            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) 
+&lt;/span&gt;40&lt;span&gt;            {e.printStackTrace();    }
+&lt;/span&gt;41            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;调用execute方法后，会自动地执行定义在第20行的run方法&lt;/span&gt;
+42            String result =&lt;span&gt; normalDemo.execute();
+&lt;/span&gt;43            System.out.println(&quot;Call available function, result is:&quot; +&lt;span&gt; result);
+&lt;/span&gt;44&lt;span&gt;        }
+&lt;/span&gt;45    }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    在main方法里，我们指定了如下的工作流程。&lt;/p&gt;
+&lt;p&gt;    第一步，在第36行里，通过调用initRestClient方法完成了初始化的工作。&lt;/p&gt;
+&lt;p&gt;    第二步，在第42行里执行了execute方法，这个方法是封装在HystrixCommand方法里的，一旦调用，则会触发第20行的run方法。&lt;/p&gt;
+&lt;p&gt;    请注意，这里一旦执行execute方法，则会立即（即以同步的方式）执行run方法，在run方法返回结果之前，代码是会阻塞在第42行的，即不会继续往后执行。&lt;/p&gt;
+&lt;p&gt;    第三步，在第20行的run方法里，我们以localhost:8080/available的方式调用了服务端的服务。&lt;/p&gt;
+&lt;p&gt;    执行本段代码，会看到如下的打印语句，这些打印语句很好地验证了上述讲述的过程流程。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+1&lt;span&gt;    In run
+&lt;/span&gt;2    Status &lt;span&gt;for&lt;/span&gt; URI:http:&lt;span&gt;//&lt;/span&gt;&lt;span&gt;localhost:8080/available is :200&lt;/span&gt;
+3    Call available function, result is:Hystrix Demo,result is: This Server works well.
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h4&gt;&lt;span lang=&quot;EN-US&quot;&gt;4 以异步的方式调用服务&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;&lt;span lang=&quot;EN-US&quot;&gt;    &lt;/span&gt;在上部分的Hystrix案例中，请求是被依次执行，在处理完上个请求之前，后一个请求处于阻塞等待状态，这种Hystrix同步的处理方式适用于并发量一般的场景。&lt;/p&gt;
+&lt;p&gt;    但单台服务器的负载处理能力毕竟是有限的，如果并发量高于（或远远高于）这个极限时，那么我们就得考虑采用Hystrix基于异步的保护机制，从下图里，我们能看到基于异步处理的效果图。 &lt;/p&gt;
+&lt;p align=&quot;center&quot;&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1226172/201808/1226172-20180801070224925-1456694327.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;    从上图里我们能看到，请求不是被同步地立即执行，而是被放入到一个队列（queue）中，封装在HystrixCommand的处理代码是从queue里拿出请求，并以基于hystrix保护措施的方式处理该请求。在下面的AsyncHystrixDemo.java里，我们将演示hystrix异步执行的方式。   &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+1    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;省略必要的package和import代码&lt;/span&gt;
+2    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里同样是继承HystrixCommand&amp;lt;String&amp;gt;类&lt;/span&gt;
+3    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; AsyncHystrixDemo &lt;span&gt;extends&lt;/span&gt; HystrixCommand&amp;lt;String&amp;gt;&lt;span&gt; {
+&lt;/span&gt;4        RestClient client = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;5        HttpRequest request = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;6        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; AsyncHystrixDemo() {
+&lt;/span&gt;7            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 指定命令组的名字&lt;/span&gt;
+8    &lt;span&gt;super&lt;/span&gt;(HystrixCommandGroupKey.Factory.asKey(&quot;ExampleGroup&quot;&lt;span&gt;));
+&lt;/span&gt;9&lt;span&gt;        }
+&lt;/span&gt;10        &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; initRestClient() {
+&lt;/span&gt;11            client = (RestClient) ClientFactory.getNamedClient(&quot;AsyncHystrix&quot;&lt;span&gt;);
+&lt;/span&gt;12            &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;13                request = HttpRequest.newBuilder().uri(&lt;span&gt;new&lt;/span&gt; URI(&quot;/available&quot;&lt;span&gt;)).build();
+&lt;/span&gt;14&lt;span&gt;            } 
+&lt;/span&gt;15            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (URISyntaxException e) 
+&lt;/span&gt;16&lt;span&gt;            {    e.printStackTrace();    }
+&lt;/span&gt;17&lt;span&gt;        ConfigurationManager.getConfigInstance().setProperty(
+&lt;/span&gt;18                    &quot;AsyncHystrix.ribbon.listOfServers&quot;, &quot;localhost:8080&quot;&lt;span&gt;);
+&lt;/span&gt;19&lt;span&gt;        }
+&lt;/span&gt;20        &lt;span&gt;protected&lt;/span&gt;&lt;span&gt; String run() {
+&lt;/span&gt;21            System.out.println(&quot;In run&quot;&lt;span&gt;);
+&lt;/span&gt;22&lt;span&gt;            HttpResponse response;
+&lt;/span&gt;23            String result = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;24            &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;25                response =&lt;span&gt; client.executeWithLoadBalancer(request);
+&lt;/span&gt;26                System.out.println(&quot;Status for URI:&quot; + response.getRequestedURI() + &quot; is :&quot; +&lt;span&gt; response.getStatus());
+&lt;/span&gt;27                result = response.getEntity(String.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;28&lt;span&gt;            } 
+&lt;/span&gt;29            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (ClientException e) {e.printStackTrace(); } 
+&lt;/span&gt;30            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) { e.printStackTrace();    }
+&lt;/span&gt;31            &lt;span&gt;return&lt;/span&gt; &quot;Hystrix Demo,result is: &quot; +&lt;span&gt; result;
+&lt;/span&gt;32        }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    在上述代码的第6行里，我们定义了构造函数，在第10行里，定义了初始化Ribbon环境的initRestClient方法，在第20行里，定义了执行hytrix业务的run方法。这三个方法和刚才讲到的NormalHystrixDemo类里很相似，所以就不再详细讲述。    &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;33        public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+&lt;/span&gt;34            AsyncHystrixDemo asyncDemo = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; AsyncHystrixDemo();
+&lt;/span&gt;35&lt;span&gt;            asyncDemo.initRestClient();
+&lt;/span&gt;36            &lt;span&gt;try&lt;/span&gt; {    Thread.sleep(1000&lt;span&gt;);} 
+&lt;/span&gt;37            &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) 
+&lt;/span&gt;38&lt;span&gt;            {    e.printStackTrace();    }
+&lt;/span&gt;39             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;上述代码是初始化环境并sleep 1秒&lt;/span&gt;
+40            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;得到Future对象  &lt;/span&gt;
+41            Future&amp;lt;String&amp;gt; future =&lt;span&gt; asyncDemo.queue();
+&lt;/span&gt;42            String result = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;43            &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;44                System.out.println(&quot;Start Async Call&quot;&lt;span&gt;);
+&lt;/span&gt;45                 &lt;span&gt;//&lt;/span&gt;&lt;span&gt;通过get方法以异步的方式调用请求&lt;/span&gt;
+46                result =&lt;span&gt; future.get();
+&lt;/span&gt;47            } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) 
+&lt;/span&gt;48&lt;span&gt;              { e.printStackTrace();} 
+&lt;/span&gt;49             &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (ExecutionException e) 
+&lt;/span&gt;50&lt;span&gt;           {     e.printStackTrace();    }
+&lt;/span&gt;51            System.out.println(&quot;Call available function, result is:&quot; +&lt;span&gt; result);
+&lt;/span&gt;52&lt;span&gt;        }
+&lt;/span&gt;53    }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;    在main函数的34到38行，我们同样是初始化了Ribbon环境，这和之前的NormalHystrixDemo类的做法是一样的。&lt;/p&gt;
+&lt;p&gt;    在第41行里，我们通过queue方法，得到了一个包含调用请求的Future&amp;lt;String&amp;gt;类型的对象，而在第46行里，我们是通过future对象的get方法执行请求。&lt;/p&gt;
+&lt;p&gt;    这里有两个看点，第一，在执行第46行的get方法后，HystrixComman会自动调用定义在第20行的run方法，第二，这里得到请求对象是在第41行，而调用请求则在46行，也就是说，并不是在请求到达时就立即执行，而是通过异步的方式执行。&lt;/p&gt;
+&lt;p&gt;    本部分代码的执行结果和NormalHystrixDemo.java是一样的，所以就不再给出了。   &lt;/p&gt;
+&lt;h4&gt; &lt;/h4&gt;
+&lt;h4&gt;&lt;span lang=&quot;EN-US&quot;&gt;本文中的文字和代码谢绝转载。&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;&lt;span lang=&quot;EN-US&quot;&gt;    &lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Tue, 31 Jul 2018 23:05:00 +0000</pubDate>
+<dc:creator>hsm_computer</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/JavaArchitect/p/9399209.html</dc:identifier>
+</item>
+<item>
+<title>依赖注入[6]: .NET Core DI框架[编程体验] - Artech</title>
+<link>http://www.cnblogs.com/artech/p/net-core-di-06.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/artech/p/net-core-di-06.html</guid>
+<description>&lt;p&gt;毫不夸张地说，整个ASP.NET Core框架是建立在一个依赖注入框架之上的，它在应用启动时构建请求处理管道过程中，以及利用该管道处理每个请求过程中使用到的服务对象均来源于DI容器。该DI容器不仅为ASP.NET Core框架提供必要的服务，同时作为了应用的服务提供者，依赖注入已经成为了ASP.NET Core应用基本的编程模式。在前面一系列的文章中，我们主要从理论层面讲述了依赖注入这种设计模式，补充必要的理论基础是为了能够理解与ASP.NET Core框架无缝集成的依赖注入框架的设计原理。我们总是采用“先简单体验，后者深入剖析”来讲述每一个知识点，所以我们利用一些简单的实例从编程层面来体验一下服务注册的添加和服务实例的提取。&lt;/p&gt;
+
+&lt;p&gt;为了让读者朋友们能够更加容易地认识依赖注入框架的实现原理和编程模式，我在《&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-04.html&quot;&gt;依赖注入[4]: 创建一个简易版的DI框架[上篇]&lt;/a&gt;》和《&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-05.html&quot;&gt;依赖注入[5]: 创建一个简易版的DI框架[下篇]&lt;/a&gt;》自行创建了一个名为&lt;strong&gt;Cat&lt;/strong&gt;的依赖注入框架。不论是编程模式和实现原理，Cat与我们现在即将介绍的依赖注入框架都非常相似，对于后者提供的每一个特性，我们几乎都能在Cat中找到对应物。&lt;/p&gt;
+&lt;p&gt;我在设计Cat的时候即将它作为提供服务实例的DI容器，也作为了存放服务注册的容器，但是与ASP.NET Core框架集成的这个依赖注入框架则将这两者分离开来。我们添加的服务注册被保存到通过&lt;strong&gt;IServiceCollection&lt;/strong&gt;接口表示的集合之中，基于这个集合创建的DI容器体现为一个&lt;strong&gt;IServiceProvider&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;由于作为DI框架的IServiceProvider具有类似于Cat的层次结构，所以两者对提供的服务实例采用一致的生命周期管理方式。DI框架利用如下这个枚举ServiceLifetime提供了&lt;strong&gt;Singleton&lt;/strong&gt;、&lt;strong&gt;Scoped&lt;/strong&gt;和&lt;strong&gt;Transient&lt;/strong&gt;三种生命周期模式是，我在Cat中则将其命名为&lt;strong&gt;Root&lt;/strong&gt;、&lt;strong&gt;Self&lt;/strong&gt;和&lt;strong&gt;Transient&lt;/strong&gt;，前者命名关注于现象，而我则关注于内部实现。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;enum&lt;/span&gt;&lt;span&gt; ServiceLifetime
+{
+    Singleton,
+    Scoped,
+    Transient
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+应用初始化过程中添加的服务注册是DI容器用于提供所需服务实例的依据。由于IServiceProvider总是利用指定的&lt;strong&gt;服务类型&lt;/strong&gt;来提供对应服务实例，所以服务是基于类型进行注册的，我们倾向于利用接口来对服务进行抽象，所以这里的服务类型一般为接口。除了以指定服务实例的形式外（默认采用Singleton模式），我们在注册服务的时候必须指定一个具体的生命周期模式。
+&lt;ul&gt;&lt;li&gt;指定注册非服务类型和实现类型；&lt;/li&gt;
+&lt;li&gt;指定一个现有的服务实例；&lt;/li&gt;
+&lt;li&gt;指定一个创建服务实例的委托对象。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;我们定义了如下的接口和对应的实现类型来演示针对DI框架的服务注册和提取。其中Foo、Bar和Baz分别实现了对应的接口IFoo、IBar和IBaz，为了反映Cat对服务实例生命周期的控制，我们让它们派生于同一个基类Base。Base实现了IDisposable接口，我们在其构造函数和实现的Dispose方法中打印出相应的文字以确定对应的实例何时被创建和释放。我们还定义了一个泛型的接口IFoobar&amp;lt;T1, T2&amp;gt;和对应的实现类Foobar&amp;lt;T1, T2&amp;gt;来演示针对泛型服务实例的提供。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;45&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IFoo {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IBar {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IBaz {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; IFoobar&amp;lt;T1, T2&amp;gt;&lt;span&gt; {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Base : IDisposable
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Base() =&amp;gt; Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;An instance of {GetType().Name} is created.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Dispose() =&amp;gt; Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;The instance of {GetType().Name} is disposed.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+}
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Foo : Base, IFoo, IDisposable { }
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Bar : Base, IBar, IDisposable { }
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Baz : Base, IBaz, IDisposable { }
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Foobar&amp;lt;T1, T2&amp;gt;: IFoobar&amp;lt;T1,T2&amp;gt;&lt;span&gt;
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; IFoo Foo { &lt;span&gt;get&lt;/span&gt;&lt;span&gt;; }
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; IBar Bar { &lt;span&gt;get&lt;/span&gt;&lt;span&gt;; }
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; Foobar(IFoo foo, IBar bar)
+    {
+        Foo &lt;/span&gt;=&lt;span&gt; foo;
+        Bar &lt;/span&gt;=&lt;span&gt; bar;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在如下所示的代码片段中我们创建了一个ServiceCollection（它是对IServiceCollection接口的默认实现）对象并调用相应的方法（AddTransient、AddScoped和AddSingleton）针对接口IFoo、IBar和IBaz注册了对应的服务，从方法命名可以看出注册的服务采用的生命周期模式分别为Transient、Scoped和Singleton。在完成服务注册之后，我们调用IServiceCollection接口的扩展方法BuildServiceProvider创建出代表DI容器的IServiceProvider对象，并利用它调用后者的GetService&amp;lt;T&amp;gt;方法来提供相应的服务实例。调试断言表明IServiceProvider提供的服务实例与预先添加的服务注册是一致的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+{
+    &lt;/span&gt;&lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Main()
+    {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; provider = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+            .AddTransient&lt;/span&gt;&amp;lt;IFoo, Foo&amp;gt;&lt;span&gt;()
+            .AddScoped&lt;/span&gt;&amp;lt;IBar&amp;gt;(_ =&amp;gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Bar())
+            .AddSingleton&lt;/span&gt;&amp;lt;IBaz, Baz&amp;gt;&lt;span&gt;()
+            .BuildServiceProvider();
+        Debug.Assert(provider.GetService&lt;/span&gt;&amp;lt;IFoo&amp;gt;() &lt;span&gt;is&lt;/span&gt;&lt;span&gt; Foo);
+        Debug.Assert(provider.GetService&lt;/span&gt;&amp;lt;IBar&amp;gt;() &lt;span&gt;is&lt;/span&gt;&lt;span&gt; Bar);
+        Debug.Assert(provider.GetService&lt;/span&gt;&amp;lt;IBaz&amp;gt;() &lt;span&gt;is&lt;/span&gt;&lt;span&gt; Baz); 
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;除了提供类似于IFoo、IBar和IBaz这样非泛型服务实例之外，如果具有对应的泛型定义（Generic Definition）的服务注册，IServiceProvider同样也能提供泛型服务实例。如下面的代码片段所示，在为创建的ServiceCollection对象添加了针对IFoo和IBar接口的服务注册之后，我们调用AddTransient方法注册了针对泛型定义IFoobar&amp;lt;，&amp;gt;的服务注册，实现的类型为Foobar&amp;lt;,&amp;gt;。当我们利用ServiceCollection创建出代表DI容器的IServiceProvider对象并利用后者提供一个类型为IFoobar&amp;lt;IFoo, IBar&amp;gt;的服务实例的时候，它会创建并返回一个Foobar&amp;lt;Foo, Bar&amp;gt;对象。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; provider = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+    .AddTransient&lt;/span&gt;&amp;lt;IFoo, Foo&amp;gt;&lt;span&gt;()
+    .AddTransient&lt;/span&gt;&amp;lt;IBar, Bar&amp;gt;&lt;span&gt;()
+    .AddTransient(&lt;/span&gt;&lt;span&gt;typeof&lt;/span&gt;(IFoobar&amp;lt;,&amp;gt;), &lt;span&gt;typeof&lt;/span&gt;(Foobar&amp;lt;,&amp;gt;&lt;span&gt;))
+    .BuildServiceProvider();
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; foobar = (Foobar&amp;lt;IFoo, IBar&amp;gt;)provider.GetService&amp;lt;IFoobar&amp;lt;IFoo, IBar&amp;gt;&amp;gt;&lt;span&gt;();
+Debug.Assert(foobar.Foo &lt;/span&gt;&lt;span&gt;is&lt;/span&gt;&lt;span&gt; Foo);
+Debug.Assert(foobar.Bar &lt;/span&gt;&lt;span&gt;is&lt;/span&gt; Bar);
+&lt;/pre&gt;&lt;/div&gt;
+当我们在进行服务注册的时候，可以为同一个类型添加多个服务注册，实际上添加的所有服务注册均是有效的。不过由于扩展方法GetService总是返回一个唯一的服务实例，我们对该方法采用了“后来居上”的策略，即总是采用最近添加的服务注册来创建服务实例。如果我们调用另一个扩展方法GetServices，它将利用返回所有服务注册提供的服务实例。
+&lt;p&gt;如下面的代码片段所示，我们为创建的Cat对象添加了三个针对Base类型的服务注册，对应的实现类型分别为Foo、Bar和Baz。我们最后将Base作为泛型参数调用了GetServices&amp;lt;Base&amp;gt;方法，该方法会返回包含三个Base对象的集合，集合元素的类型分别为Foo、Bar和Baz。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; services = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+    .AddTransient&lt;/span&gt;&amp;lt;Base, Foo&amp;gt;&lt;span&gt;()
+    .AddTransient&lt;/span&gt;&amp;lt;Base, Bar&amp;gt;&lt;span&gt;()
+    .AddTransient&lt;/span&gt;&amp;lt;Base, Baz&amp;gt;&lt;span&gt;()
+    .BuildServiceProvider()
+    .GetServices&lt;/span&gt;&amp;lt;Base&amp;gt;&lt;span&gt;();
+Debug.Assert(services.OfType&lt;/span&gt;&amp;lt;Foo&amp;gt;&lt;span&gt;().Any());
+Debug.Assert(services.OfType&lt;/span&gt;&amp;lt;Bar&amp;gt;&lt;span&gt;().Any());
+Debug.Assert(services.OfType&lt;/span&gt;&amp;lt;Baz&amp;gt;().Any());
+&lt;/pre&gt;&lt;/div&gt;
+对于IServiceProvider针对服务实例的提供还具有这么一个细节：如果我们在调用GetService或者GetService方法是将服务类型设置为IServiceProvider接口类型，提供的服务实例实际上就是当前的IServiceProvider对象。这一特性意味着我们可以将代表DI容器的IServiceProvider作为服务进行注入，但是在《&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-03.html&quot;&gt;依赖注入[3]: 依赖注入模式&lt;/a&gt;》已经提到过，一旦我们在应用中利用注入的IServiceProvider来获取其他依赖的服务实例，意味着我们在使用“&lt;strong&gt;Service Locator&lt;/strong&gt;”模式。这是一种“反模式（Anti-Pattern）”，如果迫不得已最好不要这么做。IServiceProvider的这一特性体现在如下所示的调试断言中。
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; provider = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection().BuildServiceProvider();
+Debug.Assert(provider.GetService&lt;/span&gt;&amp;lt;IServiceProvider&amp;gt;() == provider);
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;IServiceProvider之间的层次结构造就了三种不同的生命周期模式：由于&lt;strong&gt;Singleton&lt;/strong&gt;服务实例保存在作为&lt;strong&gt;根容器&lt;/strong&gt;的IServiceProvider对象上，所以它能够在多个同根IServiceProvider对象之间提供真正的单例保证。&lt;strong&gt;Scoped&lt;/strong&gt;服务实例被保存在&lt;strong&gt;当前&lt;/strong&gt;IServiceProvider上，所以它只能在当前IServiceProvider对象的“服务范围”保证的单例的。没有实现IDisposable接口的Transient服务则采用“&lt;strong&gt;即用即取，用后即弃&lt;/strong&gt;”的策略。&lt;/p&gt;
+&lt;p&gt;接下来我们通过简单的实例来演示三种不同生命周期模式的差异。在如下所示的代码片段中我们创建了一个ServiceCollection对象并针对接口IFoo、IBar和IBaz注册了对应的服务，它们采用的生命周期模式分别为Transient、Scoped和Singleton。在利用ServiceCollection创建出代表DI容器的IServiceProvider对象之后，我们调用其&lt;strong&gt;CreateScope&lt;/strong&gt;方法创建了两个所谓的“服务范围”，后者的ServiceProvider属性返回一个新的IServiceProvider对象，它实际上是当前IServiceProvider对象的子容器。我们最后利用作为子容器的IServiceProvider对象来提供相应的服务实例。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+{
+    &lt;/span&gt;&lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Main()
+    {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; root = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+            .AddTransient&lt;/span&gt;&amp;lt;IFoo, Foo&amp;gt;&lt;span&gt;()
+            .AddScoped&lt;/span&gt;&amp;lt;IBar&amp;gt;(_ =&amp;gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Bar())
+            .AddSingleton&lt;/span&gt;&amp;lt;IBaz, Baz&amp;gt;&lt;span&gt;()
+            .BuildServiceProvider();
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; provider1 =&lt;span&gt; root.CreateScope().ServiceProvider;
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; provider2 =&lt;span&gt; root.CreateScope().ServiceProvider;
+
+        &lt;/span&gt;&lt;span&gt;void&lt;/span&gt; GetServices&amp;lt;TService&amp;gt;&lt;span&gt;(IServiceProvider provider)
+        {
+            provider.GetService&lt;/span&gt;&amp;lt;TService&amp;gt;&lt;span&gt;();
+            provider.GetService&lt;/span&gt;&amp;lt;TService&amp;gt;&lt;span&gt;();
+        }
+
+        GetServices&lt;/span&gt;&amp;lt;IFoo&amp;gt;&lt;span&gt;(provider1);
+        GetServices&lt;/span&gt;&amp;lt;IBar&amp;gt;&lt;span&gt;(provider1);
+        GetServices&lt;/span&gt;&amp;lt;IBaz&amp;gt;&lt;span&gt;(provider1);
+        Console.WriteLine();
+        GetServices&lt;/span&gt;&amp;lt;IFoo&amp;gt;&lt;span&gt;(provider2);
+        GetServices&lt;/span&gt;&amp;lt;IBar&amp;gt;&lt;span&gt;(provider2);
+        GetServices&lt;/span&gt;&amp;lt;IBaz&amp;gt;&lt;span&gt;(provider2);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+上面的程序运行之后会在控制台上输出如图1所示的结果。由于服务IFoo被注册为Transient服务，所以IServiceProvider针对该接口类型的四次请求都会创建一个全新的Foo对象。IBar服务的生命周期模式为Scoped，如果我们利用同一个IServiceProvider对象来提供对应的服务实例，它只会创建一个Bar对象，所以整个程序执行过程中会创建两个Bar对象。IBaz服务采用Singleton生命周期，所以具有同根的两个IServiceProvider对象提供的总是同一个Baz对象，后者只会被创建一次。
+&lt;p&gt;&lt;img alt=&quot;&quot; src=&quot;data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==&quot;/&gt;&lt;a href=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061815458-282238898.png&quot;&gt;&lt;img width=&quot;325&quot; height=&quot;232&quot; title=&quot;4-1&quot; alt=&quot;4-1&quot; src=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061815709-980218625.png&quot; border=&quot;0&quot;/&gt;&lt;/a&gt;&lt;br/&gt;图1 IServiceProvider按照服务注册对应的生命周期模式提供服务实例&lt;/p&gt;
+&lt;p&gt;作为DI容器的IServiceProvider不仅仅为我们提供所需的服务实例，它还帮我们管理者这些服务实例的生命周期。如果某个服务实例实现了IDisposable接口，意味着当生命周期完结的时候需要通过调用Dispose方法执行一些资源释放操作，这些操作同样由提供服务实例的IServiceProvider对象来驱动执行。DI框架针对提供服务实例的释放策略取决于对应的服务注册采用的生命周期模式，具体的策略如下：&lt;/p&gt;
+&lt;ul readability=&quot;0.5&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;Transient和Scoped：所有实现了IDisposable接口的服务实例会被作为服务提供者的当前IServiceProvider对象保存起来，当IServiceProvider对象自身被释放的时候，这些服务实例的Dispose方法会随之被调用。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;Singleton：由于服务实例保存在作为根容器的IServiceProvider对象上，所以后者被释放的时候调用会触发针对服务实例的释放。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;对于一个ASP.NET Core应用来说，它具有一个与当前应用绑定，代表全局根容器的IServiceProvider对象。对于处理的每一次请求，ASP.NET Core框架都会利用这个根容器来创建基于当前请求的服务范围，并利用后者提供的IServiceProvider来提供请求处理所需的服务实例。请求处理完成之后，创建的服务范围被终结，对应的IServiceProvider对象也随之被释放，此时由它提供的Scoped服务实例以及实现了IDisposable接口的Transient服务实例最终得以释放。&lt;/p&gt;
+&lt;p&gt;上述的释放策略可以通过如下的演示实例来印证。我们在如下的代码片段中创建了一个ServiceCollection对象，并针对不同的生命周期模式添加了针对IFoo、IBar和IBaz的服务注册。在利用ServiceCollection创建出作为根容器的IServiceProvider之后，我们调用它的CreateScope方法创建出对应的服务范围。接下来我们利用创建对的服务范围得到代表子容器的IServiceProvider对象，并用后者提供了三个注册服务对应的实例。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+{
+    &lt;/span&gt;&lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Main()
+    {
+        &lt;/span&gt;&lt;span&gt;using&lt;/span&gt; (&lt;span&gt;var&lt;/span&gt; root = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+            .AddTransient&lt;/span&gt;&amp;lt;IFoo, Foo&amp;gt;&lt;span&gt;()
+            .AddScoped&lt;/span&gt;&amp;lt;IBar, Bar&amp;gt;&lt;span&gt;()
+            .AddSingleton&lt;/span&gt;&amp;lt;IBaz, Baz&amp;gt;&lt;span&gt;()
+            .BuildServiceProvider())
+        {
+            &lt;/span&gt;&lt;span&gt;using&lt;/span&gt; (&lt;span&gt;var&lt;/span&gt; scope =&lt;span&gt; root.CreateScope())
+            {
+                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; provider =&lt;span&gt; scope.ServiceProvider;
+                provider.GetService&lt;/span&gt;&amp;lt;IFoo&amp;gt;&lt;span&gt;();
+                provider.GetService&lt;/span&gt;&amp;lt;IBar&amp;gt;&lt;span&gt;();
+                provider.GetService&lt;/span&gt;&amp;lt;IBaz&amp;gt;&lt;span&gt;();
+                Console.WriteLine(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Child container is disposed.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            }
+            Console.WriteLine(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Root container is disposed.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+        }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;由于代表根容器的IServiceProvider对象和服务范围的创建都是在using块中进行的，所有针对它们的Dispose方法都会在using块结束的地方被调用，为了确定方法被调用的时机，我们特意在控制台上打印了相应的文字。该程序运行之后会在控制台上输出如图2所示的结果，我们可以看到当作为子容器的IServiceProvider对象被释放的时候，由它提供的两个生命周期模式分别为Transient和Scoped的两个服务实例（Foo和Bar）被正常释放了。至于生命周期模式为Singleton的服务实例Baz，它的Dispose方法会延迟到作为根容器IServiceProvider对象被释放的时候。&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061815894-1346401595.png&quot;&gt;&lt;img width=&quot;325&quot; height=&quot;198&quot; title=&quot;4-2&quot; alt=&quot;4-2&quot; src=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061816139-1684393474.png&quot; border=&quot;0&quot;/&gt;&lt;/a&gt;&lt;br/&gt;图2 服务实例的释放&lt;/p&gt;
+
+&lt;p&gt;Singleton和Scoped这两种不同生命周期是通过将提供的服务实例分别存放到作为根容器的IServiceProvider对象和当前IServiceProvider对象来实现，这意味着&lt;strong&gt;作为根容器的IServiceProvider对象提供的Scoped服务实例也是不能被释放的&lt;/strong&gt;。如果某个Singleton服务以来另一个Scoped服务，那么Scoped服务实例将被一个Singleton服务实例所引用，意味着Scoped服务实例也成了一个不会被释放的服务实例。&lt;/p&gt;
+&lt;p&gt;在ASP.NET Core应用中，当我们将某个服务注册的生命周期设置为Scoped的真正意图是希望DI容器根据请求上下文来创建和释放服务实例，但是一旦出现上述的情况下，意味着Scoped服务实例将变成一个Singleton服务实例，这样的Scoped服务实例直到应用关闭的哪一个才会得到释放。如果某个Scoped服务实例引用的资源（比如数据库连接）需要被及时释放，这可能会对应用造成灭顶之灾。为了避免这种情况下，我们在利用IServiceProvider提供服务过程开启针对服务范围的验证。&lt;/p&gt;
+&lt;p&gt;如果希望IServiceProvider在提供服务的过程中对服务范围作有效性检验，我们只需要在调用ServiceCollection的BuildServiceProvider方法的时候将一个布尔类型的True值作为参数即可。在如下所示的演示程序中，我们定义了两个服务接口（IFoo和IBar）和对应的实现类型（Foo和Bar），其中Foo依赖IBar。我们将IFoo和IBar分别注册为Singleton和Scoped服务，当我们在调用BuildServiceProvider方法创建代表DI容器的IServiceProvider对象的时候将参数设置为True以开启针对服务范围的检验。我们最后分别利用代表根容器和子容器的IServiceProvider来分别提供这两种类型的服务实例。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+{
+    &lt;/span&gt;&lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Main()
+    {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; root = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServiceCollection()
+            .AddSingleton&lt;/span&gt;&amp;lt;IFoo, Foo&amp;gt;&lt;span&gt;()
+            .AddScoped&lt;/span&gt;&amp;lt;IBar, Bar&amp;gt;&lt;span&gt;()
+            .BuildServiceProvider(&lt;/span&gt;&lt;span&gt;true&lt;/span&gt;&lt;span&gt;);    
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; child =&lt;span&gt; root.CreateScope().ServiceProvider;
+
+        &lt;/span&gt;&lt;span&gt;void&lt;/span&gt; ResolveService&amp;lt;T&amp;gt;&lt;span&gt;(IServiceProvider provider)
+        {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; isRootContainer = root == provider ? &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Yes&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;No&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
+            {
+                provider.GetService&lt;/span&gt;&amp;lt;T&amp;gt;&lt;span&gt;();
+                Console.WriteLine( $&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Status: Success; &lt;/span&gt;Service Type: {&lt;span&gt;typeof&lt;/span&gt;(T).Name}; Root: {isRootContainer}&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+&lt;span&gt;            }
+            &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception ex)
+            {
+                Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Status: Fail; &lt;/span&gt;Service Type: {&lt;span&gt;typeof&lt;/span&gt;(T).Name}; Root: {isRootContainer}&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+                  Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Error: {ex.Message}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            }
+        }
+
+        ResolveService&lt;/span&gt;&amp;lt;IFoo&amp;gt;&lt;span&gt;(root);
+        ResolveService&lt;/span&gt;&amp;lt;IBar&amp;gt;&lt;span&gt;(root);
+        ResolveService&lt;/span&gt;&amp;lt;IFoo&amp;gt;&lt;span&gt;(child);
+        ResolveService&lt;/span&gt;&amp;lt;IBar&amp;gt;&lt;span&gt;(child);
+    }
+}
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IFoo {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IBar {}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Foo : IFoo
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; IBar Bar { &lt;span&gt;get&lt;/span&gt;&lt;span&gt;; }
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Foo(IBar bar) =&amp;gt; Bar =&lt;span&gt; bar;
+}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Bar : IBar {}
+&lt;/pre&gt;&lt;/div&gt;
+上面这个演示实例启动之后将在控制台上输出如图3所示的输出结果。从输出结果可以看出针对四个服务解析，只有一次（使用代表子容器的IServiceProvider提供IBar服务实例）是成功的。这个实例充分说明了一旦开启了针对服务范围的验证，IServiceProvider对象不可能提供以单例形式存在的Scoped服务。
+&lt;p&gt;&lt;a href=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061816369-44778700.png&quot;&gt;&lt;img width=&quot;710&quot; height=&quot;219&quot; title=&quot;4-3&quot; alt=&quot;4-3&quot; src=&quot;https://images2018.cnblogs.com/blog/19327/201808/19327-20180801061816601-71314277.png&quot; border=&quot;0&quot;/&gt;&lt;/a&gt;&lt;br/&gt;图3 IServiceProvider针对服务范围的检验&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-01.html&quot;&gt;依赖注入[1]: 控制反转&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-02.html&quot;&gt;依赖注入[2]: 基于IoC的设计模式&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-03.html&quot;&gt;依赖注入[3]: 依赖注入模式&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-04.html&quot;&gt;依赖注入[4]: 创建一个简易版的DI框架[上篇]&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-05.html&quot;&gt;依赖注入[5]: 创建一个简易版的DI框架[下篇]&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-06.html&quot;&gt;依赖注入[6]: .NET Core DI框架[编程体验]&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-07.html&quot;&gt;依赖注入[7]: .NET Core DI框架[服务注册]&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/artech/p/net-core-di-08html&quot;&gt;依赖注入[8]: .NET Core DI框架[服务消费]&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Tue, 31 Jul 2018 22:18:00 +0000</pubDate>
+<dc:creator>Artech</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/artech/p/net-core-di-06.html</dc:identifier>
+</item>
+<item>
+<title>JAVAEE——宜立方商城10：使用freemarker实现网页静态化、ActiveMq同步生成静态网页、Sso单点登录系统分析 - kent鹏</title>
+<link>http://www.cnblogs.com/xieyupeng/p/9399066.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xieyupeng/p/9399066.html</guid>
+<description>&lt;p&gt;1、&lt;span&gt;使用&lt;/span&gt;freemarker&lt;span&gt;实现网页静态化&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;2、ActiveMq&lt;span&gt;同步生成静态网页&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;可以使用&lt;/span&gt;Freemarker&lt;span&gt;实现网页静态化。&lt;/span&gt;&lt;/p&gt;
+
+&lt;h2&gt;2.1. &lt;span&gt;什么是&lt;/span&gt;freemarker&lt;/h2&gt;
+&lt;p&gt;FreeMarker&lt;span&gt;是一个用&lt;/span&gt;&lt;span&gt;Java&lt;/span&gt;&lt;span&gt;语言编写的模板引擎，它基于模板来生成文本输出。&lt;/span&gt;&lt;span&gt;FreeMarker&lt;/span&gt;&lt;span&gt;与&lt;/span&gt;&lt;span&gt;Web&lt;/span&gt;&lt;span&gt;容器无关，即在&lt;/span&gt;&lt;span&gt;Web&lt;/span&gt;&lt;span&gt;运行时，它并不知道&lt;/span&gt;&lt;span&gt;Servlet&lt;/span&gt;&lt;span&gt;或&lt;/span&gt;&lt;span&gt;HTTP&lt;/span&gt;&lt;span&gt;。它不仅可以用作表现层的实现技术，而且还可以用于生成&lt;/span&gt;&lt;span&gt;XML&lt;/span&gt;&lt;span&gt;，&lt;/span&gt;&lt;span&gt;JSP&lt;/span&gt;&lt;span&gt;或&lt;/span&gt;&lt;span&gt;Java&lt;/span&gt; &lt;span&gt;等。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;目前企业中&lt;/span&gt;:&lt;span&gt;主要用&lt;/span&gt;&lt;span&gt;Freemarker&lt;/span&gt;&lt;span&gt;做静态页面或是页面展示&lt;/span&gt;&lt;/p&gt;
+
+&lt;h2&gt;2.2. Freemarker&lt;span&gt;的使用方法&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;把&lt;/span&gt;freemarker&lt;span&gt;的&lt;/span&gt;&lt;span&gt;jar&lt;/span&gt;&lt;span&gt;包添加到工程中。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Maven&lt;span&gt;工程添加依赖&lt;/span&gt;&lt;/p&gt;
+&lt;table border=&quot;1&quot; cellspacing=&quot;0&quot;&gt;&lt;tbody readability=&quot;1.5&quot;&gt;&lt;tr readability=&quot;6&quot;&gt;&lt;td valign=&quot;top&quot; width=&quot;710&quot; readability=&quot;9&quot;&gt;
+&lt;p&gt;&amp;lt;dependency&amp;gt;&lt;/p&gt;
+&lt;p&gt; 　　 &amp;lt;groupId&amp;gt;org.freemarker&amp;lt;/groupId&amp;gt;&lt;/p&gt;
+&lt;p&gt;  　　&amp;lt;artifactId&amp;gt;freemarker&amp;lt;/artifactId&amp;gt;&lt;/p&gt;
+&lt;p&gt;  　　&amp;lt;version&amp;gt;2.3.23&amp;lt;/version&amp;gt;&lt;/p&gt;
+&lt;p&gt;&amp;lt;/dependency&amp;gt;&lt;/p&gt;
+
+&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;原理：&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003457291-1743612457.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;使用步骤：&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;第一步：创建一个&lt;/span&gt;Configuration&lt;span&gt;对象，直接&lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt;一个对象。构造方法的参数就是&lt;/span&gt;&lt;span&gt;freemarker&lt;/span&gt;&lt;span&gt;对于的版本号。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;第二步：设置模板文件所在的路径。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;第三步：设置模板文件使用的字符集。一般就是&lt;/span&gt;utf-8.&lt;/p&gt;
+&lt;p&gt;第四步：加载一个模板，创建一个模板对象。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;第五步：创建一个模板使用的数据集，可以是&lt;/span&gt;pojo&lt;span&gt;也可以是&lt;/span&gt;&lt;span&gt;map&lt;/span&gt;&lt;span&gt;。一般是&lt;/span&gt;&lt;span&gt;Map&lt;/span&gt;&lt;span&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;第六步：创建一个&lt;/span&gt;Writer&lt;span&gt;对象，一般创建一&lt;/span&gt;&lt;span&gt;FileWriter&lt;/span&gt;&lt;span&gt;对象，指定生成的文件名。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;第七步：调用模板对象的&lt;/span&gt;process&lt;span&gt;方法输出文件。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;第八步：关闭流。&lt;/p&gt;
+
+&lt;p&gt;模板：&lt;/p&gt;
+&lt;p&gt;${hello}&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; genFile() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第一步：创建一个Configuration对象，直接new一个对象。构造方法的参数就是freemarker对于的版本号。&lt;/span&gt;
+        Configuration configuration = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Configuration(Configuration.getVersion());
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第二步：设置模板文件所在的路径。&lt;/span&gt;
+        configuration.setDirectoryForTemplateLoading(&lt;span&gt;new&lt;/span&gt; File(&quot;D:/workspaces-itcast/term197/e3-item-web/src/main/webapp/WEB-INF/ftl&quot;&lt;span&gt;));
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第三步：设置模板文件使用的字符集。一般就是utf-8.&lt;/span&gt;
+        configuration.setDefaultEncoding(&quot;utf-8&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第四步：加载一个模板，创建一个模板对象。&lt;/span&gt;
+        Template template = configuration.getTemplate(&quot;hello.ftl&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第五步：创建一个模板使用的数据集，可以是pojo也可以是map。一般是Map。&lt;/span&gt;
+        Map dataModel = &lt;span&gt;new&lt;/span&gt; HashMap&amp;lt;&amp;gt;&lt;span&gt;();
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;向数据集中添加数据&lt;/span&gt;
+        dataModel.put(&quot;hello&quot;, &quot;this is my first freemarker test.&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第六步：创建一个Writer对象，一般创建一FileWriter对象，指定生成的文件名。&lt;/span&gt;
+        Writer out = &lt;span&gt;new&lt;/span&gt; FileWriter(&lt;span&gt;new&lt;/span&gt; File(&quot;D:/temp/term197/out/hello.html&quot;&lt;span&gt;));
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第七步：调用模板对象的process方法输出文件。&lt;/span&gt;
+&lt;span&gt;        template.process(dataModel, out);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 第八步：关闭流。&lt;/span&gt;
+&lt;span&gt;        out.close();
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;br/&gt;2.3. 模板的语法&lt;/span&gt; &lt;/p&gt;
+&lt;h3&gt;2.3.1. &lt;span&gt;访问&lt;/span&gt;map&lt;span&gt;中的&lt;/span&gt;&lt;span&gt;key&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;${key}&lt;/p&gt;
+
+&lt;h3&gt;2.3.2. &lt;span&gt;访问&lt;/span&gt;pojo&lt;span&gt;中的属性&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;Student&lt;span&gt;对象。学号、姓名、年龄&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;${key.property}&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003530299-1020268886.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h3&gt;2.3.3. 取集合中的数据&lt;/h3&gt;
+&lt;p&gt;&amp;lt;#list studentList as student&amp;gt;&lt;/p&gt;
+&lt;p&gt;${student.id}/${studnet.name}&lt;/p&gt;
+&lt;p&gt;&amp;lt;/#list&amp;gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003534511-213110859.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003538066-655279989.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h3&gt;2.3.4. 取循环中的下标&lt;/h3&gt;
+&lt;p&gt;&amp;lt;#list studentList as student&amp;gt;&lt;/p&gt;
+&lt;p&gt;${student_index}&lt;/p&gt;
+&lt;p&gt;&amp;lt;/#list&amp;gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003542190-1793797744.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;h3&gt;2.3.5. 判断&lt;/h3&gt;
+&lt;p&gt;&amp;lt;#if student_index % 2 == 0&amp;gt;&lt;/p&gt;
+&lt;p&gt;&amp;lt;#else&amp;gt;&lt;/p&gt;
+&lt;p&gt;&amp;lt;/#if&amp;gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003546293-324046339.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h3&gt;2.3.6. 日期类型格式化&lt;/h3&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003549960-1987379207.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;h3&gt;2.3.7. Null&lt;span&gt;值的处理&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003553487-1801948271.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;h3&gt;2.3.8. Include&lt;span&gt;标签&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&amp;lt;#include “模板名称”&amp;gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003558402-234365345.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h2&gt;2.4. Freemarker&lt;span&gt;整合&lt;/span&gt;&lt;span&gt;spring&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;引入&lt;/span&gt;jar&lt;span&gt;包：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Freemarker&lt;span&gt;的&lt;/span&gt;&lt;span&gt;jar&lt;/span&gt;&lt;span&gt;包&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003605017-1155459042.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h3&gt;2.4.1. &lt;span&gt;创建整合&lt;/span&gt;spring&lt;span&gt;的配置文件&lt;/span&gt;&lt;/h3&gt;
+
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;?&lt;/span&gt;&lt;span&gt;xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;?&amp;gt;&lt;/span&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;beans &lt;/span&gt;&lt;span&gt;xmlns&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/beans&quot;&lt;/span&gt;&lt;span&gt;
+    xmlns:xsi&lt;/span&gt;&lt;span&gt;=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;&lt;/span&gt;&lt;span&gt; xmlns:p&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/p&quot;&lt;/span&gt;&lt;span&gt;
+    xmlns:context&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/context&quot;&lt;/span&gt;&lt;span&gt;
+    xmlns:dubbo&lt;/span&gt;&lt;span&gt;=&quot;http://code.alibabatech.com/schema/dubbo&quot;&lt;/span&gt;&lt;span&gt; xmlns:mvc&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/mvc&quot;&lt;/span&gt;&lt;span&gt;
+    xsi:schemaLocation&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+        http://www.springframework.org/schema/mvc http://www.springframework.org/schema/mvc/spring-mvc-4.2.xsd
+        http://code.alibabatech.com/schema/dubbo http://code.alibabatech.com/schema/dubbo/dubbo.xsd
+        http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+
+    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;freemarkerConfig&quot;&lt;/span&gt;&lt;span&gt;
+        class&lt;/span&gt;&lt;span&gt;=&quot;org.springframework.web.servlet.view.freemarker.FreeMarkerConfigurer&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;templateLoaderPath&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;/WEB-INF/ftl/&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
+        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;defaultEncoding&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;UTF-8&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;bean&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+
+
+&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;beans&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;p&gt;&lt;span&gt;&lt;br/&gt;需要编写一&lt;/span&gt;Controller&lt;span&gt;进行测试&lt;/span&gt; &lt;/p&gt;
+
+&lt;h3&gt;2.4.2. Controller&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;请求的&lt;/span&gt;url&lt;span&gt;：&lt;/span&gt;&lt;span&gt;/genhtml&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;参数：无&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;返回值：&lt;/span&gt;ok &lt;span&gt;（&lt;/span&gt;&lt;span&gt;String&lt;/span&gt;&lt;span&gt;， 需要使用&lt;/span&gt;&lt;span&gt;@ResponseBody&lt;/span&gt;&lt;span&gt;）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;业务逻辑：&lt;/p&gt;
+&lt;p&gt;1、&lt;span&gt;从&lt;/span&gt;spring&lt;span&gt;容器中获得&lt;/span&gt;&lt;span&gt;FreeMarkerConfigurer&lt;/span&gt;&lt;span&gt;对象。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;2、&lt;span&gt;从&lt;/span&gt;FreeMarkerConfigurer&lt;span&gt;对象中获得&lt;/span&gt;&lt;span&gt;Configuration&lt;/span&gt;&lt;span&gt;对象。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;3、&lt;span&gt;使用&lt;/span&gt;Configuration&lt;span&gt;对象获得&lt;/span&gt;&lt;span&gt;Template&lt;/span&gt;&lt;span&gt;对象。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;4、创建数据集&lt;/p&gt;
+&lt;p&gt;5、&lt;span&gt;创建输出文件的&lt;/span&gt;Writer&lt;span&gt;对象。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;6、&lt;span&gt;调用模板对象的&lt;/span&gt;process&lt;span&gt;方法，生成文件。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;7、关闭流。&lt;/p&gt;
+
+&lt;p&gt;加载配置文件：&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003621792-1901389782.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Controller
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; HtmlGenController {
+    
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; FreeMarkerConfigurer freeMarkerConfigurer;
+
+    @RequestMapping(&lt;/span&gt;&quot;/genhtml&quot;&lt;span&gt;)
+    @ResponseBody
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; String genHtml()&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1、从spring容器中获得FreeMarkerConfigurer对象。
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 2、从FreeMarkerConfigurer对象中获得Configuration对象。&lt;/span&gt;
+        Configuration configuration =&lt;span&gt; freeMarkerConfigurer.getConfiguration();
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 3、使用Configuration对象获得Template对象。&lt;/span&gt;
+        Template template = configuration.getTemplate(&quot;hello.ftl&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 4、创建数据集&lt;/span&gt;
+        Map dataModel = &lt;span&gt;new&lt;/span&gt; HashMap&amp;lt;&amp;gt;&lt;span&gt;();
+        dataModel.put(&lt;/span&gt;&quot;hello&quot;, &quot;1000&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 5、创建输出文件的Writer对象。&lt;/span&gt;
+        Writer out = &lt;span&gt;new&lt;/span&gt; FileWriter(&lt;span&gt;new&lt;/span&gt; File(&quot;D:/temp/term197/out/spring-freemarker.html&quot;&lt;span&gt;));
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 6、调用模板对象的process方法，生成文件。&lt;/span&gt;
+&lt;span&gt;        template.process(dataModel, out);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 7、关闭流。&lt;/span&gt;
+&lt;span&gt;        out.close();
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;OK&quot;&lt;span&gt;;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;2.5. 商品详情页面静态化&lt;/span&gt; &lt;/p&gt;
+&lt;h3&gt;2.5.1. 网页的静态化方案&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;输出文件的名称：商品&lt;/span&gt;id+&lt;span&gt;“&lt;/span&gt;&lt;span&gt;.html&lt;/span&gt;&lt;span&gt;”&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;输出文件的路径：工程外部的任意目录。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;网页访问：使用&lt;/span&gt;nginx&lt;span&gt;访问网页。在此方案下&lt;/span&gt;&lt;span&gt;tomcat&lt;/span&gt;&lt;span&gt;只有一个作用就是生成静态页面。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;工程部署：可以把e3-item-web&lt;span&gt;部署到多个服务器上。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;生成静态页面的时机：商品添加后，生成静态页面。可以使用&lt;/span&gt;Activemq&lt;span&gt;，订阅&lt;/span&gt;&lt;span&gt;topic&lt;/span&gt;&lt;span&gt;（商品添加）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003731015-1915540348.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h2&gt;3.1. &lt;span&gt;什么是&lt;/span&gt;sso&lt;span&gt;系统&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;SSO&lt;span&gt;英文全称&lt;/span&gt;&lt;span&gt;Single Sign On&lt;/span&gt;&lt;span&gt;，单点登录。&lt;/span&gt;&lt;span&gt;SSO&lt;/span&gt;&lt;span&gt;是在多个应用系统中，用户只需要登录一次就可以访问所有相互信任的应用系统。它包括可以将这次主要的登录映射到其他应用中用于同一个用户的登录的机制。它是目前比较流行的企业业务整合的解决方案之一。&lt;/span&gt;&lt;/p&gt;
+
+&lt;h2&gt;3.2. 为什么要有单点登录系统&lt;/h2&gt;
+&lt;h3&gt;3.2.1. 传统的登录实现方式&lt;/h3&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003800242-1966623486.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;此方式在只有一个&lt;/span&gt;web&lt;span&gt;工程时是没有问题。&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;3.2.2. 集群环境下&lt;/h3&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1135185/201808/1135185-20180801003837031-1007850550.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;集群环境下会出现要求用户多次登录的情况。&lt;/p&gt;
+&lt;p&gt;解决方案：&lt;/p&gt;
+&lt;p&gt;1、&lt;span&gt;配置&lt;/span&gt;tomcat&lt;span&gt;集群。配置&lt;/span&gt;&lt;span&gt;tomcatSession&lt;/span&gt;&lt;span&gt;复制。节点数不要超过&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;&lt;span&gt;个。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;2、&lt;span&gt;可以使用&lt;/span&gt;Session&lt;span&gt;服务器，保存&lt;/span&gt;&lt;span&gt;Session&lt;/span&gt;&lt;span&gt;信息，使每个节点是无状态。需要模拟&lt;/span&gt;&lt;span&gt;Session&lt;/span&gt;&lt;span&gt;。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;单点登录系统是使用&lt;/span&gt;redis&lt;span&gt;模拟&lt;/span&gt;&lt;span&gt;Session&lt;/span&gt;&lt;span&gt;，实现&lt;/span&gt;&lt;span&gt;Session&lt;/span&gt;&lt;span&gt;的统一管理。&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Tue, 31 Jul 2018 16:39:00 +0000</pubDate>
+<dc:creator>kent鹏</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/xieyupeng/p/9399066.html</dc:identifier>
+</item>
+<item>
+<title>反射和代理 - 嗜血蚂蚁</title>
+<link>http://www.cnblogs.com/shixiemayi/p/9398867.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/shixiemayi/p/9398867.html</guid>
+<description>&lt;p&gt;1、类的编译和运行简易过程：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;java的源码文件（也称为编译单元，以.java为后缀的文件）&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　↓　文件内最多只能有一个public修饰的类，否则编译器报错；某个类被public修饰，该类名必需与文件名称一致；&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;java的字节码文件（以.class为后缀的文件）&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　↓　源码文件经过编译器编译后产生的字节码文件，源码文件中的每个类都会产生一个与类名相同的字节码文件&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;java虚拟机解析字节码文件&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　　　　　加载.class文件，在内存里保持Class对象，它被用来创建这个类的所有对象。&lt;/p&gt;
+&lt;p&gt; 2、获取Class对象的途径&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Class.forName()&lt;/li&gt;
+&lt;li&gt;已知某个对象w，通过w.getClass()方法获取，该方法在Object中&lt;/li&gt;
+&lt;li&gt;普通的类、接口、数组、基本数据类型，可以通过 .class的形式获取，如char.class、Petty.class&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;3、反射--运行时的类型信息&lt;/p&gt;
+&lt;p&gt;什么是反射：程序在运行时候，可以通过类型信息获取类的域、方法、构造器等细节，通过java的反射API可以调用这些域、方法、构造器等&lt;/p&gt;
+&lt;p&gt;反射的API在java.lang.reflect类库，Class类的实例表示正在运行的 Java 应用程序中的类和接口，因此可以获取Field、Method、Constructor类的对象等信息&lt;/p&gt;
+&lt;p&gt;4、反射应用--动态代理（jdk版）&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;先看看静态代理：&lt;/li&gt;
+&lt;/ul&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.leixingxinxi;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Main {&lt;br/&gt;&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        TestFace testFace&lt;/span&gt;=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Person1();
+        &lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Persion2(testFace).testDo();
+    }
+}
+
+&lt;/span&gt;&lt;span&gt;interface&lt;/span&gt;&lt;span&gt; TestFace{
+    &lt;/span&gt;&lt;span&gt;void&lt;/span&gt;&lt;span&gt; testDo();
+}
+&lt;/span&gt;&lt;span&gt;class&lt;/span&gt; Person1 &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; TestFace{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testDo() {
+        System.out.println(&lt;/span&gt;&quot;去买一杯咖啡...&quot;&lt;span&gt;);
+    }
+}
+&lt;/span&gt;&lt;span&gt;class&lt;/span&gt; Persion2 &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; TestFace{
+    TestFace testFace;
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; Persion2(TestFace testFace){
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.testFace=&lt;span&gt;testFace;
+    }
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testDo() { &lt;br/&gt;　　　　  //方法前的操作
+        testFace.testDo();&lt;br/&gt;　　　　  //方法后的操作
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;直接调用方法：可以新建对象Persion1并执行testDo()方法，能够得到一致的结果；------&amp;gt;&amp;gt;&amp;gt;main 让 persion1去买一杯咖啡；&lt;/p&gt;
+&lt;p&gt;使用静态代理：被代理类和代理类都实现了同一个接口，将被代理类的对象注入代理类的对象域中，在代理类中重写的方法里通过被代理类对象调用对应的方法，实际使用不直接使用被代理类的方法，而是通过代理类的对象调用覆盖的方法；那么在代理类中调用的方法里，真正去调用被代理类的方法前后可以做一些操作------&amp;gt;&amp;gt;&amp;gt;main 告诉persion2 去买咖啡，persion2通知persion1去买一杯咖啡&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;动态代理（jdk版）：动态的创建了代理对象，并动态的处理对所代理的方法的调用。&lt;/li&gt;
+&lt;/ul&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.leixingxinxi;
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.lang.reflect.InvocationHandler;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.lang.reflect.Method;
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.lang.reflect.Proxy;
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Main {
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        &lt;span&gt;TestFace&lt;/span&gt; proxy&lt;/span&gt;= (&lt;span&gt;TestFace&lt;/span&gt;) Proxy.newProxyInstance(Persion1.&lt;span&gt;class&lt;/span&gt;.getClassLoader(),Persion1.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;.getInterfaces(),
+                &lt;/span&gt;&lt;span&gt;new&lt;/span&gt; MyInvocationHandler(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Persion1()));
+        proxy.testDo();
+    }
+}
+
+&lt;/span&gt;&lt;span&gt;interface&lt;/span&gt;&lt;span&gt; TestFace{
+    &lt;/span&gt;&lt;span&gt;void&lt;/span&gt;&lt;span&gt; testDo();
+}
+&lt;/span&gt;&lt;span&gt;class&lt;/span&gt; Persion1 &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; TestFace{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testDo() {
+        System.out.println(&lt;/span&gt;&quot;去买一杯咖啡...&quot;&lt;span&gt;);
+    }
+}
+&lt;/span&gt;&lt;span&gt;class&lt;/span&gt; MyInvocationHandler &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; InvocationHandler{
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; TestFace testFace;
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; MyInvocationHandler(TestFace testFace){
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.testFace=&lt;span&gt;testFace;
+    }
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Object invoke(Object proxy, Method method, Object[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Throwable {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;调用被代理对象的方法前的业务&lt;/span&gt;
+        System.out.println(&quot;当前调用的方法为：&quot;+&lt;span&gt;method.getName());
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;调用被代理对象方法&lt;/span&gt;
+&lt;span&gt;        method.invoke(testFace);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;调用被代理对象的方法后的业务&lt;/span&gt;
+        System.out.println(&quot;被代理的方法调用结束&quot;&lt;span&gt;);
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;调用过程：通过代理对象proxy调用代理方法时候，实际会去调用MyInvocationHandler 对象的invoke方法，该方法内部会调用Method的invoke方法真正去执行被代理对象的方法体&lt;/p&gt;
+
+</description>
+<pubDate>Tue, 31 Jul 2018 16:32:00 +0000</pubDate>
+<dc:creator>嗜血蚂蚁</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/shixiemayi/p/9398867.html</dc:identifier>
+</item>
+<item>
+<title>【java代码之美】---Java8 Stream - 雨点的名字</title>
+<link>http://www.cnblogs.com/qdhxhz/p/9399015.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/qdhxhz/p/9399015.html</guid>
+<description>&lt;p&gt;第一次看到Stream表达式就深深把我吸引，用它可以使你的代码更加整洁而且对集合的操作效率也会大大提高，如果你还没有用到java8的Stream特性，那就说明你确实out啦。&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;一、概述&lt;/span&gt;&lt;/h2&gt;
+&lt;h4&gt;&lt;span&gt;1、什么是Stream&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;Stream是一种&lt;span&gt;可供流式操作的数据视图&lt;/span&gt;有些类似数据库中视图的概念&lt;span&gt;它不改变源数据集合&lt;/span&gt;如果&lt;span&gt;对其进行改变的操作它会返回一个新的数据集合。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;总的来讲它有三大特性：在之后我们会对照着详细说明&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;       1、stream不存储数据&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;       2、stream不改变源数据&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;       3、stream的延迟执行特性&lt;/strong&gt;&lt;/p&gt;
+&lt;h4&gt;&lt;span&gt;&lt;strong&gt;2、Stream优点&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;ol readability=&quot;0&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;代码简洁，函数式编程写出的代码简洁且意图明确，使用&lt;em&gt;stream&lt;/em&gt;接口让你从此告别&lt;em&gt;for&lt;/em&gt;循环。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;多核友好，Java函数式编程使得编写并行程序从未如此简单，你需要的全部就是调用一下&lt;code&gt;parallel()&lt;/code&gt;方法。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;h4&gt;&lt;span&gt;3、Stream API常用方法&lt;/span&gt;&lt;/h4&gt;
+&lt;table align=&quot;left&quot;&gt;&lt;tbody readability=&quot;7.5&quot;&gt;&lt;tr&gt;&lt;td colspan=&quot;3&quot; align=&quot;center&quot;&gt;Stream操作分类&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td rowspan=&quot;2&quot;&gt;中间操作(Intermediate operations)&lt;/td&gt;
+&lt;td&gt;无状态(Stateless)&lt;/td&gt;
+&lt;td&gt;unordered() filter() map() mapToInt() mapToLong() mapToDouble() flatMap() flatMapToInt() flatMapToLong() flatMapToDouble() peek()&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;有状态(Stateful)&lt;/td&gt;
+&lt;td&gt;distinct() sorted() sorted() limit() skip()&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td rowspan=&quot;2&quot;&gt;结束操作(Terminal operations)&lt;/td&gt;
+&lt;td&gt;非短路操作&lt;/td&gt;
+&lt;td&gt;forEach() forEachOrdered() toArray() reduce() collect() max() min() count()&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;短路操作(short-circuiting)&lt;/td&gt;
+&lt;td&gt;anyMatch() allMatch() noneMatch() findFirst() findAny()&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+
+
+
+
+
+
+
+
+&lt;p&gt;Stream上的所有操作分为两类：&lt;span&gt;中间操作&lt;/span&gt;和&lt;span&gt;结束操作&lt;/span&gt;，中间操作只是一种标记，只有结束操作才会触发实际计算。&lt;/p&gt;
+&lt;p&gt;中间操作又可以分为无状态的和有状态的：&lt;/p&gt;
+&lt;p&gt;      无状态中间操作是指元素的处理不受前面元素的影响，而有状态的中间操作必须等到所有元素处理之后才知道最终结果，比如排序是有状态操作，在读取所有元素之前并不能确定排序结果；&lt;/p&gt;
+&lt;p&gt;结束操作又可以分为短路操作和非短路操作&lt;/p&gt;
+&lt;p&gt;      短路操作是指不用处理全部元素就可以返回结果，比如找到第一个满足条件的元素。之所以要进行如此精细的划分，是因为底层对每一种情况的处理方式不同。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;常用中间件&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;      &lt;span&gt;filter&lt;/span&gt;：过滤流，过滤流中的元素，返回一个符合条件的Stream&lt;/p&gt;
+&lt;div readability=&quot;53.129819277108&quot;&gt;
+&lt;p&gt;      &lt;span&gt;map&lt;/span&gt;：转换流，将一种类型的流转换为另外一种流。（mapToInt、mapToLong、mapToDouble 返回int、long、double基本类型对应的Stream）&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; flatMap&lt;/span&gt;：简单的说，就是一个或多个流合并成一个新流。（flatMapToInt、flatMapToLong、flatMapToDouble 返回对应的IntStream、LongStream、DoubleStream流。）&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; distinct&lt;/span&gt;：返回去重的Stream。&lt;/p&gt;
+&lt;p&gt;  &lt;span&gt;sorted&lt;/span&gt;：返回一个排序的Stream。&lt;/p&gt;
+&lt;p&gt;    &lt;span&gt;peek&lt;/span&gt;：主要用来查看流中元素的数据状态。&lt;/p&gt;
+&lt;p&gt;     &lt;span&gt;limit&lt;/span&gt;：返回前n个元素数据组成的Stream。属于短路操作&lt;/p&gt;
+&lt;p&gt;     &lt;span&gt;skip&lt;/span&gt;：返回第n个元素后面数据组成的Stream。 &lt;/p&gt;
+&lt;p id=&quot;articleHeader3&quot;&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;结束操作&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;  &lt;span&gt;forEach&lt;/span&gt;: 循环操作Stream中数据。&lt;/p&gt;
+&lt;p&gt;  &lt;span&gt;toArray&lt;/span&gt;: 返回流中元素对应的数组对象。&lt;/p&gt;
+&lt;p&gt;  &lt;span&gt;reduce&lt;/span&gt;: 聚合操作，用来做统计。&lt;/p&gt;
+&lt;p&gt;  &lt;span&gt;collect&lt;/span&gt;: 聚合操作，封装目标数据。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;min、max、count&lt;/span&gt;: 聚合操作，最小值，最大值，总数量。&lt;/p&gt;
+&lt;p&gt;   &lt;span&gt;anyMatch&lt;/span&gt;: 短路操作，有一个符合条件返回true。&lt;/p&gt;
+&lt;p&gt;    &lt;span&gt;allMatch&lt;/span&gt;: 所有数据都符合条件返回true。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;noneMatch&lt;/span&gt;: 所有数据都不符合条件返回true。&lt;/p&gt;
+&lt;p&gt;    &lt;span&gt;findFirst&lt;/span&gt;: 短路操作，获取第一个元素。&lt;/p&gt;
+&lt;p&gt;     &lt;span&gt;findAny&lt;/span&gt;: 短路操作，获取任一元素。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;forEachOrdered&lt;/span&gt;: 暗元素顺序执行循环操作。&lt;/p&gt;
+
+&lt;div class=&quot;article fmt article__content&quot; data-id=&quot;1190000012404465&quot; data-license=&quot;&quot; readability=&quot;35.5&quot;&gt;
+&lt;h2&gt;&lt;span&gt;二、各种案例说明&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;多举点例子，以后忘记了还可以来找自己的博客，哈哈。&lt;/p&gt;
+&lt;p&gt;首先写一个领域对象&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person {
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Integer  id;
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; String name;
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; String sex;
+    
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Integer age;
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;提供get，set，和满参构造函数&lt;/span&gt;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;&lt;span&gt;1、map中间件相关例子&lt;/span&gt;&lt;/h3&gt;
+&lt;/div&gt;
+&lt;div class=&quot;clearfix mt10&quot; readability=&quot;56.5&quot;&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;57&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestMap {
+    
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        List&lt;/span&gt;&amp;lt;Person&amp;gt; persionList = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;Person&amp;gt;&lt;span&gt;();
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(1,&quot;张三&quot;,&quot;男&quot;,8&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(2,&quot;小小&quot;,&quot;女&quot;,2&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(3,&quot;李四&quot;,&quot;男&quot;,25&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(4,&quot;王五&quot;,&quot;女&quot;,20&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(5,&quot;赵六&quot;,&quot;男&quot;,38&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(6,&quot;大大&quot;,&quot;男&quot;,65&lt;span&gt;));
+        
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1、只取出该集合中所有姓名组成一个新集合&lt;/span&gt;
+        List&amp;lt;String&amp;gt; nameList=&lt;span&gt;persionList.stream().map(Person::getName).collect(Collectors.toList());
+        System.out.println(nameList.toString());
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;2、只取出该集合中所有id组成一个新集合&lt;/span&gt;
+          List&amp;lt;Integer&amp;gt; idList=&lt;span&gt;persionList.stream().mapToInt(Person::getId).boxed().collect(Collectors.toList());
+         System.out.println(idList.toString());
+    
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;3、list转map，key值为id，value为Person对象&lt;/span&gt;
+         Map&amp;lt;Integer, Person&amp;gt; personmap = persionList.stream().collect(Collectors.toMap(Person::getId, person -&amp;gt;&lt;span&gt; person));
+         System.out.println(personmap.toString());
+      
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;4、list转map，key值为id，value为name&lt;/span&gt;
+         Map&amp;lt;Integer, String&amp;gt; namemap =&lt;span&gt; persionList.stream().collect(Collectors.toMap(Person::getId, Person::getName));
+         System.out.println(namemap.toString());         
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 运行结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1090617/201807/1090617-20180731230549914-1688110300.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;是不是之前要好几层的for循环解决的问题，通过Stream只要一行代码就可以解决了。&lt;/p&gt;
+&lt;p&gt;这里要注意，如果你list转map的key如果不唯一，会报错，所以如果你不确定你的key是否唯一，可以改成如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+ Map&amp;lt;Integer, String&amp;gt; map =&lt;span&gt; persionList.stream().collect(
+                Collectors.toMap(Person::getAge, Person::getName, (key1, key2) &lt;/span&gt;-&amp;gt;&lt;span&gt; key1)
+        );&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;&lt;span&gt; 2、filter相关例子&lt;/span&gt;&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;53&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestFilter {
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        List&lt;/span&gt;&amp;lt;Person&amp;gt; persionList = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;Person&amp;gt;&lt;span&gt;();
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(1, &quot;张三&quot;, &quot;男&quot;, 8&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(2, &quot;小小&quot;, &quot;女&quot;, 2&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(3, &quot;李四&quot;, &quot;男&quot;, 25&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(4, &quot;王五&quot;, &quot;女&quot;, 8&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(5, &quot;赵六&quot;, &quot;女&quot;, 25&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(6, &quot;大大&quot;, &quot;男&quot;, 65&lt;span&gt;));
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1、查找年龄大于20岁的人数&lt;/span&gt;
+        &lt;span&gt;long&lt;/span&gt;  age=persionList.stream().filter(p-&amp;gt;p.getAge()&amp;gt;20&lt;span&gt;).count();
+        System.out.println(age);
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;2、查找年龄大于20岁，性别为男的人数&lt;/span&gt;
+       List&amp;lt;Person&amp;gt;  ageList=persionList.stream().filter(p-&amp;gt;p.getAge()&amp;gt;20).filter(p-&amp;gt;&quot;男&quot;&lt;span&gt;.equals(p.getSex())).collect(Collectors.toList());
+        System.out.println(ageList.size());
+
+    }
+    &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt;
+     *运行结果：
+     *  3
+     *  2
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;&lt;span&gt; 3、sorted相关例子&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;   对于数组举例&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestSort {
+
+    String[] arr1 &lt;/span&gt;= {&quot;abc&quot;,&quot;a&quot;,&quot;bc&quot;,&quot;abcd&quot;&lt;span&gt;};
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 按照字符长度排序
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testSorted1_(){
+        Arrays.stream(arr1).sorted(Comparator.comparing(String::length)).forEach(System.out::println);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：a、bc、abc、abcd&lt;/span&gt;
+&lt;span&gt;    }
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 倒序
+     * reversed(),java8泛型推导的问题，所以如果comparing里面是非方法引用的lambda表达式就没办法直接使用reversed()
+     * Comparator.reverseOrder():也是用于翻转顺序，用于比较对象（Stream里面的类型必须是可比较的）
+     * Comparator. naturalOrder()：返回一个自然排序比较器，用于比较对象（Stream里面的类型必须是可比较的）
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testSorted2_(){
+        Arrays.stream(arr1).sorted(Comparator.comparing(String::length).reversed()).forEach(System.out::println);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：abcd、abc、bc、a&lt;/span&gt;
+&lt;span&gt;        Arrays.stream(arr1).sorted(Comparator.reverseOrder()).forEach(System.out::println);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：bc、abcd、abc、a&lt;/span&gt;
+&lt;span&gt;        Arrays.stream(arr1).sorted(Comparator.naturalOrder()).forEach(System.out::println);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：a、abc、abcd、bc&lt;/span&gt;
+&lt;span&gt;    }
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 先按照首字母排序
+     * 之后按照String的长度排序
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+    @Test
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; testSorted3_(){
+        Arrays.stream(arr1).sorted(Comparator.comparing(&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;::com1).thenComparing(String::length)).forEach(System.out::println);
+    }&lt;br/&gt;&lt;span&gt; //输出：a、abc、abcd、bc
+    &lt;/span&gt;&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;char&lt;/span&gt;&lt;span&gt; com1(String x){
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; x.charAt(0&lt;span&gt;);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 对于集合举例&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;55&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestSort {
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        List&lt;/span&gt;&amp;lt;Person&amp;gt; persionList = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;Person&amp;gt;&lt;span&gt;();
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(1, &quot;张三&quot;, &quot;男&quot;, 8&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(2, &quot;小小&quot;, &quot;女&quot;, 2&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(3, &quot;李四&quot;, &quot;男&quot;, 25&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(4, &quot;王五&quot;, &quot;女&quot;, 8&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(5, &quot;赵六&quot;, &quot;女&quot;, 25&lt;span&gt;));
+        persionList.add(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; Person(6, &quot;大大&quot;, &quot;男&quot;, 65&lt;span&gt;));
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;1、找到年龄最小的岁数&lt;/span&gt;
+        Collections.sort(persionList, (x, y) -&amp;gt;&lt;span&gt; x.getAge().compareTo(y.getAge()));
+        Integer age &lt;/span&gt;= persionList.get(0&lt;span&gt;).getAge();
+        System.out.println(&lt;/span&gt;&quot;年龄最小的有:&quot; +&lt;span&gt; age);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：年龄最小的有:2
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;2、找到年龄最小的姓名&lt;/span&gt;
+        String name =&lt;span&gt; persionList.stream()
+                .sorted(Comparator.comparingInt(x &lt;/span&gt;-&amp;gt;&lt;span&gt; x.getAge()))
+                .findFirst()
+                .get().getName();
+        System.out.println(&lt;/span&gt;&quot;年龄最小的姓名:&quot; +&lt;span&gt; name);
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出：年龄最小的姓名:小小&lt;/span&gt;&lt;span&gt;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt; 其它的就不具体写了。以后遇到特殊的再往里面补充。&lt;/p&gt;
+
+&lt;h3&gt;&lt;span&gt;参考&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;    1、&lt;/span&gt;&lt;a href=&quot;http://www.importnew.com/26090.html&quot; target=&quot;_blank&quot;&gt;跟上 Java 8 – Stream API 快速入门&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;   2、&lt;a id=&quot;cb_post_title_url&quot; href=&quot;https://www.cnblogs.com/andywithu/p/7404101.html&quot;&gt;java8之stream&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;   3、&lt;a href=&quot;https://blog.csdn.net/u011863951/article/details/81108312&quot; target=&quot;_blank&quot;&gt;[Java进阶篇][函数式编程][Java 8+ Stream API]&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;   4、&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/CarpenterLee/p/6637118.html&quot;&gt;深入理解Java Stream流水线&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;想太多，做太少，中间的落差就是烦恼。想没有烦恼，要么别想，要么多做。中校【10】&lt;/strong&gt; &lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Tue, 31 Jul 2018 16:11:00 +0000</pubDate>
+<dc:creator>雨点的名字</dc:creator>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/qdhxhz/p/9399015.html</dc:identifier>
+</item>
+<item>
 <title>Lucene-Query的使用及其索引库的维护 - 马瘦风</title>
 <link>http://www.cnblogs.com/shoufeng/p/9398964.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/shoufeng/p/9398964.html</guid>
@@ -508,158 +1541,6 @@ public void updateIndexByTerm() throws IOException{
 <dc:identifier>http://www.cnblogs.com/magicxyx/p/9397622.html</dc:identifier>
 </item>
 <item>
-<title>Confluence 6 任务的类型 - huyuchengus</title>
-<link>http://www.cnblogs.com/huyuchengus/p/9398922.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/huyuchengus/p/9398922.html</guid>
-<description>&lt;p&gt;下面是有关你可以调整的计划任务列表。&lt;/p&gt;
-
-&lt;table class=&quot;wrapped confluenceTable tablesorter tablesorter-default&quot;&gt;&lt;tbody readability=&quot;46.292890075224&quot;&gt;&lt;tr readability=&quot;5.71875&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;Confluence 备份（Back Up Confluence）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;对 Confluence 站点执行&lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/Configuring+Backups&quot;&gt;备份&lt;/a&gt;操作。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;At 2am every day&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;9&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;检查集群安全（Check Cluster Safety）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;针对集群方式的 Confluence 安装，这个计划任务将会保证在集群中只有一个 Confluence 节点向数据库中写入信息。&lt;br/&gt;针对标准方式（非集群方式）版本的 Confluence，这个任务被用来警告用户，谁错误的连接到第二个 Confluence 数据库实例，这个数据库已经被一个 Confluence 使用了。in use.&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;Every 30 seconds&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;清理 Journal 实体（Clean Journal Entries）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;周期化的清理 journal  实体，这个能够保证数据的大小能够保持正常的增长速度而避免过度膨胀。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每节点（Per node）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每天的 2 AM&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;清理临时目录（Clean Temporary Directory）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;清理 &lt;code&gt;&amp;lt;confluence-home&amp;gt;/temp&lt;/code&gt; 目录中的临时文件。这个目录被导出任务或其他一些任务创建。&lt;br/&gt;&lt;img class=&quot;emoticon emoticon-information&quot; src=&quot;https://www.cwiki.us/s/en_GB/7701/88819522251e178b5cc83bc1e3ddc18a884c1aed/_/images/icons/emoticons/information.svg&quot; alt=&quot;(info)&quot; data-emoticon-name=&quot;information&quot;/&gt; 这个清理不包括 Confluence 安装目录中文件的清理。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每节点（Per node）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每天的 4 AM&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;6.6561403508772&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;清理过期的邮件错误（Clear Expired Mail Errors）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;清理 &lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/The+Mail+Queue&quot;&gt;The Mail Queue&lt;/a&gt; 队列中的通知错误。当一个邮件因为某个原因而发送失败没有发送成功的话，一个通知错误将会被发送到邮件错误队列中。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每天的 3 AM&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;7&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;清理过期的记住我令牌（Clear Expired Remember Me Tokens）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;清理所有过期的记住我（Remember Me）令牌。记住我这个令牌超过两周后就会过期。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每个月的 20 号&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;7.6666666666667&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;邮件每日报表（Email Daily Reports）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;针对 Confluence 的内容的修改，为&lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/Scheduled+Jobs#ScheduledJobs-emailreportsubscription&quot;&gt;所有订阅者&lt;/a&gt;发送每天的更新通知。&lt;br/&gt;&lt;img class=&quot;emoticon emoticon-information&quot; src=&quot;https://www.cwiki.us/s/en_GB/7701/88819522251e178b5cc83bc1e3ddc18a884c1aed/_/images/icons/emoticons/information.svg&quot; alt=&quot;(info)&quot; data-emoticon-name=&quot;information&quot;/&gt; 所有有关 Confluence 的内容修改记录将会只记录最后 24 小时的修改。这个推荐你只能修改任务发送邮件的时间为每 24 个小时中的某一个时间、&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每天的 12 AM&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;刷新边际索引队列（Flush Edge Index Queue）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;刷新边际索引队列，能够保证 Confluence 的索引是最新的索引。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每节点（Per node）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每 30 秒&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;刷新本地任务队列（Flush Local Task Queue）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;刷新本地任务队列。（Confluence 的内部任务通常具有很高的刷新频率）。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每节点（Per node）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每分钟&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;7.7507788161994&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;刷新邮件队列（Flush Mail Queue）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;发送 &lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/The+Mail+Queue&quot;&gt;mail queue&lt;/a&gt; 队列中已经队列的邮件通知。这并不包括批量的通知。编辑 发送批量的通知（&lt;strong&gt;Send batched notifications&lt;/strong&gt;）任务，如果你同时希望修改通知的发送频率包括页面或者博客的更新。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每分钟&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;9&quot;&gt;&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;发送批量通知（Send batched notifications）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;从有关上次任务运行后，发送有关页面或者博客更新的邮件通知。如果邮件并不是很多的话，可以增加这个发送的频率，如果你有很多邮件通知的话，你可以减少发送邮件的频率。这个设置对 Confluence 的性能提升会有很大的影响。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每 10 分钟&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td class=&quot;confluenceTd&quot;&gt;刷新任务队列（Flush Task Queue）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;刷新任务队列（Confluence 的内部任务通常具有很高的刷新频率）。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每节点（Per node）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot;&gt;每分钟&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;8&quot;&gt;&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;发送推荐更新邮件（Send Recommended Updates Email）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;触发发送推荐更新邮件给用户。这个任务是每个小时运行一次的，但是用户可以收到每周更新或者每日更新，这个是根据用户自己属性的设置不同而不同的。这个时间与时区是对应的。&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每小时&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;13.605960264901&quot;&gt;&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;清理老的计划任务运行信息（Purge Old Job Run Details）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot; readability=&quot;10.620689655172&quot;&gt;
-&lt;p&gt;Confluence 存储每一个计划任务的运行情况在数据库表 &lt;code&gt;scheduler_run_details&lt;/code&gt; 中。为了保持数据库中保存有足够的信息，但是又不至于扩大数据库的存储，清理老的计划任务细节（&lt;strong&gt;Purge Old Job Run Details&lt;/strong&gt;）任务将会日常运行删除细节：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;超过 90 的天成功任务。&lt;/li&gt;
-&lt;li&gt;超过 7 天的未成功的任务。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;有可以重置 &lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/Configuring+System+Properties&quot;&gt;system properties&lt;/a&gt; 中的一些设置；&lt;code&gt;jobs.limit.per.purge&lt;/code&gt;, &lt;code&gt;all.jobs.ttl.hours&lt;/code&gt; and &lt;code&gt;unsuccessful.jobs.ttl.hours&lt;/code&gt;。&lt;/p&gt;
-&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每集群（Per cluster）&lt;/td&gt;
-&lt;td class=&quot;confluenceTd&quot; colspan=&quot;1&quot;&gt;每天的 11 PM&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;a href=&quot;https://www.cwiki.us/display/CONF6ZH/Scheduled+Jobs&quot;&gt;https://www.cwiki.us/display/CONF6ZH/Scheduled+Jobs&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Tue, 31 Jul 2018 15:31:00 +0000</pubDate>
-<dc:creator>huyuchengus</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/huyuchengus/p/9398922.html</dc:identifier>
-</item>
-<item>
-<title>【好记性不如烂笔头】之小程序要点记录 - 牙疼哥哥</title>
-<link>http://www.cnblogs.com/pomelott/p/9398919.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/pomelott/p/9398919.html</guid>
-<description>&lt;p&gt;1. 每添加一个页面需要在app.json中注册，第一个页面为首页。&lt;/p&gt;
-&lt;p&gt;2. 例如注册一个welcome页面&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;// 注意： 路径最前面不需要加 ‘/’ ， 不需要加文件名&lt;br/&gt;{
-  &lt;/span&gt;&quot;pages&quot;&lt;span&gt;: [
-      &lt;/span&gt;&quot;pages/welcome/welcome&quot;&lt;span&gt;
-  ]
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;3. 每增加新页面后，js文件不能为空，需要调用 Page ({}) 初始化， 同样，页面的json文件也不能为空，应写为 {}&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面对应的js文件&lt;/span&gt;
-&lt;span&gt;
-Page({
-
-})&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面对应的json文件, 不能为空，最简单也要写成下面的格式&lt;/span&gt;
-&lt;span&gt;
-{
-
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;4. 通过在啊app.json里面注册页面，IDE会自动为开发者创建 .wxml, .js, .wxss, .json 的四个对应的文件&lt;/p&gt;
-&lt;p&gt;5. 每个页面都有一个名字为page的根结点&lt;/p&gt;
-&lt;p&gt;6. 小程序中支持一下几种css选择器&lt;/p&gt;
-&lt;p&gt;.class(.box)   #id(#box)  element(view)      element,Element (view, checkbox)   ::after(view::after)    ::before (view::before)&lt;/p&gt;
-&lt;p&gt;7. 小程序中新定义了 rpx的适配单位：在宽度为750px的设计稿中， 1物理像素 = 1rpx = 0.5px &lt;/p&gt;
-&lt;p&gt;8. Boolean的陷阱：在swiper组件中，用vertical属性来设置是否垂直排列，若要设置为水平排列，只有一下三种方法：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1. 不加如vertical属性&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; 2. vertical = ‘’&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; 3. vertical = ‘{{false}}’         &lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;9. 小程序为image组件增加了 mode 属性用以控制图片的裁剪，常用的是widthFix（宽度充满，高度自适应）&lt;/p&gt;
-&lt;p&gt;10. page页面的声明周期&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;Page({
-    data: {},
-    onLoad: &lt;/span&gt;&lt;span&gt;function&lt;/span&gt; (options) {},      &lt;span&gt;//&lt;/span&gt;&lt;span&gt;  页面初始化  options 为页面跳转所带来的参数， 一个页面只会调用一次&lt;/span&gt;
-    onShow: &lt;span&gt;function&lt;/span&gt; () {},             &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面显示，每次打开页面都会调用&lt;/span&gt;
-    onReady: &lt;span&gt;function&lt;/span&gt; () {},            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面初次渲染完成，一个页面只会调用一次，代表页面已经准备好，可进行视觉交互&lt;/span&gt;
-    onHide: &lt;span&gt;function&lt;/span&gt; () {},             &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面隐藏&lt;/span&gt;
-    onUnload: &lt;span&gt;function&lt;/span&gt; () {}            &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 页面关闭&lt;/span&gt;
-&lt;span&gt;})
-
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 注意： &lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; 1. 一个页面的加载顺序（onLoad &amp;gt; onShow &amp;gt; onReady）&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; 2. onLoad和onReady在整个页面的声明周期内只会执行一次，除非这个页面执行了onUnload卸载掉了，卸载意味着这个页面的一个声明周期结束了&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; 3. onReady 仅仅用来监听页面的第一次渲染&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;11.  小程序中提供的其他特定事件的监听程序：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; onPullDownRefresh : 监听用户下拉动作的事件处理函数&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; onReachBottom: 页面上拉触底事件的处理函数&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; onShareAppMessage : 用户点击右上角分享&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt; 持续更新中。。。。。。&lt;/span&gt;&lt;/p&gt;
-</description>
-<pubDate>Tue, 31 Jul 2018 15:29:00 +0000</pubDate>
-<dc:creator>牙疼哥哥</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/pomelott/p/9398919.html</dc:identifier>
-</item>
-<item>
 <title>好代码是管出来的——使用GitHub实现简单的CI/CD - 7m鱼</title>
 <link>http://www.cnblogs.com/selimsong/p/9398738.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/selimsong/p/9398738.html</guid>
@@ -761,394 +1642,6 @@ Page({
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/netWild/p/maven.html</dc:identifier>
-</item>
-<item>
-<title>web server性能优化浅谈 - Jack47</title>
-<link>http://www.cnblogs.com/Jack47/p/performance-optimizing-for-gateway.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Jack47/p/performance-optimizing-for-gateway.html</guid>
-<description>&lt;p&gt;作者:&lt;a href=&quot;http://www.cnblogs.com/Jack47/&quot;&gt;Jack47, ZhiYan&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;转载请保留作者和&lt;a href=&quot;http://www.cnblogs.com/Jack47/&quot;&gt;原文出处&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;性能优化，优化的东西一定得在主路径上，结合测量的结果去优化。不然即使性能再好，逻辑相对而言执行不了几次，其实对提示性能的影响微乎其微。记得抖哥以前说多隆在帮忙查广告搜索引擎的问题，看到了一处代码，激动的说这里用他的办法，性能可以提升至少10倍。但实际上，这里的逻辑基本走不到 face_palm。&lt;/p&gt;
-&lt;p&gt;性能优化的几个跟语言无关的大方向：&lt;/p&gt;
-&lt;h2 id=&quot;减少算法的时间复杂度&quot;&gt;减少算法的时间复杂度&lt;/h2&gt;
-&lt;h3 id=&quot;例子1&quot;&gt;例子1&lt;/h3&gt;
-&lt;p&gt;我们实现了一个CallBack的机制，一段执行流程里，会有多个plugin，每个plugin可以添加callback，每个callback有唯一的名字；添加callback时，需要注意覆盖的问题，如果覆盖了，需要返回老的callback。一开始我们的实现机制是使用数组，这样添加时，需要挨个遍历，查看是否时覆盖的情况。Update操作的时间复杂度为O(n)；后来我们添加了一个辅助的Map，用来存储 &amp;lt;name, callbackIdx&amp;gt;的映射关系。Update的平均时间复杂度降低为O(1)&lt;/p&gt;
-&lt;h3 id=&quot;例子2&quot;&gt;例子2&lt;/h3&gt;
-&lt;p&gt;在我们的pipeline场景里，类似net/http里的context，我们有个task的概念的。每个阶段(plugin)都可以向里面塞数据，一开始为了支持cancel某个阶段，重新执行这个阶段的功能，我们是使用嵌套，类似递归的方式。这样就可以很方便的撤销某个阶段放入的数据。但是这种设计，如果要从里面取数据，需要层层遍历，类似递归一样，时间复杂度为O(n);因为每个plugin都会与task打交道，所以这里 task里数据的存取是高频操作，而且我们后来经过权衡，觉得支持取消掉某个阶段对task的操作，不是必须的，不支持也没关系，所以后来简化了task的设计，直接用一个map来做，这样时间复杂度又降下来了。&lt;/p&gt;
-&lt;h2 id=&quot;根据业务逻辑设计优化的数据结构&quot;&gt;根据业务逻辑，设计优化的数据结构&lt;/h2&gt;
-&lt;p&gt;我们有个场景，是要对URL执行类似归一化的操作，把里面重复的&lt;code&gt;\&lt;/code&gt;字符删掉，比如 &lt;code&gt;\\&lt;/code&gt; -&amp;gt; &lt;code&gt;\&lt;/code&gt;。这个逻辑对于网关，是高频逻辑，因为每个请求来了，都需要判断，但是真正要删掉重复的&lt;code&gt;\&lt;/code&gt;的操作，其实比较少，大部分场景是检查完，发现正常，不需要做修改。&lt;/p&gt;
-&lt;p&gt;一开始我们的实现是把url字符挨个检查，没问题的放入 bytes.Buffer 中，最终返回 buffer.String()；后来我们优化了一下，采用了标准库中 &lt;a href=&quot;https://github.com/golang/go/blob/master/src/path/filepath/path.go#L21-L24&quot;&gt;path/path.go&lt;/a&gt; 中的 Lazybuf 的方式，LazyBuf中发现要写入的字符和基准的字符不一样时，才分配内存来存储修改后的字符串，不然最终还是基准的字符，直接返回就行，避免了无谓的内存拷贝操作。&lt;/p&gt;
-&lt;p&gt;这里其实体现了一个小技巧，尽量想想自己需要的操作，是否标准库里有，同时也要多看看标准库的实现，吸取经验。&lt;/p&gt;
-&lt;h2 id=&quot;尽量减少磁盘io次数&quot;&gt;尽量减少磁盘IO次数&lt;/h2&gt;
-&lt;p&gt;IO操作尽量批量进行。比如我们的网关会记录访问日志，类似Nginx的access.log。在生产环境/压测环境下，会生成大量的日志，虽然操作系统写入文件是有缓冲的，但是这个缓冲机制我们应用程序没法直接控制，而且写入文件时调用系统API，也比较耗时。我们可以在应用层面，给日志留缓冲区(buffer)，定时或达到一定量(4k,跟虚拟文件系统的块大小保持一致）时调用操作系统IO操作来写入日志。&lt;/p&gt;
-&lt;p&gt;总结一下，就是写入日志是异步的，同时是攒够一批之后，再调用操作系统的写入&lt;/p&gt;
-&lt;p&gt;具体实现：进来的数据，先放到一个2048字节大小的channel里，由一个固定的go routine负责不断的从channel里读取数据，写入到buffered io里。这里2048字节的channel，类似队列一样，是有削峰作用的。当有大批日志写入时，channel可以暂时缓冲一下，降低 buffer.io 真正flush的频率。；写入文件时，套上一个 &lt;code&gt;bufio.Writer(size=512)&lt;/code&gt;，即内部是有512字节大小的缓冲区，满了才使用整块数据调用Write()；&lt;/p&gt;
-&lt;h2 id=&quot;尽量复用资源&quot;&gt;尽量复用资源&lt;/h2&gt;
-&lt;p&gt;资源的申请和释放，跟内存(也是一种资源)的申请和释放其实是一样的，尽量复用，避免重复/频繁申请；&lt;br/&gt;比如下面的这个&lt;a href=&quot;https://github.com/golang/go/blob/master/src/time/tick.go#L49-L53&quot;&gt;time.Tick&lt;/a&gt;，适用于使用者不需要关闭它，即非频繁调用的情况。使用它很方便，但是要注意，它没法关闭，所以垃圾回收器也没法回收它。来看一下下面的这段代码修改记录：&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;+   ticker := time.NewTicker(time.Second)
-+   defer ticker.Stop()
-+
-    for {
-        select {
--       case &amp;lt;-time.Tick(time.Second):
-+       case &amp;lt;-ticker.C:&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;修改前，for循环里会频繁创建time.Ticker,但都没有回收机制。改动后，for循环里复用同一个time.Ticker,而且会在当前函数执行结束时释放time.Ticker。&lt;/p&gt;
-&lt;h2 id=&quot;sync.map的使用&quot;&gt;sync.Map的使用&lt;/h2&gt;
-&lt;p&gt;其实看清楚&lt;a href=&quot;https://github.com/golang/go/blob/master/src/sync/map.go#L12-L26&quot;&gt;map.go&lt;/a&gt;里的注释，注意使用场景。&lt;/p&gt;
-&lt;p&gt;sync.Map适合两种用途：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;指定的key，value只会被写入一次，但是会被读取很多次&lt;/li&gt;
-&lt;li&gt;多个goroutine读取、写入、覆盖的数据都是没有交集的&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;只有上述情况下，sync.Map才能相比Go map搭配单独的Mutex或RWMutex而言，显著降低锁的竞争，均摊复杂度是常数(amortized constant time)&lt;/p&gt;
-&lt;p&gt;大部分情况下，应该用 map ，然后用单独的锁或者同步机制，这样类型安全，而且可以有其他的逻辑&lt;/p&gt;
-&lt;h2 id=&quot;锁相关&quot;&gt;锁相关&lt;/h2&gt;
-&lt;h3 id=&quot;mutexes&quot;&gt;Mutexes&lt;/h3&gt;
-&lt;p&gt;锁在满足以下条件的情况下，是很快的：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;没有其他人竞争 (想象为挤公交车，此时没人跟你抢，你直接上车)&lt;/li&gt;
-&lt;li&gt;锁覆盖的代码，执行时间非常快 (想象为挤公交车，大家速度都很快，嗖嗖就上去了，下一个人等待上一个人挤上去的时间很短)&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;当竞争越激烈，锁的性能下降的越厉害。&lt;/p&gt;
-&lt;p&gt;Reference:&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://preshing.com/20111118/locks-arent-slow-lock-contention-is/&quot;&gt;locks aren't slow, lock contention is&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;锁的粒度尽量小&quot;&gt;锁的粒度尽量小&lt;/h3&gt;
-&lt;p&gt;比如我们的pipeline生命周期的管理，一开始是通过一把大锁来控制并发的，后续优化时，发现里面可以细分成两块，各自可以用一把锁来控制，这样锁的粒度变小，并发程度会提高。&lt;/p&gt;
-&lt;p&gt;这里比较好的例子是&lt;a href=&quot;https://github.com/allegro/bigcache&quot;&gt;BigCache&lt;/a&gt;的实现。它使用分片（sharding）的方式，&lt;br/&gt;跟Java 7里的&lt;a href=&quot;https://github.com/openjdk-mirror/jdk7u-jdk/blob/master/src/share/classes/java/util/concurrent/ConcurrentHashMap.java#L107&quot;&gt;concurrent hash map&lt;/a&gt;的实现类似，对数据进行分片，分片之间是独立的，可以并发的进行写操作。对细分后的分片进行并发控制，这样能有效减小锁的粒度，让并发度尽可能高。&lt;/p&gt;
-&lt;p&gt;Reference: &lt;a href=&quot;https://allegro.tech/2016/03/writing-fast-cache-service-in-go.html&quot;&gt;Writing Fast Cache Service in Go&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;rwmutexes&quot;&gt;RWMutexes&lt;/h3&gt;
-&lt;ol&gt;&lt;li&gt;是否有多读少写的场景，如果是，尽量用读写锁；这样尽量把写锁的粒度缩小，能用读锁解决的，就不需要用写锁，真正需要修改结果时，才使用写锁。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;&lt;a href=&quot;https://github.com/megaease/easegateway/commit/04d42e9779a276ef222b23186c9c65d79d48a85b&quot; class=&quot;uri&quot;&gt;https://github.com/megaease/easegateway/commit/04d42e9779a276ef222b23186c9c65d79d48a85b&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;比如：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;func (b *DataBucket) QueryDataWithBindDefault(key interface{}, defaultValueFunc DefaultValueFunc) (interface{}, error) {
-    先上读锁，看key是否存在，如果存在，就返回 // 大部分情况下是这样，所以这个优化肯定很有意义
-    否则，上写锁，把默认值加上 // 这种情况只会发生一次
- }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;尽量使用无锁的方式&quot;&gt;尽量使用无锁的方式：&lt;/h3&gt;
-&lt;p&gt;是否真的需要加锁？是否能用CAS的操作来代替Mutex？&lt;/p&gt;
-&lt;p&gt;例如：&lt;/p&gt;
-&lt;p&gt;利用 atmoic int stopped = 0／1 来代表是否停止，需要停止时，设置为1。&lt;/p&gt;
-&lt;p&gt;golang里Atomic操作有：Atomic.CompareAndSet, LoadInt(), StoreInt()&lt;/p&gt;
-&lt;p&gt;如果利用某个变量代表现在是否在干活，close时需要等别人干完活，那么在close时，需要通过spin的方式等待干活的人结束:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;for atomic.LoadInt(&amp;amp;doing) &amp;gt; 0 {
-    sleep(1ms)
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;内存相关&quot;&gt;内存相关&lt;/h2&gt;
-&lt;p&gt;减少内存分配的次数&lt;/p&gt;
-&lt;h3 id=&quot;生成字符串时尽量写入-bytes.buffer-而不是用-fmt.sprintf&quot;&gt;生成字符串时，尽量写入 bytes.Buffer, 而不是用 fmt.Sprintf()&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;+   var repeatingRune rune
--   result := string(s[0])  
-+   result := bytes.NewBuffer(nil)
-    for _, r := range s[:1] {
--       result = fmt.Sprintf(&quot;%s%s&quot;, result, string(r)) 
-+       result.WriteRune(r)
-+   }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;数据结构初始化时尽量指定合适的容量&quot;&gt;数据结构初始化时，尽量指定合适的容量&lt;/h3&gt;
-&lt;p&gt;比如Java或者Go里面，如果数组，Map的大小已知，可以在声明时指定大小，这样避免后续追加数据时需要扩展内部容量，造成多次内存分配&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;-   eventStream := make(chan cluster.Event)
-+   eventStream := make(chan cluster.Event, 1024)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;语言go相关&quot;&gt;语言(Go)相关&lt;/h3&gt;
-&lt;p&gt;语言相关的其实还有很多，但是随着语言的发展，基本上都会被解决掉，所以这里只提一下下面的这个，对Go语言感兴趣的同学，可以看&lt;a href=&quot;https://www.slideshare.net/TylerTreat/so-you-wanna-go-fast-80300458&quot;&gt;So You Wanna Go Fast&lt;/a&gt;&lt;/p&gt;
-&lt;h4 id=&quot;避免内存拷贝&quot;&gt;避免内存拷贝&lt;/h4&gt;
-&lt;p&gt;如下的代码，两者有什么区别？&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;-   for _, bucket := range s.buckets {
--       bucket.Update(v)
-+   for i := 0; i &amp;lt; len(s.buckets); i++ {
-        buckets[i].Update(v)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;修改前的这种方式，bucket是通过拷贝生成的临时变量；而且这种方式下，由于操作的是临时变量，所以 s.buckets并不会被更新！&lt;/p&gt;
-&lt;h3 id=&quot;go-routine虽好也有代价&quot;&gt;Go routine虽好，也有代价&lt;/h3&gt;
-&lt;p&gt;我们的网关，一开始的时候，由于大家也都是刚接触Go语言，用Go routine用的也顺手，所以很喜欢用Go routine;比如我们的主流程里，需要记录本次请求的一些指标，为了不影响主流程的执行，这些记录指标的逻辑都是启动一个新的go routine去执行的。后来发现我们在一台机器上，一个程序里，某一时刻启动了十万计的go routine，而这些go routine生命周期很短，会不断的销毁和创建。我也简单的用Go Benchmark测试模拟了一个场景，测试了之后发现go routine数量上去后，性能下降很大，说明此时的调度开销也比较大了。后来我们修改了设计，让大家把需要更新的数据放到channel里，启动固定的go routine去做更新的事情，这样可以避免频繁创建go routine的情况。&lt;/p&gt;
-&lt;h3 id=&quot;使用多个http.client来发送请求&quot;&gt;使用多个http.Client来发送请求&lt;/h3&gt;
-&lt;p&gt;一开始我们是通过一个http.Client来发送同一个API的请求，后来担心这里可能存在并发的瓶颈，尝试了创建多个http.Client,发送时随机使用某一个发送的机制，发现性能提升了。其实性能有多少提升，取决于使用场景的，还是得实际测量，用数值说话，我们的方法不一定对你们有用！&lt;/p&gt;
-&lt;p&gt;Go语言在benchmark方面，提供了很多强有力的工具，可以参加下面的文章：&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://talks.godoc.org/github.com/davecheney/high-performance-go-workshop/high-performance-go-workshop.slide&quot;&gt;High performance go workshop&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://about.sourcegraph.com/go/an-introduction-to-go-tool-trace-rhys-hiltner/&quot;&gt;An Introduction to go tool trace&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dgryski/go-perfbook/blob/master/performance.md&quot;&gt;Writing and Optimizing Go code&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://rakyll.org/go-tool-flags/&quot;&gt;Go tooling essentials&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;好了，以上就是所有内容了，欢迎留下你的性能优化的思路和方法！&lt;br/&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;br/&gt;如果您看了本篇博客,有所收获，请点击右下角的“推荐”，让更多人看到！
-&lt;p&gt;打赏也是对自己的肯定&lt;/p&gt;
-&lt;div align=&quot;center&quot;&gt;&lt;img class=&quot;wp-image-558 size-thumbnail&quot; src=&quot;http://img2.tbcdn.cn/L1/461/1/f553ea55e9814b43fb39bb1e6543bee82c2db72f&quot; alt=&quot;pay_weixin&quot; width=&quot;150&quot; height=&quot;150&quot;/&gt;&lt;/div&gt;
-&lt;p&gt;微信打赏&lt;/p&gt;
-</description>
-<pubDate>Tue, 31 Jul 2018 15:11:00 +0000</pubDate>
-<dc:creator>Jack47</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Jack47/p/performance-optimizing-for-gateway.html</dc:identifier>
-</item>
-<item>
-<title>webpack4 系列教程(二): 编译 ES6 - YuanXin.me</title>
-<link>http://www.cnblogs.com/geyouneihan/p/9398779.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/geyouneihan/p/9398779.html</guid>
-<description>&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;今天介绍&lt;code&gt;webpack&lt;/code&gt;怎么编译&lt;code&gt;ES6&lt;/code&gt;的各种函数和语法。敲黑板：&lt;strong&gt;这是&lt;code&gt;webpack4&lt;/code&gt;版本哦, 有一些不同于&lt;code&gt;webpack3&lt;/code&gt;的地方。&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dongyuanxin/webpack-demos/tree/master/demo02&quot;&gt;&amp;gt;&amp;gt;&amp;gt; 本节课源码&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dongyuanxin/webpack-demos&quot;&gt;&amp;gt;&amp;gt;&amp;gt; 所有课程源码&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;了解babel&quot;&gt;1. 了解&lt;code&gt;babel&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;说起编译&lt;code&gt;es6&lt;/code&gt;，就必须提一下&lt;code&gt;babel&lt;/code&gt;和相关的技术生态：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;code&gt;babel-loader&lt;/code&gt;: 负责 es6 语法转化&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;babel-preset-env&lt;/code&gt;: 包含 es6、7 等版本的语法转化规则&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;babel-polyfill&lt;/code&gt;: es6 内置方法和函数转化垫片&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;babel-plugin-transform-runtime&lt;/code&gt;: 避免 polyfill 污染全局变量&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;需要注意的是, &lt;code&gt;babel-loader&lt;/code&gt;和&lt;code&gt;babel-polyfill&lt;/code&gt;。前者负责语法转化，比如：箭头函数；后者负责内置方法和函数，比如：&lt;code&gt;new Set()&lt;/code&gt;。&lt;/p&gt;
-&lt;h3 id=&quot;安装相关库&quot;&gt;2. 安装相关库&lt;/h3&gt;
-&lt;p&gt;这次，我们的&lt;code&gt;package.json&lt;/code&gt;文件配置如下：&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;{
-  &quot;devDependencies&quot;: {
-    &quot;babel-core&quot;: &quot;^6.26.3&quot;,
-    &quot;babel-loader&quot;: &quot;^7.1.5&quot;,
-    &quot;babel-plugin-transform-runtime&quot;: &quot;^6.23.0&quot;,
-    &quot;babel-preset-env&quot;: &quot;^1.7.0&quot;,
-    &quot;webpack&quot;: &quot;^4.15.1&quot;
-  },
-  &quot;dependencies&quot;: {
-    &quot;babel-polyfill&quot;: &quot;^6.26.0&quot;,
-    &quot;babel-runtime&quot;: &quot;^6.26.0&quot;
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dongyuanxin/webpack-demos/blob/master/demo02/package.json&quot;&gt;&amp;gt;&amp;gt;&amp;gt; package.json 配置地址&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;webpack中使用babel&quot;&gt;3. &lt;code&gt;webpack&lt;/code&gt;中使用&lt;code&gt;babel&lt;/code&gt;&lt;/h3&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;&lt;code&gt;babel&lt;/code&gt;的相关配置，推荐单独写在&lt;code&gt;.babelrc&lt;/code&gt;文件中。下面，我给出这次的相关配置：&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;{
-  &quot;presets&quot;: [
-    [
-      &quot;env&quot;,
-      {
-        &quot;targets&quot;: {
-          &quot;browsers&quot;: [&quot;last 2 versions&quot;]
-        }
-      }
-    ]
-  ],
-  &quot;plugins&quot;: [&quot;transform-runtime&quot;]
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在&lt;code&gt;webpack&lt;/code&gt;配置文件中，关于&lt;code&gt;babel&lt;/code&gt;的调用需要写在&lt;code&gt;module&lt;/code&gt;模块中。对于相关的匹配规则，除了匹配&lt;code&gt;js&lt;/code&gt;结尾的文件，还应该去除&lt;code&gt;node_module/&lt;/code&gt;文件夹下的第三库的文件（发布前已经被处理好了）。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;module.exports = {
-  entry: {
-    app: &quot;./app.js&quot;
-  },
-  output: {
-    filename: &quot;bundle.js&quot;
-  },
-  module: {
-    rules: [
-      {
-        test: /\.js$/,
-        exclude: /(node_modules)/,
-        use: {
-          loader: &quot;babel-loader&quot;
-        }
-      }
-    ]
-  }
-};&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dongyuanxin/webpack-demos/blob/master/demo02/.babelrc&quot;&gt;&amp;gt;&amp;gt;&amp;gt; .babelrc 地址&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dongyuanxin/webpack-demos/blob/master/demo02/webpack.config.js&quot;&gt;&amp;gt;&amp;gt;&amp;gt; 配置文件地址&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;最后babel-polyfill&quot;&gt;4. 最后：&lt;code&gt;babel-polyfill&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;我们发现整个过程中并没有使用&lt;code&gt;babel-polyfill&lt;/code&gt;。&lt;strong&gt;它需要在我们项目的入口文件中被引入&lt;/strong&gt;，或者在&lt;code&gt;webpack.config.js&lt;/code&gt;中配置。这里我们采用第一种方法编写&lt;code&gt;app.js&lt;/code&gt;:&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;import &quot;babel-polyfill&quot;;
-let func = () =&amp;gt; {};
-const NUM = 45;
-let arr = [1, 2, 4];
-let arrB = arr.map(item =&amp;gt; item * 2);
-
-console.log(arrB.includes(8));
-console.log(&quot;new Set(arrB) is &quot;, new Set(arrB));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;命令行中进行打包，然后编写&lt;code&gt;html&lt;/code&gt;文件引用打包后的文件即可在不支持&lt;code&gt;es6&lt;/code&gt;规范的老浏览器中看到效果了。&lt;/p&gt;
-&lt;h3 id=&quot;相关资料&quot;&gt;5. 相关资料&lt;/h3&gt;
-&lt;hr/&gt;&lt;blockquote readability=&quot;3.7560975609756&quot;&gt;
-&lt;p&gt;欢迎技术交流，引用请注明出处。&lt;br/&gt;个人网站：&lt;a href=&quot;http://yuanxin.me&quot;&gt;Yuan Xin&lt;/a&gt;&lt;br/&gt;原文链接：&lt;a href=&quot;http://yuanxin.me/#/blog/passage/31&quot;&gt;webpack4 系列教程(二): 编译 ES6&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-</description>
-<pubDate>Tue, 31 Jul 2018 14:51:00 +0000</pubDate>
-<dc:creator>YuanXin.me</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/geyouneihan/p/9398779.html</dc:identifier>
-</item>
-<item>
-<title>Java8新特性(一)_interface中的static方法和default方法 - 阳光温暖</title>
-<link>http://www.cnblogs.com/zhenghengbin/p/9398682.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhenghengbin/p/9398682.html</guid>
-<description>&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;为什么要单独写个Java8新特性，一个原因是我目前所在的公司用的是jdk8，并且框架中用了大量的Java8的新特性，如上篇文章写到的stream方法进行过滤map集合。stream方法就是接口Collection中的default方法。所以准备专门写写关于java8新特性的文章，虽然现在10已经发布了。但还是要认真的去了解下新版本的变化。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;static方法&quot;&gt;static方法&lt;/h3&gt;
-&lt;p&gt;java8中为接口新增了一项功能：定义一个或者更多个静态方法。用法和普通的static方法一样。&lt;/p&gt;
-&lt;h4 id=&quot;代码示例&quot;&gt;代码示例&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code&gt;public interface InterfaceA {
-
-    /**
-     * 静态方法
-     */
-    static void showStatic() {
-        System.out.println(&quot;InterfaceA++showStatic&quot;);
-    }
-
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;测试&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;public class Test {
-    public static void main(String[] args) {
-        InterfaceA.show();
-    }
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;结果&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;InterfaceA++showStatic&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;注意，实现接口的类或者子接口不会继承接口中的静态方法&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;h3 id=&quot;default方法&quot;&gt;default方法&lt;/h3&gt;
-&lt;p&gt;在接口中，增加default方法， 是为了既有的成千上万的Java类库的类增加新的功能， 且不必对这些类重新进行设计。 比如， 只需在Collection接口中&lt;br/&gt;增加default Stream stream(), 相应的Set和List接口以及它们的子类都包含此的方法， 不必为每个子类都重新copy这个方法。&lt;/p&gt;
-&lt;h4 id=&quot;代码示例-1&quot;&gt;代码示例&lt;/h4&gt;
-&lt;h5 id=&quot;实现单一接口仅实现接口&quot;&gt;实现单一接口，仅实现接口&lt;/h5&gt;
-&lt;pre&gt;
-&lt;code&gt;public interface InterfaceA {
-
-    /**
-     * 静态方法
-     */
-    static void showStatic() {
-        System.out.println(&quot;InterfaceA++showStatic&quot;);
-    }
-
-    /**
-     * 默认方法
-     */
-    default void showDefault() {
-        System.out.println(&quot;InterfaceA ++showDefault&quot;);
-    }
-
-}
-
-
-
-/**先只实现这个接口
- * @author: curry
- * @Date: 2018/7/31
- */
-public class InterfaceAImpl implements InterfaceA{
-
-
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;测试&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;public class Test {
-    public static void main(String[] args) {
-        InterfaceA.showStatic();
-        new InterfaceAImpl().showDefault();
-    }
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;结果&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;InterfaceA++showStatic
-InterfaceA ++showDefault&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;如果接口中的默认方法不能满足某个实现类需要，那么实现类可以覆盖默认方法。&lt;/strong&gt;&lt;/p&gt;
-&lt;h5 id=&quot;实现单一接口重写接口中的default方法&quot;&gt;实现单一接口，重写接口中的default方法&lt;/h5&gt;
-&lt;pre&gt;
-&lt;code&gt;public class InterfaceAImpl implements InterfaceA{
-
-    /**
-     * 跟接口default方法一致,但不能再加default修饰符
-     */
-    @Override
-    public void showDefault(){
-        System.out.println(&quot;InterfaceAImpl++ defaultShow&quot;);
-    }
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;测试&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;public class Test {
-    public static void main(String[] args) {
-        InterfaceA.showStatic();
-        new InterfaceAImpl().showDefault();
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;结果&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;InterfaceA++showStatic
-InterfaceAImpl++ defaultShow&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;实现多个接口且接口中拥有相同的default方法和static方法&quot;&gt;实现多个接口，且接口中拥有相同的default方法和static方法&lt;/h5&gt;
-&lt;p&gt;新创建个接口InterfaceB&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;/**
- * @author: curry
- * @Date: 2018/7/31
- */
-public interface InterfaceB {
-    /**
-     * 静态方法
-     */
-    static void showStatic() {
-        System.out.println(&quot;InterfaceB++showStatic&quot;);
-    }
-
-    /**
-     * 默认方法
-     */
-    default void showDefault() {
-        System.out.println(&quot;InterfaceB ++showDefault&quot;);
-    }
-
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;修改实现类&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;public class InterfaceAImpl implements InterfaceA,InterfaceB{
-    @Override
-    public void showDefault() {
-        System.out.println(&quot;InterfaceAImpl ++ showDefault&quot;);
-    }
-    &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;测试结果&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;InterfaceA++showStatic
-InterfaceAImpl ++ showDefault&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;总结&quot;&gt;总结&lt;/h3&gt;
-&lt;p&gt;看了接口中新增的这个新特性，感觉还是不错的，内容也比较简单。需要注意一点就是如果实现多个接口时，每个接口都有相同的default方法需要重写该方法。&lt;/p&gt;
-</description>
-<pubDate>Tue, 31 Jul 2018 14:29:00 +0000</pubDate>
-<dc:creator>阳光温暖</dc:creator>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhenghengbin/p/9398682.html</dc:identifier>
 </item>
 </channel>
 </rss>
