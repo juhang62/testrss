@@ -13,7 +13,7 @@
 <link>https://randomascii.wordpress.com/2018/08/16/24-core-cpu-and-i-cant-type-an-email-part-one/</link>
 <guid isPermaLink="true" >https://randomascii.wordpress.com/2018/08/16/24-core-cpu-and-i-cant-type-an-email-part-one/</guid>
 <description>&lt;p&gt;I wasn’t looking for trouble. I wasn’t trying to build Chrome a &lt;a href=&quot;https://randomascii.wordpress.com/2017/07/09/24-core-cpu-and-i-cant-move-my-mouse/&quot;&gt;thousand times in a weekend&lt;/a&gt;, I was just engaging in that most mundane of 21st century tasks, writing an email at 10:30 am. And suddenly gmail hung. I kept typing but for several seconds but no characters were appearing on screen. Then, suddenly gmail caught up and I resumed my &lt;em&gt;very important&lt;/em&gt; email. Then it happened again, only this time gmail went unresponsive for even longer. Well &lt;a href=&quot;https://quoteinvestigator.com/2015/03/02/eureka-funny/&quot;&gt;that’s funny&lt;/a&gt;…&lt;/p&gt;
-&lt;p&gt;I have trouble resisting a good performance mystery but in this case the draw was particularly strong. I work on Chrome, on Windows, focused on performance. Investigating this hang was actually my &lt;em&gt;job&lt;/em&gt;. And after a lot of false starts and some hard work I figured out how Chrome, gmail, Windows, and our IT department were working together to prevent me from typing an email, and in the process I found a way to save a significant amount of memory for some web pages in Chrome.&lt;/p&gt;
+&lt;p&gt;I have trouble resisting a good performance mystery but in this case the draw was particularly strong. I work at Google, making Chrome, for Windows, focused on performance. Investigating this hang was actually my &lt;em&gt;job&lt;/em&gt;. And after a lot of false starts and some hard work I figured out how Chrome, gmail, Windows, and our IT department were working together to prevent me from typing an email, and in the process I found a way to save a significant amount of memory for some web pages in Chrome.&lt;/p&gt;
 
 &lt;p&gt;This investigation had so many rabbit holes that I’m going to save some of the digressions for a follow-on post, but this one will entirely explain the hangs.&lt;/p&gt;
 &lt;p&gt;As usual I had &lt;a href=&quot;https://randomascii.wordpress.com/2015/09/01/xperf-basics-recording-a-trace-the-ultimate-easy-way/&quot;&gt;UIforETW&lt;/a&gt; running in the background, tracing to circular buffers, so I just had to type Ctrl+Win+R and the buffers, representing the last thirty seconds or so of system activity, were saved to disk. I loaded it into &lt;a href=&quot;https://randomascii.wordpress.com/2012/06/19/wpaxperf-trace-analysis-reimagined/&quot;&gt;Windows Performance Analyzer&lt;/a&gt; (WPA), but I couldn’t definitively find the hang.&lt;/p&gt;
@@ -44,11 +44,11 @@
 &lt;blockquote&gt;
 &lt;p&gt;WmiPerfClass.dll!EnumSelectCounterObjects (stack base)&lt;br/&gt;WmiPerfClass.dll!ConvertCounterPath&lt;br/&gt;pdh.dll!PdhiTranslateCounter&lt;br/&gt;pdh.dll!GetSystemPerfData&lt;br/&gt;KernelBase.dll!blah-blah-blah&lt;br/&gt;advapi32.dll!blah-blah-blah&lt;br/&gt;perfproc.dll!blah-blah-blah&lt;br/&gt;perfproc.dll!GetProcessVaData&lt;br/&gt;ntdll.dll!NtQueryVirtualMemory&lt;br/&gt;ntoskrnl.exe!NtQueryVirtualMemory&lt;br/&gt;ntoskrnl.exe!MmQueryVirtualMemory&lt;br/&gt;ntoskrnl.exe!MiQueryAddressSpan&lt;br/&gt;ntoskrnl.exe!MiQueryAddressState&lt;br/&gt;ntoskrnl.exe!MiGetNextPageTable (stack leaf)&lt;/p&gt;
 &lt;/blockquote&gt;
-&lt;p&gt;It turns out that reproducing the slow scanning from the sampling data was quite easy. My VirtualScan program just called NtQueryVirtualMemory in the obvious loop to scan the address space of a specified process, the code worked, it took a really long time to scan the gmail process (10-15 seconds), and it triggered the hang. But why?&lt;/p&gt;
-&lt;p&gt;The advantage of writing the scanning loop myself was that I could start generating statistics. &lt;a href=&quot;https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/nf-ntifs-ntqueryvirtualmemory&quot;&gt;NtQueryVirtualMemory&lt;/a&gt; returns data on each contiguous range of address space that has matching attributes. That might mean all reserved, all committed with particular protection settings, etc. The gmail process had about 26,000 of these blocks but I found another process (&lt;a href=&quot;https://randomascii.wordpress.com/2012/06/19/wpaxperf-trace-analysis-reimagined/&quot;&gt;WPA&lt;/a&gt;, as it turns out) that had 16,000 memory blocks but could be scanned very quickly.&lt;/p&gt;
+&lt;p&gt;It turns out that reproducing the slow scanning from the sampling data was quite easy. The interesting part of the call stack above is &lt;em&gt;NtQueryVirtualMemory&lt;/em&gt;, which is used to scan process memory, and is called by the suggestively named &lt;em&gt;GetProcessVaData&lt;/em&gt;, where &lt;em&gt;Va&lt;/em&gt; probably stands for &lt;em&gt;Virtual Address&lt;/em&gt;. My VirtualScan program just called &lt;em&gt;NtQueryVirtualMemory&lt;/em&gt; in the obvious loop to scan the address space of a specified process, the code worked, it took a really long time to scan the gmail process (10-15 seconds), and it triggered the hang. But why?&lt;/p&gt;
+&lt;p&gt;The advantage of writing the scanning loop myself was that I could start generating statistics. &lt;a href=&quot;https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/nf-ntifs-ntqueryvirtualmemory&quot;&gt;&lt;em&gt;NtQueryVirtualMemory&lt;/em&gt;&lt;/a&gt; returns data on each contiguous range of address space that has matching attributes. That might mean all reserved, all committed with particular protection settings, etc. The gmail process had about 26,000 of these blocks but I found another process (&lt;a href=&quot;https://randomascii.wordpress.com/2012/06/19/wpaxperf-trace-analysis-reimagined/&quot;&gt;WPA&lt;/a&gt;, as it turns out) that had 16,000 memory blocks but could be scanned very quickly.&lt;/p&gt;
 &lt;p&gt;At some point I looked at the gmail process with &lt;a href=&quot;https://docs.microsoft.com/en-us/sysinternals/downloads/vmmap&quot;&gt;vmmap&lt;/a&gt; and noticed that the gmail process had a fair amount of memory (361,836 KiB) and a lot of separate blocks (49,719) coming from a single reservation in the Shareable category – a reservation with a size of 2,147,483,648 KiB, aka 2 TiB. Wot?&lt;/p&gt;
 &lt;p&gt;&lt;a href=&quot;https://randomascii.files.wordpress.com/2018/08/image4.png&quot;&gt;&lt;img title=&quot;image&quot; border=&quot;0&quot; alt=&quot;image&quot; src=&quot;https://randomascii.files.wordpress.com/2018/08/image_thumb4.png?w=585&amp;amp;h=225&quot; width=&quot;585&quot; height=&quot;225&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;I happened to know that the 2 TiB reservation is used for &lt;a href=&quot;http://www.alex-ionescu.com/?p=246&quot;&gt;Control Flow Guard&lt;/a&gt; (CFG), and I remembered that “CFG” showed up on the call stacks where the gmail Chrome process was waiting – MiCommitVadCfgBits was on the stack. Maybe the large number of blocks in the CFG region were the problem!&lt;/p&gt;
+&lt;p&gt;I happened to know that the 2 TiB reservation is used for &lt;a href=&quot;http://www.alex-ionescu.com/?p=246&quot;&gt;Control Flow Guard&lt;/a&gt; (CFG), and I remembered that “CFG” showed up on the call stacks where the gmail Chrome process was waiting – &lt;em&gt;MiCommitVadCfgBits&lt;/em&gt; was on the stack. Maybe the large number of blocks in the CFG region were the problem!&lt;/p&gt;
 &lt;p&gt;Control Flow Guard (CFG) is used to try to stop exploits. Its 2 TiB reservation is a sparse bitmap which indicates which addresses (across 128 TiB of user-mode address space) are valid indirect branch targets. So I modified my virtual memory scanner to count how many blocks were in the CFG region (just look for the 2 TiB reservation) and how many blocks were tagged as executable. Since CFG memory is used to &lt;em&gt;describe&lt;/em&gt; executable memory I expected to see one block of CFG memory for each block of executable memory in the process. Instead I saw 98 blocks of executable memory and &lt;em&gt;24,866&lt;/em&gt; blocks of committed CFG memory. A significant discrepancy:&lt;/p&gt;
 &lt;p&gt;&lt;span&gt;     Scan time,  Committed, page tables, committed blocks&lt;br/&gt;Total: 41.763s, 1457.7 MiB,    67.7 MiB,  32112, 98 code blocks&lt;br/&gt;  CFG: 41.759s,  353.3 MiB,    59.2 MiB,  24866&lt;/span&gt;&lt;/p&gt;
 &lt;blockquote&gt;
@@ -110,7 +110,7 @@
 
 &lt;/div&gt;
 &lt;/div&gt;
-&lt;div class=&quot;sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded&quot; id=&quot;like-post-wrapper-18565082-2858-5b7680335b358&quot; data-src=&quot;//widgets.wp.com/likes/index.html?ver=20180319#blog_id=18565082&amp;amp;post_id=2858&amp;amp;origin=randomascii.wordpress.com&amp;amp;obj_id=18565082-2858-5b7680335b358&quot; data-name=&quot;like-post-frame-18565082-2858-5b7680335b358&quot;&gt;
+&lt;div class=&quot;sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded&quot; id=&quot;like-post-wrapper-18565082-2858-5b76f0689fa9e&quot; data-src=&quot;//widgets.wp.com/likes/index.html?ver=20180319#blog_id=18565082&amp;amp;post_id=2858&amp;amp;origin=randomascii.wordpress.com&amp;amp;obj_id=18565082-2858-5b76f0689fa9e&quot; data-name=&quot;like-post-frame-18565082-2858-5b76f0689fa9e&quot;&gt;
 &lt;h3 class=&quot;sd-title&quot;&gt;Like this:&lt;/h3&gt;
 &lt;div class=&quot;likes-widget-placeholder post-likes-widget-placeholder&quot;&gt;&lt;span class=&quot;button&quot;&gt;&lt;span&gt;Like&lt;/span&gt;&lt;/span&gt; &lt;span class=&quot;loading&quot;&gt;Loading...&lt;/span&gt;&lt;/div&gt;
 &lt;/div&gt;
@@ -538,131 +538,8 @@
 <title>NYU Makes Tuition Free for All Medical Students</title>
 <link>https://www.wsj.com/articles/nyu-offers-full-tuition-scholarships-for-all-medical-students-1534433082</link>
 <guid isPermaLink="true" >https://www.wsj.com/articles/nyu-offers-full-tuition-scholarships-for-all-medical-students-1534433082</guid>
-<description>&lt;div class=&quot;clearfix byline-wrap&quot;&gt;
-
-
-    
-
-        
-    &lt;div class=&quot;byline&quot;&gt;
-    
-    
-        &lt;span&gt;By&lt;/span&gt;
-    
-              &lt;div class=&quot;author mobile-scrim hasMenu&quot; data-scrim=&quot;{&amp;quot;type&amp;quot;:&amp;quot;author&amp;quot;,&amp;quot;header&amp;quot;:&amp;quot;Melissa Korn&amp;quot;,&amp;quot;subhead&amp;quot;:&amp;quot;The Wall Street Journal&amp;quot;,&amp;quot;list&amp;quot;:[{&amp;quot;type&amp;quot;:&amp;quot;link&amp;quot;,&amp;quot;icon&amp;quot;:&amp;quot;bio&amp;quot;,&amp;quot;url&amp;quot;:&amp;quot;https://www.wsj.com/news/author/7426&amp;quot;,&amp;quot;text&amp;quot;:&amp;quot;Biography&amp;quot;},{&amp;quot;type&amp;quot;:&amp;quot;link&amp;quot;,&amp;quot;icon&amp;quot;:&amp;quot;twitter&amp;quot;,&amp;quot;url&amp;quot;:&amp;quot;http://twitter.com/melissakorn&amp;quot;,&amp;quot;text&amp;quot;:&amp;quot;@melissakorn&amp;quot;},{&amp;quot;type&amp;quot;:&amp;quot;link&amp;quot;,&amp;quot;icon&amp;quot;:&amp;quot;facebook&amp;quot;,&amp;quot;url&amp;quot;:&amp;quot;http://facebook.com/melissashirakorn&amp;quot;,&amp;quot;text&amp;quot;:&amp;quot;melissashirakorn&amp;quot;},{&amp;quot;type&amp;quot;:&amp;quot;link&amp;quot;,&amp;quot;icon&amp;quot;:&amp;quot;google&amp;quot;,&amp;quot;url&amp;quot;:&amp;quot;https://plus.google.com/u/0/101257706797480545216/about&amp;quot;,&amp;quot;text&amp;quot;:&amp;quot;Google+&amp;quot;},{&amp;quot;type&amp;quot;:&amp;quot;link&amp;quot;,&amp;quot;icon&amp;quot;:&amp;quot;email&amp;quot;,&amp;quot;url&amp;quot;:&amp;quot;mailto:Melissa.Korn@wsj.com&amp;quot;,&amp;quot;text&amp;quot;:&amp;quot;Melissa.Korn@wsj.com&amp;quot;}]}&quot; itemscope=&quot;&quot; itemprop=&quot;author&quot; itemtype=&quot;http://schema.org/Person&quot;&gt;
-                  &lt;span class=&quot;name&quot; itemprop=&quot;name&quot;&gt;Melissa Korn&lt;/span&gt;
-                  &lt;/div&gt;
-
-    &lt;/div&gt;
-    
-    &lt;time class=&quot;timestamp&quot;&gt;
-      Updated Aug. 16, 2018 12:10 p.m. ET
-    &lt;/time&gt;&lt;/div&gt;
-
-  
-
-
-
-       &lt;p&gt;New York University said Thursday that it will cover tuition for all its medical students regardless of their financial situation, a first among the nation’s major medical schools and an attempt to expand career options for graduates who won’t be saddled with six-figure debt.&lt;/p&gt; &lt;p&gt;School officials worry that rising tuition and soaring loan balances are &lt;a href=&quot;https://www.wsj.com/articles/in-search-of-more-doctors-new-training-efforts-grow-1497021686?mod=article_inline&quot; class=&quot;icon none&quot;&gt;pushing new doctors into high-paying fields&lt;/a&gt; and contributing to a shortage of researchers and primary care physicians. Medical schools nationwide have been conducting aggressive fundraising campaigns to compete for top prospects, alleviate the debt burden and give graduates more career choices.&lt;/p&gt;
-
-
-
-
-      &lt;div class=&quot;paywall&quot;&gt;
-
-
-
-
-       &lt;p&gt;NYU raised more than $450 million of the roughly $600 million it estimates it will need to fund the tuition package in perpetuity, including $100 million from 
-
-
-
-
-
-
-            &lt;a href=&quot;http://quotes.wsj.com/HD&quot;&gt;Home Depot&lt;/a&gt;
-            
-
-
-       founder Kenneth Langone and his wife, Elaine. The school will provide full-tuition scholarships for 93 first-year students—another nine are already covered through M.D./PhD programs—as well as 350 students already partway through the M.D.-only degree program.&lt;/p&gt; 
-
-
-
-
-
-
-       
-
-
-
-
-       &lt;p&gt;“This is going to be a huge game-changer for us, for our students and for our patients,” said Dr. Rafael Rivera, associate dean for admission and financial aid. The school will refund out-of-pocket tuition payments already made for the current year, and return loans students may have taken out.&lt;/p&gt; &lt;p&gt;The move dwarfs efforts by other schools, including Columbia University and the University of California, Los Angeles, to alleviate the financial strain of a medical education. Earlier this year Columbia’s Vagelos College of Physicians and Surgeons announced it would eliminate loans for all students who qualify for financial aid, while UCLA’s David Geffen School of Medicine expects to provide more than 300 full scholarships between 2012 and 2022, based on merit.&lt;/p&gt; &lt;p&gt;The Cleveland Clinic Lerner College of Medicine of Case Western Reserve University, with just 32 students a year, &lt;a href=&quot;https://www.wsj.com/articles/SB121081981994794319?mod=article_inline&quot; class=&quot;icon none&quot;&gt;has paid full tuition and fees since 2008&lt;/a&gt; in an effort to encourage graduates to pursue academic and research careers.&lt;/p&gt; &lt;p&gt;Nationally, 72% of graduates from the class of 2018 had debt from medical school, with a median of $195,000 in loans, according to student surveys by the Association of American Medical Colleges. More than one-third of medical students also have student loans from prior academic programs.&lt;/p&gt; 
-
-
-
-
-
-
-       
-
-
-
-
-       &lt;p&gt;Sixty-two percent of NYU medical school’s most recent graduating class had student loans, averaging $171,908 for medical school and $184,000 overall. Most medical students will still need to pay for about $29,000 in annual room, board and other living expenses; tuition had been set at $55,018 for the coming year.&lt;/p&gt; &lt;p&gt;“There’s really a moral imperative to reduce the amount of debt people have,” Dr. Rivera said, citing concerns that loan burdens are shaping career choices and might even be scaring some prospects away from going to medical school at all.&lt;/p&gt; &lt;p&gt;Schools are also seeking to better reflect the population of U.S. patients in terms of race, ethnicity, gender and socioeconomic backgrounds. Asians make up a disproportionate share of medical-school classes, but other minorities are vastly underrepresented.&lt;/p&gt; &lt;p&gt;The median parental income for new medical-school students is $125,000, according to the AAMC.&lt;/p&gt; &lt;p&gt;Most medical students who want to go into lower paying practices like family medicine and endocrinology can take advantage of federal programs in which their monthly loan payments are tied to discretionary income; their loan balances are then forgiven after 10 or 25 years, depending on where they work. With compounding interest, &lt;a href=&quot;https://www.wsj.com/articles/mike-meru-has-1-million-in-student-loans-how-did-that-happen-1527252975?mod=article_inline&quot; class=&quot;icon none&quot;&gt;they often don’t make much dent on the principal balance&lt;/a&gt;.&lt;/p&gt; &lt;p&gt;The salary disparity for doctors can be stark. The four lowest-paying specialties, all in pediatrics, had average annual compensation of $221,900 or below, according to a survey of more than 65,000 doctors by Doximity, a medical social network for clinicians. Doctors specializing in internal medicine had average annual compensation of $260,000.&lt;/p&gt; &lt;p&gt;Meanwhile, neurosurgery was the top-paying specialty last year, with average compensation of $662,755. Thoracic surgery and orthopaedic surgery rounded out the top three, at $602,745 and $537,568, respectively.&lt;/p&gt; &lt;p&gt;There’s no guarantee that schools’ new scholarships will push more students into less lucrative specialties or underserved communities, as the tuition payments aren’t tied to any career commitment after graduation. But school officials are hopeful.&lt;/p&gt; &lt;p&gt;“If you’re faced with debts that you’re likely to have into your 50s, it’s got to have an influence on what you choose to do,” said 
-
-
-
-
-      Dr. Lee Goldman, 
-
-
-
-
-       dean of Columbia’s Faculties of Health Sciences and Medicine. Published tuition for that school is $61,146 this year; including living expenses, students can expect to shell out between $92,311 and $100,665, the school says.&lt;/p&gt; 
-
-
-
-
-
-
-       
-
-
-
-
-       &lt;p&gt;Former 
-
-
-
-
-
-
-            &lt;a href=&quot;http://quotes.wsj.com/MRK&quot;&gt;Merck&lt;/a&gt;
-            
-
-
-       &amp;amp; Co. chairman Dr. P. Roy Vagelos and his wife, Diana, gave Columbia’s medical school $250 million last winter, with $150 million earmarked for the endowment that funds the new no-loan financial aid package. About half the class receives need-based aid.&lt;/p&gt; &lt;p&gt;Generous aid packages are a powerful recruiting tool.&lt;/p&gt; &lt;p&gt;Columbia’s yield, or the share of admitted students who actually enrolled, increased by 1% this year in the wake of the financial aid announcement, and the school anticipates an even higher yield in the future.&lt;/p&gt; &lt;p&gt;UCLA boasts on its website that students have turned down offers from the University of California, San Francisco, Harvard University and Stanford University to attend its medical school, thanks to merit scholarships covering all costs for up to 20% of students. Those are funded by a $100 million gift made in 2012 by entertainment mogul David Geffen.&lt;/p&gt; &lt;p&gt;“I don’t know of any schools that would not want their students to graduate debt-free,” said Dr. Roy Ziegelstein, vice dean for education at the top-ranked Johns Hopkins University School of Medicine. “All schools are aiming for that end result.”&lt;/p&gt; &lt;p&gt;Median debt for Hopkins medical students who borrow is around $110,000, well below the national median.&lt;/p&gt; &lt;p&gt;Dr. Ziegelstein commended Columbia and other schools for their financial aid initiatives. “I love it. And I’m trying to do the same thing,” he said.&lt;/p&gt; &lt;p&gt; &lt;strong&gt;Write to &lt;/strong&gt;Melissa Korn at &lt;a href=&quot;mailto:melissa.korn@wsj.com&quot; target=&quot;_blank&quot; class=&quot;icon &quot;&gt;melissa.korn@wsj.com&lt;/a&gt;&lt;/p&gt;  &lt;p&gt; &lt;strong&gt;Corrections &amp;amp; Amplifications &lt;/strong&gt; &lt;br/&gt;NYU will provide full-tuition scholarships for 93 first-year students—another nine are already covered through M.D./PhD programs. An earlier version of this article incorrectly gave the numbers as 92 and 10.&lt;/p&gt; 
-
-
-
-
-
-
-      &lt;/div&gt;
-
-
-
-
-
-
-    &lt;p class=&quot;printheadline&quot;&gt;
-      Appeared in the August 17, 2018, print edition as 'NYU Medical School Makes Tuition Free.'
-    &lt;/p&gt;
-
-
-
-
-</description>
+<description>&lt;p&gt;New York University said Thursday that it will cover tuition for all its medical students regardless of their financial situation, a first among the nation’s major medical schools and an attempt to expand career options for graduates who won’t be saddled with six-figure debt.&lt;/p&gt; &lt;p&gt;School officials worry that rising tuition and soaring loan balances are pushing new doctors into high-paying fields and contributing to a shortage of researchers and primary care physicians. Medical schools nationwide have been conducting aggressive...
+  &lt;/p&gt;</description>
 <pubDate>Thu, 16 Aug 2018 16:13:31 +0000</pubDate>
 <dc:creator>mudil</dc:creator>
 <og:title>NYU Makes Tuition Free for All Medical Students</og:title>
@@ -675,44 +552,47 @@
 <dc:identifier>https://www.wsj.com/articles/nyu-offers-full-tuition-scholarships-for-all-medical-students-1534433082</dc:identifier>
 </item>
 <item>
-<title>OpenPGPjs has passed an independent security audit</title>
-<link>https://protonmail.com/blog/openpgpjs-protonmail-security-audit/</link>
-<guid isPermaLink="true" >https://protonmail.com/blog/openpgpjs-protonmail-security-audit/</guid>
-<description>&lt;h2&gt;As part of our commitment to open source, we maintain the OpenPGPjs encryption library. After some recent code enhancements, OpenPGPjs underwent an independent security audit, the results of which are discussed below.&lt;/h2&gt;
-&lt;p&gt;At ProtonMail, our goal is to make encryption as widespread and accessible as possible. We believe a key step toward that is having well-maintained, robust, and &lt;a href=&quot;https://protonmail.com/blog/protonmail-open-source/&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;secure open source encryption libraries&lt;/a&gt;. This is the goal of our efforts on the OpenPGPjs &lt;a href=&quot;https://protonmail.com/blog/what-is-end-to-end-encryption/&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;encryption&lt;/a&gt; library, which is today used by hundreds of applications (including ProtonMail) serving millions around the world. As the maintainer of OpenPGPjs, we are responsible for making sure the library is up to date and secure, as well as offering basic support to developers who wish to use it.&lt;/p&gt;
-&lt;p&gt;In March 2018, we released &lt;a href=&quot;https://protonmail.com/blog/openpgpjs-3-release/&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;Version 3.0 of OpenPGPjs&lt;/a&gt;. With this major update, OpenPGPjs is even more powerful, secure, and efficient. As part of this update, the OpenPGPjs developer community commissioned an independent security audit from the well-respected security firm &lt;a href=&quot;https://cure53.de&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;Cure53&lt;/a&gt;. Independent security audits are an important way to ensure there are no vulnerabilities that could be exploited by attackers.&lt;/p&gt;
-&lt;h3&gt;Summer 2018 Security Audit Coverage&lt;/h3&gt;
-&lt;p&gt;The version 3.0 release brought many new features and improvements, such as support for &lt;a href=&quot;https://en.wikipedia.org/wiki/Elliptic-curve_cryptography&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;elliptic curve cryptography&lt;/a&gt; (ECC), which uses smaller signing and encryption keys compared with &lt;a href=&quot;https://en.wikipedia.org/wiki/RSA_(cryptosystem)&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;RSA cryptography&lt;/a&gt; (what ProtonMail uses now), making it a faster and more efficient alternative.&lt;/p&gt;
-&lt;p&gt;The new version also adds compression, which reduces the size of data before encryption to save space (and time) during encryption and transmission. OpenPGPjs now also offers support for &lt;a href=&quot;https://en.wikipedia.org/wiki/Authenticated_encryption&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;AEAD&lt;/a&gt; (Authenticated Encryption with Associated Data). This protocol provides confidentiality, integrity, and authenticity guarantees on encrypted data, so that you when you decrypt data, you can be sure this was the exact same data encrypted by your sender, and you can be sure that it was indeed encrypted by that sender. For those who are interested, you can find the &lt;a href=&quot;https://github.com/openpgpjs/openpgpjs/pull/691&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;full technical details of OpenPGPjs Version 3.0 here&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;The Cure53 team focused on a couple of these new features while also taking a closer look at some key aspects of OpenPGPjs’ crypto implementations. In particular, the audit focused on the following:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;AEAD encrypted packets&lt;/li&gt;
-&lt;li&gt;EAX, GCM, OCB&lt;/li&gt;
-&lt;li&gt;CMAC&lt;/li&gt;
-&lt;li&gt;All cryptographic primitive implementations: AES, AES-EAX, AES-GCM, AES-CBC, ED25519, C25519, ECDSA, HMAC, P256, P384, P521, SECP256K1&lt;/li&gt;
-&lt;li&gt;Prime number handling&lt;/li&gt;
-&lt;li&gt;Date support in signatures&lt;/li&gt;
-&lt;li&gt;Cryptographic API exposure via different providers&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;OpenPGPjs Audit Results&lt;/h3&gt;
-&lt;p&gt;We are pleased to receive a highly positive result from the audit. No major issues were discovered. In their summary, &lt;a href=&quot;https://github.com/openpgpjs/openpgpjs/issues/719&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;Cure53 provided the following feedback&lt;/a&gt;:&lt;/p&gt;
-&lt;p&gt;“Tested cryptographic implementations were top notch and excellent quality given the platform. The only limitations come from the platform itself (JavaScript/web), which do not allow for side channel resistance or reliable constant time operations. Overall however this is an exceptional library for JavaScript cryptography.”&lt;/p&gt;
-&lt;p&gt;As OpenPGPjs forms the foundation of ProtonMail’s encryption, this result provides extra certainty that ProtonMail’s cryptography is properly protecting users as intended. Working with the open source community is an important part of what we do at ProtonMail, and we will continue to build out the OpenPGPjs library. We are grateful to the ProtonMail community for supporting us in these efforts.&lt;/p&gt;
-&lt;p&gt;Best Regards,&lt;br/&gt;The ProtonMail Team&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;You can get a &lt;a href=&quot;https://protonmail.com/signup&quot;&gt;free secure email account from ProtonMail here&lt;/a&gt;.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;We also provide a &lt;a href=&quot;https://protonvpn.com/&quot;&gt;free VPN service&lt;/a&gt; to protect your privacy.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;ProtonMail and ProtonVPN are funded by the community. If you would like to support our efforts, you can upgrade to a &lt;a href=&quot;https://protonmail.com/support/knowledge-base/paid-plans/&quot;&gt;paid plan&lt;/a&gt; or &lt;a href=&quot;https://protonmail.com/donate&quot;&gt;donate&lt;/a&gt;. &lt;/em&gt;Your support allows us to continue to develop ProtonMail as free and &lt;a href=&quot;https://protonmail.com/blog/protonmail-open-source/&quot;&gt;open source software&lt;/a&gt;.&lt;/strong&gt;&lt;/p&gt;
+<title>Australians who won&amp;#039;t unlock their phones could face ten years in jail</title>
+<link>https://nakedsecurity.sophos.com/2018/08/16/australians-who-wont-unlock-their-phones-could-face-10-years-in-jail/</link>
+<guid isPermaLink="true" >https://nakedsecurity.sophos.com/2018/08/16/australians-who-wont-unlock-their-phones-could-face-10-years-in-jail/</guid>
+<description>&lt;div class=&quot;entry-prefix&quot;&gt;
+&lt;div class=&quot;entry-author&quot;&gt;&lt;span class=&quot;by&quot;&gt;by&lt;/span&gt; &lt;a href=&quot;https://nakedsecurity.sophos.com/author/danny-bradbury/&quot; title=&quot;Posts by Danny Bradbury&quot; class=&quot;author url fn&quot; rel=&quot;author&quot;&gt;Danny Bradbury&lt;/a&gt;&lt;/div&gt;
 
-
+&lt;/div&gt;
+&lt;p&gt;The Australian government wants to force companies to help it get at suspected criminals’ data. If they can’t, it would jail people for up to a decade if they refuse to unlock their phones.&lt;/p&gt;
+&lt;p&gt;The country’s &lt;a href=&quot;https://www.homeaffairs.gov.au/about/consultations/assistance-and-access-bill-2018&quot; rel=&quot;nofollow&quot;&gt;Assistance and Access Bill&lt;/a&gt;, introduced this week for public consultation, strengthens the penalties for people who refuse to unlock their phones for the police. Under Australia’s existing Crimes Act, judges could jail a person for two years for not handing over their data. The proposed Bill extends that to up to ten years, arguing that the existing penalty wasn’t strong enough.&lt;/p&gt;
+&lt;p&gt;The Bill takes a multi-pronged approach to accessing a suspect’s data by co-opting third parties to help the authorities. New rules apply to “communication service providers”, which is a definition with a broad scope. It covers not only telcos, but also device vendors and application publishers, as long as they have “a nexus to Australia”.&lt;/p&gt;
+&lt;p&gt;These companies would be subject to two kinds of government order that would compel them to help retrieve a suspect’s information.&lt;/p&gt;
+&lt;p&gt;The first of these is a ‘technical assistance notice’ that requires telcos to hand over any decryption keys they hold. This notice would help the government in end-to-end encryption cases where the target lets a service provider hold their own encryption keys.&lt;/p&gt;
+&lt;p&gt;But what if the suspect stores the keys themselves? In that case, the government would pull out the big guns with a second kind of order called a technical capability notice. It forces communications providers to build new capabilities that would help the government access a target’s information where possible.&lt;/p&gt;
+&lt;p&gt;In short, the government asks companies whether they can access the data. If they can’t, then the second order asks them to figure out a way. Here’s a flowchart explaining how it works.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png&quot;&gt;&lt;img data-attachment-id=&quot;414389&quot; data-permalink=&quot;https://nakedsecurity.sophos.com/2018/08/16/australians-who-wont-unlock-their-phones-could-face-10-years-in-jail/industry-assistance/&quot; data-orig-file=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png&quot; data-orig-size=&quot;668,936&quot; data-comments-opened=&quot;1&quot; data-image-meta=&quot;{&amp;quot;aperture&amp;quot;:&amp;quot;0&amp;quot;,&amp;quot;credit&amp;quot;:&amp;quot;&amp;quot;,&amp;quot;camera&amp;quot;:&amp;quot;&amp;quot;,&amp;quot;caption&amp;quot;:&amp;quot;&amp;quot;,&amp;quot;created_timestamp&amp;quot;:&amp;quot;0&amp;quot;,&amp;quot;copyright&amp;quot;:&amp;quot;&amp;quot;,&amp;quot;focal_length&amp;quot;:&amp;quot;0&amp;quot;,&amp;quot;iso&amp;quot;:&amp;quot;0&amp;quot;,&amp;quot;shutter_speed&amp;quot;:&amp;quot;0&amp;quot;,&amp;quot;title&amp;quot;:&amp;quot;&amp;quot;,&amp;quot;orientation&amp;quot;:&amp;quot;0&amp;quot;}&quot; data-image-title=&quot;Industry Assistance&quot; data-image-description=&quot;&quot; data-medium-file=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=214&quot; data-large-file=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=640&amp;amp;h=897&quot; class=&quot;aligncenter size-large wp-image-414389&quot; src=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=640&amp;amp;h=897&quot; alt=&quot;&quot; width=&quot;640&quot; height=&quot;897&quot; srcset=&quot;https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=640&amp;amp;h=897 640w, https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=107&amp;amp;h=150 107w, https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png?w=214&amp;amp;h=300 214w, https://sophosnews.files.wordpress.com/2018/08/industry-assistance.png 668w&quot; sizes=&quot;(max-width: 640px) 100vw, 640px&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h2&gt;No backdoors&lt;/h2&gt;
+&lt;p&gt;The government’s &lt;a href=&quot;https://www.homeaffairs.gov.au/consultations/Documents/explanatory-document.pdf&quot; rel=&quot;nofollow&quot;&gt;explanatory note&lt;/a&gt; says that the Bill could force a manufacturer to hand over detailed specs of a device, install government software on it, help agencies develop their own “systems and capabilities”, and notify agencies of major changes to their systems. In short, it would force communications providers to work extensively with the government to gain access to a target’s data where it was in their power to do so, and it would also compel them to keep all of this secret.&lt;/p&gt;
+&lt;p&gt;What if the communications provider doesn’t want to help? Then they could face penalties from the government, or “injunctions or enforceable undertakings”.&lt;/p&gt;
+&lt;p&gt;There are a few things that the Bill doesn’t allow. The government can’t force a company to build weaknesses into a product, or stop it from fixing those that it finds. That rules out encryption backdoors, then. Neither can it access information without a warrant.&lt;/p&gt;
+&lt;p&gt;However, the proposed legislation also creates a new class of access warrant that lets police officers get evidence from devices in secret before the device encrypts it, including intercepting communications and using other computers to access the data. It also amends existing search and seizure warrants, allowing the cops to access data remotely, including online accounts.&lt;/p&gt;
+&lt;h2&gt;The backdoor war&lt;/h2&gt;
+&lt;p&gt;In proposing this legislation, Australia joins a complex and heated debate about the role of encryption in the tech business. The Bill effectively rules out the inclusion of encryption backdoors, but seeks help from as many people as possible to get at the data, using a variety of loosely-defined methods.&lt;/p&gt;
+&lt;p&gt;Many services such as Snapchat don’t use end-to-end encryption, meaning that a government could use legislation like this to make it hand over a user’s encryption keys.&lt;/p&gt;
+&lt;p&gt;In this sense, it mirrors the UK’s Investigatory Powers Act, which asks telecommunications companies to remove electronic protections where possible. It also parrots FBI officials, who have &lt;a href=&quot;https://nakedsecurity.sophos.com/2018/03/12/fbi-we-dont-want-a-backdoor-we-just-want-you-to-break-encryption/&quot;&gt;said&lt;/a&gt; that they aren’t asking for encryption backdoors but that they do want vendors and service providers to break it where necessary.&lt;/p&gt;
+&lt;p&gt;The tensions over forced decryption have played out across the globe. In the US, Apple has tussled with the FBI in court over its unwillingness to help the feds break into its devices.&lt;/p&gt;
+&lt;p&gt;On the other side of the world, &lt;a href=&quot;https://nakedsecurity.sophos.com/2018/04/17/privacy-is-not-for-sale-says-telegram-founder/&quot;&gt;Russia blocked&lt;/a&gt; privacy-focused messaging company Telegram after it failed to hand over encryption keys that protect its cloud-based chats. However, Telegram also offers ‘secret chats’ for the extra-paranoid, which support end-to-end encryption, and the company couldn’t hand over those keys even if it wanted to.&lt;/p&gt;
+&lt;p&gt;There are two sides to the encryption argument. Security advocates &lt;a href=&quot;https://www.sophos.com/en-us/lp/nobackdoors.aspx&quot;&gt;including Sophos&lt;/a&gt; argue against the use of encryption backdoors, warning that criminals could discover and use them. Privacy advocates like Telegram founder Pavel Durov don’t like backdoors or forced decryption because they don’t want the authorities overstepping their bounds.&lt;/p&gt;
+&lt;p&gt;On the other hand, the authorities want to get at encrypted data somehow because they want it to stop criminals such as child abusers and terrorists. The latter have been known to &lt;a href=&quot;https://www.nytimes.com/2016/09/06/world/europe/telegram-isis-privacy-encryption.html&quot; rel=&quot;nofollow&quot;&gt;use&lt;/a&gt; the Telegram service to plan their attacks.&lt;/p&gt;
+&lt;p&gt;The flurry of legislation around the world addressing this issue is a product of that complex debate. It also highlights the disparity between the legal system, which moves at a snail’s pace, and the technology world, which moves at the speed of light. One thing is for sure – it is a debate that is far from over yet.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://twitter.com/DannyBradbury&quot; class=&quot;twitter-follow-button&quot;&gt;Follow @DannyBradbury&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://twitter.com/NakedSecurity&quot; class=&quot;twitter-follow-button&quot;&gt;Follow @NakedSecurity&lt;/a&gt;&lt;/p&gt;
 </description>
-<pubDate>Thu, 16 Aug 2018 14:54:45 +0000</pubDate>
-<dc:creator>testloop</dc:creator>
+<pubDate>Thu, 16 Aug 2018 14:56:01 +0000</pubDate>
+<dc:creator>luord</dc:creator>
 <og:type>article</og:type>
-<og:title>ProtonMail’s open source encryption library, OpenPGPjs, has passed an independent security audit - ProtonMail Blog</og:title>
-<og:description>As part of our commitment to open source, we maintain the OpenPGPjs encryption library. After some recent code enhancements, OpenPGPjs underwent an independent security audit, the results of which are discussed below. At ProtonMail, our goal is to make encryption as widespread and accessible as possible. We believe a key step toward that is having …</og:description>
-<og:url>https://protonmail.com/blog/openpgpjs-protonmail-security-audit/</og:url>
-<og:image>https://protonmail.com/blog/wp-content/uploads/2018/08/protonmail-openpgpjs-protonmail-security-audit.jpg</og:image>
-<dc:language>en-US</dc:language>
+<og:title>Australians who won’t unlock their phones could face 10 years in jail</og:title>
+<og:url>https://nakedsecurity.sophos.com/2018/08/16/australians-who-wont-unlock-their-phones-could-face-10-years-in-jail/</og:url>
+<og:description>The Australian government wants to increase the criminal penalty for refusing to decrypt data from 2 years to 10 years.</og:description>
+<og:image>https://sophosnews.files.wordpress.com/2018/08/shutterstock_414624859-compressor.jpg?w=640</og:image>
+<dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://protonmail.com/blog/openpgpjs-protonmail-security-audit/</dc:identifier>
+<dc:identifier>https://nakedsecurity.sophos.com/2018/08/16/australians-who-wont-unlock-their-phones-could-face-10-years-in-jail/</dc:identifier>
 </item>
 </channel>
 </rss>
