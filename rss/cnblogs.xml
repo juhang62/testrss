@@ -9,6 +9,671 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>redis调优的实战经验 - 大叔据</title>
+<link>http://www.cnblogs.com/uncleData/p/9689322.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/uncleData/p/9689322.html</guid>
+<description>&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;本文根据redis的info命令查看redis的内存使用情况以及state状态，来观察redis的运行情况以及需要作出的相应优化。&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;pre&gt;
+&lt;code&gt;1.memory
+used_memory:13409011624 #used_memory=实际缓存占用的内存+Redis自身运行所占用的内存(如元数据、lua)。
+                        #这个值是由Redis使用内存分配器分配的内存，不包括内存碎片浪费的内存。
+used_memory_rss:13740019719  #从操作系统上显示已经分配的内存总量。
+used_memory_peak:13409011624  #内存使用的峰值大小
+total_system_memory:33567678464  #系统总内存
+used_memory_lua:37888  #Lua脚本引擎所使用的内存大小。
+maxmemory:0  #最大可用内存(可配置，默认为total_system_memory)
+maxmemory_policy:noeviction  #淘汰机制,noneviction为禁止淘汰数据
+mem_fragmentation_ratio:1.02;  #内存碎片率
+mem_allocator:jemalloc-4.0.3; #编译时指定的Redis内存分配器，可以是libc、jemalloc、tcmalloc。
+
+2.stats
+total_commands_processed:3500  #自启动起Redis服务处理命令的总数&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;引发内存交换&quot;&gt;1.1.引发内存交换&lt;/h2&gt;
+&lt;p&gt;  当Redis内存使用率超过可用内存(maxmemory可配置)的95%时，操作系统会进行内存与swap空间数据交换。&lt;strong&gt;把内存中旧的或不再使用的内容写入硬盘上即Swap分区，以便腾出新的物理内存给新页或活动页(page)使用&lt;/strong&gt;。 在硬盘上进行读写操作要比在内存上进行读写操作，时间上慢了近&lt;strong&gt;5个数量级&lt;/strong&gt;，内存是0.1μs单位、而硬盘是10ms。如果Redis进程上发生内存交换，那么Redis和依赖Redis上数据的应用会受到严重的性能影响。&lt;/p&gt;
+&lt;h2 id=&quot;rdb持久化风险&quot;&gt;1.2.rdb持久化风险&lt;/h2&gt;
+&lt;p&gt;  在没有开启持久化的情况下，&lt;strong&gt;redis宕机或者内存使用率超过95%会有丢数据的风险&lt;/strong&gt;。若使用快照(rdb)持久化，Redis会fork一个子进程把当前内存中的数据完全复制一份写入到硬盘上(&lt;strong&gt;fork使用的内存和redis当前使用的内存会一样多&lt;/strong&gt;)。因此若是当前使用内存&lt;strong&gt;超过可用内存的45%时&lt;/strong&gt;触发快照功能，那么此时进行的内存交换会变的非常危险(可能会丢失数据)。 倘若在这个时候实例上有大量频繁的更新操作，问题会变得更加严重。&lt;/p&gt;
+
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;尽可能的使用Hash数据结构&lt;/strong&gt;。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;  因为Redis在储存小于100个字段的Hash结构上，其存储效率是非常高的。所以&lt;strong&gt;在不需要集合(set)操作或list的push/pop操作的时候，尽可能的使用Hash结构&lt;/strong&gt;。比如，在一个web应用程序中，需要存储一个对象表示用户信息，使用单个key表示一个用户，其每个属性存储在Hash的字段里，这样要比给每个属性单独设置一个key-value要高效的多。 通常情况下倘若有数据使用string结构，用多个key存储时，那么应该转换成单key多字段的Hash结构。 如上述例子中介绍的Hash结构应包含，单个对象的属性或者单个用户各种各样的资料。Hash结构的操作命令是HSET(key, fields, value)和HGET(key, field)，使用它可以存储或从Hash中取出指定的字段。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;设置key的过期时间&lt;/strong&gt;。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;  一个减少内存使用率的简单方法就是，&lt;strong&gt;每当存储对象时确保设置key的过期时间&lt;/strong&gt;。倘若key在明确的时间周期内使用或者旧key不大可能被使用时，就可以用Redis过期时间命令(expire,expireat, pexpire, pexpireat)去设置过期时间，这样Redis会在key过期时自动删除key。 假如你知道每秒钟有多少个新key-value被创建，那可以调整key的存活时间，并指定阀值去限制Redis使用的最大内存。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;回收key&lt;/strong&gt;。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;  在Redis配置文件Redis.conf中，&lt;strong&gt;通过设置“maxmemory”属性的值可以限制Redis最大使用的内存&lt;/strong&gt;，修改后重启实例生效。 也可以使用客户端命令config set maxmemory 去修改值，这个命令是立即生效的，但会在重启后会失效，需要使用config rewrite命令去刷新配置文件。&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;若是启用了Redis快照功能，应该设置“maxmemory”值为系统可使用内存的45%，因为快照时需要一倍的内存来复制整个数据集，也就是说如果当前已使用45%，在快照期间会变成95%(45%+45%+5%)，其中5%是预留给其他的开销。&lt;/li&gt;
+&lt;li&gt;如果没开启快照功能，maxmemory最高能设置为系统可用内存的95%。&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;&lt;strong&gt;淘汰策略&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;  当内存使用&lt;strong&gt;达到设置的最大阀值&lt;/strong&gt;时，需要选择一种&lt;strong&gt;key的回收策略&lt;/strong&gt;，可在Redis.conf配置文件中修改“maxmemory-policy”属性值。 若是Redis数据集中的key都设置了过期时间，那么“volatile-ttl”策略是比较好的选择。但如果key在达到最大内存限制时没能够迅速过期，或者根本没有设置过期时间。那么设置为“allkeys-lru”值比较合适，它允许Redis从整个数据集中挑选最近最少使用的key进行删除(LRU淘汰算法)。&lt;/p&gt;
+&lt;p&gt;Redis还提供了一些其他淘汰策略，如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;volatile-lru：使用LRU算法从已设置过期时间的数据集合中淘汰数据。
+volatile-ttl：从已设置过期时间的数据集合中挑选即将过期的数据淘汰。
+volatile-random：从已设置过期时间的数据集合中随机挑选数据淘汰。
+allkeys-lru：使用LRU算法从所有数据集合中淘汰数据。
+allkeys-random：从数据集合中任意选择数据淘汰
+no-enviction：禁止淘汰数据。&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;  通过设置maxmemory为系统可用内存的45%或95%(取决于持久化策略)和设置“maxmemory-policy”为“volatile-ttl”或“allkeys-lru”(取决于过期设置)，可以比较准确的限制Redis最大内存使用率，&lt;strong&gt;在绝大多数场景下使用这2种方式可确保Redis不会进行内存交换&lt;/strong&gt;。倘若你担心由于限制了内存使用率导致丢失数据的话，可以设置noneviction值禁止淘汰数据。&lt;/p&gt;
+
+&lt;p&gt;  当mem_fragmentation_ratio远大于1时即used_memory_rss/used_memory（稍大于1正常）,说明redis中存在大量的内存碎片,一个比较好的解决办法就是重启redis，这里需要注意的是&lt;strong&gt;如果用的是aof持久化，那么重启之前要进行rewriteaof操作，否则会无效&lt;/strong&gt;。还有可以指定Redis使用的内存分配器，一般管理员不推荐，麻烦而且要重新编译。&lt;/p&gt;
+&lt;p&gt;参考：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://redis.io/documentation&quot;&gt;redis官方文档&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.datadoghq.com/wp-content/uploads/2013/09/Understanding-the-Top-5-Redis-Performance-Metrics.pdf&quot;&gt;不错的英文文档&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;评论不能及时回复可直接加公众号提问或交流，知无不答，谢谢 。&lt;br/&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/3334524-a32f634684a8d101.JPG?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;欢迎关注大叔&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+</description>
+<pubDate>Fri, 21 Sep 2018 22:47:00 +0000</pubDate>
+<dc:creator>大叔据</dc:creator>
+<og:description>本文根据redis的info命令查看redis的内存使用情况以及state状态，来观察redis的运行情况以及需要作出的相应优化。 info 1.used_memory 过大导致的问题 1.1.引发内</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/uncleData/p/9689322.html</dc:identifier>
+</item>
+<item>
+<title>5年后、10年后，你想成为什么样的自己？ - Liam Wang</title>
+<link>http://www.cnblogs.com/willick/p/what-do-you-want-to-be.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/willick/p/what-do-you-want-to-be.html</guid>
+<description>&lt;div id=&quot;js_content&quot; class=&quot;rich_media_content&quot; readability=&quot;71&quot;&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/191097/201809/191097-20180922022824553-681320968.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;5 年后、10 年后，你想成为什么样的自己？你认真思考过这个问题吗？&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;可能你思考过这个问题，但一直没有给自己一个明确的答案，也可能你从来没想过这个问题。这都很正常，毕竟我们都太容易陷入一日复一日的漩涡里。每天早上起来乘一样的交通工具行一样的路去工作，做一样的事情；下班行一样的路回家，做一样的事情；闲暇时去差不多一样的地方玩，去看差不多一样的影剧。然后一天的日子就变成了一年，很快就变成了一生。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;拥有稳定的生活固然很好，但我们还是要有意识地引导自己去往更好的未来。就像处在漆黑的屋子里，你必须找到那个电灯开关，按下去，这样才能看清周围的样子，心中才能不恐慌。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;5 年后、10 年后，你想成为什么样的自己？归根结底，问的是你是否有清晰的目标。说到目标，确实，目标是非常重要的，没有目标就不知道自己要去哪里，没有目标就没有出发的动力。但是有目标还不够，有目标不表示你会有持久的动力，不表示你在追求的过程中能感受到快乐。设定目标只是一种技巧，清晰才是真正的力量。如何才能有清晰的目标，你要清楚地回答下面的问题：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;1. &lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;你自己现在是个什么样的人？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;在职业上，你的能力达到了什么水平？你是一个合格的小兵，还是一个能够独挡一面的大将军？在生活上，你有哪些品质又有哪些缺点？你是否能够很好地维护家庭关系？你是否能够让身边的人感到快乐？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;2. &lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;未来你想成为一个什么样的自己？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;你是想成为受人尊敬有影响力的人？还是想可以做想做的事而不用担心生活？要想成为那样的自己，你要拥有什么样的能力？是会说流利的英文，还是成为某个技术领域的专家？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;3. &lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;工作和生活中，哪些事情对你来说是真的有意义的？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;回到当下的&lt;/span&gt;生活和工作中，你的第一目标分别是什么？你还有哪些事情没做？你现在所做的是否和你的目标吻合？你是否浪费了太多的时间和精力在没有意义的事情上面？&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;不要试图在短时间内就把这些问题回答清楚，因为每个人随着认知的提高和环境的改变，看问题的角度也会发生变化。重要的是你要开始问自己，把这些问句变成日常生活的一部分，不断反复问自己，不断让答案越来越清晰。这样才能突破自己的现状，才能每走一步都感觉到离 5 年后、10 年后的那个自己更近一些。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Hi，未来路上，我们结伴同行可好？&lt;/span&gt; &lt;/p&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Fri, 21 Sep 2018 18:25:00 +0000</pubDate>
+<dc:creator>Liam Wang</dc:creator>
+<og:description>5 年后、10 年后，你想成为什么样的自己？你认真思考过这个问题吗？ 可能你思考过这个问题，但一直没有给自己一个明确的答案，也可能你从来没想过这个问题。这都很正常，毕竟我们都太容易陷入一日复一日的漩涡</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/willick/p/what-do-you-want-to-be.html</dc:identifier>
+</item>
+<item>
+<title>并行编程（Parallel Framework） - Jonins</title>
+<link>http://www.cnblogs.com/jonins/p/9558276.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jonins/p/9558276.html</guid>
+<description>&lt;h2&gt;前言&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;并行编程：&lt;/strong&gt;通过编码方式利用多核或多处理器称为并行编程，多线程概念的一个子集。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;并行处理&lt;/strong&gt;：把正在执行的大量的任务分割成小块，分配给多个同时运行的线程。多线程的一种。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;并行编程分为如下几个结构&lt;/strong&gt;：&lt;/p&gt;
+&lt;p&gt;1.&lt;strong&gt;并行的&lt;/strong&gt;&lt;span&gt;&lt;strong&gt;LINQ&lt;/strong&gt;&lt;/span&gt;或&lt;span&gt;&lt;strong&gt;PLINQ&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;2.&lt;span&gt;&lt;strong&gt;Parallel&lt;/strong&gt;&lt;/span&gt;类&lt;/p&gt;
+&lt;p&gt;3.&lt;strong&gt;任务并行结构&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;4.&lt;strong&gt;并发集合&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;5.&lt;span&gt;&lt;strong&gt;SpinLock&lt;/strong&gt;&lt;/span&gt;和&lt;span&gt;&lt;strong&gt;SpinWait&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;这些是.NET 4.0引入的功能，一般被称为&lt;strong&gt;PFX（Parallel Framework，并行框架）&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;Parallel&lt;/span&gt;&lt;/strong&gt;类和&lt;strong&gt;任务并行结构&lt;/strong&gt;称为&lt;strong&gt;TPL（Task Parallel Library，任务并行库）&lt;/strong&gt;。&lt;/p&gt;
+
+&lt;h2&gt;并行框架（PFX）&lt;/h2&gt;
+&lt;h3&gt;1.并行框架基础&lt;/h3&gt;
+&lt;p&gt;当前CPU技术达到瓶颈，而制造商将关注重点转移到提高内核技术上，而标准单线程代码并不会因此而自动提高运行速度。&lt;br/&gt;利用多核提升程序性能通常需要对计算密集型代码进行一些处理：&lt;br/&gt;1.将代码划分成块。&lt;br/&gt;2.通过多线程并行执行这些代码块。&lt;br/&gt;3.结果变为可用后，以线程安全和高性能的方式整合这些结果。&lt;br/&gt;传统多线程结构虽然实现功能，但难度颇高且不方便，特别是划分和整理的步骤（本质问题是：多线程同时使用相同数据时，出于线程安全考虑进行锁定的常用策略会&lt;strong&gt;引发大量竞争&lt;/strong&gt;）。&lt;br/&gt;而&lt;strong&gt;并行框架（Parallel Framework）&lt;/strong&gt;专门用于在这些应用场景中提供帮助。&lt;/p&gt;
+&lt;h3&gt;2.并行框架组成&lt;/h3&gt;
+&lt;p&gt;PFX：高层由两个数据并行API组成：PLINQ或Parallel类。底层包含任务并行类和一组另外的结构为并行编程提供帮助。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1440910/201809/1440910-20180911215911345-1561819809.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;h2&gt;基础并行语言集成查询（PLINQ）&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;语言集成查询（Language Integrated Query,LINQ）&lt;/strong&gt;提供了一个简捷的语法来查询数据集合。而这种由一个线程顺序处理数据集合的方式我们称为&lt;strong&gt;顺序查询（sequential query）&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;并行语言集成查询（Parallel LINQ）&lt;/strong&gt;是&lt;strong&gt;LINQ&lt;/strong&gt;的&lt;strong&gt;并行版&lt;/strong&gt;。它将顺序查询转换为并行查询，在内部使用任务，将集合中数据项的处理工作分散到多个CPU上，以并发处理多个数据项。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;PLINQ将自动并行化本地的LINQ查询&lt;/strong&gt;，&lt;span&gt;&lt;strong&gt;System.Linq.ParallelEnumerable&lt;/strong&gt;&lt;/span&gt;类（它定义在System.Core.dll中，需要引用System.Linq）公开了所有&lt;strong&gt;标准LINQ操作符的并行版本&lt;/strong&gt;。这些所有方法是依据&lt;span&gt;&lt;strong&gt;System.Linq.ParallelQuery&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;扩展而来。&lt;/p&gt;
+&lt;h3&gt;1.LINQ to PLINQ&lt;/h3&gt;
+&lt;p&gt;要让LINQ查询调用并行版本，必须将自己的&lt;strong&gt;顺序查询（基于IEnumerable或IEnumerable&amp;lt;T&amp;gt;）&lt;/strong&gt;转换成&lt;strong&gt;并行查询（基于ParallelQuery或ParallelQuery&amp;lt;T&amp;gt;）&lt;/strong&gt;,使用&lt;span&gt;&lt;strong&gt;ParallelEnumerable&lt;/strong&gt;&lt;/span&gt;的&lt;span&gt;&lt;strong&gt;AsParallel&lt;/strong&gt;&lt;/span&gt;方法实现,如示例：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             IEnumerable&amp;lt;&lt;span&gt;int&lt;/span&gt;&amp;gt; numbers = Enumerable.Range(&lt;span&gt;1&lt;/span&gt;, &lt;span&gt;1000&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             ParallelQuery parallelQuery =
+&lt;span&gt; 7&lt;/span&gt;                 &lt;span&gt;from&lt;/span&gt; n &lt;span&gt;in&lt;/span&gt; numbers.AsParallel()&lt;span&gt;//&lt;/span&gt;&lt;span&gt;转换为并行&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;                 &lt;span&gt;where&lt;/span&gt; n &amp;gt; &lt;span&gt;3&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;                 &lt;span&gt;select&lt;/span&gt;&lt;span&gt; n;
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;             &lt;span&gt;foreach&lt;/span&gt; (&lt;span&gt;var&lt;/span&gt; item &lt;span&gt;in&lt;/span&gt;&lt;span&gt; parallelQuery)
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;                Console.WriteLine(item);
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;结果如下：使用Enumerable.Range生成的集合是顺序的，但是经过并行查询后顺序被打乱。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180914151707589-427256261.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;2.PLINQ to LINQ&lt;/h3&gt;
+&lt;p&gt; 将执行并行查询的操作切换回执行顺序查询（并不常用），通过&lt;strong&gt;&lt;span&gt;ParalleIEnumerable&lt;/span&gt;&lt;/strong&gt;的&lt;span&gt;&lt;strong&gt;AsSequential&lt;/strong&gt;&lt;/span&gt;实现。此时操作只由一个线程执行。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             IEnumerable&amp;lt;&lt;span&gt;int&lt;/span&gt;&amp;gt; numbers = Enumerable.Range(&lt;span&gt;1&lt;/span&gt;, &lt;span&gt;1000&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             IEnumerable&amp;lt;&lt;span&gt;int&lt;/span&gt;&amp;gt; enumerable = numbers.AsParallel().AsSequential().Where(c =&amp;gt; c &amp;gt; &lt;span&gt;3&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             &lt;span&gt;foreach&lt;/span&gt; (&lt;span&gt;var&lt;/span&gt; item &lt;span&gt;in&lt;/span&gt;&lt;span&gt; enumerable)
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                Console.WriteLine(item);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;3.整合结果集（ForAll）&lt;/h3&gt;
+&lt;p&gt;通常，一个LINQ查询的结果数据是让某个线程执行一个&lt;span&gt;foreach&lt;/span&gt;来处理，此时只有一个线程遍历查询的所有结果，如果希望&lt;strong&gt;以并行方式处理查询结果&lt;/strong&gt;，通过&lt;span&gt;&lt;strong&gt;ParalleIEnumerable&lt;/strong&gt;&lt;/span&gt;的&lt;span&gt;&lt;strong&gt;ForAll&lt;/strong&gt;&lt;/span&gt;方法处理查询，如示例：&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             IEnumerable&amp;lt;&lt;span&gt;int&lt;/span&gt;&amp;gt; numbers = Enumerable.Range(&lt;span&gt;1&lt;/span&gt;, &lt;span&gt;1000&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             (&lt;span&gt;from&lt;/span&gt; n &lt;span&gt;in&lt;/span&gt; numbers.AsParallel() &lt;span&gt;where&lt;/span&gt; n &amp;gt; &lt;span&gt;3&lt;/span&gt; &lt;span&gt;select&lt;/span&gt; n).ForAll((d) =&amp;gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;             {
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                  d = d + &lt;span&gt;1000&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                 Console.WriteLine(d);&lt;span&gt;//Console在此回损害性能，因为内部回对线程进行同步，此处因演示所以暂且一用
+&lt;/span&gt;&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;             });
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 执行结果如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180914165239749-357172300.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;h2&gt;解析PLINQ&lt;/h2&gt;
+&lt;h3&gt;1.PLINQ执行模型&lt;/h3&gt;
+&lt;p&gt;如图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180914165748027-2031355513.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;2.异常处理&lt;/h3&gt;
+&lt;p&gt;PLINQ的报错将以&lt;span&gt;&lt;strong&gt;AggregateException&lt;/strong&gt;&lt;/span&gt;形式被重抛，其中&lt;strong&gt;&lt;span&gt;InnerExceeptions&lt;/span&gt;&lt;/strong&gt;属性包含一个或多个真正异常，示例可看 &lt;strong&gt;&lt;a href=&quot;https://www.cnblogs.com/jonins/p/9558275.html&quot; target=&quot;_blank&quot;&gt;异步编程（async&amp;amp;await）&lt;/a&gt;&lt;/strong&gt;内的异常处理部分。&lt;/p&gt;
+&lt;h3&gt;3.PLINQ结果的排序&lt;/h3&gt;
+&lt;p&gt; 并行化查询当整理结果时不能保持初始化数据的原始次序。如果要保持序列的原始序列，可以通过在&lt;span&gt;&lt;strong&gt;AsParallel&lt;/strong&gt;&lt;/span&gt;之后调用&lt;span&gt;&lt;strong&gt;AsOrdered&lt;/strong&gt;&lt;/span&gt;来强制实现：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt;             IEnumerable&amp;lt;&lt;span&gt;int&lt;/span&gt;&amp;gt; numbers = Enumerable.Range(&lt;span&gt;1&lt;/span&gt;, &lt;span&gt;10000&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;             &lt;span&gt;var&lt;/span&gt; enumerable = numbers.AsParallel().Where(c =&amp;gt; c &amp;gt; &lt;span&gt;3&lt;/span&gt;);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;调用&lt;span&gt;&lt;strong&gt;AsOrdered&lt;/strong&gt;&lt;/span&gt;时，因为PLINQ要保持跟踪每个元素的原始位置，会导致性能损失。&lt;/p&gt;
+&lt;p&gt;调用&lt;span&gt;&lt;strong&gt;AsUnordered&lt;/strong&gt;&lt;/span&gt;,可以在后续的查询中低效&lt;strong&gt;&lt;span&gt;AsOrdered&lt;/span&gt;&lt;/strong&gt;产生的副作用，允许查询从调用&lt;span&gt;&lt;strong&gt;AsUnordered&lt;/strong&gt;&lt;/span&gt;时起更高效的执行。&lt;/p&gt;
+&lt;h3&gt;4.PLINQ存在的局限与限制&lt;/h3&gt;
+&lt;p&gt;1.若要使PLINQ发挥作用，&lt;strong&gt;必须具有一定数量的计算密集型工作&lt;/strong&gt;可分配给工作者线程。&lt;strong&gt;大多数的LINQ to Objects查询执行速度很快&lt;/strong&gt;，不仅没有必要并行化，而且划分、整理和协调额外线程的开销实际上会降低执行速度。而且查询若调用了非线程安全的方法，PLINQ的结果有可能不正确。&lt;/p&gt;
+&lt;p&gt;2.&lt;strong&gt;PLINQ能够并行化的内容还有些限制&lt;/strong&gt;，以下查询运算符防止查询被并行化，&lt;strong&gt;除非源元素位于他们的元素索引位置&lt;/strong&gt;：Take、TakeWhile、Skip和SkipWhileSelect、SelectMany和ElementAt的索引版本。&lt;/p&gt;
+&lt;p&gt;3.&lt;strong&gt;以下查询运算符是并行化的&lt;/strong&gt;，但所使用的复杂划分策略有时可能比顺序处理的速度还要低：Join、GroupBy、GroupJonin、Distinct、Union、Intersect和Except。&lt;/p&gt;
+&lt;h3&gt;5.PLINQ的结果&lt;/h3&gt;
+&lt;p&gt;和普通LINQ查询一样，PLINQ查询也是延迟求值的。意味着执行只在开始使用时触发。但是列举结果集时和普通顺序查询有区别：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;顺序查询：&lt;/strong&gt;完全由使用者从输入序列中“拉取”每个元素。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;并行查询：&lt;/strong&gt;通常使用独立线程来获取序列中的元素，时间上比使用者需要它们时要提前，再通过查询链并行处理元素后将结果保存在一块缓存中，以便使用者按需取用。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;注意&lt;/span&gt;&lt;/strong&gt;：过早暂停结果列举，查询处理器也会暂停或结束，目的是不浪费CPU的时间或内存。在调用&lt;span&gt;&lt;strong&gt;AsParallel&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;之后调用&lt;/span&gt;WithMergeOptions&lt;/strong&gt;&lt;/span&gt;可以调节PLINQ的缓冲行为。&lt;/p&gt;
+&lt;h3&gt;6.如何使用PLINQ&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;为何优化将LINQ都并行化是不可取的，因为LINQ能解决大多数问题，执行速度也很快，因此无法从并行化中收益。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;一种更好的方式是找出CPU密集的瓶颈，然后考虑通过LINQ的形式表达（这类重构，LINQ往往会使代码量变少，而且增强可读性）。&lt;/p&gt;
+&lt;p&gt;PLINQ十分适用于易并行问题。他还可以很好地处理结构化的阻塞任务。&lt;/p&gt;
+&lt;p&gt;PLINQ不适于镜像制作，因为将数百万元素整理为一个输出序列将带来瓶颈，相反将元素写入一个数组或托管内存块中，然后使用Parallel类或任务并行管理多线程是更好的选择。&lt;/p&gt;
+
+&lt;h2&gt;Parallel类&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Parallel&lt;/strong&gt;&lt;/span&gt;类是对线程的一个很好的抽象。该类位于&lt;span&gt;&lt;strong&gt;System.Threading.Tasks&lt;/strong&gt;&lt;/span&gt;命名空间中，&lt;strong&gt;提供了数据和任务并行性&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;PFX通过&lt;span&gt;&lt;strong&gt;Parallel&lt;/strong&gt;&lt;/span&gt;类中的三个静态方法，提供了一种基本形式的结构化并行机制：&lt;/p&gt;
+&lt;h3&gt;1.Parallel.Invoke&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Parallel.Invoke&lt;/strong&gt;&lt;/span&gt;：&lt;strong&gt;用于并行执行一组委托&lt;/strong&gt;，示例如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; &lt;span&gt;            Parallel.Invoke(
+&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;                 () =&amp;gt; Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id:{Thread.CurrentThread.ManagedThreadId}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;),
+&lt;/span&gt;&lt;span&gt;5&lt;/span&gt;                 () =&amp;gt; Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id:{Thread.CurrentThread.ManagedThreadId}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; &lt;span&gt;                );
+&lt;/span&gt;&lt;span&gt;7&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;8&lt;/span&gt;         }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;执行结果&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180921105034551-979650521.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Parallel.Invoke&lt;/strong&gt;&lt;/span&gt;方法并行执行一组&lt;span&gt;Action&lt;/span&gt;委托，然后等待它们完成。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Invoke(&lt;span&gt;params&lt;/span&gt; Action[] actions);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;示例看起来像是创建和等待两个Task对象的一种捷径。但两者存在重要的区别：&lt;br/&gt;如果传入一个包含数据量非常大的委托数组时，&lt;span&gt;&lt;strong&gt;Parallel.Invoke&lt;/strong&gt;&lt;/span&gt;方法仍然能高效工作，这是因为在底层，&lt;span&gt;&lt;strong&gt;Parallel.Invoke&lt;/strong&gt;&lt;/span&gt;方法是&lt;span&gt;&lt;strong&gt;将大量元素划分成较小的块&lt;/strong&gt;&lt;/span&gt;，分配给底层的&lt;span&gt;Task&lt;/span&gt;执行,而不是每个委托创建一个独立&lt;span&gt;Task&lt;/span&gt;。&lt;/p&gt;
+&lt;h3&gt;2.Parallel.For&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Parallel.For&lt;/strong&gt;&lt;/span&gt;：&lt;strong&gt;执行C# for循环的并行化等价循环&lt;/strong&gt;，示例如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;顺序循环&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;                 &lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = &lt;span&gt;0&lt;/span&gt;; i &amp;lt; &lt;span&gt;10&lt;/span&gt;; i++&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;                {
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                    Test(i);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;                }
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;             Console.WriteLine(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;并行化for开始&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;顺序执行转换为并行化&lt;/span&gt;
+&lt;span&gt;14&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;                 Parallel.For(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;10&lt;/span&gt;, i =&amp;gt;&lt;span&gt; Test(i));
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;顺序执行转换为并行化（更简单的方式）&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;                 Parallel.For(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;10&lt;/span&gt;&lt;span&gt;, Test);
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Test(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; i)
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;             Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id：{Thread.CurrentThread.ManagedThreadId},输出结果为：{i}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;结果如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180921111657142-1262749091.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;3.Parallel.ForEach&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;Parallel.ForEach&lt;/strong&gt;&lt;/span&gt;：&lt;strong&gt;执行C# foreach循环的并行化等价循环&lt;/strong&gt;，示例如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;46&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             &lt;span&gt;string&lt;/span&gt;[] data = { &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;zero&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;one&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;three&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;four&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;five&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;six&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;seven&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;eight&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;nine&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; };
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;顺序循环&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                 &lt;span&gt;foreach&lt;/span&gt; (&lt;span&gt;string&lt;/span&gt; num &lt;span&gt;in&lt;/span&gt;&lt;span&gt; data)
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                {
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;                    Test(num);
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;                }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;             Console.WriteLine(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;并行化foreach开始&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;顺序执行转换为并行化&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;                 Parallel.ForEach(data, num =&amp;gt;&lt;span&gt; Test(num));
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Test(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; str)
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;             Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id：{Thread.CurrentThread.ManagedThreadId},输出结果为：{str}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;执行结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180921111503975-1717420999.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;注意：以上三个方法都&lt;strong&gt;会引发阻塞直到所有工作完成为止&lt;/strong&gt;。和PLINQ一样，在出现未处理的异常之后，余下的工作者在它们当前的迭代之后停止，而一场将被抛回给调用者，并封装在一个&lt;span&gt;&lt;strong&gt;AggregateException&lt;/strong&gt;&lt;/span&gt;中。&lt;/p&gt;
+&lt;h3&gt;4.索引&amp;amp;跳出（ParallelLoopState）&lt;/h3&gt;
+&lt;p&gt;有时迭代索引很有用处，但是切忌&lt;strong&gt;不可像顺序循环的用法使用共享变量&lt;/strong&gt;（循环内i++）的方式使用，因为&lt;strong&gt;共享变量值在并行上下文中是线程不安全的&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;同样的，因为并行&lt;strong&gt;&lt;span&gt;For&lt;/span&gt;&lt;/strong&gt;或&lt;strong&gt;&lt;span&gt;ForEach&lt;/span&gt;&lt;/strong&gt;中的循环体是一个委托，所以无法使用&lt;span&gt;break&lt;/span&gt;语句提前退出循环，必须调用&lt;strong&gt;&lt;span&gt;ParallelLoopState&lt;/span&gt;&lt;/strong&gt;对象上的&lt;strong&gt;&lt;span&gt;Break&lt;/span&gt;&lt;/strong&gt;或&lt;strong&gt;&lt;span&gt;Stop&lt;/span&gt;&lt;/strong&gt;方法。&lt;/p&gt;
+&lt;p&gt;以&lt;span&gt;&lt;strong&gt;ForEach&lt;/strong&gt;&lt;/span&gt;为例，&lt;strong&gt;&lt;span&gt;ForEach&lt;/span&gt;&lt;/strong&gt;重载的其中之一如下，它包含&lt;span&gt;&lt;strong&gt;Acton&lt;/strong&gt;&lt;/span&gt;的其中有三个参数（&lt;span&gt;TSourec&lt;/span&gt;=子元素，&lt;span&gt;ParallelLoopState&lt;/span&gt;=并行循环状态，&lt;span&gt;long&lt;/span&gt;=索引）：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; ParallelLoopResult ForEach&amp;lt;TSource&amp;gt;(IEnumerable&amp;lt;TSource&amp;gt; source, Action&amp;lt;TSource, ParallelLoopState, &lt;span&gt;long&lt;/span&gt;&amp;gt; body)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;所以，想要得到索引和提前跳出的正确方式如示例：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;49&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             &lt;span&gt;string&lt;/span&gt;[] data = { &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;zero&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;one&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;three&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;four&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;five&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;six&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;seven&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;eight&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;nine&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; };
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             Parallel.ForEach(data, (num, state, i) =&amp;gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                 Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前索引为:{i},状态为:{state}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                Test(num);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;                 &lt;span&gt;if&lt;/span&gt; (num == &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;six&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;                    state.Break();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;            });
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Test(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; str)
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;             Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id：{Thread.CurrentThread.ManagedThreadId},输出结果为：{str}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;结果如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180921154634847-1261841989.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;For&lt;/strong&gt;&lt;/span&gt;的版本如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;49&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;             &lt;span&gt;string&lt;/span&gt;[] data = { &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;zero&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;one&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;three&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;four&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;five&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;six&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;seven&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;eight&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;nine&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; };
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             Parallel.For(&lt;span&gt;0&lt;/span&gt;, data.Length, (i, state) =&amp;gt;
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;            {
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                 Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前索引为:{i},状态为:{state}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;                Test(data[i]);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;                 &lt;span&gt;if&lt;/span&gt; (data[i] == &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;six&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;                    state.Break();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;            });
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;            Console.ReadKey();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Test(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; str)
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        {
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;             Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;当前线程Id：{Thread.CurrentThread.ManagedThreadId},输出结果为：{str}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h2&gt;任务并行&lt;/h2&gt;
+&lt;p&gt;对于任务并行的内容，请戳 &lt;a href=&quot;https://www.cnblogs.com/jonins/p/9444374.html&quot; target=&quot;_blank&quot;&gt;任务（Task）&lt;/a&gt; 和 &lt;a href=&quot;https://www.cnblogs.com/jonins/p/9558275.html&quot; target=&quot;_blank&quot;&gt;异步编程（async&amp;amp;await）&lt;/a&gt;。&lt;/p&gt;
+
+&lt;h2&gt;并发集合概述&lt;/h2&gt;
+&lt;p&gt;.NET 4.0在&lt;span&gt;System.Collections.Concurrent&lt;/span&gt;命名空间中提供了一组新的集合。所有这些集合都完全是&lt;strong&gt;线程安全&lt;/strong&gt;的：&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1440910/201809/1440910-20180921171719513-1653445596.png&quot; alt=&quot;&quot;/&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;这些集合不仅是为使用带锁的普通集合提供了快捷方式，而且可以在一般的多线程中使用并发集合，但需要&lt;span&gt;注意&lt;/span&gt;：&lt;br/&gt;1.并发集合针对并行编程进行了调整。&lt;strong&gt;只有在高度并发的应用场景中，传统集合的性能才能胜过它们&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;2.&lt;strong&gt;线程安全的集合不能确保使用它的代码也是安全的&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;3.如果枚举一个并发集合的同时，另一个线程要修改它，不会抛出任何异常，相反，得到旧内容与新内容的混合。&lt;/p&gt;
+&lt;p&gt;4.不存在任何List&amp;lt;T&amp;gt;的并发版本。&lt;/p&gt;
+&lt;p&gt;5.它们的内存利用率没有非并发的Stack和Queue类高效，但对于并发访问的效果更好。&lt;/p&gt;
+&lt;h3&gt;1.结构概述&lt;/h3&gt;
+&lt;p&gt;这些并发集合与传统集合的区别是：它们公开了特殊方法来执行原子测试和行动操作，而这些方法都是通过&lt;span&gt;&lt;strong&gt;IProducerConsumerCollection&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;接口提供的。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;IProducerConsumerCollection&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;接口代表一个线程安全的生产者/消费者集合，这三个类继承并实现了&lt;span&gt;&lt;strong&gt;IProducerConsumerCollection&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;接口：&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;ConcurrentStack&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;、&lt;strong&gt;&lt;span&gt;ConcurrentQueue&amp;lt;T&amp;gt;&lt;/span&gt;&lt;/strong&gt;、&lt;span&gt;&lt;strong&gt;ConcurrentBag&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;span&gt;。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;它们实现的&lt;span&gt;&lt;strong&gt;TryAdd&lt;/strong&gt;&lt;/span&gt;和&lt;span&gt;&lt;strong&gt;TryTake&lt;/strong&gt;&lt;/span&gt;方法用于测试一个添加/删除操作能否执行，如果可以，则执行添加/删除操作。测试与行动不需要对传统集合上锁。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;ConcurrentBag&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;用于保存对象的无需集合，适用于调用Take或TryTake时不关心获取那个元素的额情况。&lt;/p&gt;
+&lt;p&gt;相对于并发队列或堆栈，在多线程同时调用一个ConcurrentBag的&lt;span&gt;Add&lt;/span&gt;时，不存在竞争，但队列或堆栈并行调用&lt;span&gt;Add&lt;/span&gt;会引起一些竞争，所以ConcurrentBag上调用&lt;span&gt;&lt;strong&gt;Take&lt;/strong&gt;&lt;/span&gt;方法非常高效。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;BlockingCollection&amp;lt;T&amp;gt;&lt;/strong&gt;&lt;/span&gt;类似阻塞集合，适用于等待新元素的出现，可以把它看作一个容器，使用一个阻塞集合封装所有实现IProducerConsumerCollection&amp;lt;T&amp;gt;的集合，并且允许从封装的集合中去除元素，若没有元素，操作会阻塞&lt;/p&gt;
+&lt;h3&gt;2.基础方法&lt;/h3&gt;
+&lt;p&gt;常用的一些方法，整理自 &lt;a href=&quot;https://blog.csdn.net/wangzhiyu1980&quot; target=&quot;_blank&quot;&gt;zy__&lt;/a&gt; ：&lt;/p&gt;
+&lt;blockquote readability=&quot;60&quot;&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;ConcurrentQueue&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;：完全无锁，但面临资源竞争失败时可能会陷入自旋并重试操作。&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Enqueue：在队尾插入元素&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryDequeue：尝试删除队头元素，并通过out参数返回&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryPeek：尝试将对头元素通过out参数返回，但不删除该元素。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;ConcurrentStack&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;：完全无锁，但面临资源竞争失败时可能会陷入自旋并重试操作。&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Push：向栈顶插入元素&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryPop：从栈顶弹出元素，并且通过out 参数返回&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryPeek：返回栈顶元素，但不弹出。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;ConcurrentBag&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;：一个无序的集合，程序可以向其中插入元素，或删除元素。在同一个线程中向集合插入，删除元素的效率很高。&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Add：向集合中插入元素 &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryTake：从集合中取出元素并删除 &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryPeek：从集合中取出元素，但不删除该元素。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;BlockingCollection&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;：一个支持界限和阻塞的容器&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;em id=&quot;__mceDel&quot;&gt;Add ：向容器中插入元素&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryTake：从容器中取出元素并删除&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryPeek：从容器中取出元素，但不删除。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;CompleteAdding：告诉容器，添加元素完成。此时如果还想继续添加会发生异常。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;IsCompleted：告诉消费线程，生产者线程还在继续运行中，任务还未完成。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;ConcurrentDictionary&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;：&lt;em id=&quot;__mceDel&quot;&gt;对于读操作是完全无锁的，当很多线程要修改数据时，它会使用细粒度的锁。&lt;/em&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;AddOrUpdate：如果键不存在，方法会在容器中添加新的键和值，如果存在，则更新现有的键和值。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;GetOrAdd：如果键不存在，方法会向容器中添加新的键和值，如果存在则返回现有的值，并不添加新值。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;TryAdd：尝试在容器中添加新的键和值。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryGetValue：尝试根据指定的键获得值。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryRemove：尝试删除指定的键。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;TryUpdate：有条件的更新当前键所对应的值。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;GetEnumerator：返回一个能够遍历整个容器的枚举器。&lt;/span&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;结语&lt;/h2&gt;
+&lt;p&gt;根据&lt;strong&gt;ConcurrentBag&lt;/strong&gt;编写&lt;strong&gt;线程安全&lt;/strong&gt;的生产者消费者请戳：&lt;a href=&quot;https://www.cnblogs.com/InCerry/p/9497729.html&quot; target=&quot;_blank&quot;&gt;这里&lt;/a&gt; 。&lt;/p&gt;
+&lt;p&gt;说实在的写这篇文章挺烦的，主要涉及的知识点太多讲的太细篇幅会很长况且我自己有些也还没用过，所以是概述性文章，对PFX有个基本的认识，当需要具体深入使用某些知识时再查询相关文档。&lt;/p&gt;
+&lt;p&gt;关于 &lt;a href=&quot;https://www.cnblogs.com/jonins/category/1253133.html&quot; target=&quot;_blank&quot;&gt;并发编程（Concurrent programming）&lt;/a&gt;更新到这里基本已经完结，&lt;span&gt;&lt;strong&gt;谢谢大家的支持&lt;/strong&gt;&lt;/span&gt;。&lt;/p&gt;
+&lt;p&gt;因个人的兴趣，所以准备沉淀下来专攻 &lt;strong&gt;数据结构和算法&lt;/strong&gt;，然后研究 &lt;strong&gt;人工智能&lt;/strong&gt;（Microsoft的人工智能平台Windows ML不会涉及，选择研究Google的第二代人工智能学习系统&lt;strong&gt;TensorFlow&lt;/strong&gt; ）。&lt;/p&gt;
+&lt;p&gt;接下来会对&lt;strong&gt;Linux&lt;/strong&gt;、&lt;strong&gt;Python&lt;/strong&gt;进行基础的学习并更新文章。&lt;/p&gt;
+&lt;p&gt;但是最核心的还是&lt;strong&gt;数据结构&amp;amp;算法&lt;/strong&gt;使用那种编程语言并不重要&lt;strong&gt;，&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;感兴趣的朋友可以关注。&lt;/p&gt;
+
+&lt;h2&gt;参考文献&lt;/h2&gt;
+&lt;p&gt;CLR via C#（第4版） Jeffrey Richter&lt;/p&gt;
+&lt;p&gt;C#高级编程（第10版） C# 6 &amp;amp; .NET Core 1.0   Christian Nagel  &lt;/p&gt;
+&lt;p&gt;果壳中的C# C#5.0权威指南  Joseph Albahari&lt;/p&gt;
+&lt;p&gt;...&lt;/p&gt;
+</description>
+<pubDate>Fri, 21 Sep 2018 17:24:00 +0000</pubDate>
+<dc:creator>Jonins</dc:creator>
+<og:description>前言 并行编程：通过编码方式利用多核或多处理器称为并行编程，多线程概念的一个子集。 并行处理：把正在执行的大量的任务分割成小块，分配给多个同时运行的线程。多线程的一种。 并行编程分为如下几个结构： 1</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jonins/p/9558276.html</dc:identifier>
+</item>
+<item>
+<title>Sqlserver 数据库数据位置讲解 及 脚本备份 - StitchWang</title>
+<link>http://www.cnblogs.com/LaoWang666/p/9689155.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/LaoWang666/p/9689155.html</guid>
+<description>&lt;p&gt;在我们实际开发过程中，使用会经常连接系统数据库（一般为开发使用内网访问）。所以导致我们回家或者是出差想要使用数据时（当然不建议回家加班），很尴尬所以赋值数据库到本地是必不可少的。&lt;/p&gt;
+&lt;p&gt;为什么不使用 Sql server的 .bak 备份还原文件呢？&lt;/p&gt;
+&lt;p&gt;因为有的在内网测试的数据库在备份的时候，会把备份文件放在服务器的磁盘上，导致本地磁盘无法使用（当然你如果有服务器的登陆权限也可以远程连接将.bak文件拷贝到本地使用）&lt;/p&gt;
+&lt;p&gt;再说执行数据脚本之前先说一下数据库的存储构成：主要文件（.mdf）、次要文件（.ndf）、日志文件（.ldf）&lt;/p&gt;
+&lt;p&gt;注：在不使用表分区的时候.ndf文件是不会生成的，默认建数据库产生的数据保存在.mdf文件里，.ldf主要记录对数据的操作日志&lt;/p&gt;
+&lt;p&gt;那这些保存数据的文件由放在哪里呢？&lt;/p&gt;
+&lt;p&gt;我们在安装的Sqlserver 数据库的时候默认放在C 系统盘，所以在不更改数据库最初建立的位置的情况下会在&lt;/p&gt;
+&lt;p&gt;C:\Program Files\Microsoft SQL Server\MSSQL11.MSSQLSERVER\MSSQL\DATA  这个文件夹里面&lt;/p&gt;
+&lt;p&gt;可以 右键数据库连接名 点击属性 ---- 在左侧导航页中找到 数据库设置项 选择  ----- 在右侧数据库默认位置 中 可以看到你的数据 保存的位置&lt;/p&gt;
+&lt;p&gt;好了我们开始脚本备份了&lt;/p&gt;
+&lt;p&gt;首先选中要备份的数据库右键 任务 ----  生成脚本&lt;/p&gt;
+&lt;p&gt;好了开始上图&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921172645867-504897901.png&quot; alt=&quot;&quot; width=&quot;488&quot; height=&quot;420&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921172717295-1262659863.png&quot; alt=&quot;&quot; width=&quot;487&quot; height=&quot;418&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921172838442-1742848799.png&quot; alt=&quot;&quot; width=&quot;463&quot; height=&quot;398&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921173106879-1400801624.png&quot; alt=&quot;&quot; width=&quot;766&quot; height=&quot;410&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921173308572-2044116494.png&quot; alt=&quot;&quot; width=&quot;799&quot; height=&quot;688&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180921173651111-517946990.png&quot; alt=&quot;&quot; width=&quot;803&quot; height=&quot;430&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;接下来就是到本地生成数据库了：&lt;/p&gt;
+&lt;p&gt;双击脚本文件进入SQL server 查询窗口&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1345034/201809/1345034-20180922002331950-1431132715.png&quot; alt=&quot;&quot; width=&quot;707&quot; height=&quot;363&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;切记切记，文件夹一定要存在，不存在可以改一下（因为有的服务器的数据库数据保存的不在默认位置，导致生成失败）。那会刚被老大鄙视完。连路径有误都看不出&lt;/p&gt;
+&lt;p&gt;一脸尴尬。。。。。&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 21 Sep 2018 16:33:00 +0000</pubDate>
+<dc:creator>StitchWang</dc:creator>
+<og:description>在我们实际开发过程中，使用会经常连接系统数据库（一般为开发使用内网访问）。所以导致我们回家或者是出差想要使用数据时（当然不建议回家加班），很尴尬所以赋值数据库到本地是必不可少的。 为什么不使用 Sql</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/LaoWang666/p/9689155.html</dc:identifier>
+</item>
+<item>
+<title>.NET Core微服务之基于Steeltoe集成Zuul实现统一API网关 - Edison Chou</title>
+<link>http://www.cnblogs.com/edisonchou/p/dotnet_core_microservice_integrate_with_springcloud_zuul.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/edisonchou/p/dotnet_core_microservice_integrate_with_springcloud_zuul.html</guid>
+<description>&lt;p&gt;&lt;em&gt;&lt;strong&gt;Tip:&lt;/strong&gt; &lt;/em&gt;此篇已加入&lt;a title=&quot;find more ?&quot; href=&quot;https://www.cnblogs.com/edisonchou/p/dotnetcore_microservice_foundation_blogs_index.html&quot; target=&quot;_blank&quot;&gt;.NET Core微服务基础系列文章索引&lt;/a&gt;，本篇接上一篇《&lt;a href=&quot;https://www.cnblogs.com/edisonchou/p/dotnet_core_microservice_integrate_with_springcloud_eureka.html&quot; target=&quot;_blank&quot;&gt;基于Steeltoe使用Eureka实现服务注册与发现&lt;/a&gt;》，所演示的示例也是基于上一篇的基础上而扩展的。&lt;/p&gt;
+
+&lt;p&gt;　　API Gateway（API GW / API 网关），顾名思义，是出现在系统边界上的一个面向API的、串行集中式的强管控服务，这里的边界是企业IT系统的边界。&lt;/p&gt;
+&lt;p&gt;　　Zuul 是Netflix 提供的一个开源组件，致力于在云平台上提供动态路由，监控，弹性，安全等边缘服务的框架，也有很多公司使用它来作为网关的重要组成部分。Spring Cloud 体系收录的该模块，主要用于提供动态路由、监控、安全控制、限流配额等，可以将内部微服务API同意暴露。&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921170215716-745008206.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　有关Zuul的更多内容，请参考我的这一篇：《&lt;a href=&quot;https://www.cnblogs.com/edisonchou/p/java_spring_cloud_foundation_sample_list.html&quot; target=&quot;_blank&quot;&gt;Spring Cloud微服务架构学习笔记与示例&lt;/a&gt;》，这里不是本文重点，不再赘述。&lt;/p&gt;
+
+&lt;p&gt;　　（1）pom.xml添加相关依赖包：本示例的版本 =&amp;gt; Spring Boot 1.5.15.RELEASE，Spring Cloud Edgware.SR3&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+    &amp;lt;dependencies&amp;gt;
+        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;spring-boot-starter&amp;lt;/artifactId&amp;gt;
+        &amp;lt;/dependency&amp;gt;
+
+        &amp;lt;!-- zuul --&amp;gt;
+        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;org.springframework.cloud&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;spring-cloud-starter-zuul&amp;lt;/artifactId&amp;gt;
+        &amp;lt;/dependency&amp;gt;
+
+        &amp;lt;!-- eureka --&amp;gt;
+        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;org.springframework.cloud&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;spring-cloud-starter-eureka&amp;lt;/artifactId&amp;gt;
+        &amp;lt;/dependency&amp;gt;
+
+        &amp;lt;!-- 热启动，热部署依赖包，为了调试方便，加入此包 --&amp;gt;
+        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;spring-boot-devtools&amp;lt;/artifactId&amp;gt;
+            &amp;lt;optional&amp;gt;&lt;span&gt;true&lt;/span&gt;&amp;lt;/optional&amp;gt;
+        &amp;lt;/dependency&amp;gt;
+    &amp;lt;/dependencies&amp;gt;
+
+    &amp;lt;!-- spring cloud dependencies --&amp;gt;
+    &amp;lt;dependencyManagement&amp;gt;
+        &amp;lt;dependencies&amp;gt;
+            &amp;lt;dependency&amp;gt;
+                &amp;lt;groupId&amp;gt;org.springframework.cloud&amp;lt;/groupId&amp;gt;
+                &amp;lt;artifactId&amp;gt;spring-cloud-dependencies&amp;lt;/artifactId&amp;gt;
+                &amp;lt;version&amp;gt;Edgware.SR3&amp;lt;/version&amp;gt;
+                &amp;lt;type&amp;gt;pom&amp;lt;/type&amp;gt;
+                &amp;lt;scope&amp;gt;&lt;span&gt;import&lt;/span&gt;&amp;lt;/scope&amp;gt;
+            &amp;lt;/dependency&amp;gt;
+        &amp;lt;/dependencies&amp;gt;
+    &amp;lt;/dependencyManagement&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　（2）启动类添加@EnableZuulProxy注解&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@SpringBootApplication
+@EnableZuulProxy
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ZuulServiceApplication {
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        SpringApplication.run(ZuulServiceApplication.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args);
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　（3）添加必要配置（application.yml）：主要是针对Eureka的配置，本示例将Zuul也作为一个Eureka Client注册到Eureka Server中。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;server:
+  port: &lt;/span&gt;5000&lt;span&gt;
+
+spring:
+  application:
+    name: zuul&lt;/span&gt;-gateway-&lt;span&gt;service
+
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http:&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;localhost:8761/eureka/&lt;/span&gt;
+&lt;span&gt;  instance:
+    prefer&lt;/span&gt;-ip-address: &lt;span&gt;true&lt;/span&gt;&lt;span&gt; # 优先注册IP地址而不是hostname
+    instance&lt;/span&gt;-id: zuul-gateway-&lt;span&gt;container:${server.port}
+  healthcheck:
+    enabled: &lt;/span&gt;&lt;span&gt;true&lt;/span&gt;&lt;span&gt; # 启用健康检查,注意:需要引用spring boot actuator
+
+management:
+  security:
+    enabled: &lt;/span&gt;&lt;span&gt;false&lt;/span&gt; # 默认为true，改为false以便可以看到routes
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　启动Eureka Server和Zuul Server之后：&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921164029967-1081030826.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　示例代码：&lt;a title=&quot;zuul-service&quot; href=&quot;https://github.com/EdisonChou/Microservice.PoC.Steeltoe/tree/master/springcloud&quot; target=&quot;_blank&quot;&gt;https://github.com/EdisonChou/Microservice.PoC.Steeltoe/tree/master/springcloud/zuul-service&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;　　基于第一篇的三个已注册到Eureka的ASP.NET Core WebAPI示例项目（示例代码：&lt;a href=&quot;https://github.com/EdisonChou/Microservice.PoC.Steeltoe/tree/master/src/Chapter1-ServiceDiscovery&quot; target=&quot;_blank&quot;&gt;https://github.com/EdisonChou/Microservice.PoC.Steeltoe/tree/master/src/Chapter1-ServiceDiscovery&lt;/a&gt;），无须做任何修改，启动并注册到Eureka之后的服务列表：&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921164219195-1372672284.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　（1）通过Zuul访问Agent-Service&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921163211723-467970859.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　（2）通过Zuul访问Premium-Service&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921163218688-825329879.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　（3）通过Zuul访问Client-Service （多Client-Service实例，验证负载均衡）&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/381412/201809/381412-20180921163231618-437962436.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　本文极简地介绍了一下Spring Cloud Zuul，并使用Java快速地编写了一个API网关Zuul Server，然后基于上一篇的三个ASP.NET Core演示了一下API网关的效果。当然，对于Zuul还有很多内容，这里就不再一一演示，有兴趣的童鞋或者对这种混搭式的架构感兴趣的童鞋可以去了解一下。&lt;/p&gt;
+
+&lt;div id=&quot;Copyright&quot; readability=&quot;8.2242990654206&quot;&gt;
+&lt;p&gt;作者：&lt;a title=&quot;author&quot; href=&quot;http://www.edisonchou.cn&quot; target=&quot;_blank&quot;&gt;周旭龙&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;出处：&lt;a title=&quot;from&quot; href=&quot;http://edisonchou.cnblogs.com&quot; target=&quot;_blank&quot;&gt;http://edisonchou.cnblogs.com&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文链接。&lt;/p&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Fri, 21 Sep 2018 16:06:00 +0000</pubDate>
+<dc:creator>Edison Chou</dc:creator>
+<og:description>Tip: 此篇已加入.NET Core微服务基础系列文章索引，本篇接上一篇《基于Steeltoe使用Eureka实现服务注册与发现》，所演示的示例也是基于上一篇的基础上而扩展的。 一、关于S</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/edisonchou/p/dotnet_core_microservice_integrate_with_springcloud_zuul.html</dc:identifier>
+</item>
+<item>
+<title>记一次尴尬的Java应用内存泄露排查 - fairjm</title>
+<link>http://www.cnblogs.com/fairjm/p/java_application_offheap_memory_leak_analyze.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/fairjm/p/java_application_offheap_memory_leak_analyze.html</guid>
+<description>&lt;p&gt;这星期被线上JVM内存占用不断增大的问题所困扰,自己提出了一些假设,然后去实施验证都一一失败了,有一些经验和教训在这里分享下.&lt;br/&gt;之所以是尴尬,是最后因为修复了另一个看似不相关的问题导致内存不再上升,但这之间的关系还未明了,还需要继续追踪.&lt;br/&gt;这里讲述一下这次排查的过程.&lt;/p&gt;
+&lt;hr/&gt;
+&lt;p&gt;服务器的JVM配置为&lt;code&gt;Xmx3g&lt;/code&gt;,使用G1,没有设置&lt;code&gt;Xms&lt;/code&gt;考虑自然收缩和fgc之后的空间回拢.&lt;br/&gt;没有发生过fgc,且堆内存的增长正常,排除掉堆内存的问题.&lt;br/&gt;使用NMT查看各个区域的内存正常,committed内存不足4G,但实际情况内存占用不断增大,甚至出现了OOM killer杀掉java进程.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Total: reserved=5037MB, committed=3926MB
+-                 Java Heap (reserved=3072MB, committed=3072MB)
+                            (mmap: reserved=3072MB, committed=3072MB)
+
+-                     Class (reserved=1196MB, committed=192MB)
+                            (classes #29793)
+                            (malloc=6MB #86203)
+                            (mmap: reserved=1190MB, committed=186MB)
+
+-                    Thread (reserved=186MB, committed=186MB)
+                            (thread #184)
+                            (stack: reserved=184MB, committed=184MB)
+                            (malloc=1MB #922)
+                            (arena=1MB #366)
+
+-                      Code (reserved=273MB, committed=171MB)
+                            (malloc=29MB #39947)
+                            (mmap: reserved=244MB, committed=142MB)
+
+-                        GC (reserved=176MB, committed=176MB)
+                            (malloc=30MB #114115)
+                            (mmap: reserved=146MB, committed=146MB)
+
+-                  Compiler (reserved=1MB, committed=1MB)
+
+-                  Internal (reserved=88MB, committed=88MB)
+                            (malloc=88MB #83467)
+
+-                    Symbol (reserved=31MB, committed=31MB)
+                            (malloc=27MB #312661)
+                            (arena=4MB #1)
+
+-    Native Memory Tracking (reserved=10MB, committed=10MB)
+                            (tracking overhead=10MB)
+
+-                   Unknown (reserved=6MB, committed=0MB)
+                            (mmap: reserved=6MB, committed=0MB)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921225245348-1616182920.png&quot;/&gt;&lt;br/&gt;内存增长情况(中间下降是进行fgc或重启服务)&lt;/p&gt;
+&lt;p&gt;最开始考虑是直接内存的问题,观察GC行为发现没有发生过一次fgc,想当然觉得应该是直接内存无法回收,并且在手动执行gc之后内存占用的确是下降的.&lt;br/&gt;于是调整了一波JVM参数,将堆大小设置为2500M,并配置MaxDirectMemory用来触发fgc.&lt;br/&gt;但最后发现内存依旧增长,且还是没有fgc.&lt;br/&gt;再观察了下heap(jmap -heap)的情况,发现手工触发fgc后,heap释放的大小和内存下降几乎一致.&lt;br/&gt;在使用JMX查看了direct pool(java.nio.BufferPool)后惊奇地发现..直接内存并没有多少使用(我们底层用了netty,下意识认为出了问题):&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921230143974-1129789118.png&quot;/&gt;&lt;br/&gt;图中所示最大只用了4M左右.&lt;/p&gt;
+&lt;p&gt;最后设置了&lt;code&gt;Xms&lt;/code&gt;之后发现fgc已经没有作用,内存的使用量不会再下降,排除掉了这个因素.&lt;br/&gt;这个错误的判断最主要的原因还是先入为主,没有收集支撑的直接证据.&lt;/p&gt;
+
+&lt;p&gt;接下去只能使用&lt;code&gt;pmap&lt;/code&gt;(pamp -X pid)看下具体的内存信息.&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921230450727-543896772.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;发现了一些有趣的东西,大量的64M块.&lt;br/&gt;直觉告诉我,快找出问题了.&lt;br/&gt;搜索了下发现类似的问题:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921230615858-2043303086.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;解决方法也很直接换一个分配内存的库.&lt;br/&gt;可选的也只有tcmalloc和jemalloc.&lt;/p&gt;
+&lt;p&gt;选择了前者,配置之后效果出众.&lt;br/&gt;已经没有上图中那么多的64M块了.&lt;br/&gt;并且启动后的内存使用是掉了下来,但是好景不长.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921230953366-1591448704.png&quot;/&gt;&lt;br/&gt;(蓝线是使用了tcmalloc,红线是对比方)&lt;br/&gt;刚开始的确蓝线内存使用好一点(红线在20:00的时候重启 内存降低了).&lt;br/&gt;但随后还是增长了,比较迷的一点是在8点后内存陡降(但JVM没有重启,PID也没有变化),恢复到了最初的水平.&lt;/p&gt;
+&lt;p&gt;看来问题不在这里.&lt;/p&gt;
+
+&lt;p&gt;周常部署的时候出现一个问题,导致heap OOM,我跟了下发现了一段代码内存溢出,但看似和这个堆外内存引起的问题没有关联就没怎么在意.&lt;/p&gt;
+&lt;p&gt;第二天同事修复了这个问题,迁移走了这个接口到另一个服务.&lt;br/&gt;tcmalloc的heap profiling无法使用,一开启&lt;code&gt;libunwind&lt;/code&gt;就&lt;code&gt;segment fault&lt;/code&gt;退出,换成jemalloc后开启.&lt;br/&gt;还在想是不是常见的那个zip溢出的问题,但是搜索了代码库没有发现忘记关闭的情况,等着看下增长和dump验证下.&lt;br/&gt;观察了一会儿,突然发现内存不再增长了.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921231556902-865599480.png&quot;/&gt;&lt;br/&gt;(蓝线是之前一直留着的机器,中间降低是进行了重启)&lt;br/&gt;非常平稳地度过了一天.&lt;/p&gt;
+&lt;p&gt;那坨profiling也失去了意义... ...&lt;/p&gt;
+&lt;p&gt;这就感觉非常尴尬了...&lt;/p&gt;
+
+&lt;p&gt;更尴尬的是另一个服务炸了... ...&lt;br/&gt;继续跟进,先把jemalloc配置过去,等下一次增长看下dump.&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;随着时间的推移遇见了各种各样的问题.&lt;br/&gt;这次排查除了对之前积累的知识的运用,更多像是一次对搜索引擎熟练度的提升 :( .&lt;/p&gt;
+&lt;p&gt;但过程还是很不错的,也看到了一些自己以前没有接触过的知识.&lt;br/&gt;深深感受到自己知识的匮乏,就像深渊(??)一样,逐渐深入才会发现不一样的风景.&lt;br/&gt;生活中还是要多(xie)些bug才会更精彩的啊... ...&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1244488/201809/1244488-20180921233424486-892720676.png&quot;/&gt;&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;参考资料:&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;http://lovestblog.cn/blog/2015/05/12/direct-buffer/&quot; class=&quot;uri&quot;&gt;http://lovestblog.cn/blog/2015/05/12/direct-buffer/&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://yq.aliyun.com/articles/227924&quot; class=&quot;uri&quot;&gt;https://yq.aliyun.com/articles/227924&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/jeffgriffith/native-jvm-leaks&quot; class=&quot;uri&quot;&gt;https://github.com/jeffgriffith/native-jvm-leaks&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;glibc issue原问题:&lt;br/&gt;&lt;a href=&quot;https://serverfault.com/questions/341579/what-consumes-memory-in-java-process?newreg=394e0ea40e55493d8149010909011719&quot; class=&quot;uri&quot;&gt;https://serverfault.com/questions/341579/what-consumes-memory-in-java-process?newreg=394e0ea40e55493d8149010909011719&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;关于NMT的internal 包含了直接内存 不包含DirectMemory:&lt;br/&gt;&lt;a href=&quot;https://stackoverflow.com/questions/47309859/what-is-contained-in-code-internal-sections-of-jcmd&quot; class=&quot;uri&quot;&gt;https://stackoverflow.com/questions/47309859/what-is-contained-in-code-internal-sections-of-jcmd&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 21 Sep 2018 15:36:00 +0000</pubDate>
+<dc:creator>fairjm</dc:creator>
+<og:description>这星期被线上JVM内存占用不断增大的问题所困扰,自己提出了一些假设,然后去实施验证都一一失败了,有一些经验和教训在这里分享下. 之所以是尴尬,是最后因为修复了另一个看似不相关的问题导致内存不再上升,但</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/fairjm/p/java_application_offheap_memory_leak_analyze.html</dc:identifier>
+</item>
+<item>
 <title>RMQ_第一弹_Sparse Table - 31415926535x</title>
 <link>http://www.cnblogs.com/31415926535x/p/9688994.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/31415926535x/p/9688994.html</guid>
@@ -184,16 +849,16 @@ int rmq(int x,int y)
 &lt;p&gt;假如你是按照如上添加语言资源的，那么问题来了，添加如上英文语言资源呢？是不是也分别添加单个资源，再拼凑绑定？&lt;/p&gt;
 
 &lt;p&gt;正确的做法是，添加整个语言资源，&lt;span&gt;“&lt;span&gt;{0}，你好！感谢已使用软件 {1} 天！&lt;/span&gt;”&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;原因：&lt;/span&gt;&lt;span&gt;使用格式化的语言资源，那么将中文资源翻译成英文或者其它语言后，得到的译文符合原有的含义了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;原因：&lt;/span&gt;&lt;span&gt;使用格式化的语言资源，那么将中文资源翻译成英文或者其它语言后，得到的译文才符合原有的含义。&lt;/span&gt;&lt;/p&gt;
 &lt;p&gt;&lt;span&gt;不然，一段一段翻译后的文本拼接，得到的只会是，&lt;span&gt;中式英文之类的&lt;/span&gt;。。。&lt;/span&gt;&lt;/p&gt;
 
 &lt;p&gt;在添加了语言资源后，如何在WPF界面显示呢？&lt;/p&gt;
 &lt;h2&gt;简单的文本样式&lt;/h2&gt;
-&lt;p&gt;只是简单的文本拼接，样式相同时，可以直接绑定动态变量值 - 昵称和使用年限，然后通过StringFormat或者Conveter去处理格式化文本。&lt;/p&gt;
+&lt;p&gt;假如只是实现简单的文本拼接，且样式相同时，可以直接绑定动态变量值 - 昵称和使用年限，然后通过StringFormat或者Conveter去处理格式化文本。&lt;/p&gt;
 &lt;ul&gt;&lt;li&gt;如果只有一个动态变量，直接使用&lt;span&gt;StringFormat处理即可。&lt;/span&gt;Text=&quot;{Binding Name,StringFormat={StaticResource TheFormatedText}}&quot;&lt;/li&gt;
 &lt;li&gt;如果多个动态变量，可以使用多重绑定+Converter，实现文本格式化。&lt;/li&gt;
 &lt;/ul&gt;&lt;h2&gt;复杂的文本样式&lt;/h2&gt;
-&lt;p&gt;复杂样式，例如：&lt;/p&gt;
+&lt;p&gt;假如格式化文本，需要实现复杂的样式和操作，例如：&lt;/p&gt;
 &lt;ol&gt;&lt;li&gt;文本+按钮&lt;/li&gt;
 &lt;li&gt;文本+超链接&lt;/li&gt;
 &lt;li&gt;加粗文本+普通文本+红色文本&lt;/li&gt;
@@ -366,6 +1031,21 @@ int rmq(int x,int y)
 &lt;/span&gt;&lt;span&gt;101&lt;/span&gt; 
 &lt;span&gt;102&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; list;
 &lt;/span&gt;&lt;span&gt;103&lt;/span&gt;     }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;5. 控件的使用&lt;/p&gt;
+&lt;p&gt;界面显示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/685541/201809/685541-20180922013509496-1289404411.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;调用实现：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;local:ComplexTextBlock &lt;/span&gt;&lt;span&gt;Text&lt;/span&gt;&lt;span&gt;=&quot;小王,好好{0}，详见{1}!&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; Style&lt;/span&gt;&lt;span&gt;=&quot;&lt;/span&gt;&lt;span&gt;{StaticResource ComplexTextBlockStyle}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; Margin&lt;/span&gt;&lt;span&gt;=&quot;0 10 0 0&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;2&lt;/span&gt;         &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;local:ComplexTextBlock.ContentFormats&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;3&lt;/span&gt;             &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;local:ContentFormatsCollection&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;4&lt;/span&gt;                 &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Button &lt;/span&gt;&lt;span&gt;Content&lt;/span&gt;&lt;span&gt;=&quot;学习&quot;&lt;/span&gt;&lt;span&gt; Click&lt;/span&gt;&lt;span&gt;=&quot;ButtonBase_OnClick&quot;&lt;/span&gt;&lt;span&gt; VerticalAlignment&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;Button&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;5&lt;/span&gt;                 &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;Button &lt;/span&gt;&lt;span&gt;x:Name&lt;/span&gt;&lt;span&gt;=&quot;LinkedButton&quot;&lt;/span&gt;&lt;span&gt; Content&lt;/span&gt;&lt;span&gt;=&quot;学习计划&quot;&lt;/span&gt;&lt;span&gt; Click&lt;/span&gt;&lt;span&gt;=&quot;LinkedButton_OnClick&quot;&lt;/span&gt;&lt;span&gt; Style&lt;/span&gt;&lt;span&gt;=&quot;&lt;/span&gt;&lt;span&gt;{StaticResource LinkedTextBlock}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; VerticalAlignment&lt;/span&gt;&lt;span&gt;=&quot;Center&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt;6&lt;/span&gt;             &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;local:ContentFormatsCollection&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;7&lt;/span&gt;         &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;local:ComplexTextBlock.ContentFormats&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;8&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;local:ComplexTextBlock&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
 &lt;/pre&gt;&lt;/div&gt;
 &lt;p&gt;详细代码实现，可查看&lt;a href=&quot;https://github.com/Kybs0/ComplexTextBlock&quot; target=&quot;_blank&quot;&gt;Github源码Demo&lt;/a&gt;&lt;/p&gt;
 
@@ -847,1182 +1527,6 @@ User [id=1, username=小明, birthday=null, sex=1, address=四川成都]
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/aihuxi/p/9688711.html</dc:identifier>
-</item>
-<item>
-<title>socket传送二进制流的一些总结 - 随性者也</title>
-<link>http://www.cnblogs.com/zhugaopeng/p/9688882.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhugaopeng/p/9688882.html</guid>
-<description>&lt;p&gt;第一次实质性的接触socket通信方面的工作，所以遇到的问题还真不少，写篇博客记录一下，提升下记忆。&lt;/p&gt;
-&lt;p&gt;需求是通过私有协议进行二进制数据的传输，必须保证数据包不能被丢失，所以选择tcp的socket进行通信。&lt;/p&gt;
-&lt;p&gt;1. 遇到的第一个问题是客户端与服务端的socket通信没有保持持续的连接状态&lt;/p&gt;
-&lt;p&gt;   这个是一个想当然的错误。想当然的以为TCP是有连接的通信，但是你如果长时间不通信，服务端一直保持着通信，这对服务器资源是一种极大的浪费。客户端与服务端的连接是需要占用一定资源的，而服务端的资源是有限的。如果一直保持连接状态，那么你的服务器的性能肯定是有问题的。&lt;/p&gt;
-&lt;p&gt;   解决这个问题的办法是保活。服务端发送心跳包，客户端接受到之后进行回应。客户端告诉服务器，还在线，不要断开连接。如果客户端长时间没有回应，服务器断开与此客户端的连接，减少资源占用。&lt;/p&gt;
-
-&lt;p&gt;2. 二进制文件的读写问题&lt;/p&gt;
-&lt;p&gt;    第一次尝试读取二进制文件采取了分段读取的方式。测试过程中发现一个很大的问题：文件读取到部分就会中断读取。debug下，得出是读取到了空字符('\0')。这个直接导致一次读取到内容在发送前丢失，甚至有些情况下会有空字符，客户端接受时会产生崩溃现象。&lt;/p&gt;
-&lt;p&gt;   既然分段不行，就干脆全部读取，然后在分段发送。boost.asio库支持对vector包装发送，分段发送时，把一块二进制流拷贝到vector中，然后整体发送。&lt;/p&gt;
-
-&lt;p&gt;3. 提高二进制流的传输效率&lt;/p&gt;
-&lt;p&gt;   直接传输二进制流不是一个高效的行为，也不是一个安全的行为。直接发送一个二进制流很容易被截获，从而导致信息泄露。&lt;/p&gt;
-&lt;p&gt;   提高二进制流传输效率的办法就是加密压缩再发送。服务器加密压缩，客户端解密解压缩。可采取两种方式：&lt;/p&gt;
-&lt;p&gt;   1）整体压缩，分段发送&lt;/p&gt;
-&lt;p&gt;   2）分段压缩，分段发送&lt;/p&gt;
-&lt;p&gt;   要求不是很高的话，采取方式一比较好。简单粗暴。。&lt;/p&gt;
-
-&lt;p&gt;贴一些代码，整体读取二进制文件的：&lt;/p&gt;
-&lt;p&gt;先是C++的：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;string&lt;/span&gt; fileName = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;D:/XtAmpClient/XtAmpTradeClient_x64_3.0.1.14473.exe&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    ifstream ifs(fileName, ios_base::binary);
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; 
-&lt;span&gt; 4&lt;/span&gt;     filebuf* pbuf =&lt;span&gt; ifs.rdbuf();
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;int&lt;/span&gt; size = pbuf-&amp;gt;pubseekoff(&lt;span&gt;0&lt;/span&gt;, ios_base::end, ios_base::&lt;span&gt;in&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     pbuf-&amp;gt;pubseekpos(&lt;span&gt;0&lt;/span&gt;, ios_base::&lt;span&gt;in&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
-&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;char&lt;/span&gt;* buf = &lt;span&gt;new&lt;/span&gt; &lt;span&gt;char&lt;/span&gt;&lt;span&gt;[size];
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;     pbuf-&amp;gt;&lt;span&gt;sgetn(buf, size);
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    ifs.close();
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;     &lt;span&gt;delete&lt;/span&gt; []buf;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;最后是C的：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt;     &lt;span&gt;const&lt;/span&gt; &lt;span&gt;char&lt;/span&gt;* fileName = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;D:/XtAmpClient/XtAmpTradeClient_x64_3.0.1.14473.exe&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     FILE* fp = fopen(fileName, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (NULL ==&lt;span&gt; fp)
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;    {
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         cout &amp;lt;&amp;lt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;open file failed&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &amp;lt;&amp;lt;&lt;span&gt; endl;
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; ;
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; 
-&lt;span&gt; 9&lt;/span&gt;     fseek(fp, &lt;span&gt;0&lt;/span&gt;&lt;span&gt;, SEEK_END);
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;long&lt;/span&gt; size =&lt;span&gt; ftell(fp);
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;    rewind(fp);
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; 
-&lt;span&gt;13&lt;/span&gt;     &lt;span&gt;char&lt;/span&gt;* buffer = (&lt;span&gt;char&lt;/span&gt;*)&lt;span&gt;malloc&lt;/span&gt;(&lt;span&gt;sizeof&lt;/span&gt;(&lt;span&gt;char&lt;/span&gt;) *&lt;span&gt; size);
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (NULL ==&lt;span&gt; buffer)
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;    {
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;         cout &amp;lt;&amp;lt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;malloc failed&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &amp;lt;&amp;lt;&lt;span&gt; endl;
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; ;
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; 
-&lt;span&gt;20&lt;/span&gt;     &lt;span&gt;int&lt;/span&gt; ret = fread(buffer, &lt;span&gt;1&lt;/span&gt;&lt;span&gt;, size, fp);
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (ret !=&lt;span&gt; size)
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;    {
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;         cout &amp;lt;&amp;lt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;reading failed&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &amp;lt;&amp;lt;&lt;span&gt; endl;
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; ;
-&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; 
-&lt;span&gt;27&lt;/span&gt; &lt;span&gt;    fclose(fp);
-&lt;/span&gt;&lt;span&gt;28&lt;/span&gt;     &lt;span&gt;free&lt;/span&gt;(buffer);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;性能上C比C++好一点点，但是C++的代码明显更简洁。&lt;/p&gt;
-</description>
-<pubDate>Fri, 21 Sep 2018 14:48:00 +0000</pubDate>
-<dc:creator>随性者也</dc:creator>
-<og:description>第一次实质性的接触socket通信方面的工作，所以遇到的问题还真不少，写篇博客记录一下，提升下记忆。 需求是通过私有协议进行二进制数据的传输，必须保证数据包不能被丢失，所以选择tcp的socket进行</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhugaopeng/p/9688882.html</dc:identifier>
-</item>
-<item>
-<title>玩转ASP.NET Core中的日志组件 - LamondLu</title>
-<link>http://www.cnblogs.com/lwqlun/p/9683482.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/lwqlun/p/9683482.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;日志组件&lt;/strong&gt;，作为程序员使用频率最高的组件，给程序员开发调试程序提供了必要的信息。ASP.NET Core中内置了一个通用日志接口&lt;code&gt;ILogger&lt;/code&gt;，并实现了多种内置的日志提供器，例如&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Console&lt;/li&gt;
-&lt;li&gt;Debug&lt;/li&gt;
-&lt;li&gt;EventSource&lt;/li&gt;
-&lt;li&gt;EventLog&lt;/li&gt;
-&lt;li&gt;TraceSource&lt;/li&gt;
-&lt;li&gt;Azure App Service&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;除了内置的日志提供器，ASP.NET Core还支持了多种第三方日志工具，例如&lt;/p&gt;
-&lt;p&gt;开发人员在ASP.Net Core中可以自由指定日志提供器，并将日志发送到指定的位置。&lt;br/&gt;本篇博文中，我们将由浅入深的介绍ASP.Net Core中通用日志接口，最后我们将实现一些自定义的日志提供器(Log Provider)。&lt;/p&gt;
-
-&lt;h2 id=&quot;日志级别log-level&quot;&gt;日志级别(Log Level)&lt;/h2&gt;
-&lt;p&gt;ASP.NET Core中提供了6种日志级别，分别是Trace, Debug, Information, Warning, Error, Critical。以下是他们的具体使用场景&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;11&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;5&quot;&gt;&lt;td&gt;Trace&lt;/td&gt;
-&lt;td&gt;记录一些对程序员调试问题有帮助的信息,&lt;br/&gt;其中可能包含一些敏感信息, 所以应该避免在&lt;br/&gt;生产环境中启用Trace日志&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;5&quot;&gt;&lt;td&gt;Debug&lt;/td&gt;
-&lt;td&gt;记录一些在开发和调试阶段有用的短时变&lt;br/&gt;量(Short-term usefulness), 所以除非为了临时排除生产环境的&lt;br/&gt;故障，开发人员应该尽量避免在生产环境中启用Debug日志&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;Information&lt;/td&gt;
-&lt;td&gt;记录应用程序的一些流程, 例如，记录当前api请求的url&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;5&quot;&gt;&lt;td&gt;Warning&lt;/td&gt;
-&lt;td&gt;记录应用程序中发生的不正常或者未预期的事件信息。&lt;br/&gt;这些信息中可能包含错误消息或者错误产生的条件, 例如, 文件未找到&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Error&lt;/td&gt;
-&lt;td&gt;记录应用程序中某个操作产生的错误和异常信息。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Critical&lt;/td&gt;
-&lt;td&gt;记录一些需要立刻修复的问题。例如数据丢失，磁盘空间不足。&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h2 id=&quot;如何创建日志&quot;&gt;如何创建日志&lt;/h2&gt;
-&lt;p&gt;为了创建一个日志，我们首先需要通过依赖注入获取一个实现ILogger&amp;lt;日志类别&amp;gt;的泛型接口对象。&lt;/p&gt;
-&lt;p&gt;已以下代码为例, 在&lt;code&gt;ValuesController&lt;/code&gt;的构造函数中，我们注入了一个&lt;code&gt;ILogger&lt;/code&gt;的日志记录器&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    [Route(&quot;api/[controller]&quot;)]
-    [ApiController]
-    public class ValuesController : ControllerBase
-    {
-        private readonly ILogger&amp;lt;ValuesController&amp;gt; _logger = null;
-
-        public ValuesController(ILogger&amp;lt;ValuesController&amp;gt; logger)
-        {
-            _logger = logger;
-        }
-
-        // GET api/values
-        [HttpGet]
-        public ActionResult&amp;lt;IEnumerable&amp;lt;string&amp;gt;&amp;gt; Get()
-        {
-            _logger.LogInformation(&quot;[Test Log]Getting items.&quot;);
-            return new string[] { &quot;value1&quot;, &quot;value2&quot; };
-        }
-
-
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后我们使用&lt;code&gt;ILogger&lt;/code&gt;接口提供的&lt;code&gt;LogInformation&lt;/code&gt;方法添加了一个Information类型日志&quot;[Test Log]Getting items&quot;。&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;注：&lt;code&gt;ILogger&lt;/code&gt;为了提供了6个可用的输出日志方法，分别对应了6个不同的日志级别&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;LogTrace&lt;/li&gt;
-&lt;li&gt;LogDebug&lt;/li&gt;
-&lt;li&gt;LogInformation&lt;/li&gt;
-&lt;li&gt;LogWarning&lt;/li&gt;
-&lt;li&gt;LogError&lt;/li&gt;
-&lt;li&gt;LogCritical!&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;p&gt;下面我们使用Kestral服务器启动项目&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921212856486-815180648.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;项目产生的日志如下，我们手动输出的日志出现在控制台中。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921212922423-906742638.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;日志配置&quot;&gt;日志配置&lt;/h2&gt;
-&lt;p&gt;可能针对以上的代码，有些同学可能有疑问，我们没有在Startup.cs中注入任何日志提供器，但是日志却正常产生了。这是由于Program.cs中默认使用WebHost.CreateDefaultBuilder方法添加了2个日志提供器。&lt;/p&gt;
-&lt;h3 id=&quot;默认日志提供器&quot;&gt;默认日志提供器&lt;/h3&gt;
-&lt;p&gt;当创建一个新的ASP.NET Core WebApi项目，我们通常在Program.cs中看到以下代码。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class Program
-    {
-        public static void Main(string[] args)
-        {
-            CreateWebHostBuilder(args).Build().Run();
-        }
-
-        public static IWebHostBuilder CreateWebHostBuilder(string[] args) =&amp;gt;
-            WebHost.CreateDefaultBuilder(args)
-                .UseStartup&amp;lt;Startup&amp;gt;();
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;下面我们看一下WebHost.CreateDefaultBuilder的源代码&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public static IWebHostBuilder CreateDefaultBuilder(string[] args)
-    {
-        var builder = new WebHostBuilder()
-            .UseKestrel()
-            .UseContentRoot(Directory.GetCurrentDirectory())
-            .ConfigureAppConfiguration((hostingContext, config) =&amp;gt;
-            {
-                var env = hostingContext.HostingEnvironment;
-
-                config.AddJsonFile(&quot;appsettings.json&quot;, optional: true, reloadOnChange: true)
-                      .AddJsonFile($&quot;appsettings.{env.EnvironmentName}.json&quot;, optional: true, reloadOnChange: true);
-
-                if (env.IsDevelopment())
-                {
-                    var appAssembly = Assembly.Load(new AssemblyName(env.ApplicationName));
-                    if (appAssembly != null)
-                    {
-                        config.AddUserSecrets(appAssembly, optional: true);
-                    }
-                }
-
-                config.AddEnvironmentVariables();
-
-                if (args != null)
-                {
-                    config.AddCommandLine(args);
-                }
-            })
-            .ConfigureLogging((hostingContext, logging) =&amp;gt;
-            {
-                logging.UseConfiguration(hostingContext.Configuration.GetSection(&quot;Logging&quot;));
-                logging.AddConsole();
-                logging.AddDebug();
-            })
-            .UseIISIntegration()
-            .UseDefaultServiceProvider((context, options) =&amp;gt;
-            {
-                options.ValidateScopes = context.HostingEnvironment.IsDevelopment();
-            })
-            .ConfigureServices(services =&amp;gt;
-            {
-                services.AddTransient&amp;lt;IConfigureOptions&amp;lt;KestrelServerOptions&amp;gt;, KestrelServerOptionsSetup&amp;gt;();
-            });
-
-        return builder;
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;你会发现代码中通过&lt;code&gt;logging.AddConsole&lt;/code&gt;和&lt;code&gt;logging.AddDebug&lt;/code&gt;默认配置了Console和Debug类型的日志提供器，这也就是为什么我们没有注入任何日志提供器，日志却能正常产生了。&lt;/p&gt;
-&lt;h3 id=&quot;手动添加日志提供器&quot;&gt;手动添加日志提供器&lt;/h3&gt;
-&lt;p&gt;看了以上代码后，你应该可以也清楚了如何自己添加其他内置的日志提供器。我们只需要在Program.cs中使用ConfigureLogging方法就可以配置我们需要的日志提供器了。&lt;/p&gt;
-&lt;p&gt;例：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class Program
-    {
-        public static void Main(string[] args)
-        {
-            CreateWebHostBuilder(args).Build().Run();
-        }
-
-        public static IWebHostBuilder CreateWebHostBuilder(string[] args) =&amp;gt;
-            WebHost.CreateDefaultBuilder(args)
-            .ConfigureLogging((hostingContext, logging) =&amp;gt;
-            {
-                logging.AddConsole();
-                logging.AddDebug();
-                logging.AddEventSourceLogger();
-            })
-            .UseStartup&amp;lt;Startup&amp;gt;();
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;除了在Program.cs添加日志提供器之外，我们还可以在Startup.cs中添加日志提供器。&lt;br/&gt;在Startup.cs中，我们可以为Configure方法添加第三个参数&lt;code&gt;ILoggerFactory loggerFactory&lt;/code&gt;, 并使用该参数添加日志提供器。&lt;/p&gt;
-&lt;p&gt;例：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
-    {
-        if (env.IsDevelopment())
-        {
-            app.UseDeveloperExceptionPage();
-        }
-
-        loggerFactory.AddConsole();
-        loggerFactory.AddDebug();
-        
-        app.UseMvc();
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;配置文件及日志级别过滤&quot;&gt;配置文件及日志级别过滤&lt;/h3&gt;
-&lt;p&gt;ASP.NET Core默认会从appSetting.json中的Logging属性读取日志的配置(当然你也可以从其他文件中读取配置)，这里设置了不同的日志提供器产生的最低的日志级别，配置样例如下。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;{
-  &quot;Logging&quot;: {
-    &quot;Debug&quot;: {
-      &quot;LogLevel&quot;: {
-        &quot;Default&quot;: &quot;Information&quot;
-      }
-    },
-    &quot;Console&quot;: {
-      &quot;LogLevel&quot;: {
-        &quot;Microsoft.AspNetCore.Mvc.Razor.Internal&quot;: &quot;Warning&quot;,
-        &quot;Microsoft.AspNetCore.Mvc.Razor.Razor&quot;: &quot;Debug&quot;,
-        &quot;Microsoft.AspNetCore.Mvc.Razor&quot;: &quot;Error&quot;,
-        &quot;Default&quot;: &quot;Trace&quot;
-      }
-    },
-    &quot;LogLevel&quot;: {
-      &quot;Default&quot;: &quot;Debug&quot;
-    }
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;以上代码中的Debug表示Debug日志提供器, Console表示Console日志提供器, 最后一个LogLevel表示其他日志提供器通用。&lt;br/&gt;Debug中的Default设置为Information, 即Debug中产生的日志最低级别是Information, 低于Information级别的日志不会输出。Console中的配置同理。&lt;/p&gt;
-
-&lt;p&gt;在学习了以上基础知识之后，我们应该对内置的日志提供器有了简单的认识。下面我们尝试自定义2个日志提供器。&lt;br/&gt;在ASP.NET Core中，我们可以通过实现&lt;code&gt;ILogger&lt;/code&gt;, &lt;code&gt;ILoggerProvider&lt;/code&gt;2个接口来创建我们自己的日志提供器。&lt;/p&gt;
-&lt;h2 id=&quot;编写一个自定义样式的控制台日志组件&quot;&gt;编写一个自定义样式的控制台日志组件&lt;/h2&gt;
-&lt;p&gt;这里我们希望添加一个在控制台中输出的日志，但是和内置Console类型日志的区别是我们为不同的日志类型设置了不同的颜色。&lt;/p&gt;
-&lt;p&gt;首先我们创建一个新的Api项目ColoredConsoleLoggerSample&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921212944855-1277713354.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后我们创建一个针对不同日志级别的字体颜色配置类&lt;code&gt;ColoredConsoleLoggerConfiguration&lt;/code&gt;, 代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class ColoredConsoleLoggerConfiguration
-    {
-        public LogLevel LogLevel { get; set; } = LogLevel.Warning;
-        public ConsoleColor Color { get; set; } = ConsoleColor.Yellow;
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这个类中定义了针对不同日志类型设置不同的字体颜色。&lt;/p&gt;
-&lt;p&gt;然后我们创建一个日志类&lt;code&gt;ColoredConsoleLogger&lt;/code&gt;, 它实现了&lt;code&gt;ILogger&lt;/code&gt;接口，代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class ColoredConsoleLogger : ILogger
-    {
-        private readonly string _name;
-        private readonly ColoredConsoleLoggerConfiguration _config;
-
-        public ColoredConsoleLogger(string name, ColoredConsoleLoggerConfiguration config)
-        {
-            _name = name;
-            _config = config;
-        }
-
-        public IDisposable BeginScope&amp;lt;TState&amp;gt;(TState state)
-        {
-            return null;
-        }
-
-        public bool IsEnabled(LogLevel logLevel)
-        {
-            return logLevel == _config.LogLevel;
-        }
-
-        public void Log&amp;lt;TState&amp;gt;(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func&amp;lt;TState, Exception, string&amp;gt; formatter)
-        {
-            if (!IsEnabled(logLevel))
-            {
-                return;
-            }
-            
-            var color = Console.ForegroundColor;
-            Console.ForegroundColor = _config.Color;
-            Console.WriteLine($&quot;{logLevel.ToString()} - {_name} - {formatter(state, exception)}&quot;);
-            Console.ForegroundColor = color;
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;ColoredConsoleLogger仅针对一种日志级别&lt;/li&gt;
-&lt;li&gt;只要当前产生的日志级别和ColoredConsoleLogger中定义的日志级别一样时，日志才会输出，这里我们是用&lt;code&gt;IsEnable&lt;/code&gt;方法判断的&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;Log&lt;/code&gt;是ILogger接口中定义的方法，我们就是在这个方法中输出日志的&lt;/li&gt;
-&lt;li&gt;这里我们在输入日志前记录下了当前控制台的原始字体颜色， 当输出日志完成之后，我们将字体颜色恢复成了原来的颜色&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;然后我们添加一个Logger提供器类&lt;code&gt;ColoredConsoleLoggerProvider&lt;/code&gt;，代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class ColoredConsoleLoggerProvider : ILoggerProvider
-    {
-        private readonly ColoredConsoleLoggerConfiguration _config;
-
-        public ColoredConsoleLoggerProvider(ColoredConsoleLoggerConfiguration config)
-        {
-            _config = config;
-        }
-
-        public ILogger CreateLogger(string categoryName)
-        {
-            return new ColoredConsoleLogger(categoryName, _config);
-        }
-
-        public void Dispose()
-        {
-
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;ColoredConsoleLoggerProvider仅针对一种日志级别&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;CreateLogger&lt;/code&gt;是&lt;code&gt;ILoggerProvider&lt;/code&gt;接口中定义的方法，它是用来返回一个日志生成器的&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最后我们修改Startup.cs中的Configure方法, 代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
-    {
-        if (env.IsDevelopment())
-        {
-            app.UseDeveloperExceptionPage();
-        }
-        
-        loggerFactory.AddProvider(new ColoredConsoleLoggerProvider(new ColoredConsoleLoggerConfiguration
-        {
-            LogLevel = LogLevel.Information,
-            Color = ConsoleColor.Blue
-        }));
-        loggerFactory.AddProvider(new ColoredConsoleLoggerProvider(new ColoredConsoleLoggerConfiguration
-        {
-            LogLevel = LogLevel.Debug,
-            Color = ConsoleColor.Gray
-        }));
-
-        app.UseMvc();
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里我们添加了2个日志日志提供器，分别是针对Information级别日志和Debug级别日志的&lt;/p&gt;
-&lt;h4 id=&quot;最终效果&quot;&gt;最终效果&lt;/h4&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921213001275-1411664716.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;我们的日志根据我们预设的字体颜色正确的显示了出来&lt;/p&gt;
-&lt;h2 id=&quot;编写一个与signalr集成的实时日志组件&quot;&gt;编写一个与SignalR集成的实时日志组件&lt;/h2&gt;
-&lt;p&gt;下面我们再来自定义一个与SignalR集成的日志提供器，我们希望产生的日志通过一个SignalR服务器推送到一个网页中。&lt;/p&gt;
-&lt;p&gt;首先我们创建一个ASP.NET Core WebApi项目，命名为SignalrServer, 创建之后，我们右键项目属性，修改App Url为http://localhost:5000&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921213238072-2014467640.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后我们创建一个LogHub类，它集成自Hub类，代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class LogHub : Hub
-    {
-        public async Task WriteLog(Log log)
-        {
-            await Clients.All.SendAsync(&quot;showLog&quot;, log);
-        }
-    }
-
-    public class Log
-    {
-        public LogLevel Level { get; set; }
-
-        public string Content { get; set; }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;这里我们创建了一个写日志的方法，它会把日志推送到所有连接到SignalR服务器的客户端，并调用客户端的showLog方法来展示推送的日志信息。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;然后我们修改Startup.cs文件，代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class Startup
-    {
-        public Startup(IConfiguration configuration)
-        {
-            Configuration = configuration;
-        }
-
-        public IConfiguration Configuration { get; }
-
-        // This method gets called by the runtime. Use this method to add services to the container.
-        public void ConfigureServices(IServiceCollection services)
-        {
-            services.AddCors();
-            services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
-            
-            services.AddSignalR();
-        }
-
-        // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-        public void Configure(IApplicationBuilder app, IHostingEnvironment env)
-        {
-            if (env.IsDevelopment())
-            {
-                app.UseDeveloperExceptionPage();
-            }
-            app.UseCors(p =&amp;gt; p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader().AllowCredentials());
-            app.UseSignalR(routes =&amp;gt;
-            {
-                routes.MapHub&amp;lt;LogHub&amp;gt;(&quot;/logHub&quot;);
-            });
-
-            
-
-            app.UseMvc();
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;我们通过&lt;code&gt;service.AddSignalR&lt;/code&gt;注册了SignalR服务&lt;/li&gt;
-&lt;li&gt;我们通过&lt;code&gt;app.UserSignalR&lt;/code&gt;方法注册一个logHub&lt;/li&gt;
-&lt;li&gt;这里我们启用了CORS, 因为需要提供跨域访问&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;然后我们创建一个另外一个ASP.NET Core WebApi项目, SignalRLoggerSample&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921213251180-1460056264.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;项目创建成功之后，我们右键点击项目属性，并设置App URL为http://localhost:5001&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921213300497-1318546926.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后我们使用Package Console Manager, 安装Microsoft.AspNetCore.SignalR.Client&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;PM&amp;gt; install-package Microsoft.AspNetCore.SignalR.Client&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;为了创建一个SignalR日志提供器， 我们分别创建一个SignalRLogger类和一个SignalRLoggerProvider类， 代码如下&lt;/p&gt;
-&lt;p&gt;SignalRLogger.cs&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class SignalRLogger : ILogger
-    {
-        HubConnection connection;
-
-        public SignalRLogger()
-        {
-            connection = new HubConnectionBuilder()
-             .WithUrl(&quot;http://localhost:5000/LogHub&quot;)
-             .Build();
-        }
-
-        public IDisposable BeginScope&amp;lt;TState&amp;gt;(TState state)
-        {
-            return null;
-        }
-
-        public bool IsEnabled(LogLevel logLevel)
-        {
-            return true;
-        }
-
-        public void Log&amp;lt;TState&amp;gt;(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func&amp;lt;TState, Exception, string&amp;gt; formatter)
-        {
-            if (!IsEnabled(logLevel))
-            {
-                return;
-            }
-
-            connection.StartAsync().Wait();
-            var task = connection.SendAsync(&quot;writeLog&quot;, new { Level = logLevel, Content = formatter(state, exception) });
-            task.Wait();
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;SignalRLoggerProvider.cs&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public class SignalRLoggerProvider : ILoggerProvider
-    {
-        public SignalRLoggerProvider()
-        {
-        }
-
-        public ILogger CreateLogger(string categoryName)
-        {
-            return new SignalRLogger();
-        }
-
-        public void Dispose()
-        {
-
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;这里使用&lt;code&gt;HubConnectionBuilder&lt;/code&gt;创建了一个SignalR连接&lt;/li&gt;
-&lt;li&gt;连接启动成功之后，我们使用&lt;code&gt;connection.SendAsync&lt;/code&gt;方法，将当前产生的日志信息发送到SignalR服务器&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;添加完成之后，我们在wwwroot文件夹中创建一个index.html, 在其中引入jquery和signalr的js库，并指定连接的signalR服务器是http://localhost:5000/logHub&lt;/p&gt;
-&lt;p&gt;index.html&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;!DOCTYPE html&amp;gt;
-&amp;lt;html&amp;gt;
-&amp;lt;head&amp;gt;
-    &amp;lt;meta charset=&quot;utf-8&quot; /&amp;gt;
-    &amp;lt;title&amp;gt;&amp;lt;/title&amp;gt;
-    &amp;lt;script src=&quot;jquery-1.10.2.min.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-    &amp;lt;script src=&quot;signalr.min.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-&amp;lt;/head&amp;gt;
-&amp;lt;body&amp;gt;
-    &amp;lt;h1&amp;gt;Logs&amp;lt;/h1&amp;gt;
-    &amp;lt;div id=&quot;content&quot; style=&quot;border:1px solid #0094ff&quot;&amp;gt;
-
-    &amp;lt;/div&amp;gt;
-    &amp;lt;script type=&quot;text/javascript&quot;&amp;gt;
-        var levels = [
-            { level: 0, name: 'Trace', backgroundColor: 'gray' },
-            { level: 1, name: 'Debug', backgroundColor: 'green' },
-            { level: 2, name: 'Information', backgroundColor: 'blue' },
-            { level: 3, name: 'Warning', backgroundColor: 'yellow' },
-            { level: 4, name: 'Error', backgroundColor: 'orange' },
-            { level: 5, name: 'Critical', backgroundColor: 'red' },
-        ];
-
-        function getLevelName(level) {
-            return levels.find(function (o) {
-                return o.level == level;
-            }).name;
-        }
-
-        function getLevelColor(level) {
-            return levels.find(function (o) {
-                return o.level == level;
-            }).backgroundColor;
-        }
-
-        var connection = new signalR.HubConnectionBuilder().withUrl(&quot;http://localhost:5000/logHub&quot;).build();
-
-        connection.on(&quot;showLog&quot;, function (message) {
-            var div = &quot;&amp;lt;div style='background-color:&quot; + getLevelColor(message.level)+&quot;'&amp;gt;[&quot; + getLevelName(message.level) + &quot;]:&quot; + message.content + &quot;&amp;lt;/div&amp;gt;&quot;;
-            $(&quot;#content&quot;).append(div);
-        });
-
-        connection.start().catch(function (err) {
-            return console.error(err.toString());
-        });
-    &amp;lt;/script&amp;gt;
-&amp;lt;/body&amp;gt;
-&amp;lt;/html&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后我们修改ValuesController文件，代码如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    [Route(&quot;api/[controller]&quot;)]
-    [ApiController]
-    public class ValuesController : ControllerBase
-    {
-        private ILogger&amp;lt;ValuesController&amp;gt; _logger = null;
-
-        public ValuesController(ILogger&amp;lt;ValuesController&amp;gt; logger)
-        {
-            _logger = logger;
-        }
-
-        // GET api/values
-        [HttpGet]
-        public ActionResult&amp;lt;IEnumerable&amp;lt;string&amp;gt;&amp;gt; Get()
-        {
-            _logger.LogTrace(&quot;User call the /api/values api&quot;);
-            _logger.LogDebug(&quot;User call the /api/values api&quot;);
-            _logger.LogInformation(&quot;User call the /api/values api&quot;);
-            _logger.LogWarning(&quot;User call the /api/values api&quot;);
-            _logger.LogError(&quot;User call the /api/values api&quot;);
-            _logger.LogCritical(&quot;User call the /api/values api&quot;);
-            return new string[] { &quot;value1&quot;, &quot;value2&quot; };
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;代码解释&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;我们创建了一个ValueController类的日志&lt;/li&gt;
-&lt;li&gt;当用户请求/api/values时，我们输出了6个不同级别的日志&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最后我们修改Startup.cs中的Configure方法，使用我们之前介绍的方法，将SignalRLoggerProvider添加到管道中&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
-    {
-        if (env.IsDevelopment())
-        {
-            app.UseDeveloperExceptionPage();
-        }
-        app.UseStaticFiles();
-
-        loggerFactory.AddProvider(new SignalRLoggerProvider());
-
-        app.UseMvc();
-
-
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;最终效果-1&quot;&gt;最终效果&lt;/h4&gt;
-&lt;p&gt;最后我们按照顺序，先启动SignalRServer, 再启动SignalRLoggerSample, 效果如下&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201809/65831-20180921213314960-208241893.gif&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://files.cnblogs.com/files/lwqlun/logging.zip&quot;&gt;本篇源代码&lt;/a&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Fri, 21 Sep 2018 13:42:00 +0000</pubDate>
-<dc:creator>LamondLu</dc:creator>
-<og:description>简介 日志组件 ，作为程序员使用频率最高的组件，给程序员开发调试程序提供了必要的信息。ASP.NET Core中内置了一个通用日志接口ILogger，并实现了多种内置的日志提供器，例如 Console</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/lwqlun/p/9683482.html</dc:identifier>
-</item>
-<item>
-<title>朱晔的互联网架构实践心得S1E9：架构评审一百问和设计文档五要素 - lovecindywang</title>
-<link>http://www.cnblogs.com/lovecindywang/p/9688523.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/lovecindywang/p/9688523.html</guid>
-<description>&lt;p&gt;【&lt;a href=&quot;https://files.cnblogs.com/files/lovecindywang/ZHUYE_ARCH_S1E9.pdf&quot; target=&quot;_blank&quot;&gt;下载文本PDF进行阅读&lt;/a&gt;】&lt;/p&gt;
-
-&lt;p&gt;本文我会来说说我认为架构评审中应该看的一些点，以及我写设计文档的一些心得。助你在架构评审中过五关斩六将，助你写出能让人收藏点赞的设计文档。&lt;/p&gt;
-
-&lt;h2&gt;技术架构评审&lt;/h2&gt;
-
-&lt;p&gt;架构评审或技术方案评审的价值在于集众人的力量大家一起来分析看看方案里是否有坑，方案上线后是否会遇到不可逾越的重大技术问题，提前尽可能把一些事情先考虑到提出质疑其实对项目的健康发展有很大的好处。很多公司都有架构评审委员会都有架构评审的流程，做业务的兄弟要么看到这个流程往往心惊胆战害怕自己做的方案被毙了咋整，要么就是认为这是一种过场，随便糊弄一点文档发给委员会看一下就算过去了。我做过架构评审委员也做过提交评审方案的业务兄弟，不管哪个角色我都不害怕而是喜欢这一流程，评审这个事情做的好其实可以很享受，大家都是一起学习的过程，不存在谁为难谁。下面说说我觉得架构评审（非代码评审）中看重的需要评审的一些点。&lt;/p&gt;
-
-&lt;h4&gt;组件选型&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;为什么选A不选B呢？&lt;/li&gt;
-&lt;li&gt;A不是开源的，出了问题怎么办？&lt;/li&gt;
-&lt;li&gt;B虽然是开源的，但是是Erlang写的，公司没人能看懂怎么办？&lt;/li&gt;
-&lt;li&gt;C我看待解决的Issues还有很多，有没有去了解过？&lt;/li&gt;
-&lt;li&gt;这个组件在性能方面你是否了解过？&lt;/li&gt;
-&lt;li&gt;开源的免费版本不支持集群怎么办？&lt;/li&gt;
-&lt;li&gt;如果彻底要自己写这个组件有没有可能性？&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;组件特别是存储组件选型挺重要的，真心建议事先可以有那么几周的时间搭一个高可用的集群，使用接近于真实的数据对组件进行压测（你看之前我博客上的Mongodb的压测文章停火的，说明很多人没有这个时间和条件对一些组件进行压测）。眼见为实耳听为虚，自己通过压测对比一下自己得出的数据和公开的数据是否有差异，如果有的话说不定还能发现自己使用上的一些问题。尽量还是选用使用的人多的开源组件吧，出了问题至少Patch不会来的太慢。&lt;/p&gt;
-
-&lt;h4&gt;性能&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;我们需求的TPS、QPS和RT是多少？&lt;/li&gt;
-&lt;li&gt;整体设计上会做到的TPS、QPS和RT是多少？&lt;/li&gt;
-&lt;li&gt;随着数据量的增大系统性能会不会出现明显问题？&lt;/li&gt;
-&lt;li&gt;系统哪个环节会是最大的瓶颈？&lt;/li&gt;
-&lt;li&gt;是否打算做压力测试，压力测试方案是怎么样的？&lt;/li&gt;
-&lt;li&gt;怎么提高前端用户的访问流畅性？&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;对于重要的项目，建议做一下整体压测，没有经过压测得出来的估计的结论往往可能是错的，我们总以为最终会死在最后的存储上，但是很可能早早就死在了程序的低级错误上，比如在一些存储组件的Client使用上，如果没把控好最佳实践（把应该作为单例使用Clinet每次都去创建一次，默认的线程数小的可怜应该重新配置但是保留了默认值），死的非常难看。&lt;/p&gt;
-
-&lt;h4&gt;可伸缩性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;每一个环节是否都是可以横向扩展的？&lt;/li&gt;
-&lt;li&gt;扩容需要怎么做手动还是自动？&lt;/li&gt;
-&lt;li&gt;数据库不能横向扩展怎么办？&lt;/li&gt;
-&lt;li&gt;纵向扩展有多少效果？&lt;/li&gt;
-&lt;li&gt;横向扩展是否是线性的？&lt;/li&gt;
-&lt;li&gt;扩展后是否可以提高响应速度？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;灵活性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;是否有了解过产品层面以后会怎么发展？&lt;/li&gt;
-&lt;li&gt;模块A是否能拆分出去独立为其它业务服务？&lt;/li&gt;
-&lt;li&gt;模块B是否可以替换为另一种第三方数据源？&lt;/li&gt;
-&lt;li&gt;如果流程有变，需要多大的工作量来适应？&lt;/li&gt;
-&lt;li&gt;业务是否可以做到可配？&lt;/li&gt;
-&lt;li&gt;为什么A和B都有差不多的逻辑？&lt;/li&gt;
-&lt;li&gt;是否考虑到了A业务的实现以后还有B的可能性？&lt;/li&gt;
-&lt;li&gt;如果现在有两种策略以后扩展到了八种策略怎么做？&lt;/li&gt;
-&lt;li&gt;以后是否可以把这个业务的H5前端适配到PC？&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;可扩展性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;为什么A和B都有差不多的逻辑？&lt;/li&gt;
-&lt;li&gt;是否考虑到了A业务的实现以后还有B的可能性？&lt;/li&gt;
-&lt;li&gt;如果现在有两种策略以后扩展到了八种策略怎么做？&lt;/li&gt;
-&lt;li&gt;以后是否可以把这个业务的H5前端适配到PC？&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;可靠性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;是否架构中有单点？&lt;/li&gt;
-&lt;li&gt;故障转移是怎么实现的？&lt;/li&gt;
-&lt;li&gt;集群内部故障转移需要多久？&lt;/li&gt;
-&lt;li&gt;MQ或存储出现问题的时候系统会怎么样？&lt;/li&gt;
-&lt;li&gt;MQ或存储出现问题又恢复了系统是否会自己恢复？&lt;/li&gt;
-&lt;li&gt;是否考虑过异地故障转移的方案？&lt;/li&gt;
-&lt;li&gt;是否考虑过多活的方案？&lt;/li&gt;
-&lt;li&gt;是否有数据丢失的可能性？&lt;/li&gt;
-&lt;li&gt;数据丢失后是否可以恢复？&lt;/li&gt;
-&lt;li&gt;系统彻底挂了对其它业务的影响是什么？&lt;/li&gt;
-&lt;li&gt;系统彻底挂了是否可以有线下的方式走业务？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;安全性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;是否彻底避免SQL注入和XSS？&lt;/li&gt;
-&lt;li&gt;是否做了风控策略？&lt;/li&gt;
-&lt;li&gt;是否有防刷保护机制？&lt;/li&gt;
-&lt;li&gt;数据库拖库了会怎么样？&lt;/li&gt;
-&lt;li&gt;是否有数据泄露的可能性？&lt;/li&gt;
-&lt;li&gt;数据的权限怎么控制的？&lt;/li&gt;
-&lt;li&gt;功能的权限是怎么控制的？&lt;/li&gt;
-&lt;li&gt;是否做了日志审计？&lt;/li&gt;
-&lt;li&gt;受到了DDOS攻击怎么办？&lt;/li&gt;
-&lt;li&gt;数据传输是否加密验签？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;兼容性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;老的系统打算怎么办？&lt;/li&gt;
-&lt;li&gt;怎么进行新老系统替换？&lt;/li&gt;
-&lt;li&gt;新老系统能否来回切换？&lt;/li&gt;
-&lt;li&gt;别的系统怎么连接你这套新服务？&lt;/li&gt;
-&lt;li&gt;上下游依赖是否梳理过，影响范围多大？&lt;/li&gt;
-&lt;li&gt;上下游改造的难度怎么样？&lt;/li&gt;
-&lt;li&gt;上下游改造有排期吗？&lt;/li&gt;
-&lt;li&gt;上下游改造的计划和通知时间确定了吗？&lt;/li&gt;
-&lt;li&gt;使用了新的数据源数据怎么迁移？&lt;/li&gt;
-&lt;li&gt;使用了新的技术老项目开发能否适应？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;弹性处理&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;这个数据重复消费会怎么样？&lt;/li&gt;
-&lt;li&gt;这个接口重复调用会怎么样？&lt;/li&gt;
-&lt;li&gt;是否考虑了服务降级？哪些业务支持降级？&lt;/li&gt;
-&lt;li&gt;是否考虑了服务熔断？熔断后怎么处理？&lt;/li&gt;
-&lt;li&gt;是否考虑了服务限流？限流后客户端表现怎么样？&lt;/li&gt;
-&lt;li&gt;队列爆仓会怎么样？&lt;/li&gt;
-&lt;li&gt;是否考虑了隔离性？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;事务性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;这段业务由谁保证事务性？&lt;/li&gt;
-&lt;li&gt;数据库事务回滚后会怎么样？&lt;/li&gt;
-&lt;li&gt;服务调用了失败怎么办？&lt;/li&gt;
-&lt;li&gt;队列补偿怎么做的？&lt;/li&gt;
-&lt;li&gt;服务调用补偿怎么做的？&lt;/li&gt;
-&lt;li&gt;数据补偿实现最终一致需要多久？&lt;/li&gt;
-&lt;li&gt;在数据不完整的时候用户会感知到吗？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;可测试性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;测试环境和线上的差异多大？&lt;/li&gt;
-&lt;li&gt;是否支持部署多套隔离的测试环境？&lt;/li&gt;
-&lt;li&gt;是否打算做单元测试，覆盖率目标是多少？&lt;/li&gt;
-&lt;li&gt;测试黑盒白盒工作量的比例是怎么样的？&lt;/li&gt;
-&lt;li&gt;是否支持接口层面的自动化测试？&lt;/li&gt;
-&lt;li&gt;是否有可能做UI自动化测试？&lt;/li&gt;
-&lt;li&gt;压测怎么造数据？&lt;/li&gt;
-&lt;li&gt;是否可以在线上做压测？&lt;/li&gt;
-&lt;li&gt;线上压测怎么隔离测试数据？&lt;/li&gt;
-&lt;li&gt;是否有测试白名单功能？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;可运维性&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;每一个组件对服务器哪方面的压力会最大？&lt;/li&gt;
-&lt;li&gt;重新搭建整套系统最快需要多少时间？&lt;/li&gt;
-&lt;li&gt;系统是否可以完全基于源代码构建？&lt;/li&gt;
-&lt;li&gt;系统是否有初始化或预热的环节？&lt;/li&gt;
-&lt;li&gt;系统里哪些环节需要人工参与？&lt;/li&gt;
-&lt;li&gt;数据是否需要定期归档处理？&lt;/li&gt;
-&lt;li&gt;会不会有突发的数据量业务量增大？&lt;/li&gt;
-&lt;li&gt;随着时间的推移如果压力保持不变的话系统需要怎么来巡检和维护？&lt;/li&gt;
-&lt;li&gt;怎么在容器里进行部署？&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h4&gt;监控&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;业务层面哪些指标需要监控和报警？&lt;/li&gt;
-&lt;li&gt;应用层面系统内部是否有暴露了一些指标作监控和报警？&lt;/li&gt;
-&lt;li&gt;系统层面使用的中间件和存储是否有监控报警？&lt;/li&gt;
-&lt;li&gt;是否所有环节都接入了全链路跟踪？&lt;/li&gt;
-&lt;li&gt;出现报警的时候应该由谁来处理？&lt;/li&gt;
-&lt;li&gt;每一个模块是否有固定的主要和次要负责人？&lt;/li&gt;
-&lt;li&gt;有没有可能系统出了问题无法通过监控指标体现？&lt;/li&gt;
-&lt;li&gt;哪些指标需要上大屏由监控进行7*24监控？&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;看了这么多问题可能会觉得这架构设计是没法做了，其实不同阶段的项目有不同的目标，我们不会在项目起步的时候做99.99%的可用性支持百万QPS的架构，高效完成项目的业务目标也是架构考虑的因素之一。而且随着项目的发展，随着公司中间件和容器的标准化，很多架构的工作被标准化替代，业务代码需要考虑架构方面伸缩性运维性等等的需求越来越少，慢慢的这些工作都能由架构和运维团队来接。一开始的时候我们可以花一点时间来考虑这些问题，但是不是所有的问题都需要有最终的方案。&lt;/p&gt;
-
-&lt;h2&gt;技术设计文档&lt;/h2&gt;
-&lt;p&gt;如果你在Google搜索架构设计文档、技术设计文档、概要设计文档可以搜索到很多模板，很多公司也会以这些模板作为设计文档的模板来让大家填写。对于大部分所谓的项目只是一个项目中的一个小环节是一个具体的业务逻辑，因此总是可以看到大家写的所谓的技术设计文档只能填满文档的20%，其余都不知道怎么写。当你不知道文档应该写哪些内容的时候可以这么来考虑问题，就是你这个项目接下去是要卖给别人来用的，你没有机会当面和他把这个项目说清楚，你只能通过文档来把事情写清楚，别人就给你一次机会，如果看不懂你文档表达的意思，不能理解你的项目，你的项目就卖不出去不值钱，这个时候你一定会从各个角度来剖析你的系统想尽一切办法来把事情说清楚，用这个方法逼一下自己的，你的文档会很优秀。接下去我想说一下如果是我的话我看重技术设计的哪些部分以及这些部分的文档的写作方式，这些内容构成了一个必要的（概要）设计文档，算是抛砖引玉。&lt;/p&gt;
-
-&lt;h4&gt;交代背景和需求全貌&lt;/h4&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212257360-2020170680.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;在这里，推荐使用脑图在技术角度给出一下自己理解的项目需求的分布。PRD中的产品功能脑图可以和这里技术角度的脑图有差异，在说清楚需求的同时侧重技术层面，体现在：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;可以不按照需求的功能点进行归类而是按照实际项目归类，把需求列在实际的项目下面&lt;/li&gt;
-&lt;li&gt;可以区分需求是自己干的还是调用外部的接口，可以在图上以不同的形态提现&lt;/li&gt;
-&lt;li&gt;可以画出功能之间的依赖关系，以虚线实线进一步区分依赖的程度&lt;/li&gt;
-&lt;li&gt;可以在图上体现需求的优先级以及需求目前的进展和负责人，这样基本一个图就可以看清楚这个项目需要消耗多少资源需要多久可以结束&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;看了这个图基本产品需求就可以理解个大概，具体的细节规则可以进一步参考PRD。&lt;/p&gt;
-
-&lt;h4&gt;系统架构图&lt;/h4&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212314553-230618853.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;在本系列文章的第二到第五篇中，我都配了一个架构图。架构图需要传递清楚下面的信息：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;项目由哪些模块、服务、缓存、存储构成，可以以不同的图案和颜色代表不同类型&lt;/li&gt;
-&lt;li&gt;模块之间的依赖关系（当然，也可以从数据的流向角度来画）&lt;/li&gt;
-&lt;li&gt;核心流程的步骤，沿着图上的1、2、3基本就可以大概了解核心流程的实现&lt;/li&gt;
-&lt;li&gt;可以用大的框把组件进行分组来描述组件的部署方式（比如相同机器上承载的组件在一个框内）&lt;/li&gt;
-&lt;li&gt;可以以边框的虚实来分类项目内的组件或三方组件，可以以箭头的虚实来标记主要流程次要流程等等&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;UML里会有一些具体的分类，什么类图、组件图、部署图等等，我觉得不必拘泥于这些细节，通过线线框框的架构图能把模块和模块之间的关系表述请求，然后再配以一定的文字来说明每一个组件即可。我自己常用的是gliffy，只要能说清楚，Word画也可以。根据项目的大小，图上的模块不一定是需要独立部署的进程，模块也可以是项目内部的一个模块或类。对于复杂的项目，要画一个图说清楚很难，可以画一个大的架构图，然后针对每一个模块或流程再细化画不同层次的图。&lt;/p&gt;
-
-&lt;h4&gt;对外API定义&lt;/h4&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212309042-1107189522.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;API的详细定义可以由Swagger UI、Spring REST Doc、Miredot等等工具生成，这些生成的接口是按照代码来组织层次关系的，只能体现接口的参数定义不能体现接口的形态等，是没有思想的，不适合用来阅读，只适合用来参考。因此还是建议做一个脑图来总体阐述一下接口的：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;分类，按业务功能的分类，按受众的分类等等&lt;/li&gt;
-&lt;li&gt;形式（图上不同的颜色），同步还是异步（结果不在响应中，单独的回调返回），单条还是批量，数据接口还是页面调用等等&lt;/li&gt;
-&lt;li&gt;重要性（图上文字后的星号），比如重点标记主流程的接口&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;图上可以不显示出参数清单，但可以以简单的文字来描述重要参数，比如下单接口：-&amp;gt;@用户身份，优惠券ID*，[{商品ID,数量}]&amp;lt;-订单号，下单结果（0-失败，1-成功）。（-&amp;gt;代表输入，&amp;lt;-代表输出，[]代表数组，@代表隐式参数，*代表可空参数等等）。&lt;/p&gt;
-&lt;p&gt;之前强调过好多次涉及到和外部交互的API是设计中非常重要的一个环节，不仅仅体现了系统对外输出的能力，也体现了系统设计在安全性、复用性、封装等方面的平衡。&lt;/p&gt;
-
-&lt;h4&gt;交互时序&lt;/h4&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212322047-540956533.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;时序图的表达非常重要，可以表现需求脑图、架构图和API脑图无法表现出来的几个方面，清晰展现了某个事情：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;关键的利益关系方。这个事情由哪几个方面构成，可以是用户、甲方、乙方这么来分，也可以是用户、APP客户端、服务端这么来分&lt;/li&gt;
-&lt;li&gt;每一方在做什么，依赖的又是什么，整个顺序是怎么样的&lt;/li&gt;
-&lt;li&gt;技术层面这是同步接口、还是回调、还是非技术的线下流程&lt;/li&gt;
-&lt;li&gt;还可以在图上表现出可选逻辑，条件判断逻辑，循环逻辑等等&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;我觉得能在比较高的层面说一下技术（对接）流程即可，不一定要详细到类和类之间的交互，类和类之间的交互阅读代码或直接看全链路调用的图就可以。如果项目有多个合作方多个依赖方，项目流程比较复杂，那么序列图是能把这个事情说清楚的最好的方式。&lt;/p&gt;
-&lt;p&gt;对于这种时序图，采用传统的工具来画费时费力，推荐下面两个工具（&lt;a href=&quot;https://www.websequencediagrams.com/&quot;&gt;https://www.websequencediagrams.com/&lt;/a&gt;和&lt;a href=&quot;http://plantuml.com/sequence-diagram&quot;&gt;http://plantuml.com/sequence-diagram&lt;/a&gt;），可以在几分钟内生成需要的图。&lt;/p&gt;
-&lt;p&gt;我们输入类似的文字：&lt;/p&gt;
-&lt;p&gt;title 合作流程&lt;/p&gt;
-&lt;p&gt;用户-&amp;gt;XX:投资YY标的&lt;/p&gt;
-&lt;p&gt;XX-&amp;gt;YY:同步投资情况，更新可用额度&lt;/p&gt;
-&lt;p&gt;用户-&amp;gt;YY:在额度内消费&lt;/p&gt;
-&lt;p&gt;YY-&amp;gt;XX:同步消费情况，更新可用额度，更新回款计划&lt;/p&gt;
-&lt;p&gt;YY-&amp;gt;XX:还款&lt;/p&gt;
-&lt;p&gt;XX-&amp;gt;用户:回款（已消费部分作为手续费给XX）&lt;/p&gt;
-&lt;p&gt;opt 线下流程&lt;/p&gt;
-&lt;p&gt;XX-&amp;gt;YY:对于YY用户的消费出账单&lt;/p&gt;
-&lt;p&gt;YY-&amp;gt;XX:对账确认账单&lt;/p&gt;
-&lt;p&gt;XX-&amp;gt;YY:打款开具发票&lt;/p&gt;
-&lt;p&gt;End&lt;/p&gt;
-&lt;p&gt;网站生成类似的时序图，还可以自由选择自己喜欢的样式：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212333744-590347865.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;h4&gt;数据库ER&lt;/h4&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212342330-308964411.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;ER图就是实体联系图。形式上我们可以在图上表现几个点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;实体：哪些表&lt;/li&gt;
-&lt;li&gt;实体上的属性：体现实体之间关系以及实体业务功能的重要字段&lt;/li&gt;
-&lt;li&gt;联系：实体和实体之间的关系，比如一对多，多对一还是多对多之类&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;在有的时候我们可以省略属性的类型定义，甚至可以直接省略具体的属性（实体名和M对N的关系是必须的），把图简化为类似下面的部分：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212350524-975344653.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;ER图的信息量非常大，绝对不是粘贴一下表结构的DDL可以替代的，原因是：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;ER图可以以极小的空间展现很多信息，这样我们可以在图上对业务进行分组，看到全貌&lt;/li&gt;
-&lt;li&gt;ER图展现的是表和表之间的关系，一眼可以看出最重要核心的表是哪些&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;比如下图，是否一眼就可以看明白一套P2P金融业务整个数据结构的架构呢：&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/103060/201809/103060-20180921212356502-1410921664.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;（随便画的图，不代表任何意义，请不要以这个图做P2P的表结构设计）&lt;/p&gt;
-
-&lt;p&gt;所有的图，文字只是一个维度，我们要学会利用边框类型（矩形、圆角矩形），边框样式（虚线，实线），填充色，文字颜色，关联线条粗细颜色样式，框内ICON来增加我们要表现信息的维度，最多可以增加到6维+，这种能力是文字很难实现的。一图胜过千言，所以我一直认为图是设计文档中非常重要的部分。&lt;/p&gt;
-
-&lt;h4&gt;其它&lt;/h4&gt;
-
-&lt;p&gt;之前我说了我们可以以五图的形式（需求脑图、架构图、API脑图、序列图、数据库ER图）把系统大概介绍一个底朝天，说清楚了需求、架构、对外接口、交互流程和数据结构设计这几个事情，业务项目说清楚这些足够了。&lt;/p&gt;
-&lt;p&gt;对于偏向于中间件（不管是基础中间件还是业务中间件，中台）的项目（而不是业务项目），这里我再补充几个重要的方面，需要在设计文档中有体现：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;可靠性：是否有单点的组件，非单点的组件如何做故障转移&lt;/li&gt;
-&lt;li&gt;高性能：是否有抗突发性能压力的能力，大概可以满足多少的TPS和QPS，怎么去做来实现高性能&lt;/li&gt;
-&lt;li&gt;可扩展：随着压力上升哪些环节可以做扩展，怎么做扩展&lt;/li&gt;
-&lt;li&gt;安全性：哪些手段防突破，万一突破了后果怎么样&lt;/li&gt;
-&lt;li&gt;兼容性：和遗留系统怎么通讯，怎么做迁移&lt;/li&gt;
-&lt;li&gt;…………等等方面&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;这些点我就不一一展开说了，在第一节说架构评审的时候都有提到过，针对那些问题写一下自己的设计是怎么应对的吧。&lt;/p&gt;
-
-&lt;p&gt;这些点我认为可以构成一个合格的设计文档，文档的形式不重要，重要的是可以把业务的技术实现梳理清楚，确保我们在开发之前有一个清晰的思路，在开发上线后，文档也是一个后人熟悉系统的非常重要的手段。你可能会提出疑问说这样的设计文档是不是太粗略了一点，完全没有体现到软件层面设计的细节，没错是这样，但是我一直说的是互联网架构心得，敢问现在互联网项目从0开始的大项目1到2个月上线，大的版本迭代2周一次，如果设计的时间是五分之一的话，设计也就是2天到一周这样子，我们有多少时间和能力来细化文档呢，如果能把我这里说的五要素都做好，对于互联网项目已经笑死。&lt;/p&gt;
-&lt;p&gt;还有一点往往会比较可惜，我们或许可以做到在开发之前有一个概要设计文档的产出，但是我们很难做到在系统上线后随着迭代还能继续维护第一版产品上线时那个大而全的文档。随着产品的迭代，我们的技术文档也像PRD迭代文档一样只说这次迭代的技术改动的话，这种设计文档因为没有全局观意义不大。对于这个情况，我觉得对于每一条业务线的产品，我都建议我们至少能维护大而全的下面这些文档的全量版本：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;完整表结构（顺带标一下归档方案、重要程度）&lt;/li&gt;
-&lt;li&gt;需求全貌&lt;/li&gt;
-&lt;li&gt;对外产品能力输出全貌&lt;/li&gt;
-&lt;li&gt;整体架构图&lt;/li&gt;
-&lt;li&gt;关键业务交互流程（特别是那种很难说清楚的多方结算关系）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;定期回顾一下这五个文档，根据最近的需求改改，可能也只需要花费几小时的时间，对于大项目其意义往往是新人的灵魂导师（之前我有画过一个比较复杂系统的架构图，这个架构图我看到有人做了桌面）。&lt;/p&gt;
-</description>
-<pubDate>Fri, 21 Sep 2018 13:24:00 +0000</pubDate>
-<dc:creator>lovecindywang</dc:creator>
-<og:description>朱晔的互联网架构实践心得S1E9：架构评审一百问和设计文档五要素 朱晔的互联网架构实践心得S1E9：架构评审一百问和设计文档五要素 【下载文本PDF进行阅读】 本文我会来说说我认为架构评审中应该看的一</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/lovecindywang/p/9688523.html</dc:identifier>
-</item>
-<item>
-<title>[llvm] LLVM 核心类简明示例 : llvm::Value &amp;&amp; llvm::Type &amp;&amp; llvm::Constant - racaljk</title>
-<link>http://www.cnblogs.com/racaljk/p/9688336.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/racaljk/p/9688336.html</guid>
-<description>&lt;p&gt;llvm核心类位于 &lt;code&gt;include/llvm/IR&lt;/code&gt;中，用以表示机器无关且表现力极强的LLVM IR。&lt;/p&gt;
-&lt;h2 id=&quot;llvmvalue&quot;&gt;llvm::Value&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;llvm::Value&lt;/strong&gt;则是这其中的重中之重，它用来表示一个具有类型的值。它是类图如下：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/600493/201809/600493-20180921202805710-1561882155.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;llvm::Argument&lt;/code&gt;,&lt;code&gt;llvm::BasicBlock&lt;/code&gt;,&lt;code&gt;llvm::Constant&lt;/code&gt;,&lt;code&gt;llvm::Instruction&lt;/code&gt;这些很重要的类都是它的子类。&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;llvm::Value&lt;/code&gt;有一个&lt;code&gt;llvm::Type*&lt;/code&gt;成员和一个&lt;code&gt;use list&lt;/code&gt;。后者可以跟踪有哪些其他&lt;code&gt;Value&lt;/code&gt;使用了自己，我们可以使用下面的迭代器对它进行访问：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;unsigned use_size() 返回有多少Value使用它&lt;/li&gt;
-&lt;li&gt;bool use_empty() 是否没有Value使用它&lt;/li&gt;
-&lt;li&gt;use_iterator use_begin() 返回use list的迭代器头&lt;/li&gt;
-&lt;li&gt;use_iterator use_end() 返回尾&lt;/li&gt;
-&lt;li&gt;User *use_back() 返回use list的最后一个元素&lt;/li&gt;
-&lt;/ul&gt;&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;int main() {
-    Value* val1 = ConstantFP::get(theContext, APFloat(3.2));
-    if (val1-&amp;gt;use_empty()) {
-        std::cout &amp;lt;&amp;lt; &quot;no one use it\n&quot;;
-    }
-    system(&quot;pause&quot;);
-    return 0;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;llvmtype&quot;&gt;llvm:Type&lt;/h2&gt;
-&lt;p&gt;前者顾名思义表示一个类型。可以通过&lt;code&gt;Value::getType()&lt;/code&gt;获取到这个&lt;code&gt;llvm::Type*&lt;/code&gt;,它有一些&lt;code&gt;is*()&lt;/code&gt;成员函数可以判断是下面哪种类型：&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;  enum TypeID {
-    // PrimitiveTypes - make sure LastPrimitiveTyID stays up to date.
-    VoidTyID = 0,    ///&amp;lt;  0: type with no size
-    HalfTyID,        ///&amp;lt;  1: 16-bit floating point type
-    FloatTyID,       ///&amp;lt;  2: 32-bit floating point type
-    DoubleTyID,      ///&amp;lt;  3: 64-bit floating point type
-    X86_FP80TyID,    ///&amp;lt;  4: 80-bit floating point type (X87)
-    FP128TyID,       ///&amp;lt;  5: 128-bit floating point type (112-bit mantissa)
-    PPC_FP128TyID,   ///&amp;lt;  6: 128-bit floating point type (two 64-bits, PowerPC)
-    LabelTyID,       ///&amp;lt;  7: Labels
-    MetadataTyID,    ///&amp;lt;  8: Metadata
-    X86_MMXTyID,     ///&amp;lt;  9: MMX vectors (64 bits, X86 specific)
-    TokenTyID,       ///&amp;lt; 10: Tokens
-
-    // Derived types... see DerivedTypes.h file.
-    // Make sure FirstDerivedTyID stays up to date!
-    IntegerTyID,     ///&amp;lt; 11: Arbitrary bit width integers
-    FunctionTyID,    ///&amp;lt; 12: Functions
-    StructTyID,      ///&amp;lt; 13: Structures
-    ArrayTyID,       ///&amp;lt; 14: Arrays
-    PointerTyID,     ///&amp;lt; 15: Pointers
-    VectorTyID       ///&amp;lt; 16: SIMD 'packed' format, or other vector type
-  };&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;比如这样：&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;int main() {
-    Value* val1 = ConstantFP::get(theContext, APFloat(3.2));
-    Type* t = val1-&amp;gt;getType();
-
-    if (t-&amp;gt;isDoubleTy()) {
-        std::cout &amp;lt;&amp;lt; &quot;val1 is typed as double(&quot; &amp;lt;&amp;lt; t-&amp;gt;getTypeID() &amp;lt;&amp;lt;&quot;)\n&quot;;
-    }
-    system(&quot;pause&quot;);
-    return 0;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;除此之外&lt;code&gt;llvm::Type&lt;/code&gt;还有很多成员函数，详细请参见&lt;a href=&quot;http://llvm.org/doxygen/classllvm_1_1Type.html&quot; class=&quot;uri&quot;&gt;http://llvm.org/doxygen/classllvm_1_1Type.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;多说一句，我们还可以对 &lt;strong&gt;llvm::Value&lt;/strong&gt; 进行命名&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;bool hasName() const&lt;/li&gt;
-&lt;li&gt;std::string getName() const&lt;/li&gt;
-&lt;li&gt;void setName(const std::string &amp;amp;Name)&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;llvmconstant&quot;&gt;llvm::Constant&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;llvm::Constant&lt;/code&gt;表示一个各种常量的基类，基于它派生出了&lt;code&gt;ConstantInt 整型常量&lt;/code&gt;,&lt;code&gt;ConstantFP 浮点型常量&lt;/code&gt;,&lt;code&gt;ConstantArray 数组常量&lt;/code&gt;,&lt;code&gt;ConstantStruct 结构体常量&lt;/code&gt;:&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;int main() {
-    // 构造一个32位，无符号的整型值，值为1024
-    APInt ci = APInt(32, 1024);
-    ConstantInt* intVal = ConstantInt::get(theContext, ci);
-    std::cout &amp;lt;&amp;lt; &quot;bit width:&quot; &amp;lt;&amp;lt; intVal-&amp;gt;getBitWidth()
-              &amp;lt;&amp;lt; &quot;\nvalue:&quot; &amp;lt;&amp;lt; intVal-&amp;gt;getValue().toString(16, false);
-
-    system(&quot;pause&quot;);
-    return 0;
-}&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Fri, 21 Sep 2018 12:26:00 +0000</pubDate>
-<dc:creator>racaljk</dc:creator>
-<og:description>LLVM 核心类简明示例 : llvm::Value &amp;&amp; llvm::Type &amp;&amp; llvm::Constant llvm核心类位于 中，用以表示机器无关且表现力极强的LLVM IR。 llvm:</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/racaljk/p/9688336.html</dc:identifier>
-</item>
-<item>
-<title>业务拆分的思考 - 挑战者V</title>
-<link>http://www.cnblogs.com/youcong/p/9688300.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/youcong/p/9688300.html</guid>
-<description>&lt;p&gt;从最初的单体应用，即将进行业务拆分，分而治之，虽心不免有些激动，但是很快就陷入深思。&lt;/p&gt;
-&lt;p&gt;因为我不得不考虑如何拆分比较好及其现在要不要拆分的问题。&lt;/p&gt;
-&lt;p&gt;目前我们开发的是一个多租户系统应用，考虑到公共通用功能，例如用户功能、组织功能、菜单功能、模块功能、系统监控、审批功能、权限管理等，我们将其作为公共模块，而像共享方面的系统或者是智能门锁方面的系统，我们决定将其抽象另外的模块，当特定的用户需要该功能时，只需与我方沟通签订对应的合作协议，我方后台超级管理员只需配置下相应的权限即可。&lt;/p&gt;
-&lt;p&gt;一、先谈谈是否要拆分的问题&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-孙子曰：“不尽知用兵之害者，则不能尽知用兵之利“。
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;还是回到之前的那个问题，业务是否真正需要拆分呢？这里要结合具体的业务需求。&lt;/p&gt;
-&lt;p&gt;比如，目前我对这个多租户系统有这么样一个想法，如果要拆分，按照上述的原则公共模块进行抽取，抽取为一个后台web应用。&lt;/p&gt;
-&lt;p&gt;而像共享方面(例如共享汽车等)和智能门锁可单独作为另外的一个应用。之所以这么做的原因在于处于如下考虑:&lt;/p&gt;
-&lt;p&gt;(1)解耦性和可维护性&lt;/p&gt;
-&lt;p&gt;如果所有的系统都要放入一个庞大的war下，那么代码耦合度可能会比较高，而且不易维护，就好比git分支开发，之所以强调每个人在自己的分支下开发对应的功能模块，是因为避免全部都在主分支开发时，导致出现的代码混乱和冲突问题。另外还有一个考虑是，通常主分支，也就是master分支，一般情况下，主分支的代码是不存在问题的，或者问题非常小，但是由于都在主分支上进行开发，导致有的时候，因为没有严格的代码审核机制，导致有些开发人员，比如曾经的我，仅仅只是为了完成任务而开发，写程序时，很少思考不考虑到是否会不会影响到其他同事的代码，最后的结果是，陷入的一个死循环，改bug,改bug....&lt;/p&gt;
-&lt;p&gt;之所以强调可维护性，是因为，对于这个多租户而言，后台模块单独作为一个应用，由部分人负责，而像智能门锁或者是共享汽车等应用是另外一个模块，也由专门的开发人员负责，这样一来，你打你的我打我的，总的原则，坚持一个，“高内聚，低耦合，代码可读性良好，可扩展性良好”。&lt;/p&gt;
-&lt;p&gt;当然了，实际情况也不能你打你的，我打我的，各自为战，该及时沟通还是得及时沟通，对于项目组长而言就需要时刻了解自己的组员工作进度及其代码方面的情况，因为这样一来当项目经理问起时，也不必胆战心惊。&lt;/p&gt;
-&lt;p&gt;作为项目经理，处于整个项目的领路人，项目的成败，很大程度不仅仅是由底层的开发人员所决定，还有就是项目经理的决策和管理。&lt;/p&gt;
-
-&lt;p&gt;(2)稳定性&lt;/p&gt;
-&lt;p&gt;有这么一句话，“鸡蛋不能同时放在一个笼子下”。&lt;/p&gt;
-&lt;p&gt;后台应用，一般情况下仅仅只是管理人员使用，或者是管理员通过权限分配指定某一些人使用。这样一来，基本上，不用考虑高并发。&lt;/p&gt;
-&lt;p&gt;而像智能门锁这样的，不得不考虑高并发和性能方面的问题，如果全部将其放在一个war下，一个出问题，全部出问题，将会导致宕机，影响项目的正常服务，容错性差。&lt;/p&gt;
-&lt;p&gt;这样看来，业务拆分，也是为了提高稳定性。&lt;/p&gt;
-
-
-&lt;p&gt;二、谈谈业务拆分的思路&lt;/p&gt;
-&lt;p&gt;(1)梳理所有的业务功能环节&lt;/p&gt;
-&lt;p&gt;主要以粗分为主，例如智能门锁系统的智能门锁、智能网关等等这样的。&lt;/p&gt;
-&lt;p&gt;(2）业务功能细分&lt;/p&gt;
-&lt;p&gt;例如智能门锁系统中的智能门锁，它不仅包含门锁列表展示、安装门锁、门锁详情信息、门锁授权人、一次性密码和系统密码等，还包括如何开锁等等。&lt;/p&gt;
-&lt;p&gt;(3)梳理业务主体，进行分门别类划分&lt;/p&gt;
-&lt;p&gt;这里主要强调的是将业务分类，类似开发中的紧急并非常重要、紧急但不重要这样的开发优先级。&lt;/p&gt;
-&lt;p&gt;(4)将金字塔结构图结合业务泳道图通过关键指标来识别关键业务功能&lt;/p&gt;
-&lt;p&gt;也许这句话不是特别好理解，比较官方，不过当我说完后，你一定会非常明白。&lt;/p&gt;
-&lt;p&gt;其实整个项目就是一个金字塔结构&lt;/p&gt;
-&lt;p&gt;从顶层到下层，自顶向下，如图(画的有点丑，大家凑合着看吧)&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1255290/201809/1255290-20180921195607745-1762649664.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt; 根据这幅图可归纳为如下四点:&lt;/p&gt;
-&lt;p&gt;a. 将所有的通过用业务逻辑组成公共服务，比如配置服务，调度服务，缓存服务等;&lt;/p&gt;
-&lt;p&gt;b.如果有一个业务主体，得到了各方面的关注，那么就把这个业务首先拆分出来独立成一个模块；&lt;/p&gt;
-&lt;p&gt;c.长流程业务就符合业务主体特殊一条标准，可以提取为一个独立的服务；&lt;/p&gt;
-&lt;p&gt;d. 分渠道，比如将接口调用的逻辑和界面方式的逻辑解耦成两个服务，比如后台和接口，使得两个变成独立的管道互不影响；&lt;/p&gt;
-
-&lt;p&gt;(6)重构&lt;br/&gt;拆分的过程也意味着对代码进行重构。&lt;/p&gt;
-&lt;p&gt;a.首先拆除所有的公共服务(校验服务，规则服务，开通服务，归档服务)，然后再拆分特殊业务主体服务(重点业务，长流程业务)，最后拆不同驱动实现方式（接口服务和界面服务）;&lt;/p&gt;
-&lt;p&gt;b.因为业务量特别大，系统采用消息队列的方式进行处理，通过接骨法接触代码之间的耦合，并提供对外服务的接口;&lt;/p&gt;
-&lt;p&gt;c. 比如创建订单的环节，设计所有的业务主体，影响大，所以这个服务不能一下子全拆出来，要通过修路法，先建设一个订单服务和原来的系统并行使用，同时分流出几个试点业务到订单服务。当上下游调用没有问题，可以正常创建订单后，再通过分批逃跑法，逐步地将其他业务的处理迁移到这个微服务上面，最终当所有的业务都迁移成功之后，原来的系统的订单处理逻辑就废弃了；&lt;/p&gt;
-&lt;p&gt;d.业务的拆分过程中，数据库拆分的工作也同时进行（主从和读写分离）；&lt;/p&gt;
-
-&lt;p&gt;三、分布式拆分&lt;/p&gt;
-&lt;p&gt;提到分布式，普及下什么是分布式系统，这里我引用图片:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1255290/201809/1255290-20180921200516820-1081016815.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;引用百度百科:&lt;/p&gt;
-&lt;p&gt;分布式系统（distributed system）是建立在网络之上的&lt;a href=&quot;https://baike.baidu.com/item/%E8%BD%AF%E4%BB%B6&quot; target=&quot;_blank&quot;&gt;软件&lt;/a&gt;系统。正是因为&lt;a href=&quot;https://baike.baidu.com/item/%E8%BD%AF%E4%BB%B6/12053&quot; target=&quot;_blank&quot; data-lemmaid=&quot;12053&quot;&gt;软件&lt;/a&gt;的特性，所以分布式系统具有高度的&lt;a href=&quot;https://baike.baidu.com/item/%E5%86%85%E8%81%9A%E6%80%A7/4973441&quot; target=&quot;_blank&quot; data-lemmaid=&quot;4973441&quot;&gt;内聚性&lt;/a&gt;和透明性。因此，网络和分布式系统之间的区别更多的在于高层&lt;a href=&quot;https://baike.baidu.com/item/%E8%BD%AF%E4%BB%B6/12053&quot; target=&quot;_blank&quot; data-lemmaid=&quot;12053&quot;&gt;软件&lt;/a&gt;（特别是&lt;a href=&quot;https://baike.baidu.com/item/%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/192&quot; target=&quot;_blank&quot; data-lemmaid=&quot;192&quot;&gt;操作系统&lt;/a&gt;），而不是硬件。&lt;a href=&quot;https://baike.baidu.com/item/%E5%86%85%E8%81%9A%E6%80%A7/4973441&quot; target=&quot;_blank&quot; data-lemmaid=&quot;4973441&quot;&gt;内聚性&lt;/a&gt;是指每一个&lt;a href=&quot;https://baike.baidu.com/item/%E6%95%B0%E6%8D%AE%E5%BA%93/103728&quot; target=&quot;_blank&quot; data-lemmaid=&quot;103728&quot;&gt;数据库&lt;/a&gt;分布节点&lt;a href=&quot;https://baike.baidu.com/item/%E9%AB%98%E5%BA%A6%E8%87%AA%E6%B2%BB/3379318&quot; target=&quot;_blank&quot; data-lemmaid=&quot;3379318&quot;&gt;高度自治&lt;/a&gt;，有本地的&lt;a href=&quot;https://baike.baidu.com/item/%E6%95%B0%E6%8D%AE%E5%BA%93%E7%AE%A1%E7%90%86%E7%B3%BB%E7%BB%9F/1239101&quot; target=&quot;_blank&quot; data-lemmaid=&quot;1239101&quot;&gt;数据库管理系统&lt;/a&gt;。透明性是指每一个&lt;a href=&quot;https://baike.baidu.com/item/%E6%95%B0%E6%8D%AE%E5%BA%93/103728&quot; target=&quot;_blank&quot; data-lemmaid=&quot;103728&quot;&gt;数据库&lt;/a&gt;分布节点对用户的应用来说都是透明的，看不出是本地还是远程。在&lt;a href=&quot;https://baike.baidu.com/item/%E5%88%86%E5%B8%83%E5%BC%8F%E6%95%B0%E6%8D%AE%E5%BA%93%E7%B3%BB%E7%BB%9F/5389644&quot; target=&quot;_blank&quot; data-lemmaid=&quot;5389644&quot;&gt;分布式数据库系统&lt;/a&gt;中，用户感觉不到数据是分布的，即用户不须知道关系是否分割、有无&lt;a href=&quot;https://baike.baidu.com/item/%E5%89%AF%E6%9C%AC/3512540&quot; target=&quot;_blank&quot; data-lemmaid=&quot;3512540&quot;&gt;副本&lt;/a&gt;、数据存于哪个站点以及&lt;a href=&quot;https://baike.baidu.com/item/%E4%BA%8B%E5%8A%A1/5945882&quot; target=&quot;_blank&quot; data-lemmaid=&quot;5945882&quot;&gt;事务&lt;/a&gt;在哪个站点上执行等。&lt;/p&gt;
-
-&lt;p&gt;关于分布式拆分，我主要围绕三个方面讲，需求，原则，方法等三个方面。&lt;/p&gt;
-&lt;p&gt;(1)需求&lt;/p&gt;
-&lt;p&gt;a.组织结构变化&lt;/p&gt;
-&lt;p&gt;从最初的一个团队逐渐成长并拆分为几个团队，团队按照业务线不同进行划分，为了减少各个业务系统和代码间的关联和耦合，几个团队不再可能共同向一个代码库中提交代码，必须对原有系统进行拆分，以减少团队间的干扰。&lt;/p&gt;
-
-&lt;p&gt;b.安全&lt;/p&gt;
-&lt;p&gt;这里所指的安全不是系统级别的安全，而是指代码或成果的安全，尤其是对于很多具有核心算法的系统，为了代码不被泄露，需要对相关系统进行模块化拆分，隔离核心功能，保护知识产权。&lt;/p&gt;
-
-&lt;p&gt;c.替换性&lt;/p&gt;
-&lt;p&gt;有些产品为了提供差异化的服务，需要产品具有可定制功能，根据用户的选择自由组合为一个完整的系统，比如一些模块，免费用户使用的功能与收费用户使用的功能肯定是不一样的，这就需要这些模块具有替换性，判断是免费用户还是收费用户使用不同的模块组装，这也需要对系统进行模块化拆分。&lt;/p&gt;
-
-&lt;p&gt;d.交互速度&lt;/p&gt;
-&lt;p&gt;单体程序最大的问题在于系统错综复杂，牵一发而动全身，也许一个小的改动就造成很多功能没办法正常工作，极大的降低了软件的交付速度，因为每次改动都需要大量的回归测试确保每个模块都能正确工作，因为我们不清楚改动会影响到什么，所以需要做大量重复工作，增加了测试成本。这时候就需要对系统进行拆分，理清各个功能间的关系并解耦。&lt;/p&gt;
-
-&lt;p&gt;e.技术需求&lt;/p&gt;
-&lt;p&gt;单体程序由于技术栈固定，尤其的是比较庞大的系统，不能很方便的进行技术升级，或者说对引入新技术或框架等处于封闭状态；每种语言都有自己的特点，单体程序没有办法享受到其它语言带来的便利；对应到团队中，团队技术相对比较单一。&lt;/p&gt;
-&lt;p&gt;相比于基于业务的垂直拆分，基于技术的横向拆分也很重要，使用数据访问层可以很好的隐藏对数据库的直接访问、减少数据库连接数、增加数据使用效率等；横向拆分可以极大的提高各个层级模块的重用性。&lt;/p&gt;
-&lt;p&gt;f.业务需求&lt;/p&gt;
-&lt;p&gt;由于业务上的某些特殊要求，比如对某个功能或模块的高可用性、高性能、可伸缩性等的要求，虽然也可以将单体整体部署到分布式环境中实现高可用、高性能等，但是从系统维护的角度来考虑，每次改动都要重新部署所有节点，显然会增加很多潜在的风险和不确定定性因素，所以有时候不得不选择将那些有特殊要求的功能从系统中抽取出来，独立部署和扩展。&lt;/p&gt;
-
-&lt;p&gt;(2)原则&lt;/p&gt;
-&lt;p&gt;a.业务优先&lt;/p&gt;
-&lt;p&gt;每个系统天然都会按业务功能分成多个模块，每个模块又包含许多业务相关的功能，在系统拆分时，我们就可以优先考虑按照业务边界进行切割，切割完成后再针对每个模块进行拆解，循序渐进，逐渐迭代深入，最终完成系统的拆解。这个过程类似庖丁解牛，要找到关节之处下刀，方能事半功倍。&lt;/p&gt;
-
-&lt;p&gt;b.循环渐进&lt;/p&gt;
-&lt;p&gt;系统拆分过程中包含两个非常重要的工作：拆分和测试。二者缺一不可，并且二者是并行进行的，一定要边拆分边测试。每一步拆分完成都要保证系统功能是完整的，保证系统的测试是完整的。拆分要小步前进，如此以来可以减少累计错误的发生。这一点在《重构》这本书中也讲到了。&lt;/p&gt;
-
-&lt;p&gt;c.兼顾技术&lt;/p&gt;
-&lt;p&gt;系统不能为了分布式而分布式，系统拆分的代价相当昂贵；当然如果有拆分的需要，我们也不能白白浪费这么好的学习机会：&lt;/p&gt;
-&lt;p&gt;可靠测试：“重构之前，首先检查自己是否有一套可靠的测试机制”，这是MartinFowler在《重构》这本书中说到的，它同样对系统拆分有效。拆分是在对系统进行大手术，每一次的改动都要保证系统保持原来的行为不变。测试使得我有足够的信心进行下一步的拆分或重构，不至于在错误的道路上越走越远，以至于错误累积。测试与拆分如影随形，每一步都要有足够的测试。没有测试的拆分和重构我真的不敢想象结果会是什么样子。&lt;/p&gt;
-&lt;p&gt;关于测试的重要性可以参考我的这篇文章:&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/youcong/p/9291184.html&quot;&gt;论单元测试之重要性&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;之前我强调过，测试由底层的单元到高层的UI，其中单元是最有利于发现问题解决问题的。&lt;/p&gt;
-
-&lt;p&gt;(3)方法&lt;/p&gt;
-&lt;p&gt;a.公共模块复用;&lt;/p&gt;
-&lt;p&gt;b.增加代理，解耦;&lt;/p&gt;
-
-&lt;p&gt;小结:&lt;/p&gt;
-&lt;p&gt;本文主要讲三个大方面，第一个是业务拆分是否有必要拆分;第二个是业务拆分的思路;最后一个是分布式业务拆分。&lt;/p&gt;
-&lt;p&gt;本文的重点在于第一个和第二个，因为这两个我深有体会，试验过，应用过。至于分布式的话，此次主要普及下相关的知识和给有这方面需求的人启发。&lt;/p&gt;
-&lt;p&gt;本文主要参考如下两篇文章：&lt;/p&gt;
-&lt;p&gt;业务系统拆分的基本思路:https://blog.csdn.net/u011402896/article/details/80506394&lt;/p&gt;
-&lt;p&gt;分布式拆分:https://blog.csdn.net/zzz34k/article/details/52576731&lt;/p&gt;
-&lt;p&gt;当然了，也加上了我自己的理解和想法。&lt;/p&gt;
-&lt;p&gt;希望能给广大的IT友友们带来有益的收获。&lt;/p&gt;
-</description>
-<pubDate>Fri, 21 Sep 2018 12:19:00 +0000</pubDate>
-<dc:creator>挑战者V</dc:creator>
-<og:description>从最初的单体应用，即将进行业务拆分，分而治之，虽心不免有些激动，但是很快就陷入深思。 因为我不得不考虑如何拆分比较好及其现在要不要拆分的问题。 目前我们开发的是一个多租户系统应用，考虑到公共通用功能，</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/youcong/p/9688300.html</dc:identifier>
-</item>
-<item>
-<title>在AndroidStudio上使用AddressSanitizer - willhua</title>
-<link>http://www.cnblogs.com/willhua/p/9688266.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/willhua/p/9688266.html</guid>
-<description>&lt;p&gt;AddressSanitizer是Google主导的一个开源内存问题检测工具。现在也开始支持Android平台，且受Google推荐来替代之前的Valgrind。目前AddressSanitizer能够发现如下问题：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Out-of-bounds accesses to heap, stack and globals&lt;/li&gt;
-&lt;li&gt;Use-after-free&lt;/li&gt;
-&lt;li&gt;Use-after-return (runtime flag ASAN_OPTIONS=detect_stack_use_after_return=1)&lt;/li&gt;
-&lt;li&gt;Use-after-scope (clang flag -fsanitize-address-use-after-scope)&lt;/li&gt;
-&lt;li&gt;Double-free, invalid free&lt;/li&gt;
-&lt;li&gt;Memory leaks (experimental)&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;其中，值得一提的是&lt;strong&gt;Memory leaks&lt;/strong&gt;，现在还是experiment，准确的说，现在还只支持Linux平台，并不支持Android。所以，想写一个内存泄露来检验AddressSanitizer是否生效就要注意了，就像本人一样，其实AddressSanitizer都已经正常运行了，然后一直没有检测出来Memory leaks就以为没有生效，导致浪费了很多时间。&lt;/p&gt;
-&lt;blockquote readability=&quot;9.469387755102&quot;&gt;
-&lt;p&gt;For more information on leak detector in AddressSanitizer, see &lt;a href=&quot;https://clang.llvm.org/docs/LeakSanitizer.html&quot;&gt;LeakSanitizer&lt;/a&gt;. The leak detection is turned on by default on Linux, and can be enabled using &lt;code&gt;ASAN_OPTIONS=detect_leaks=1&lt;/code&gt; on OS X; however, it is not yet supported on other platforms.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;也许有人会说，Android不也是Linux嘛。这个的话，从它的Supported Platforms：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Linux i386/x86_64 (tested on Ubuntu 12.04)&lt;/li&gt;
-&lt;li&gt;OS X 10.7 - 10.11 (i386/x86_64)&lt;/li&gt;
-&lt;li&gt;iOS Simulator&lt;/li&gt;
-&lt;li&gt;Android ARM&lt;/li&gt;
-&lt;li&gt;NetBSD i386/x86_64&lt;/li&gt;
-&lt;li&gt;FreeBSD i386/x86_64 (tested on FreeBSD 11-current)&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;就可以看出来，Linux和Android是不同的。而且这里还注明了必须ARM，也就是说如果用非ARM的Android设备可能就不支持。个人认为这和AddressSanitizer的实现机制有关。因为它是通过重写比如malloc之类的函数，构造&lt;strong&gt;shadow Memory&lt;/strong&gt;来实现的检测。而这些函数可能都是汇编语言写的，所以不同的CPU硬件就需要不同的实现版本。&lt;/p&gt;
-&lt;h4 id=&quot;as中的应用&quot;&gt;AS中的应用&lt;/h4&gt;
-&lt;h5 id=&quot;编译指令&quot;&gt;编译指令&lt;/h5&gt;
-&lt;p&gt;其实很简单，就两点，开启AddressSanitizer标志和使用clang编译器。&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;开启AddressSanitizer标志：在CMakeLists.txt中添加如下语句：&lt;/li&gt;
-&lt;/ol&gt;&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;SET (CMAKE_CXX_FLAGS &quot;${CMAKE_CXX_FLAGS} -O0 -g -fsanitize=address -fno-omit-frame-pointer&quot;)
-SET (CMAKE_C_FLAGS &quot;${CMAKE_C_FLAGS} -O0 -g -fsanitize=address -fno-omit-frame-pointer&quot;)
-SET (CMAKE_SHARED_LINKER_FLAGS &quot;${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address&quot;)
-SET (CMAKE_ANDROID_ARM_MODE ARM)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ol&gt;&lt;li&gt;使用clang编译：在build.gradle的cmake模块下面添加：&lt;/li&gt;
-&lt;/ol&gt;&lt;pre&gt;
-&lt;code&gt;arguments &quot;-DANDROID_TOOLCHAIN=clang&quot;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;在设备中安装asan&quot;&gt;在设备中安装ASAN&lt;/h5&gt;
-&lt;p&gt;要点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;设备需要root&lt;/li&gt;
-&lt;li&gt;运行ndk中的asan_device_setup脚本&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;关于asan_device_setup脚本，在AS自带的ndk-bundle中，其脚本路径为&lt;code&gt;ndk-bundle/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/7.0.2/bin/asan_device_setup&lt;/code&gt;，而如果是自己单独安装的NDK，那么其路径为&lt;code&gt;NDKROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/asan_device_setup&lt;/code&gt;。如果脚本执行成功，那么设备就会自动重启，在本人实践中，最后部分信息如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;gt;&amp;gt; Pushing files to the device
-Installing /system/lib/libclang_rt.asan-arm-android.so 644 
-[100%] /system/lib/libclang_rt.asan-arm-android.so
-Installing /system/lib64/libclang_rt.asan-aarch64-android.so 644 
-[100%] /system/lib64/libclang_rt.asan-aarch64-android.so
-Installing /system/bin/app_process32 755 u:object_r:zygote_exec:s0
-[100%] /system/bin/app_process32
-Installing /system/bin/app_process32.real 755 u:object_r:zygote_exec:s0
-[100%] /system/bin/app_process32.real
-Installing /system/bin/app_process64 755 u:object_r:zygote_exec:s0
-[100%] /system/bin/app_process64
-Installing /system/bin/app_process64.real 755 u:object_r:zygote_exec:s0
-[100%] /system/bin/app_process64.real
-Installing /system/bin/asanwrapper 755 
-[100%] /system/bin/asanwrapper
-Installing /system/bin/asanwrapper64 755 
-[100%] /system/bin/asanwrapper64
-&amp;gt;&amp;gt; Restarting shell (asynchronous)
-&amp;gt;&amp;gt; Please wait until the device restarts&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;测试&quot;&gt;测试&lt;/h5&gt;
-&lt;p&gt;有了前面两步，就可以实验了，其实还是很简单的。&lt;/p&gt;
-&lt;p&gt;使用AS新建一个C++支持的默认Android项目，然后修改其native函数如下：&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;extern &quot;C&quot; JNIEXPORT jstring
-JNICALL
-Java_com_example_willhua_asantest_MainActivity_stringFromJNI(
-        JNIEnv *env,
-        jobject /* this */) {
-    std::string hello = &quot;Hello from C++&quot;;
-
-    int *ptr = (int*)malloc(sizeof(int) * 3);
-    ptr[4] = 6;
-
-    return env-&amp;gt;NewStringUTF(hello.c_str());
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后在注意Build Variant为debug，点击启动就OK啦。然后在log中可以看到检测到了heap-buffer-overflow：&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://imgchr.com/i/infteK&quot;&gt;&lt;img src=&quot;https://s1.ax1x.com/2018/09/21/infteK.png&quot; alt=&quot;infteK.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h5 id=&quot;参考&quot;&gt;参考&lt;/h5&gt;
-&lt;p&gt;&lt;a href=&quot;https://clang.llvm.org/docs/AddressSanitizer.html#supported-platforms&quot;&gt;clang: AddressSanitizer&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://zhuanlan.zhihu.com/p/29176806&quot;&gt;Android Native内存检测&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://zhuanlan.zhihu.com/p/37515148&quot;&gt;内存检测工具&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://github.com/google/sanitizers/wiki/AddressSanitizerOnAndroid&quot;&gt;AddressSanitizerOnAndroid&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 21 Sep 2018 12:08:00 +0000</pubDate>
-<dc:creator>willhua</dc:creator>
-<og:description>在AndroidStudio上使用AddressSanitizer AddressSanitizer是Google主导的一个开源内存问题检测工具。现在也开始支持Android平台，且受Google推荐</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/willhua/p/9688266.html</dc:identifier>
 </item>
 </channel>
 </rss>
