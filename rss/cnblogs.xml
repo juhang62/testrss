@@ -9,6 +9,756 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Java并发（8）- 读写锁中的性能之王：StampedLock - knock_小新</title>
+<link>http://www.cnblogs.com/konck/p/9691538.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/konck/p/9691538.html</guid>
+<description>&lt;p&gt;在上一篇《你真的懂ReentrantReadWriteLock吗？》中我给大家留了一个引子，一个更高效同时可以避免写饥饿的读写锁---StampedLock。StampedLock实现了不仅多个读不互相阻塞，同时在读操作时不会阻塞写操作。&lt;/p&gt;
+&lt;p&gt;为什么StampedLock这么神奇？能够达到这种效果，它的核心思想在于，在读的时候如果发生了写，应该通过重试的方式来获取新的值，而不应该阻塞写操作。这种模式也就是典型的无锁编程思想，和CAS自旋的思想一样。这种操作方式决定了StampedLock在读线程非常多而写线程非常少的场景下非常适用，同时还避免了写饥饿情况的发生。这篇文章将通过以下几点来分析StampedLock。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;StampedLock的官方使用示例分析&lt;/li&gt;
+&lt;li&gt;源码分析：读写锁共享的状态量&lt;/li&gt;
+&lt;li&gt;源码分析：写锁的释放和获取&lt;/li&gt;
+&lt;li&gt;源码分析：悲观读锁的释放和获取&lt;/li&gt;
+&lt;li&gt;性能测试&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;stampedlock的官方使用示例分析&quot;&gt;StampedLock的官方使用示例分析&lt;/h2&gt;
+&lt;p&gt;先来看一个官方给出的StampedLock使用案例：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public class Point {
+
+    private double x, y;
+    
+    private final StampedLock stampedLock = new StampedLock();
+    
+    //写锁的使用
+    void move(double deltaX, double deltaY){
+        
+        long stamp = stampedLock.writeLock(); //获取写锁
+        try {
+            x += deltaX;
+            y += deltaY;
+        } finally {
+            stampedLock.unlockWrite(stamp); //释放写锁
+        }
+    }
+    
+    //乐观读锁的使用
+    double distanceFromOrigin() {
+        
+        long stamp = stampedLock.tryOptimisticRead(); //获得一个乐观读锁
+        double currentX = x;
+        double currentY = y;
+        if (!stampedLock.validate(stamp)) { //检查乐观读锁后是否有其他写锁发生，有则返回false
+            
+            stamp = stampedLock.readLock(); //获取一个悲观读锁
+            
+            try {
+                currentX = x;
+            } finally {
+                stampedLock.unlockRead(stamp); //释放悲观读锁
+            }
+        } 
+        return Math.sqrt(currentX*currentX + currentY*currentY);
+    }
+    
+    //悲观读锁以及读锁升级写锁的使用
+    void moveIfAtOrigin(double newX,double newY) {
+        
+        long stamp = stampedLock.readLock(); //悲观读锁
+        try {
+            while (x == 0.0 &amp;amp;&amp;amp; y == 0.0) {
+                long ws = stampedLock.tryConvertToWriteLock(stamp); //读锁转换为写锁
+                if (ws != 0L) { //转换成功
+                    
+                    stamp = ws; //票据更新
+                    x = newX;
+                    y = newY;
+                    break;
+                } else {
+                    stampedLock.unlockRead(stamp); //转换失败释放读锁
+                    stamp = stampedLock.writeLock(); //强制获取写锁
+                }
+            }
+        } finally {
+            stampedLock.unlock(stamp); //释放所有锁
+        }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;首先看看第一个方法move，可以看到它和ReentrantReadWriteLock写锁的使用基本一样，都是简单的获取释放，可以猜测这里也是一个独占锁的实现。需要注意的是 在获取写锁是会返回个只long类型的stamp，然后在释放写锁时会将stamp传入进去。这个stamp是做什么用的呢？如果我们在中间改变了这个值又会发生什么呢？这里先暂时不做解释，后面分析源码时会解答这个问题。&lt;/p&gt;
+&lt;p&gt;第二个方法distanceFromOrigin就比较特别了，它调用了tryOptimisticRead，根据名字判断这是一个乐观读锁。首先什么是乐观锁？乐观锁的意思就是先假定在乐观锁获取期间，共享变量不会被改变，既然假定不会被改变，那就不需要上锁。在获取乐观读锁之后进行了一些操作，然后又调用了validate方法，这个方法就是用来验证tryOptimisticRead之后，是否有写操作执行过，如果有，则获取一个读锁，这里的读锁和ReentrantReadWriteLock中的读锁类似，猜测也是个共享锁。&lt;/p&gt;
+&lt;p&gt;第三个方法moveIfAtOrigin，它做了一个锁升级的操作，通过调用tryConvertToWriteLock尝试将读锁转换为写锁，转换成功后相当于获取了写锁，转换失败相当于有写锁被占用，这时通过调用writeLock来获取写锁进行操作。&lt;/p&gt;
+&lt;p&gt;看过了上面的三个方法，估计大家对怎么使用StampedLock有了一个初步的印象。下面就通过对StampedLock源码的分析来一步步了解它背后是怎么解决锁饥饿问题的。&lt;/p&gt;
+&lt;h2 id=&quot;源码分析读写锁共享的状态量&quot;&gt;源码分析：读写锁共享的状态量&lt;/h2&gt;
+&lt;p&gt;从上面的使用示例中我们看到，在StampedLock中，除了提供了类似ReentrantReadWriteLock读写锁的获取释放方法，还提供了一个乐观读锁的获取方式。那么这三种方式是如何交互的呢？根据AQS的经验，StampedLock中应该也是使用了一个状态量来标志锁的状态。通过下面的源码可以证明这点：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;// 用于操作state后获取stamp的值
+private static final int LG_READERS = 7;
+private static final long RUNIT = 1L;               //0000 0000 0001
+private static final long WBIT  = 1L &amp;lt;&amp;lt; LG_READERS; //0000 1000 0000
+private static final long RBITS = WBIT - 1L;        //0000 0111 1111
+private static final long RFULL = RBITS - 1L;       //0000 0111 1110
+private static final long ABITS = RBITS | WBIT;     //0000 1111 1111
+private static final long SBITS = ~RBITS;           //1111 1000 0000
+
+//初始化时state的值
+private static final long ORIGIN = WBIT &amp;lt;&amp;lt; 1;       //0001 0000 0000
+
+//锁共享变量state
+private transient volatile long state;
+//读锁溢出时用来存储多出的毒素哦
+private transient int readerOverflow;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面的源码中除了定义state变量外，还提供了一系列变量用来操作state，用来表示读锁和写锁的各种状态。为了方便理解，我将他们都表示成二进制的值，长度有限，这里用低12位来表示64的long，高位自动用0补齐。要理解这些状态的作用，就需要具体分析三种锁操作方式是怎么通过state这一个变量来表示的，首先来看看获取写锁和释放写锁。&lt;/p&gt;
+&lt;h2 id=&quot;源码分析写锁的释放和获取&quot;&gt;源码分析：写锁的释放和获取&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code&gt;public StampedLock() {
+    state = ORIGIN; //初始化state为 0001 0000 0000
+}
+
+public long writeLock() {
+    long s, next; 
+    return ((((s = state) &amp;amp; ABITS) == 0L &amp;amp;&amp;amp; //没有读写锁
+                U.compareAndSwapLong(this, STATE, s, next = s + WBIT)) ? //cas操作尝试获取写锁
+            next : acquireWrite(false, 0L));    //获取成功后返回next，失败则进行后续处理，排队也在后续处理中
+}
+
+public void unlockWrite(long stamp) {
+    WNode h;
+    if (state != stamp || (stamp &amp;amp; WBIT) == 0L) //stamp值被修改，或者写锁已经被释放，抛出错误
+        throw new IllegalMonitorStateException();
+    state = (stamp += WBIT) == 0L ? ORIGIN : stamp; //加0000 1000 0000来记录写锁的变化，同时改变写锁状态
+    if ((h = whead) != null &amp;amp;&amp;amp; h.status != 0)
+        release(h);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这里先说明两点结论：读锁通过前7位来表示，每获取一个读锁，则加1。写锁通过除前7位后剩下的位来表示，每获取一次写锁，则加1000 0000，这两点在后面的源码中都可以得倒证明。&lt;br/&gt;初始化时将state变量设置为0001 0000 0000。写锁获取通过&lt;code&gt;((s = state) &amp;amp; ABITS)&lt;/code&gt;操作等于0时默认没有读锁和写锁。写锁获取分三种情况：&lt;/p&gt;
+&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;没有读锁和写锁时，state为0001 0000 0000&lt;br/&gt;0001 0000 0000 &amp;amp; 0000 1111 1111 = 0000 0000 0000 // 等于0L，可以尝试获取写锁&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个读锁时，state为0001 0000 0001&lt;br/&gt;0001 0000 0001 &amp;amp; 0000 1111 1111 = 0000 0000 0001 // 不等于0L&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个写锁，state为0001 1000 0000&lt;br/&gt;0001 1000 0000 &amp;amp; 0000 1111 1111 = 0000 1000 0000 // 不等于0L&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;获取到写锁，需要将s + WBIT设置到state，也就是说每次获取写锁，都需要加0000 1000 0000。同时返回s + WBIT的值&lt;br/&gt;0001 0000 0000 + 0000 1000 0000 = 0001 1000 0000&lt;/p&gt;
+&lt;p&gt;释放写锁首先判断stamp的值有没有被修改过或者多次释放，之后通过&lt;code&gt;state = (stamp += WBIT) == 0L ? ORIGIN : stamp&lt;/code&gt;来释放写锁，位操作表示如下：&lt;br/&gt;&lt;code&gt;stamp += WBIT&lt;/code&gt;&lt;br/&gt;0010 0000 0000 = 0001 1000 0000 + 0000 1000 0000&lt;br/&gt;这一步操作是重点！！！写锁的释放并不是像ReentrantReadWriteLock一样+1然后-1，而是通过再次加0000 1000 0000来使高位每次都产生变化，为什么要这样做？直接减掉0000 1000 0000不就可以了吗？这就是为了后面乐观锁做铺垫，让每次写锁都留下痕迹。&lt;/p&gt;
+&lt;p&gt;大家可以想象这样一个场景，字母A变化为B能看到变化，如果在一段时间内从A变到B然后又变到A，在内存中自会显示A，而不能记录变化的过程，这也就是CAS中的ABA问题。在StampedLock中就是通过每次对高位加0000 1000 0000来达到记录写锁操作的过程，可以通过下面的步骤理解：&lt;br/&gt;第一次获取写锁：&lt;br/&gt;0001 0000 0000 + 0000 1000 0000 = 0001 1000 0000&lt;br/&gt;第一次释放写锁：&lt;br/&gt;0001 1000 0000 + 0000 1000 0000 = 0010 0000 0000&lt;br/&gt;第二次获取写锁：&lt;br/&gt;0010 0000 0000 + 0000 1000 0000 = 0010 1000 0000&lt;br/&gt;第二次释放写锁：&lt;br/&gt;0010 1000 0000 + 0000 1000 0000 = 0011 0000 0000&lt;br/&gt;第n次获取写锁：&lt;br/&gt;1110 0000 0000 + 0000 1000 0000 = 1110 1000 0000&lt;br/&gt;第n次释放写锁：&lt;br/&gt;1110 1000 0000 + 0000 1000 0000 = 1111 0000 0000&lt;br/&gt;可以看到第8位在获取和释放写锁时会产生变化，也就是说第8位是用来表示写锁状态的，前7位是用来表示读锁状态的，8位之后是用来表示写锁的获取次数的。这样就有效的解决了ABA问题，留下了每次写锁的记录，也为后面乐观锁检查变化提供了基础。&lt;/p&gt;
+&lt;p&gt;关于&lt;code&gt;acquireWrite&lt;/code&gt;方法这里不做具体分析，方法非常复杂，感兴趣的同学可以网上搜索相关资料。这里只对该方法做下简单总结，该方法分两步来进行线程排队，首先通过随机探测的方式多次自旋尝试获取锁，然后自旋一定次数失败后再初始化节点进行插入。&lt;/p&gt;
+&lt;h2 id=&quot;源码分析悲观读锁的释放和获取&quot;&gt;源码分析：悲观读锁的释放和获取&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code&gt;public long readLock() {
+    long s = state, next;  
+    return ((whead == wtail &amp;amp;&amp;amp; (s &amp;amp; ABITS) &amp;lt; RFULL &amp;amp;&amp;amp; //队列为空，无写锁，同时读锁未溢出，尝试获取读锁
+                U.compareAndSwapLong(this, STATE, s, next = s + RUNIT)) ?   //cas尝试获取读锁+1
+            next : acquireRead(false, 0L));     //获取读锁成功，返回s + RUNIT，失败进入后续处理，类似acquireWrite
+}
+
+public void unlockRead(long stamp) {
+    long s, m; WNode h;
+    for (;;) {
+        if (((s = state) &amp;amp; SBITS) != (stamp &amp;amp; SBITS) ||
+            (stamp &amp;amp; ABITS) == 0L || (m = s &amp;amp; ABITS) == 0L || m == WBIT)
+            throw new IllegalMonitorStateException();
+        if (m &amp;lt; RFULL) {    //小于最大记录值（最大记录值127超过后放在readerOverflow变量中）
+            if (U.compareAndSwapLong(this, STATE, s, s - RUNIT)) {  //cas尝试释放读锁-1
+                if (m == RUNIT &amp;amp;&amp;amp; (h = whead) != null &amp;amp;&amp;amp; h.status != 0)
+                    release(h);
+                break;
+            }
+        }
+        else if (tryDecReaderOverflow(s) != 0L) //readerOverflow - 1
+            break;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;悲观读锁的获取和ReentrantReadWriteLock类似，不同在于StampedLock的读锁很容易溢出，最大只有127，超过后通过一个额外的变量readerOverflow来存储，这是为了给写锁留下更大的空间，因为写锁是在不停增加的。悲观读锁获取分下面四种情况：&lt;/p&gt;
+&lt;ul readability=&quot;3.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;没有读锁和写锁时，state为0001 0000 0000&lt;br/&gt;// 小于 0000 0111 1110，可以尝试获取读锁&lt;br/&gt;0001 0000 0000 &amp;amp; 0000 1111 1111 = 0000 0000 0000&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个读锁时，state为0001 0000 0001&lt;br/&gt;// 小于 0000 0111 1110，可以尝试获取读锁&lt;br/&gt;0001 0000 0001 &amp;amp; 0000 1111 1111 = 0000 0000 0001&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个写锁，state为0001 1000 0000&lt;br/&gt;// 大于 0000 0111 1110，不可以获取读锁&lt;br/&gt;0001 1000 0000 &amp;amp; 0000 1111 1111 = 0000 1000 0000&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;读锁溢出，state为0001 0111 1110&lt;br/&gt;// 等于 0000 0111 1110，不可以获取读锁&lt;br/&gt;0001 0111 1110 &amp;amp; 0000 1111 1111 = 0000 0111 1110&lt;br/&gt;读锁的释放过程在没有溢出的情况下是通过&lt;code&gt;s - RUNIT&lt;/code&gt;操作也就是-1来释放的，当溢出后则将readerOverflow变量-1。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;乐观读锁的获取和验证&quot;&gt;乐观读锁的获取和验证&lt;/h2&gt;
+&lt;p&gt;乐观读锁因为实际上没有获取过锁，所以也就没有释放锁的过程，只是在操作后通过验证检查和获取前的变化。源码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;//尝试获取乐观锁
+public long tryOptimisticRead() {
+    long s;
+    return (((s = state) &amp;amp; WBIT) == 0L) ? (s &amp;amp; SBITS) : 0L;
+}
+
+//验证乐观锁获取之后是否有过写操作
+public boolean validate(long stamp) {
+    //该方法之前的所有load操作在内存屏障之前完成，对应的还有storeFence()及fullFence()
+    U.loadFence();  
+    return (stamp &amp;amp; SBITS) == (state &amp;amp; SBITS);  //比较是否有过写操作
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;乐观锁基本原理就时获取锁时记录state的写状态，然后在操作完成之后检查写状态是否有变化，因为写状态每次都会在高位留下记录，这样就避免了写锁获取又释放后得不到准确数据。获取写锁记录有三种情况：&lt;/p&gt;
+&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;没有读锁和写锁时，state为0001 0000 0000&lt;br/&gt;//((s = state) &amp;amp; WBIT) == 0L) true&lt;br/&gt;0001 0000 0000 &amp;amp; 0000 1000 0000 = 0000 0000 0000&lt;br/&gt;//(s &amp;amp; SBITS)&lt;br/&gt;0001 0000 0000 &amp;amp; 1111 1000 0000 = 0001 0000 0000&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个读锁时，state为0001 0000 0001&lt;br/&gt;//((s = state) &amp;amp; WBIT) == 0L) true&lt;br/&gt;0001 0000 0001 &amp;amp; 0000 1000 0000 = 0000 0000 0000&lt;br/&gt;//(s &amp;amp; SBITS)&lt;br/&gt;0001 0000 0001 &amp;amp; 1111 1000 0000 = 0001 0000 0000&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;有一个写锁，state为0001 1000 0000&lt;br/&gt;//((s = state) &amp;amp; WBIT) == 0L) false&lt;br/&gt;0001 1000 0000 &amp;amp; 0000 1000 0000 = 0000 1000 0000&lt;br/&gt;//0L&lt;br/&gt;0000 0000 0000&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;验证过程中是否有过写操作，分四种情况&lt;/p&gt;
+&lt;ul readability=&quot;3&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;写过一次&lt;br/&gt;0001 0000 0000 &amp;amp; 1111 1000 0000 = 0001 0000 0000&lt;br/&gt;0010 0000 0000 &amp;amp; 1111 1000 0000 = 0010 0000 0000 //false&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;未写过，但读过&lt;br/&gt;0001 0000 0000 &amp;amp; 1111 1000 0000 = 0001 0000 0000&lt;br/&gt;0001 0000 1111 &amp;amp; 1111 1000 0000 = 0001 0000 0000 //true&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;正在写&lt;br/&gt;0001 0000 0000 &amp;amp; 1111 1000 0000 = 0001 0000 0000&lt;br/&gt;0001 1000 0000 &amp;amp; 1111 1000 0000 = 0001 1000 0000 //false&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;之前正在写，无论是否写完都不会为0L&lt;br/&gt;0000 0000 0000 &amp;amp; 1111 1000 0000 = 0000 0000 0000 //false&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;性能测试&quot;&gt;性能测试&lt;/h2&gt;
+&lt;p&gt;分析完了StampedLock的实现原理，这里对StampedLock、ReentrantReadWriteLock以及Synchronized分别在各种场景下进行性能测试，测试的基准代码采用https://blog.takipi.com/java-8-stampedlocks-vs-readwritelocks-and-synchronized/ 文章中的代码，首先贴出上述博客中的测试结果,文章中的OPTIMISTIC模式由于采用了“脏读”模式，这里不采用OPTIMISTIC的测试结果，只比较StampedLock、ReentrantReadWriteLock以及Synchronized。&lt;/p&gt;
+&lt;p&gt;5个读线程和5个写线程场景：表现最好的是StampedLock的正常模式以及ReentrantReadWriteLock。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224407901-774890344.png&quot;/&gt;&lt;br/&gt;10个读线程和10个写线程场景：表现最好的是StampedLock的正常模式以及Synchronized。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224420110-1383860423.png&quot;/&gt;&lt;br/&gt;16个读线程和4个写线程场景：表现最好的是StampedLock的正常模式以及Synchronized。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224430794-272740897.png&quot;/&gt;&lt;br/&gt;19个读线程和1个写线程场景：表现最好的是Synchronized。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224442185-1225829405.png&quot;/&gt;&lt;br/&gt;博客评论中还有一种测试场景2000读线程和1个写线程，测试结果如下：&lt;br/&gt;StampedLock ... 12814.2 ReentrantReadWriteLock ... 18882.8 Synchronized ... 22696.4&lt;br/&gt;表现最好的是StampedLock。&lt;/p&gt;
+&lt;p&gt;看完了上面的测试，前面3种场景表现最好的都为StampedLock，但第4种情况下StampedLock表现很差，于是我自己对代码又进行了一遍测试，同时鉴于读写锁的大量应用在缓存场景下，读写差距极大，我增加了100个读和1个写的场景。&lt;/p&gt;
+&lt;p&gt;测试机器：MAC OS(10.12.6),CPU : 2.4 GHz Intel Core i5,内存：8G 软件版本：JDK1.8&lt;br/&gt;测试结果如下：&lt;br/&gt;19个读线程和1个写线程场景：表现最好的是StampedLock以及Synchronized。&lt;br/&gt;读线程: 19. 写线程: 1. 循环次数: 5. 计算总和: 1000000&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224449783-418659655.jpg&quot;/&gt;&lt;br/&gt;100个读线程和1个写线程场景：表现最好的是StampedLock以及Synchronized。&lt;br/&gt;读线程: 100. 写线程: 1. 循环次数: 5. 计算总和: 100000&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201809/368583-20180922224456977-650093318.jpg&quot;/&gt;&lt;br/&gt;通过上述测试，可以发现整体性能平均而言StampedLock和Synchronized相差不大，StampedLock在读写差距加大时稍微有点优势。而ReentrantReadWriteLock性能之差有点出乎意料，基本可以达到抛弃使用的地步了，不知道大家对ReentrantReadWriteLock的使用场景有什么建议？&lt;/p&gt;
+&lt;p&gt;同时鉴于原生的Synchronized后期可优化空间比较大，而且在代码复杂性以及安全性上面都具有一定优势，因此在绝大多数场景可以使用Synchronized来进行同步，对性能有一定要求的在某些特定场景下可以使用StampedLock。测试所用代码在我所引用的博客中都可以找到，大家可以自行尝试测试，如果对结果有什么疑问，欢迎在评论中提出。&lt;/p&gt;
+&lt;p&gt;参考资料：&lt;br/&gt;&lt;a href=&quot;https://blog.takipi.com/java-8-stampedlocks-vs-readwritelocks-and-synchronized/&quot; class=&quot;uri&quot;&gt;https://blog.takipi.com/java-8-stampedlocks-vs-readwritelocks-and-synchronized/&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Mon, 24 Sep 2018 23:29:00 +0000</pubDate>
+<dc:creator>knock_小新</dc:creator>
+<og:description>在上一篇《你真的懂ReentrantReadWriteLock吗？》中我给大家留了一个引子，一个更高效同时可以避免写饥饿的读写锁 StampedLock。StampedLock实现了不仅多个读不互相阻</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/konck/p/9691538.html</dc:identifier>
+</item>
+<item>
+<title>内网很安全？错错错！附攻击演示 - 百宝门-SSO顾问</title>
+<link>http://www.cnblogs.com/baibaomen/p/intranet-attack.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/baibaomen/p/intranet-attack.html</guid>
+<description>&lt;p&gt;给企业做单点登录咨询和实施的时候，讲到通信环节的安全性，常听到这种声音：这些系统只在内网使用，不用https没关系！&lt;/p&gt;
+&lt;p&gt;包括在我前一篇&lt;a href=&quot;https://www.cnblogs.com/baibaomen/p/http-session-hijack.html&quot; target=&quot;_blank&quot;&gt;《&lt;/a&gt;&lt;a id=&quot;post_title_link_6863822&quot; href=&quot;https://www.cnblogs.com/baibaomen/p/http-session-hijack.html&quot;&gt;看完48秒动画，让你不敢再登录HTTP网站&lt;/a&gt;&lt;a href=&quot;https://www.cnblogs.com/baibaomen/p/http-session-hijack.html&quot; target=&quot;_blank&quot;&gt;》&lt;/a&gt;的评论里，也有不少程序猿觉得我演示的案例，在现实网络中难以实现。&lt;/p&gt;
+&lt;p&gt;这个观点非常错误和危险，并且还特别迎合直观：内网屏蔽了绝大部分外部的黑客攻击，应该会安全得多吧？&lt;/p&gt;
+&lt;p&gt;为此，我把给企业做培训和顾问时，常会演示的程序，给大家做个分享。&lt;/p&gt;
+&lt;p&gt;当内网中有人运行这个程序，你在自己电脑上网会被同事实时“直播”；手机明明连的是公司有“安全”标记的wifi，访问单位OA时竟也会被轻松嗅探走账号密码。大部分人都会目瞪口呆，彻底改变“内网很安全”、“标记了'安全'的公司wifi很安全”的认识。&lt;/p&gt;
+
+&lt;p&gt;这个版本，是在我github开源的HttpHijacker基础上，增加了三个功能：&lt;/p&gt;
+&lt;p&gt;1. 网络设备嗅探&lt;/p&gt;
+&lt;p&gt;2. ARP欺骗&lt;/p&gt;
+&lt;p&gt;3. 数据包转发&lt;/p&gt;
+&lt;p&gt;涉及到的都是最基础的网络协议。&lt;/p&gt;
+
+&lt;p&gt;大家在自己电脑运行本程序，可以看到同一局域网段或wifi的上网设备，并选择其中任一设备执行监听。&lt;/p&gt;
+&lt;p&gt;被监听设备上的所有http访问，都会实时被该程序监听并记录。&lt;/p&gt;
+&lt;p&gt;选择被监听到的任一条记录，点击“劫持选中http会话”，你的浏览器会自动打开该站点，并用被劫持者的账号身份登入，可随意查看和修改数据。&lt;/p&gt;
+&lt;p&gt; ——咳咳，考虑到好奇心甚的程序猿们，拿该程序可能造成的影响或者背负的嫌疑，我把程序做了一点限制：代码不开源；监听记录URL做截断；将可劫持的域名限制为attack-demo.baibaomen.com。&lt;/p&gt;
+
+&lt;p&gt;大家要验证和演示http会话劫持，请让其他同事用局域网的电脑或wifi手机，访问http://attack-demo.baibaomen.com，在其中输入任意账号或密码后进入个人设置界面。与此同时，你在电脑上启动监听程序，选择或手动输入同事电脑IP点击监听，将实时监听到该同事的站点浏览情况，选择劫持还将自动以其身份进入被劫持系统，随意查看和操作数据。&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/292705/201809/292705-20180925022114456-1122779279.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;程序添加到了&lt;a href=&quot;https://github.com/baibaomen/Baibaomen.HttpHijacker&quot; target=&quot;_blank&quot;&gt;https://github.com/baibaomen/Baibaomen.HttpHijacker&lt;/a&gt;，下载“百宝门内网攻击演示程序.zip”，解压即可运行。程序在本人开源的HttpHijacker上，增加了一些网络攻击的演示功能。&lt;/p&gt;
+&lt;p&gt; 程序执行时会在网络上启动ARP攻击，请慎重体验。对于网关上做了MAC地址绑定的网络环境，该攻击一般只会导致目标机器和网关通信的中断（单向MAC欺骗成功）。&lt;/p&gt;
+
+&lt;p&gt;希望通过这个程序的演示，能让大家都意识到网络安全性很脆弱。也藉此给出的警示，能尽快把国外已经先行力推的https，引入我们企业的信息化建设中来。至少，希望在SSO这个把所有鸡蛋（被集成系统的账号密码）都放在一个篮子的场景里，https能尽快成为企业认可的必选项。&lt;/p&gt;
+
+&lt;p&gt;一切未保留原文链接的转载，均属侵权行为： &lt;a id=&quot;Editor_Edit_hlEntryLink&quot; title=&quot;view: 内网很安全？错错错！附攻击程序示例&quot; href=&quot;http://www.cnblogs.com/baibaomen/p/intranet-attack.html&quot; target=&quot;_blank&quot;&gt;http://www.cnblogs.com/baibaomen/p/intranet-attack.html&lt;/a&gt;  &lt;/p&gt;
+&lt;p&gt;业务合作或授权协商请邮件：baibaomen@gmail.com。 &lt;/p&gt;
+
+
+</description>
+<pubDate>Mon, 24 Sep 2018 18:52:00 +0000</pubDate>
+<dc:creator>百宝门-SSO顾问</dc:creator>
+<og:description>给企业做顾问时，常演示这个程序，以暴露大部分企业内网环境的脆弱性。当内网中有人运行这个程序，你在自己电脑上的网站会被同事实时“直播”；手机明明连的是公司有“安全”标记的wifi，访问单位OA时竟然会被</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/baibaomen/p/intranet-attack.html</dc:identifier>
+</item>
+<item>
+<title>【强化学习】MOVE37-Introduction（导论） - Mandy鹿</title>
+<link>http://www.cnblogs.com/mandylu2018/p/9694533.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/mandylu2018/p/9694533.html</guid>
+<description>&lt;blockquote readability=&quot;8.4815789473684&quot;&gt;
+&lt;p&gt;&lt;span&gt;写在前面的话：从今日起，我会边跟着硅谷大牛Siraj的MOVE 37系列课程学习Reinforcement Learning(强化学习算法)，边更新这个系列。课程包含视频和文字，课堂笔记会按视频为单位进行整理。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;课程表地址：&lt;a href=&quot;https://github.com/llSourcell/Move_37_Syllabus&quot; target=&quot;_blank&quot;&gt;https://github.com/llSourcell/Move_37_Syllabus&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;带字幕课程视频地址：&lt;a href=&quot;https://www.bilibili.com/video/av31518766&quot; target=&quot;_blank&quot;&gt;https://www.bilibili.com/video/av31518766&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;span&gt;本课作为导论，大致普及了一下机器学习和强化学习的概念和用途。其次，捎带介绍了一下最常见的监督学习和非监督学习。对机器学习稍有了解的同学们，对这两个概念应该不陌生。如果对此毫无概念的同学们，可以看我下面的简单说明。&lt;/span&gt;&lt;/p&gt;
+
+&lt;h3&gt;&lt;span&gt;机器学习（Machine Learning)&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;首先，我们要明白，所谓的机器学习就是试图找出输入输出量之间的一个固定关系，以期对以后所有的输入量都能相应地去预测一个输出量。用数学语言来说，就是从一堆已知的x和y之间找出映射f。打个比方，如果我们发现每次穿裙子(x)就一定会下雨(y)，那么这个因果关系就是f；由此，我们就可以根据f这个关系，也就是某天穿没穿裙子，来推断会不会下雨。&lt;/span&gt;&lt;/p&gt;
+
+&lt;h3&gt;监督学习 (Supervised Learning)&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;这里举一个水果分类的例子。这里机器学习算法所要完成的工作，就是要得到水果和水果名称之间的关系。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924004507050-1585637014.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;第一步是训练算法，第二步是用测试数据来检验算法的完善度。图中可以看到，这里训练算法时输入的数据是&lt;strong&gt;预先分过类&lt;/strong&gt;的（即打过标签的），所以事先需要&lt;strong&gt;人工参与&lt;/strong&gt;，把未分类的原始数据进行分类。此即是“监督”二字的要义所在，需要人工“监督”才能完成算法的训练。&lt;/p&gt;
+
+&lt;h3&gt;非监督学习 (Unsupervised Learning)&lt;/h3&gt;
+&lt;p&gt;同样是以水果举例。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924012632149-451030005.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;同样分为两步，区别在于，这里输入的数据是&lt;strong&gt;未分类&lt;/strong&gt;过的（也未打标签）。机器学习算法需要&lt;strong&gt;自己完成分类的工作&lt;/strong&gt;，并从中找出数据中的模式（往往是我们无法解释和说明的）。非监督学习通常可以用于&lt;strong&gt;聚类&lt;/strong&gt;——识别各个类别之下数据的相似性并由此分类，也可以用于&lt;strong&gt;异常识别&lt;/strong&gt;——例如排除数据集中的异常值（视频中的例子是欺诈性交易）。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924013912398-1504065801.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;这里，一句话总结：监督学习适用于事后对数据&lt;strong&gt;阐释性分析&lt;/strong&gt;和对未来的&lt;strong&gt;预测&lt;/strong&gt;，非监督学习则更适合发现数据的&lt;strong&gt;内在规律&lt;/strong&gt;和&lt;strong&gt;结构&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;然而，实际情况中的影响因素往往更复杂，要解决的问题也往往不止是确定既有的固定关系。有时，需要我们在没有训练数据的情况根据实际情况去不断优化策略（有点类似于我们人类的熟能生巧）。因此，这里引进了另一个概念：“&lt;strong&gt;强化学习&lt;/strong&gt;”。&lt;/p&gt;
+
+&lt;h3&gt;强化学习 (Reinforcement Learning)&lt;/h3&gt;
+&lt;p&gt;这里以选择最优运输路线为例。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924201732641-1744565751.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;可知影响运输结果的因素有很多，包括天气、道路拥堵、交通工具、食品保存等等。同时，我们也&lt;strong&gt;没有先验数据来&lt;/strong&gt;训练算法和检验算法的优越性。那么这里的强化学习算法，就引入了一个&lt;strong&gt;新的维度&lt;/strong&gt;：&lt;strong&gt;时间&lt;/strong&gt;，来帮助我们在实际情况中通过&lt;strong&gt;不断迭代&lt;/strong&gt;来优化算法。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924142119314-130123493.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;强化学习算法可以说是&lt;strong&gt;介于监督算法和非监督算法之间&lt;/strong&gt;。它既不像非监督算法一样完全不使用标签，也不像监督算法一样预先打好标签，这里的标签是&lt;strong&gt;延时&lt;/strong&gt;（delayed）打上的。就像图中所标出的那样，每个环节的标签T（也可以称为&lt;strong&gt;反馈&lt;/strong&gt;）由下一个环节来标记。&lt;/p&gt;
+&lt;p&gt;我个人的理解是，所谓的强化学习算法的&lt;strong&gt;核心&lt;/strong&gt;，就是&lt;strong&gt;一个环环相扣的负反馈系统&lt;/strong&gt;。学过生物的同学大概能理解的意思，生物内部环境的稳态就是通过负反馈机制来实现的。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180924235722433-2080783743.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;而当模式识别网络（神经网络）和基于强化学习框架的实时环境结合在一起，就是所谓&lt;strong&gt;深度强化学习&lt;/strong&gt;。我的理解是，和非监督学习算法类似，前者相当于Step1的模式识别部分，而后者相当于Step2——不断提供反馈来优化算法。&lt;/p&gt;
+&lt;p&gt;至于这一算法有多牛逼嘛，看阿尔法狗就知道了。&lt;/p&gt;
+&lt;p&gt;----------------------------------------------------- &lt;/p&gt;
+&lt;p&gt;介绍完这些基本概念后，下面就进入&lt;strong&gt;正题&lt;/strong&gt;了。有一些&lt;strong&gt;数学知识&lt;/strong&gt;必须了解。&lt;/p&gt;
+
+&lt;h3&gt;马尔科夫链 (Markov Chain)&lt;/h3&gt;
+&lt;p&gt;对于强化学习来说，马尔科夫链是个很重要的概念。正是基于这个概念，才发展出算法和外界之间&lt;strong&gt;沟通&lt;/strong&gt;和&lt;strong&gt;反馈&lt;/strong&gt;的方式。&lt;/p&gt;
+&lt;p&gt;马尔科夫链究竟是什么呢？简单来说，就是用来描述&lt;strong&gt;一连串相互关联的事件（状态）&lt;/strong&gt;的一种抽象模型。其中每个事件（状态）已经发生的前提下，接着会发生哪个事件（切换到哪个状态）的概率分布是&lt;strong&gt;已知&lt;/strong&gt;的。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180925002726290-1910659717.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;好吧，如果概率统计里没学过这一课的同学，估计此时已经百分百晕了。拿现实中的例子来举例，就比方说，天气预报吧。首先我们假定只有两种天气：晴天和雨天，并且前一天下雨后第二天放晴的概率是0.2，继续下雨的概率是0.8；前一天晴天第二天下雨的概率是0.4，继续放晴是0.6。那么，根据今天的天气，我们是不是能把未来七天每天放晴和下雨的概率都算出来了？OK，这未来七天的天气状态，就是一条简单的马尔科夫链。&lt;/p&gt;
+&lt;p&gt;必须注意两点，一、我们计算出来的只是概率分布，&lt;strong&gt;依旧无法确定&lt;/strong&gt;给出每天的天气；二、每天的天气概率情况&lt;strong&gt;只取决于前一天&lt;/strong&gt;的天气。&lt;/p&gt;
+&lt;p&gt;现在可以结合一下视频里的示意图来看了，这里的转移矩阵（Transition Matrix）给出了状态间互相转移的概率分布，右下角则展示了每多走一步后我们来到A、B、C三个节点的可能性。&lt;/p&gt;
+
+&lt;h3&gt;马尔科夫决策过程（Markov Decision Process）&lt;/h3&gt;
+&lt;p&gt;马尔科夫决策过程是马尔科夫链的扩展，在原基础上加入了&lt;strong&gt;行动（Action）&lt;/strong&gt;和&lt;strong&gt;奖励/反馈（Reward）&lt;/strong&gt;。相应的转移矩阵也产生了变化，下一个状态的概率分布 不仅取决于上一个状态还取决于采取的行动。而从环境得到的反馈则告诉我们这一步到底是好（正向反馈）还是坏（负向反馈）——所谓&lt;strong&gt;趋利避害&lt;/strong&gt;，下次就可以避免在同一状态下采取同样的行动。那么最终在不断&lt;strong&gt;最大化奖励&lt;/strong&gt;的过程中，我们就获取了&lt;strong&gt;最优策略&lt;/strong&gt;。&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1334793/201809/1334793-20180925003839263-1393911969.png&quot; alt=&quot;图片来自视频&quot; width=&quot;600&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;OK，以上就是导论课的所有内容。&lt;/p&gt;
+&lt;p&gt;有理解不当或阐述的错误的地方，还望大牛们不吝指正。&lt;/p&gt;
+&lt;p&gt;感谢阅读~&lt;/p&gt;
+</description>
+<pubDate>Mon, 24 Sep 2018 16:52:00 +0000</pubDate>
+<dc:creator>Mandy鹿</dc:creator>
+<og:description>写在前面的话：从今日起，我会边跟着硅谷大牛Siraj的MOVE 37系列课程学习Reinforcement Learning(强化学习算法)，边更新这个系列。课程包含视频和文字，课堂笔记会按视频为单位</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/mandylu2018/p/9694533.html</dc:identifier>
+</item>
+<item>
+<title>Nginx简单总结 - banananana</title>
+<link>http://www.cnblogs.com/George1994/p/9697405.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/George1994/p/9697405.html</guid>
+<description>&lt;h2&gt;&lt;span&gt;特点总结&lt;/span&gt;&lt;/h2&gt;
+&lt;ol readability=&quot;1&quot;&gt;&lt;li readability=&quot;2&quot;&gt;
+&lt;p&gt;&lt;span&gt;nginx有一个master进程和多个worker进程，master进程是主要用来管理worker进程，管理的内容包括以下内容：接收来自外界的信号，向各个woker进程发送信号，监控worker进程的运行状态，当worker进程退出后，会自动重新启动新的worker进程。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;每个worker进程是相对独立平等的，相互竞争处理一个请求，并且从始至终的处理这个请求，不会出现处理其他进程的请求；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2&gt;&lt;span&gt;选择NGINX的理由&lt;/span&gt;&lt;/h2&gt;
+&lt;ol readability=&quot;7&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;底层由epoll（异步阻塞的方式）来实现，可以实现高并发；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;内存消耗少，1w个非活跃的HTTP Keep-Alive连接在Nginx中仅消耗2.5MB的内存；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;成本低廉，BSD协议开源免费；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;&lt;span&gt;配置文件简单易懂；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;支持rewrite重写规则；能根据域名、URL的不同，将HTTP请求分发到不同的后端服务器群组中；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;内置的健康检查功能；即使Nginx proxy后端的某台web服务器宕机了，也不会影响前端访问；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;span&gt;稳定性高；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;支持热部署；可以长时间的运行，并且可以在不间断服务的情况下，对软件版本进行升级；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;设计极具扩展性；它完全是由多个不同功能、不同层次、不同类型且耦合度极低的模块组成；&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2&gt;&lt;span&gt;配置结构&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;nginx.conf的配置结构包括main全局块、events块、http块、server块、location块；不同模块的执行关系：server继承main，location继承server，upstream既不会继承指令也不会被继承，它有它自己的特殊指令；&lt;/span&gt;&lt;/p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;指令上下文&lt;/span&gt;&lt;/span&gt;&lt;/th&gt;
+&lt;th&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;解释&lt;/span&gt;&lt;/span&gt;&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody readability=&quot;5.5&quot;&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;main&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td contenteditable=&quot;true&quot;&gt;&lt;span&gt;&lt;span&gt;与具体业务功能无关的一些参数；比如工作进程数等；&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;http&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td contenteditable=&quot;true&quot;&gt;&lt;span&gt;&lt;span&gt;与提供http服务相关的一些配置参数；&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;3&quot;&gt;&lt;td&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;server&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td contenteditable=&quot;true&quot;&gt;&lt;span&gt;&lt;span&gt;http服务器上支持若干个虚拟主机， 每个虚拟主机对应一个server配置项，配置项中包含该虚拟主机相关的配置；&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;location&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td contenteditable=&quot;true&quot;&gt;&lt;span&gt;&lt;span&gt;http服务中，某些特定的URL对应的一系列配置项；&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span contenteditable=&quot;true&quot;&gt;&lt;span&gt;mail&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;td contenteditable=&quot;true&quot;&gt;&lt;span&gt;&lt;span&gt;实现email相关的SMTP/IMAP/POP3代理时，共享的一些配置项；&lt;/span&gt;&lt;/span&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
+&lt;td/&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;span&gt;nginx.conf&lt;/span&gt;&lt;/p&gt;
+&lt;pre spellcheck=&quot;false&quot; contenteditable=&quot;false&quot;&gt;
+&lt;span&gt;&lt;span&gt;# 定义Nginx运行的用户和用户组，默认是nobody&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;user&lt;/span&gt;  nobody;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# 允许生成的进程数，建议设置为等于CPU总核心数&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;worker_processes&lt;/span&gt;  2;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# 指定错误日志路径，级别；这个设置可以放入全局块，http块，server块，级别依次为：debug|info|notice|warn|error|crit|alert|emerg&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;error_log&lt;/span&gt;  logs/error.&lt;span&gt;log &lt;/span&gt; info;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;​&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# 工作模式以及连接数上线&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;events&lt;/span&gt; {&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;use&lt;/span&gt; epoll;  &lt;span&gt;# 时间驱动模型，包括select, poll, epoll, kqueue等&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;worker_connections&lt;/span&gt;  1024;  &lt;span&gt;# 单个work进程允许的最大连接数目&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;​&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# http服务器&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;http&lt;/span&gt; {&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;#gzip模块设置&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip&lt;/span&gt; on; &lt;span&gt;#开启gzip压缩输出&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_min_length&lt;/span&gt; 1k; &lt;span&gt;#最小压缩文件大小&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_buffers&lt;/span&gt; &lt;span&gt;4 16k&lt;/span&gt;; &lt;span&gt;#压缩缓冲区&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_http_version&lt;/span&gt; 1.0; &lt;span&gt;#压缩版本（默认1.1，前端如果是squid2.5请使用1.0）&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_comp_level&lt;/span&gt; 2; &lt;span&gt;#压缩等级&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_types&lt;/span&gt; text/&lt;span&gt;plain application&lt;/span&gt;/&lt;span&gt;x-javascript&lt;/span&gt; text/&lt;span&gt;css application&lt;/span&gt;/xml;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;#压缩类型，默认就已经包含text/html，所以下面就不用再写了，写上去也不会有问题，但是会有一个warn。&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;gzip_vary&lt;/span&gt; on;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;#limit_zone crawler $binary_remote_addr 10m; #开启限制IP连接数的时候需要使用&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;# 子配置放到/usr/local/nginx/conf/servers/*/目录下&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/&lt;span&gt;\&lt;/span&gt;*/&lt;span&gt;upstream&lt;/span&gt;.conf;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/&lt;span&gt;\&lt;/span&gt;*/site.conf;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;
+&lt;/pre&gt;
+
+&lt;p&gt;&lt;span&gt;site.conf&lt;/span&gt;&lt;/p&gt;
+&lt;pre contenteditable=&quot;false&quot; spellcheck=&quot;false&quot;&gt;
+&lt;span&gt;&lt;span&gt;# 虚拟主机的配置&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# http接口&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;server&lt;/span&gt; {  &lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;listen&lt;/span&gt;          &lt;span&gt;80 default_server&lt;/span&gt;;  &lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;client_max_body_size&lt;/span&gt; 20m;  &lt;span&gt;# 最大上传包&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server_name&lt;/span&gt;     www.linuxidc.com;  &lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;access_log&lt;/span&gt;      logs/linuxidc.access.&lt;span&gt;log main&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;# 子配置放到/usr/local/nginx/conf/servers/test/locations/目录下&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/test/locations/&lt;span&gt;\&lt;/span&gt;*.&lt;span&gt;location&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;​&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# https接口&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# 1. https的固定端口是443，不同于HTTP的80接口&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;# 2. SSL标准需要引入安全证书，所以在 conf 中你需要指定证书和它对应的 key&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;server&lt;/span&gt; {&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;listen&lt;/span&gt; &lt;span&gt;443 ssl&lt;/span&gt; &lt;span&gt;http2 default_server&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;root&lt;/span&gt; /usr/local/nginx/conf/servers/test/nginx_www/;  &lt;span&gt;# 指定证书的位置&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/common/ssl_config.conf;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/test/https/ssl_rewrite.&lt;span&gt;location&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; /usr/local/nginx/conf/servers/test/locations/&lt;span&gt;\&lt;/span&gt;*.&lt;span&gt;location&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;
+&lt;/pre&gt;
+
+&lt;p&gt;&lt;span&gt;upstream.conf&lt;/span&gt;&lt;/p&gt;
+&lt;pre contenteditable=&quot;false&quot; spellcheck=&quot;false&quot;&gt;
+&lt;span&gt;&lt;span&gt;# 设定实际的服务器列表，几种负载均衡的方式&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;​&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;upstream&lt;/span&gt; &lt;span&gt;mysvr1 &lt;/span&gt;{   &lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 127.0.0.1:7878;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;# 热备(其它所有的非backup机器down或者忙的时候，请求backup机器))&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.10.121:&lt;span&gt;3333 backup&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;upstream&lt;/span&gt; &lt;span&gt;mysvr2 &lt;/span&gt;{&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;# weigth参数表示权值，权值越高被分配到的几率越大&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.1.11:&lt;span&gt;80 weight&lt;/span&gt;=5;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.1.12:&lt;span&gt;80 weight&lt;/span&gt;=1;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.1.13:&lt;span&gt;80 weight&lt;/span&gt;=6;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;send_timeout&lt;/span&gt; 90;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;proxy_connect_timeout&lt;/span&gt; 50;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;proxy_send_timeout&lt;/span&gt; 90;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;proxy_read_timeout&lt;/span&gt; 90;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;upstream&lt;/span&gt; &lt;span&gt;https-svr&lt;/span&gt; {&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;# 每个请求按访问ip的hash结果分配，这样每个访客固定访问一个后端服务器，可以解决session的问题&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;ip_hash&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.1.11:90;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;server&lt;/span&gt; 192.168.1.12:90;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;
+&lt;/pre&gt;
+
+&lt;p&gt;&lt;span&gt;project.location&lt;/span&gt;&lt;/p&gt;
+&lt;pre contenteditable=&quot;false&quot; spellcheck=&quot;false&quot;&gt;
+&lt;span&gt;&lt;span&gt;# 反向代理的路径，和upstream绑定，location后面绑定映射的路径&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;location&lt;/span&gt; /&lt;span&gt;app1 &lt;/span&gt;{&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; uwsgi_params;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;uwsgi_pass mysvr1&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;​&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;span&gt;location&lt;/span&gt; /&lt;span&gt;passport &lt;/span&gt;{&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;include&lt;/span&gt; uwsgi_params;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;    &lt;span&gt;uwsgi_pass https-svr&lt;/span&gt;;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;}&lt;/span&gt;
+&lt;/pre&gt;
+
+</description>
+<pubDate>Mon, 24 Sep 2018 16:01:00 +0000</pubDate>
+<dc:creator>banananana</dc:creator>
+<og:description>NGINX简单总结 特点总结 nginx有一个master进程和多个worker进程，master进程是主要用来管理worker进程，管理的内容包括以下内容：接收来自外界的信号，向各个woker进程发</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/George1994/p/9697405.html</dc:identifier>
+</item>
+<item>
+<title>css中的position属性值的探究 - NineKit</title>
+<link>http://www.cnblogs.com/NineKit/p/9697406.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/NineKit/p/9697406.html</guid>
+<description>&lt;p&gt;css的position属性指定了元素的定位类型，然后通过top，botton，left，right来具体定位。&lt;/p&gt;
+&lt;p&gt;在具体定位之前必须使用position属性，否则所有的具体定位属性都无法生效。&lt;/p&gt;
+&lt;p&gt;position可选择的值一共五个：static ，relative，absolute，fixed，或sticky。&lt;/p&gt;
+&lt;p&gt;下面博主将一一进行含代码和运行结果的对比解释&lt;/p&gt;
+&lt;p&gt;首先是不设置position属性，可以看到two元素的top的属性并未生效，而颜色属性是有效的，当前位置是默认文档流中的位置，以此为原型对比position改变时的元素位置的变化。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:html;gutter:true;&quot;&gt;
+&amp;lt;!DOCTYPE html&amp;gt;
+&amp;lt;html lang=&quot;en&quot;&amp;gt;
+&amp;lt;head&amp;gt;
+    &amp;lt;meta charset=&quot;UTF-8&quot;&amp;gt;
+    &amp;lt;link rel=&quot;stylesheet&quot; href=&quot;./j.css&quot;&amp;gt;
+&amp;lt;/head&amp;gt;
+&amp;lt;body&amp;gt;
+    &amp;lt;div class=&quot;box&quot; id=&quot;one&quot;&amp;gt;One&amp;lt;/div&amp;gt;
+    &amp;lt;div class=&quot;box&quot; id=&quot;two&quot;&amp;gt;Two&amp;lt;/div&amp;gt;
+    &amp;lt;div class=&quot;box&quot; id=&quot;three&quot;&amp;gt;Three&amp;lt;/div&amp;gt;
+    &amp;lt;div class=&quot;box&quot; id=&quot;four&quot;&amp;gt;Four&amp;lt;/div&amp;gt;  
+&amp;lt;/div&amp;gt;
+&amp;lt;/body&amp;gt;
+&amp;lt;/html&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;.box &lt;/span&gt;{&lt;span&gt;
+    display&lt;/span&gt;:&lt;span&gt; inline-block&lt;/span&gt;;&lt;span&gt;
+
+    background&lt;/span&gt;:&lt;span&gt; red&lt;/span&gt;;&lt;span&gt;
+    color&lt;/span&gt;:&lt;span&gt; white&lt;/span&gt;;
+  }&lt;span&gt;
+  
+  #two &lt;/span&gt;{&lt;span&gt;
+    top&lt;/span&gt;:&lt;span&gt; 260px&lt;/span&gt;;&lt;span&gt;
+    bottom&lt;/span&gt;:&lt;span&gt; 126px&lt;/span&gt;;&lt;span&gt;
+    left&lt;/span&gt;:&lt;span&gt; 20px&lt;/span&gt;;&lt;span&gt;
+    background&lt;/span&gt;:&lt;span&gt; blue&lt;/span&gt;;
+  }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180924234548045-1469819917.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;position：static&lt;/p&gt;
+&lt;p&gt;在#two的类下添加position：static;如下（后面每处只修改position的值）&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;  #two &lt;/span&gt;{&lt;span&gt;
+    position&lt;/span&gt;:&lt;span&gt;static&lt;/span&gt;;&lt;span&gt;
+    top&lt;/span&gt;:&lt;span&gt; 260px&lt;/span&gt;;&lt;span&gt;
+    bottom&lt;/span&gt;:&lt;span&gt; 126px&lt;/span&gt;;&lt;span&gt;
+    left&lt;/span&gt;:&lt;span&gt; 20px&lt;/span&gt;;&lt;span&gt;
+    background&lt;/span&gt;:&lt;span&gt; blue&lt;/span&gt;;
+  }
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180924234830843-226012954.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;HTML元素的默认值，即没有定位，元素出现在正常的流中。&lt;/p&gt;
+&lt;p&gt;静态定位的元素不会受到 top, bottom, left, right影响。&lt;/p&gt;
+&lt;p&gt;这个值既然会使定位属性失效，那么它存在的意义是什么的？&lt;/p&gt;
+&lt;p&gt;在网页样式修改的过程中，可以暂时的屏蔽某些元素的位置信息，或者在修改的时候，保留，某些部分的位置信息，便于恢复。&lt;/p&gt;
+
+&lt;p&gt;position：relative&lt;/p&gt;
+&lt;p&gt;相对定位，相对与原来正常文档流的位置定位，但是在定位时不改变原来的页面布局，既是相当于只是把定位的元素进行了移动，而移动的对比标准位置就是正常文档流中的位置，而原来的位置会留白。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180924235014136-2057906108.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;position ：absolute&lt;/p&gt;
+&lt;p&gt;绝对定位，该元素将从普通文档流中删除，并且不会为页面布局中的元素创建空间。他相对于最近已定位的父元素定位。例子中即是根据body元素来定位的。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180924235055279-1304619736.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;position ：fixed&lt;/p&gt;
+&lt;p&gt;固定定位，所谓固定定位和绝对定位相似，一样都会从普通文档流中删除，并且不会为页面布局中的元素创建空间；不一样的是它是固定在视窗上的，是以视窗为定位对象的的，相信大家浏览很多网页时都有这样的感受，网页上部或者下部会有广告不会随着网页的上下滚动而移动，它们是固定在网页上的，并且如果没有设置z-index来修该叠放次序，它们会覆盖网页的内容。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180924235145487-371183709.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;position ：sticky&lt;/p&gt;
+&lt;p&gt;该元素并不脱离文档流，仍然保留元素原本在文档流中的位置。&lt;/p&gt;
+&lt;p&gt;当元素在容器中被滚动超过指定的偏移值时，元素在容器内固定在指定位置。亦即如果你设置了top: 20px，那么在sticky元素到达距离相对定位的元素顶部50px的位置时固定，不再向上移动。&lt;/p&gt;
+&lt;p&gt;元素固定的相对偏移是相对于离它最近的具有滚动框的父元素，如果父元素都不可以滚动，那么是相对于viewport来计算元素的偏移量&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1480455/201809/1480455-20180925000031326-895095945.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Mon, 24 Sep 2018 16:01:00 +0000</pubDate>
+<dc:creator>NineKit</dc:creator>
+<og:description>css的position属性指定了元素的定位类型，然后通过top，botton，left，right来具体定位。 在具体定位之前必须使用position属性，否则所有的具体定位属性都无法生效。 pos</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/NineKit/p/9697406.html</dc:identifier>
+</item>
+<item>
+<title>高并发第十二弹:并发容器J.U.C -- Executor组件FutureTask、ForkJoin - 爱呼吸的鱼</title>
+<link>http://www.cnblogs.com/aihuxi/p/9697379.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/aihuxi/p/9697379.html</guid>
+<description>&lt;p&gt;从本章开始就要说 Executor 的东西了.本次讲的是一个很常用的FutureTask,和一个不是那么常用的ForkJoin,我们现在就来介绍吧&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;引言&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;span&gt;大部分时候创建线程的2种方式，一种是直接继承Thread，另外一种就是实现Runnable接口。但是这两种方式都有一个缺陷就是：在执行完任务之后无法获取执行结果。&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　  所以后期就提供了Callable和Future，通过它们可以在任务执行完毕之后得到任务执行结果。FutureTask又是集大成者.&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;一个一个来介绍&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Callable:只有一个带返回值的call方法&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@FunctionalInterface
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; Callable&amp;lt;V&amp;gt;&lt;span&gt; {
+ 
+    V call() &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception;
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;那么怎么使用Callable呢？一般情况下是配合ExecutorService来使用的，在ExecutorService接口中声明了若干个submit方法的重载版本：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&amp;lt;T&amp;gt; Future&amp;lt;T&amp;gt; submit(Callable&amp;lt;T&amp;gt;&lt;span&gt; task);
+&lt;/span&gt;&amp;lt;T&amp;gt; Future&amp;lt;T&amp;gt;&lt;span&gt; submit(Runnable task, T result);
+Future&lt;/span&gt;&amp;lt;?&amp;gt; submit(Runnable task)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　第一个submit方法里面的参数类型就是Callable。&lt;/p&gt;
+&lt;p&gt;　　暂时只需要知道Callable一般是和ExecutorService配合来使用的，具体的使用方法讲在后面讲述。&lt;/p&gt;
+&lt;p&gt;　　一般情况下我们使用第一个submit方法和第三个submit方法，第二个submit方法很少使用。&lt;/p&gt;
+&lt;h3&gt;Future接口&lt;/h3&gt;
+
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; Future&amp;lt;V&amp;gt;&lt;span&gt; {
+　// 取消任务
+  &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt; cancel(&lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; mayInterruptIfRunning);     &lt;br/&gt;//取消状态   
+  &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; isCancelled();&lt;br/&gt;//是否完成
+  &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; isDone();&lt;br/&gt;//方法用来获取执行结果，这个方法会产生阻塞，会一直等到任务执行完毕才返回
+  V get() &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; InterruptedException, ExecutionException;&lt;br/&gt;// 用来获取执行结果，如果在指定时间内，还没获取到结果，就直接返回null。
+  V get(&lt;/span&gt;&lt;span&gt;long&lt;/span&gt;&lt;span&gt; timeout, TimeUnit unit)
+        &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; InterruptedException, ExecutionException, TimeoutException;
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;也就是说Future提供了三种功能：&lt;/p&gt;
+&lt;p&gt;　　1）判断任务是否完成；&lt;/p&gt;
+&lt;p&gt;　　2）能够中断任务；&lt;/p&gt;
+&lt;p&gt;　　3）能够获取任务执行结果。&lt;/p&gt;
+&lt;p&gt;因为Future只是一个接口，所以是无法直接用来创建对象使用的，因此就有了下面的FutureTask。&lt;/p&gt;
+
+&lt;h3&gt;FutureTask&lt;/h3&gt;
+&lt;p&gt;FutureTask这个才是真实使用者.FutureTask实现了RunnableFuture接口，而RunnableFuture接口继承了Runnable与Future接口，所以它既可以作为Runnable被线程中执行，又可以作为callable获得返回值&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; FutureTask&amp;lt;V&amp;gt; &lt;span&gt;implements&lt;/span&gt; RunnableFuture&amp;lt;V&amp;gt;&lt;span&gt; {
+    ...
+}
+
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt; RunnableFuture&amp;lt;V&amp;gt; &lt;span&gt;extends&lt;/span&gt; Runnable, Future&amp;lt;V&amp;gt;&lt;span&gt; {
+    &lt;/span&gt;&lt;span&gt;void&lt;/span&gt;&lt;span&gt; run();
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;FutureTask的两个构造类&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; FutureTask(Callable&amp;lt;V&amp;gt;&lt;span&gt; callable) {
+}
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; FutureTask(Runnable runnable, V result) {
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h3&gt;使用实例&lt;/h3&gt;
+&lt;p&gt; 方法一:使用Callable&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+ExecutorService executor =&lt;span&gt; Executors.newCachedThreadPool();
+        Callable&lt;/span&gt;&amp;lt;String&amp;gt; task = &lt;span&gt;new&lt;/span&gt; Callable&amp;lt;String&amp;gt;&lt;span&gt;() {
+
+            @Override
+            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; String call() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;task 返回结果&quot;&lt;span&gt;;
+            }
+        };
+        Future&lt;/span&gt;&amp;lt;String&amp;gt; result =&lt;span&gt; executor.submit(task);
+        executor.shutdown();
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt;(result.isDone()) {
+            System.out.println(result.get());
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 方式二:使用FutureTask&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+FutureTask&amp;lt;String&amp;gt; task = &lt;span&gt;new&lt;/span&gt; FutureTask&amp;lt;&amp;gt;(&lt;span&gt;new&lt;/span&gt; Callable&amp;lt;String&amp;gt;&lt;span&gt;() {
+
+            @Override
+            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; String call() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;aaaa&quot;&lt;span&gt;;
+            }
+        });
+        task.run();
+        System.out.println(task.get());&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;fork/join:&lt;/h3&gt;
+&lt;p&gt;Fork/Join框架：在必要的情况下，将一个大任务，进行拆分（fork） 成若干个子任务（拆到不能再拆，这里就是指我们制定的拆分的临界值），再将一个个小任务的结果进行join汇总。&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Fork/Join与传统线程池的区别！&lt;/p&gt;
+&lt;p&gt;Fork/Join采用“工作窃取模式”，当执行新的任务时他可以将其拆分成更小的任务执行，并将小任务加到线程队列中，然后再从一个随即线程中偷一个并把它加入自己的队列中。&lt;/p&gt;
+&lt;p&gt;就比如两个CPU上有不同的任务，这时候A已经执行完，B还有任务等待执行，这时候A就会将B队尾的任务偷过来，加入自己的队列中，对于传统的线程，ForkJoin更有效的利用的CPU资源！&lt;/p&gt;
+&lt;p&gt;我们来看一下ForkJoin的实现：实现这个框架需要继承RecursiveTask 或者 RecursiveAction ，RecursiveTask是有返回值的，相反Action则没有&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img-blog.csdn.net/20180502173012969?watermark/2/text/aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2plc29uam9rZQ==/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70&quot; alt=&quot;&quot; width=&quot;414&quot; height=&quot;322&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;局限性：&lt;/p&gt;
+&lt;p&gt;1、任务只能使用fork和join作为同步机制，如果使用了其他同步机制，当他们在同步操作时，工作线程就不能执行其他任务了。比如在fork框架使任务进入了睡眠，那么在睡眠期间内在执行这个任务的线程将不会执行其他任务了。&lt;/p&gt;
+&lt;p&gt;2、我们所拆分的任务不应该去执行IO操作，如读和写数据文件。&lt;/p&gt;
+&lt;p&gt;3、任务不能抛出检查异常。必须通过必要的代码来处理他们。&lt;/p&gt;
+&lt;p&gt;框架核心：&lt;/p&gt;
+&lt;p&gt;核心有两个类：&lt;/p&gt;
+&lt;p&gt;ForkJoinPool | ForkJoinTask ForkJoinPool：负责来做实现，包括工作窃取算法、管理工作线程和提供关于任务的状态以及他们的执行信息。&lt;/p&gt;
+&lt;p&gt;ForkJoinTask:提供在任务中执行fork和join的机制。&lt;/p&gt;
+&lt;p&gt;测试一下:&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; ForkJoinWork &lt;span&gt;extends&lt;/span&gt; RecursiveTask&amp;lt;Long&amp;gt;&lt;span&gt;{
+
+
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; Long start;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;起始值&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; Long end;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;结束值&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt;  Long critical = 5000L;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;临界值 ,设定不大于这个值就不分裂&lt;/span&gt;
+
+    &lt;span&gt;public&lt;/span&gt;&lt;span&gt; ForkJoinWork(Long start, Long end) {
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.start =&lt;span&gt; start;
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.end =&lt;span&gt; end;
+    }
+
+    @Override
+    &lt;/span&gt;&lt;span&gt;protected&lt;/span&gt;&lt;span&gt; Long compute() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断是否是拆分完毕&lt;/span&gt;
+        Long lenth = end -&lt;span&gt; start;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(lenth&amp;lt;=&lt;span&gt;critical){
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果拆分完毕就相加&lt;/span&gt;
+            Long sum = 0L&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (Long i = start;i&amp;lt;=end;i++&lt;span&gt;){
+                sum &lt;/span&gt;+=&lt;span&gt; i;
+            }
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; sum;
+        }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;没有拆分完毕就开始拆分&lt;/span&gt;
+            Long middle = (end + start)/2;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;计算的两个值的中间值&lt;/span&gt;
+            ForkJoinWork right = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ForkJoinWork(start,middle);
+            right.fork();&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;拆分，并压入线程队列&lt;/span&gt;
+            ForkJoinWork left = &lt;span&gt;new&lt;/span&gt; ForkJoinWork(middle+1&lt;span&gt;,end);
+            left.fork();&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;拆分，并压入线程队列
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;合并&lt;/span&gt;
+            &lt;span&gt;return&lt;/span&gt; right.join() +&lt;span&gt; left.join();
+        }
+    }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+             &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l =&lt;span&gt; System.currentTimeMillis();
+             ForkJoinPool forkJoinPool &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; ForkJoinPool();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;实现ForkJoin 就必须有ForkJoinPool的支持&lt;/span&gt;
+             ForkJoinTask&amp;lt;Long&amp;gt; task = &lt;span&gt;new&lt;/span&gt; ForkJoinWork(0L,10000000000L);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;参数为起始值与结束值&lt;/span&gt;
+             Long invoke =&lt;span&gt; forkJoinPool.invoke(task);
+             &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l1 =&lt;span&gt; System.currentTimeMillis();
+             System.out.println(&lt;/span&gt;&quot;invoke = &quot; + invoke+&quot;  time: &quot; + (l1-&lt;span&gt;l));
+        }
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;测试代码&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ForkJoinWorkTest {
+    
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
+        test();
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;        test2();
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;        test3();&lt;/span&gt;
+&lt;span&gt;    }
+    
+    
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; test() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ForkJoin实现&lt;/span&gt;
+        &lt;span&gt;long&lt;/span&gt; l =&lt;span&gt; System.currentTimeMillis();
+        ForkJoinPool forkJoinPool &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; ForkJoinPool();&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 实现ForkJoin 就必须有ForkJoinPool的支持&lt;/span&gt;
+        ForkJoinTask&amp;lt;Long&amp;gt; task = &lt;span&gt;new&lt;/span&gt; ForkJoinWork(0L, 10000000000L);&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 参数为起始值与结束值&lt;/span&gt;
+        Long invoke =&lt;span&gt; forkJoinPool.invoke(task);
+        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l1 =&lt;span&gt; System.currentTimeMillis();
+        System.out.println(&lt;/span&gt;&quot;ForkJoin实现 time: &quot; + (l1 -&lt;span&gt; l));
+    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; test2() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 普通线程实现&lt;/span&gt;
+        Long x = 0L&lt;span&gt;;
+        Long y &lt;/span&gt;= 10000000000L&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l =&lt;span&gt; System.currentTimeMillis();
+        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (Long i = 0L; i &amp;lt;= y; i++&lt;span&gt;) {
+            x &lt;/span&gt;+=&lt;span&gt; i;
+        }
+        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l1 =&lt;span&gt; System.currentTimeMillis();
+        System.out.println(&lt;/span&gt;&quot;普通线程实现  time: &quot; + (l1 -&lt;span&gt; l));
+    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; test3() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Java 8 并行流的实现&lt;/span&gt;
+        &lt;span&gt;long&lt;/span&gt; l =&lt;span&gt; System.currentTimeMillis();
+        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; reduce = LongStream.rangeClosed(0, 10000000000L).parallel().reduce(0&lt;span&gt;, Long::sum);
+        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; l1 =&lt;span&gt; System.currentTimeMillis();
+        System.out.println(&lt;/span&gt;&quot;Java 8 并行流的实现 time: &quot; + (l1 -&lt;span&gt; l));
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;结果:&lt;/p&gt;
+&lt;p&gt;　　ForkJoin实现 time: 38798&lt;/p&gt;
+&lt;p&gt;普通线程实现 time: 58860&lt;/p&gt;
+&lt;p&gt; Java 8 并行流的实现 time: 2375&lt;/p&gt;
+&lt;p&gt;我们观察上面可以看出来执行10000000000L的相加操作各自执行完毕的时间不同。观察到当数据很大的时候ForkJoin比普通线程实现有效的多，但是相比之下ForkJoin的实现实在是有点麻烦，这时候Java 8 就为我们提供了一个并行流来实现ForkJoin实现的功能。可以看到并行流比自己实现ForkJoin还要快&lt;/p&gt;
+&lt;p&gt;Java 8 中将并行流进行了优化，我们可以很容易的对数据进行并行流的操作，Stream API可以声明性的通过parallel()与sequential()在并行流与穿行流中随意切换！&lt;/p&gt;
+</description>
+<pubDate>Mon, 24 Sep 2018 15:59:00 +0000</pubDate>
+<dc:creator>爱呼吸的鱼</dc:creator>
+<og:description>大部分时候创建线程的2种方式，一种是直接继承Thread，另外一种就是实现Runnable接口。但是这两种方式都有一个缺陷就是：在执行完任务之后无法获取执行结果。 Stream API可以声明性的通</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/aihuxi/p/9697379.html</dc:identifier>
+</item>
+<item>
 <title>设计模式（一）：模板模式 - JaJian</title>
 <link>http://www.cnblogs.com/jajian/p/9653333.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/jajian/p/9653333.html</guid>
@@ -1370,989 +2120,6 @@ const styles =&lt;span&gt; StyleSheet.create({
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/Finley/p/9697237.html</dc:identifier>
-</item>
-<item>
-<title>Java分布式锁,搞懂分布式锁实现看这篇文章就对了 - 请叫我头头哥</title>
-<link>http://www.cnblogs.com/toutou/p/java_lock.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/toutou/p/java_lock.html</guid>
-<description>&lt;div class=&quot;bodyCustomClass&quot; readability=&quot;34.5&quot;&gt;
-&lt;blockquote readability=&quot;12&quot;&gt;
-&lt;p&gt;随着微处理机技术的发展，人们只需花几百美元就能买到一个CPU芯片，这个芯片每秒钟执行的指令比80年代最大的大型机的处理机每秒钟所执行的指令还多。如果你愿意付出两倍的价钱，将得到同样的CPU，但它却以更高的时钟速率运行。因此，最节约成本的办法通常是在一个系统中使用集中在一起的大量的廉价CPU。所以，倾向于分布式系统的主要原因是它可以潜在地得到比单个的大型集中式系统好得多的性价比。实际上，分布式系统是通过较低廉的价格来实现相似的性能的。&lt;/p&gt;
-&lt;p&gt;随着互联网的兴起，越来越多的人使用者互联网产品。一般互联网系统都是分布式部署的，分布式部署确实能带来性能和效率上的提升，提升效率的同事，我们还需要注意，保证一个分布式环境下数据一致性的问题。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;/div&gt;
-&lt;h2 id=&quot;_nav_0&quot; class=&quot;blogCustomTitleStyle&quot;&gt;&lt;span class=&quot;blogCustomTitleIco&quot;&gt;v&lt;/span&gt;分布式锁简述&lt;/h2&gt;
-&lt;p&gt;在单机时代，虽然不存在分布式锁，但也会面临资源互斥的情况，只不过在单机的情况下，如果有多个线程要同时访问某个共享资源的时候，我们可以采用线程间加锁的机制，即当某个线程获取到这个资源后，就需要对这个资源进行加锁，当使用完资源之后，再解锁，其它线程就可以接着使用了。例如，在JAVA中，甚至专门提供了一些处理锁机制的一些API（synchronize/Lock等）。&lt;/p&gt;
-&lt;p&gt;但是到了分布式系统的时代，这种线程之间的锁机制，就没作用了，系统可能会有多份并且部署在不同的机器上，这些资源已经不是在线程之间共享了，而是属于进程之间共享的资源。因此，为了解决这个问题，「分布式锁」就强势登场了。&lt;/p&gt;
-&lt;p&gt;分布式锁是控制分布式系统之间同步访问共享资源的一种方式。在分布式系统中，常常需要协调他们的动作。如果不同的系统或是同一个系统的不同主机之间共享了一个或一组资源，那么访问这些资源的时候，往往需要互斥来防止彼此干扰来保证一致性，在这种情况下，便需要使用到分布式锁。&lt;/p&gt;
-&lt;p&gt;在分布式系统中，常常需要协调他们的动作。如果不同的系统或是同一个系统的不同主机之间共享了一个或一组资源，那么访问这些资源的时候，往往需要互斥来防止彼此干扰来保证一致性，这个时候，便需要使用到分布式锁。&lt;/p&gt;
-&lt;p&gt;分布式锁要满足哪些要求呢？&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;span&gt;排他性：&lt;/span&gt;在同一时间只会有一个客户端能获取到锁，其它客户端无法同时获取&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;避免死锁：&lt;/span&gt;这把锁在一段有限的时间之后，一定会被释放（正常释放或异常释放）&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;高可用：&lt;/span&gt;获取或释放锁的机制必须高可用且性能佳&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;...&lt;/span&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;目前相对主流的有三种，从实现的复杂度上来看，从上往下难度依次增加：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;span&gt;数据库(MySQL)&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;Redis&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;ZooKeeper&lt;/span&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;_nav_1&quot; class=&quot;blogCustomTitleStyle&quot;&gt;&lt;span class=&quot;blogCustomTitleIco&quot;&gt;v&lt;/span&gt;基于数据库实现&lt;/h2&gt;
-&lt;p&gt;基于数据库来做分布式锁的话，通常有两种做法：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;span&gt;基于数据库的乐观锁&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;基于数据库的悲观锁&lt;/span&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 id=&quot;_nav_2&quot;&gt;乐观锁&lt;/h4&gt;
-&lt;p&gt;乐观锁的特点先进行业务操作，不到万不得已不去拿锁。即“乐观”的认为拿锁多半是会成功的，因此在进行完业务操作需要实际更新数据的最后一步再去拿一下锁就好。&lt;/p&gt;
-&lt;p&gt;乐观锁机制其实就是在数据库表中引入一个版本号（version）字段来实现的。当我们要从数据库中读取数据的时候，同时把这个version字段也读出来，如果要对读出来的数据进行更新后写回数据库，则需要将version加1，同时将新的数据与新的version更新到数据表中，且必须在更新的时候同时检查目前数据库里version值是不是之前的那个version，如果是，则正常更新。如果不是，则更新失败，说明在这个过程中有其它的进程去更新过数据了。&lt;/p&gt;
-&lt;p&gt;看图叙事。模拟实战场景。&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/506684/201808/506684-20180829161041425-429935791.png&quot; alt=&quot;请叫我头头哥&quot;/&gt;
-&lt;/div&gt;
-&lt;p&gt;如上图，故事男主人公(以下简称男主)打算去ATM机取3000元，故事女主人公(以下简称女主)则要在某宝买买买，买个包需要3000元，账户的余额是5000元。如果没有采用锁的话，在两人同时取款和买买买，可能会出现合计消费了6000，导致账户余额异常。所以需要用到锁的机制，当男主女主甚至更多小主同时消费时，除了读取到6000的账户余额外，还需要读取到当前的版本号version=1，等先行消费成功的主人公(无论谁先消费)去出发修改账户余额的同时，会触发version=version+1，即version=2。那么其他人使用未更新的version(1)去更新账户余额时就会发现版本号不对，就会导致本次更新失败，就得重新去读取最新账户余额以及版本号。&lt;/p&gt;
-&lt;p&gt;乐观锁遵循的两点法则：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;锁服务要有递增的版本号version&lt;/li&gt;
-&lt;li&gt;每次更新数据的时候都必须先判断版本号对不对，然后再写入新的版本号&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 id=&quot;_nav_3&quot;&gt;悲观锁&lt;/h4&gt;
-&lt;p&gt;悲观锁的特点是先获取锁，再进行业务操作，即“悲观”的认为获取锁是非常有可能失败的，因此要先确保获取锁成功再进行业务操作。&lt;/p&gt;
-&lt;p&gt;通常所说的“一锁二查三更新”即指的是使用悲观锁。通常来讲在数据库上的悲观锁需要数据库本身提供支持，即通过常用的&lt;code&gt;select ... for update&lt;/code&gt;操作来实现悲观锁。当数据库执行&lt;code&gt;select for update&lt;/code&gt;时会获取被&lt;code&gt;select&lt;/code&gt;中的数据行的行锁，因此其他并发执行的&lt;code&gt;select for update&lt;/code&gt;如果试图选中同一行则会发生排斥（需要等待行锁被释放），因此达到锁的效果。&lt;code&gt;select for update&lt;/code&gt;获取的行锁会在当前事务结束时自动释放，因此必须在事务中使用。&lt;/p&gt;
-&lt;p&gt;示例：&lt;/p&gt;
-&lt;div readability=&quot;9.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * 消费以后更新银行余额
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; bankId 银行卡号
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; cost 消费金额
-     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
-     &lt;span&gt;*/&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; consume(Long bankId, Integer cost){
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;先锁定银行账户&lt;/span&gt;
-        BankAccount product = query(&quot;SELECT * FROM bank_account WHERE bank_id=#{bankId} FOR UPDATE&quot;&lt;span&gt;, bankId);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (product.getNumber() &amp;gt; 0&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; updateCnt = update(&quot;UPDATE tb_product_stock SET number=#{cost} WHERE product_id=#{productId}&quot;&lt;span&gt;, cost, bankId);
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(updateCnt &amp;gt; 0){    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;更新库存成功&lt;/span&gt;
-                &lt;span&gt;return&lt;/span&gt; &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;乐观锁与悲观锁的区别&lt;/p&gt;
-&lt;p&gt;乐观锁的思路一般是表中增加版本字段，更新时where语句中增加版本的判断，算是一种CAS（Compare And Swep）操作，银行消费场景中version起到了版本控制的作用（ AND &lt;code&gt;version=#{version}&lt;/code&gt;）。&lt;/p&gt;
-&lt;p&gt;悲观锁之所以是悲观，在于他认为本次操作会发生并发冲突，所以一开始就对银行账户加上锁（&lt;code&gt;SELECT ... FOR UPDATE&lt;/code&gt;），然后就可以安心的做判断和更新，因为这时候不会有别人更新账户余额。&lt;/p&gt;
-&lt;h2 id=&quot;_nav_4&quot; class=&quot;blogCustomTitleStyle&quot;&gt;&lt;span class=&quot;blogCustomTitleIco&quot;&gt;v&lt;/span&gt;基于Redis实现&lt;/h2&gt;
-&lt;p&gt;基于Redis实现的锁机制，主要是依赖redis自身的原子操作，例如：&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;SET user_key user_value NX PX 100&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;redis从2.6.12版本开始，SET命令才支持这些参数：&lt;/p&gt;
-&lt;p&gt;NX：只在在键不存在时，才对键进行设置操作，&lt;code&gt;SET key value NX&lt;/code&gt; 效果等同于 &lt;code&gt;SETNX key value&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;PX millisecond：设置键的过期时间为millisecond毫秒，当超过这个时间后，设置的键会自动失效&lt;/p&gt;
-&lt;p&gt;上述代码示例是指，当redis中不存在user_key这个键的时候，才会去设置一个user_key键，并且给这个键的值设置为 user_value，且这个键的存活时间为100ms&lt;/p&gt;
-&lt;p&gt;为什么这个命令可以帮我们实现锁机制呢？&lt;/p&gt;
-&lt;p&gt;因为这个命令是只有在某个key不存在的时候，才会执行成功。那么当多个进程同时并发的去设置同一个key的时候，就永远只会有一个进程成功。当某个进程设置成功之后，就可以去执行业务逻辑了，等业务逻辑执行完毕之后，再去进行解锁。&lt;/p&gt;
-&lt;p&gt;解锁很简单，只需要删除这个key就可以了，不过删除之前需要判断，这个key对应的value是当初自己设置的那个。&lt;/p&gt;
-&lt;p&gt;另外，针对redis集群模式的分布式锁，可以采用redis的&lt;a title=&quot;请叫我头头哥&quot; href=&quot;https://redis.io/topics/redlock&quot; target=&quot;_blank&quot;&gt;Redlock&lt;/a&gt;(可能会被墙)机制。&lt;/p&gt;
-&lt;h2 id=&quot;_nav_5&quot; class=&quot;blogCustomTitleStyle&quot;&gt;&lt;span class=&quot;blogCustomTitleIco&quot;&gt;v&lt;/span&gt;基于ZooKeeper实现&lt;/h2&gt;
-&lt;p&gt;其实基于ZooKeeper，就是使用它的临时有序节点来实现的分布式锁。&lt;/p&gt;
-&lt;p&gt;原理&lt;/p&gt;
-&lt;p&gt;当某客户端要进行逻辑的加锁时，就在zookeeper上的某个指定节点的目录下，去生成一个唯一的临时有序节点， 然后判断自己是否是这些有序节点中序号最小的一个，如果是，则算是获取了锁。如果不是，则说明没有获取到锁，那么就需要在序列中找到比自己小的那个节点，并对其调用&lt;code&gt;exist()&lt;/code&gt;方法，对其注册事件监听，当监听到这个节点被删除了，那就再去判断一次自己当初创建的节点是否变成了序列中最小的。如果是，则获取锁，如果不是，则重复上述步骤。&lt;/p&gt;
-&lt;p&gt;当释放锁的时候，只需将这个临时节点删除即可。&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/506684/201808/506684-20180829161053632-1446386777.png&quot; alt=&quot;请叫我头头哥&quot;/&gt;
-&lt;/div&gt;
-&lt;p&gt;如上图，locker是一个持久节点，&lt;code&gt;node_1/node_2/.../node_n&lt;/code&gt; 就是上面说的临时节点，由客户端client去创建的。&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;client_1/client_2/.../clien_n&lt;/code&gt; 都是想去获取锁的客户端。以client_1为例，它想去获取分布式锁，则需要跑到locker下面去创建临时节点（假如是node_1）创建完毕后，看一下自己的节点序号是否是locker下面最小的，如果是，则获取了锁。如果不是，则去找到比自己小的那个节点（假如是node_2），找到后，就监听node_2，直到node_2被删除，那么就开始再次判断自己的node_1是不是序列中最小的，如果是，则获取锁，如果还不是，则继续找一下一个节点。&lt;/p&gt;
-&lt;h2 id=&quot;_nav_7&quot; class=&quot;blogCustomTitleStyle&quot;&gt;&lt;span class=&quot;blogCustomTitleIco&quot;&gt;v&lt;/span&gt;博客总结&lt;/h2&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;分布式锁有很多种，开篇说的&quot;相对主流的有三种&quot;只是针对我所遇到的。分布式锁未来肯定是千变万化的，无论你身处一个什么样的公司，最开始的工作可能都得尽可能的从简单的做起。希望大家能根据所在公司业务场景，选择适合所在项目的方案。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;其他参考资料：&lt;/p&gt;
-
-&lt;div id=&quot;MySignature&quot; readability=&quot;9.0030211480363&quot;&gt;
-&lt;p id=&quot;PSignature&quot;&gt;&lt;br/&gt;作　　者：&lt;strong&gt;&lt;span&gt;&lt;a title=&quot;请叫我头头哥&quot; href=&quot;http://www.cnblogs.com/toutou/&quot; target=&quot;_blank&quot;&gt;请叫我头头哥&lt;/a&gt;&lt;/span&gt;&lt;/strong&gt;&lt;br/&gt;出　　处：&lt;a title=&quot;请叫我头头哥&quot; href=&quot;http://www.cnblogs.com/toutou/&quot; target=&quot;_blank&quot;&gt;http://www.cnblogs.com/toutou/&lt;/a&gt;&lt;br/&gt;关于作者：专注于基础平台的项目开发。如有问题或建议，请多多赐教！&lt;br/&gt;版权声明：本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文链接。&lt;br/&gt;特此声明：所有评论和私信都会在第一时间回复。也欢迎园子的大大们指正错误，共同进步。或者&lt;a title=&quot;请叫我头头哥&quot; href=&quot;http://msg.cnblogs.com/msg/send/%E8%AF%B7%E5%8F%AB%E6%88%91%E5%A4%B4%E5%A4%B4%E5%93%A5&quot; target=&quot;_blank&quot;&gt;直接私信&lt;/a&gt;我&lt;br/&gt;声援博主：如果您觉得文章对您有帮助，可以点击文章右下角&lt;strong&gt;&lt;span&gt;【&lt;a id=&quot;post-up&quot; href=&quot;javascript:void(0);&quot;&gt;推荐&lt;/a&gt;】&lt;/span&gt;&lt;/strong&gt;一下。您的鼓励是作者坚持原创和持续写作的最大动力！&lt;br/&gt;&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Mon, 24 Sep 2018 15:02:00 +0000</pubDate>
-<dc:creator>请叫我头头哥</dc:creator>
-<og:description>随着微处理机技术的发展，人们只需花几百美元就能买到一个CPU芯片，这个芯片每秒钟执行的指令比80年代最大的大型机的处理机每秒钟所执行的指令还多。如果你愿意付出两倍的价钱，将得到同样的CPU，但它却以更</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/toutou/p/java_lock.html</dc:identifier>
-</item>
-<item>
-<title>Cookie和Session在Node.JS中的实践（一） - 无聊就去读书</title>
-<link>http://www.cnblogs.com/wljqds/p/cookie_session_node.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wljqds/p/cookie_session_node.html</guid>
-<description>&lt;p&gt;Cookie和Session是一个非常有趣的概念，也是一个老生常谈的话题。然而，作者看了许多文章，也翻看了几本书籍，它们对Cookie和Session的概念、机制的描述都各不一致，大多文章都只谈到了Cookie和Session其中之一，但在现实开发中两者都需要使用。作者有时候写程序用到了两者但有时候连自己都没理解他们之间的区别、联系、机制等等概念。&lt;br/&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-23-19-08-16.png&quot; alt=&quot;2018-09-23-19-08-16&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;cookie&quot;&gt;Cookie&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;&lt;strong&gt;HTTP的无状态协议是产生Cookie技术的重要原因&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;HTTP是一种不保存状态，即无状态（stateless）协议。HTTP协议自身不对请求和响应之间的通信转台进行保存。也就是说HTTP是不会做持久化（Persistence）处理的。当使用HTTP进行通信时，每当有新的请求发送，就会有对应的新响应产生。这并不是缺陷，而是HTTP为了更快的处理大量事务。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-23-19-52-17.png&quot; alt=&quot;2018-09-23-19-52-17&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然而，无状态协议让业务处理变得困难的情况越来越多了，如：我们登录了某宝，就算我们跳转到了某宝的其他页面，也需要保持登录这个“状态”，但HTTP协议做不到。针对这个例子，网站为了掌握是谁发送的请求，就需要把用户的状态保存起来。&lt;/p&gt;
-&lt;p&gt;为了实现期望的保持状态功能，于是引入了Cookie技术，所以cookie的主要作用就是&lt;strong&gt;记录状态，包括会话状态管理，用户的个性化设置，浏览器的行为跟踪&lt;/strong&gt;。有了Cookie再用HTTP通信就可以管理状态，因此就有人说Cookie是HTTP的扩展。&lt;/p&gt;
-&lt;h3 id=&quot;客户端中的cookie&quot;&gt;客户端中的Cookie&lt;/h3&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Cookie是服务器发送到用户浏览器并保存在本地的一小块数据，它会在浏览器下次向同一服务器再发起请求时被携带并发送到服务器上。&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;这是我们经常听到的关于Cookie的概念，但从来没见过Cookie长什么样子。在Chrome中通过开发者工具可以查看网站用到的所有Cookie，以博客园用到的Cookie为例。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-23-20-09-48.png&quot; alt=&quot;2018-09-23-20-09-48&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;另外我们可以使用&lt;code&gt;JavaScript&lt;/code&gt;原生的API获取cookie：&lt;code&gt;document.cookie&lt;/code&gt;，使用该方法获只能获取非&lt;code&gt;HttpOnly&lt;/code&gt;类型的cookie。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-23-23-49-28.png&quot; alt=&quot;2018-09-23-23-49-28&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;跟直接在&lt;code&gt;chrome&lt;/code&gt;查看&lt;code&gt;cookie&lt;/code&gt;，使用控制台Console得到的结果除了&lt;code&gt;HttpOnly&lt;/code&gt;以外的Cookie都是一样的。可以发现，每一个&lt;code&gt;cookie&lt;/code&gt;都有几个不同的字段：&lt;code&gt;name,value,domain,path,expires/max-age,HttpOnly,secure&lt;/code&gt;来分析一下比较常用的字段：&lt;/p&gt;
-&lt;h4 id=&quot;name和value&quot;&gt;name和value&lt;/h4&gt;
-&lt;p&gt;设置&lt;code&gt;cookie&lt;/code&gt;的名字和值。必须设置字段。&lt;/p&gt;
-&lt;h4 id=&quot;domain和path&quot;&gt;domain和path&lt;/h4&gt;
-&lt;p&gt;&lt;code&gt;domain&lt;/code&gt;是域名，&lt;code&gt;path&lt;/code&gt;是路径，两者加起来就是URL，&lt;code&gt;domain&lt;/code&gt;结合&lt;code&gt;path&lt;/code&gt;一起来限制cookie能被哪些URL访问。概念比较抽象，举个例子&lt;/p&gt;
-&lt;blockquote readability=&quot;9&quot;&gt;
-&lt;p&gt;以博客园为例，博客园cookie的&lt;code&gt;domain&lt;/code&gt;为&quot;cnblogs.com&quot;,&lt;code&gt;path&lt;/code&gt;为&quot;/&quot;，若我们请求的URL的域名是&quot;cnblogs.com&quot;或者它的子域&quot;home.cnblogs.com&quot;，并且URL的路径都是&quot;/&quot;或者它的子路径&quot;/example&quot;，&quot;/home/user&quot;，以上这些URL都能访问cookie，浏览器会将这些cookie添加到请求的cookie头部中去。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;以上两个字段是可选的，&lt;code&gt;domain&lt;/code&gt;默认cookie所在的域名，&lt;code&gt;path&lt;/code&gt;默认设置该cookie的网页所在的目录。&lt;/p&gt;
-&lt;h4 id=&quot;secure&quot;&gt;secure&lt;/h4&gt;
-&lt;p&gt;带有此字段的cookie表示只有在请求使用HTTPS协议的时候才能被传到服务器中。但通常建议不会把保密的数据放到cookie中存储。&lt;/p&gt;
-&lt;h4 id=&quot;httponly&quot;&gt;HttpOnly&lt;/h4&gt;
-&lt;p&gt;JavaScript原生API能访问浏览器的cookie，这可能会遭遇&lt;code&gt;XSS&lt;/code&gt;攻击，为了防范，设置了该字段的cookie，原生API是无法访问的。&lt;/p&gt;
-&lt;h4 id=&quot;expire和max-age&quot;&gt;expire和Max-age&lt;/h4&gt;
-&lt;p&gt;&lt;code&gt;expires&lt;/code&gt;：表示cookie的最长有效时间，cookie失效时刻=expires形式是符合&lt;code&gt;HTTP-date&lt;/code&gt;规范的时间戳，这个&lt;code&gt;Date&lt;/code&gt;是一个通用的首部，语法：&lt;code&gt;Date: &amp;lt;day-name&amp;gt; &amp;lt;day&amp;gt; &amp;lt;month&amp;gt; &amp;lt;year&amp;gt; &amp;lt;hour&amp;gt;:&amp;lt;minute&amp;gt;:&amp;lt;second&amp;gt; GMT&lt;/code&gt;，可以通过&lt;code&gt;new Date().toGMTString获得&lt;/code&gt;。&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;Max-Age&lt;/code&gt;：表示cookie存储的最长时间。单位是秒，有效期：&lt;code&gt;创建时刻+max-age&lt;/code&gt;。跟expire的作用的一样的，若两者都存在则&lt;code&gt;Max-Age&lt;/code&gt;的优先级高。该属性在一些老浏览器中不支持。&lt;/p&gt;
-&lt;p&gt;如果没有给cookie设置以上这两个字段，那么cookie默认就是所谓的&lt;code&gt;会话Cookie&lt;/code&gt;，有效期就是&lt;code&gt;session&lt;/code&gt;，这里的session指的就是会话，浏览器关闭后cookie就没有了整个过程就是一个会话。&lt;/p&gt;
-&lt;h3 id=&quot;httpcookie工作原理&quot;&gt;HTTP+COOKIE工作原理&lt;/h3&gt;
-&lt;p&gt;HTTP是无状态协议，所以需要COOKIE技术来保持状态。我们知道，Cookie是服务器发送到用户浏览器并保存在本地的一小块数据，这里分析一下HTTP+COOKIE的工作原理：&lt;/p&gt;
-&lt;p&gt;考虑两种可能：&lt;br/&gt;1.&lt;strong&gt;客户端第一请求该台服务器，也就是服务器没有发送cookie给该台客户端&lt;/strong&gt;，因此客户端的第一次请求是没有cookie首部字段数据的，而服务器作为响应也会将cookie首部数据发送到该台客户端中。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-01-20-48.png&quot; alt=&quot;2018-09-24-01-20-48&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;2.&lt;strong&gt;客户端不是第一次请求该台服务器，服务器已经有发送过cookie给该台客户端&lt;/strong&gt;，那么在客户端上的cookie都会随着请求一同发送到服务器中，而服务器会检查这个cookie给你返回相应的数据，而不再需要设定cookie。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-20-07-56.png&quot; alt=&quot;2018-09-24-20-07-56&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;cookie实践&quot;&gt;COOKIE实践&lt;/h3&gt;
-&lt;p&gt;为了能明白上面的cookie工作原理，以下进行实践，建议读者跟我一起做&lt;/p&gt;
-&lt;p&gt;1.还是以博客园为例，在账户退出的状态下打开(&lt;a href=&quot;https://www.cnblogs.com&quot; class=&quot;uri&quot;&gt;https://www.cnblogs.com&lt;/a&gt;)[博客园首页],使用Chrome，如果对浏览器开发工具比较熟悉也可以使用火狐，把网站以往的cookie清除&lt;br/&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-19-42-41.png&quot; alt=&quot;2018-09-24-19-42-41&quot;/&gt;&lt;br/&gt;2.进行刷新页面，再打开chrome开发工具&lt;code&gt;network&lt;/code&gt;，选择其中的请求，点击查看&lt;code&gt;请求首部（Request Header）&lt;/code&gt;以及&lt;code&gt;响应首部（Response Header）&lt;/code&gt;，&lt;strong&gt;发现响应首部有&lt;code&gt;set-cookie字段&lt;/code&gt;，即服务器给浏览器设置的cookie。并且，请求首部是没有cookie字段的，因为我们自己清除了cookie！&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-20-01-56.png&quot; alt=&quot;2018-09-24-20-01-56&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-20-02-16.png&quot; alt=&quot;2018-09-24-20-02-16&quot;/&gt;&lt;br/&gt;此时，再去查看Cookie面板发现服务器已经给浏览器设置了Cookie。&lt;/p&gt;
-&lt;p&gt;再次刷新页面。自行重复以上步骤，&lt;strong&gt;发现请求首部多了一个&lt;code&gt;cookie&lt;/code&gt;字段，即有了cookie后，对服务器的每一次请求都会带上cookie。&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;http://p9h1w9ht8.bkt.clouddn.com/2018-09-24-20-10-34.png&quot; alt=&quot;2018-09-24-20-10-34&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;HTTP的无状态协议是产生Cookie技术的重要原因，cookie是服务器发送到用户浏览器并保存在本地的一小块数据，它会在浏览器下次向同一服务器再发起请求时被携带并发送到服务器上。cookie的主要作用就是记录状态，包括会话状态管理，用户的个性化设置，浏览器的行为跟踪。&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;写到这，已经涉及不少知识，文章篇幅太长不好，第二篇再写session以及在node.JS的实践。剧透一下，通过Node.JS操作cookie的代码：）&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;const express = require('express');
-const cookieParser = require('cookie-parser')
-
-var server = express();
-
-server.use(cookieParser('alkdukajvldfq'));
-server.use('/', function(req, res) {
-    // 发送cookie,path是指定能访问cookie的路径，可从下往上读取，反则不行，比如/=&amp;gt;path:/aaa
-    res.cookie('name', 'janro', {path: '/', maxAge: 3600*1000, signed: true});
-    // 读取cookie
-    console.log(req.cookies);
-    console.log(req.signedCookies);
-    // / 和favicon
-    console.log(req.url);
-    res.send('OK');
-
-    //清除cookie
-    res.clearCookie('name');
-});
-
-
-server.listen(8080);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;下次，session见。&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;如果您觉得阅读本文对您有帮助，请点一下“推荐”按钮，您的“推荐”将是我最大的写作动力！&lt;/p&gt;
-&lt;h2 id=&quot;reference&quot;&gt;Reference&lt;/h2&gt;
-&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://segmentfault.com/a/1190000004556040&quot; class=&quot;uri&quot;&gt;https://segmentfault.com/a/1190000004556040&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Cookies&quot; class=&quot;uri&quot;&gt;https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Cookies&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://segmentfault.com/a/1190000007579928&quot; class=&quot;uri&quot;&gt;https://segmentfault.com/a/1190000007579928&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;图解HTTP&lt;/li&gt;
-&lt;li&gt;JavaScript高级程序设计&lt;/li&gt;
-&lt;/ol&gt;</description>
-<pubDate>Mon, 24 Sep 2018 14:51:00 +0000</pubDate>
-<dc:creator>无聊就去读书</dc:creator>
-<og:description>Cookie和Session在Node.JS中的实践（一） Cookie和Session是一个非常有趣的概念，也是一个老生常谈的话题。然而，作者看了许多文章，也翻看了几本书籍，它们对Cookie和Se</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wljqds/p/cookie_session_node.html</dc:identifier>
-</item>
-<item>
-<title>Log4j使用教程 - Miya。</title>
-<link>http://www.cnblogs.com/SimpleWu/p/9696970.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/SimpleWu/p/9696970.html</guid>
-<description>&lt;p&gt;在我们的应用程序中日志是不可缺少的部分，在Apache中由一个功能无比强大的日志组件，它提供了方便的日志记录，这个开源的项目就是我们惯用的Log4j，jar包我么们一颗取Apache官网下载最新版本的。&lt;a href=&quot;https://logging.apache.org/log4j/2.x/&quot; target=&quot;_blank&quot;&gt;log4j下载地址&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;一.入门篇&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;1.打开我们的Eclipse新建一个Java项目并且导入Log4j的Jar包&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1462123/201809/1462123-20180924213140199-188210937.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;2.创建并且设置我们Log4j的资源文件&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; ### 设置###
-log4j.rootLogger &lt;/span&gt;= debug,stdout,D,&lt;span&gt;E
-
-### 输出信息到控制台 ###
-log4j.appender.stdout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.ConsoleAppender
-log4j.appender.stdout.Target &lt;/span&gt;=&lt;span&gt; System.out
-log4j.appender.stdout.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout
-log4j.appender.stdout.layout.ConversionPattern &lt;/span&gt;= &lt;span&gt;[&lt;/span&gt;&lt;span&gt;%-5p&lt;/span&gt;&lt;span&gt;]&lt;/span&gt; %d{yyyy-MM-dd HH:mm:ss,&lt;span&gt;SSS} method:%l%n%m%n
-
-### 输出DEBUG级别以上的日志到&lt;/span&gt;&lt;span&gt;E://logs/error.log ###
-log4j.appender.D &lt;/span&gt;=&lt;span&gt; org.apache.log4j.DailyRollingFileAppender
-log4j.appender.D.File &lt;/span&gt;=&lt;span&gt; E://logs/log.log
-log4j.appender.D.Append &lt;/span&gt;=&lt;span&gt; true
-log4j.appender.D.Threshold &lt;/span&gt;=&lt;span&gt; DEBUG 
-log4j.appender.D.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout
-log4j.appender.D.layout.ConversionPattern &lt;/span&gt;= %-d{yyyy-MM-dd HH:mm:ss}  &lt;span&gt;[&lt;/span&gt;&lt;span&gt; %t:%r &lt;/span&gt;&lt;span&gt;]&lt;/span&gt; - &lt;span&gt;[&lt;/span&gt;&lt;span&gt; %p &lt;/span&gt;&lt;span&gt;]&lt;/span&gt;&lt;span&gt;  %m%n
-
-### 输入ERROR级别以上的日志到&lt;/span&gt;&lt;span&gt;E://logs/error.log ###
-log4j.appender.E &lt;/span&gt;=&lt;span&gt; org.apache.log4j.DailyRollingFileAppender
-log4j.appender.E.File &lt;/span&gt;=&lt;span&gt;E://logs/error.log 
-log4j.appender.E.Append &lt;/span&gt;=&lt;span&gt; true
-log4j.appender.E.Threshold &lt;/span&gt;=&lt;span&gt; ERROR 
-log4j.appender.E.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout
-log4j.appender.E.layout.ConversionPattern &lt;/span&gt;= %-d{yyyy-MM-dd HH:mm:ss}  &lt;span&gt;[&lt;/span&gt;&lt;span&gt; %t:%r &lt;/span&gt;&lt;span&gt;]&lt;/span&gt; - &lt;span&gt;[&lt;/span&gt;&lt;span&gt; %p &lt;/span&gt;&lt;span&gt;]&lt;/span&gt;  %m%n
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;3.我们来到Log4jTest中的main方法设置日志内容&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-logger.debug(&quot;记录debug级别的信息  &quot;&lt;span&gt;);  
-logger.info(&lt;/span&gt;&quot;记录info级别的信息  &quot;&lt;span&gt;);  
-logger.error(&lt;/span&gt;&quot;记录error级别的信息  &quot;); 
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;4.查看我们的日志输出结果：&lt;/p&gt;
-&lt;p&gt;这是控制台上打印的信息。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1462123/201809/1462123-20180924214028314-1957044953.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后我们在来看看我们日志文件&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1462123/201809/1462123-20180924214040592-1471181859.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1462123/201809/1462123-20180924214059542-1257809864.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这个时候我们发现日志已经按照我们的配置要求输出到对应的文档去了。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;二.log4j最基本的使用方式&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;log4j最要由三个重要的组件构成：日志信息的优先级，日志信息的输出目的地，日志信息的输出格式。日志信息的优先级从高到低由ERROR,WARN,INFO,DEBUG,分别用来指定这条日志信息的重要程度；日志信息的输出目的地指定了日志是打印在控制台还是输出到文件中；而输出格式控制了日志信息的显示内容。&lt;/span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;1）定义配置文件&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;其实我们可以完全不用配置log4j文件，我们可以在代码中完成log4j的配置环境，但是使用配置文件将使应用程序变得更加的灵活。log4j支持两种配置文件格式，一种是XML格式的文件还有一种就是我们上面用的使用properteis资源文件。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;配置根Logger，语法为：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-log4j.rootLogger = [ level ] , appenderName, appenderName, …
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;其中，level 是日志记录的优先级，分为OFF、FATAL、ERROR、WARN、INFO、DEBUG、ALL或者您定义的级别。Log4j建议只使用四个级别，优 先级从高到低分别是ERROR、WARN、INFO、DEBUG。通过在这里定义的级别，您可以控制到应用程序中相应级别的日志信息的开关。比如在这里定 义了INFO级别，则应用程序中所有DEBUG级别的日志信息将不被打印出来。 appenderName就是指B日志信息输出到哪个地方。您可以同时指定多个输出目的地。&lt;/p&gt;
-&lt;p&gt;配置日志信息输出目的地Appender，其语法为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-log4j.appender.appenderName =&lt;span&gt; fully.qualified.name.of.appender.class  
-log4j.appender.appenderName.option1 &lt;/span&gt;=&lt;span&gt; value1  
-…  
-log4j.appender.appenderName.option &lt;/span&gt;= valueN
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;其中，Log4j提供的appender有以下几种：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;org.apache.log4j.ConsoleAppender（控制台），  
-org.apache.log4j.FileAppender（文件），  
-org.apache.log4j.DailyRollingFileAppender（每天产生一个日志文件），  
-org.apache.log4j.RollingFileAppender（文件大小到达指定尺寸的时候产生一个新的文件），  
-org.apache.log4j.WriterAppender（将日志信息以流格式发送到任意指定的地方）&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;3.配置日志信息的格式（布局），其语法为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-log4j.appender.appenderName.layout =&lt;span&gt; fully.qualified.name.of.layout.class  
-log4j.appender.appenderName.layout.option1 &lt;/span&gt;=&lt;span&gt; value1  
-…  
-log4j.appender.appenderName.layout.option &lt;/span&gt;= valueN
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;其中，Log4j提供的layout有以下几种：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;org.apache.log4j.HTMLLayout（以HTML表格形式布局），  
-org.apache.log4j.PatternLayout（可以灵活地指定布局模式），  
-org.apache.log4j.SimpleLayout（包含日志信息的级别和信息字符串），  
-org.apache.log4j.TTCCLayout（包含日志产生的时间、线程、类别等等信息）&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;Log4J采用类似C语言中的printf函数的打印格式格式化日志信息，打印参数如下： %m 输出代码中指定的消息&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;%p 输出优先级，即DEBUG，INFO，WARN，ERROR，FATAL  
-%r 输出自应用启动到输出该log信息耗费的毫秒数  
-%c 输出所属的类目，通常就是所在类的全名  
-%t 输出产生该日志事件的线程名  
-%n 输出一个回车换行符，Windows平台为“rn”，Unix平台为“n”  
-%d 输出日志时间点的日期或时间，默认格式为ISO8601，也可以在其后指定格式，比如：%d{yyy MMM dd HH:mm:ss,SSS}，输出类似：2002年10月18日 &lt;/span&gt;&lt;span&gt;22&lt;/span&gt;：&lt;span&gt;10&lt;/span&gt;：&lt;span&gt;28&lt;/span&gt;，&lt;span&gt;921&lt;/span&gt;&lt;span&gt;  
-%l 输出日志事件的发生位置，包括类目名、发生的线程，以及在代码中的行数。举例：Log4jTest.main(Log4jTest.java:&lt;/span&gt;&lt;span&gt;9&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;2）在代码中使用Log4j&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt; 首先我们要得到记录器&lt;/p&gt;
-&lt;p&gt;使用Log4j，第一步就是获取日志记录器，这个记录器将负责控制日志信息。其语法为：&lt;/p&gt;
-&lt;p&gt;　　public static Logger getLogger( String name)&lt;/p&gt;
-&lt;p&gt;　　通过指定的名字获得记录器，如果必要的话，则为这个名字创建一个新的记录器。Name一般取本类的名字，比如：&lt;/p&gt;
-&lt;p&gt;　　static Logger logger = Logger.getLogger ( ServerWithLog4j.class.getName () )&lt;/p&gt;
-&lt;p&gt;然后我们需要读取配置文件&lt;/p&gt;
-&lt;p&gt;当获得了日志记录器之后，第二步将配置Log4j环境，其语法为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;BasicConfigurator.configure ()： 自动快速地使用缺省Log4j环境。  
-PropertyConfigurator.configure ( &lt;/span&gt;&lt;span&gt;String&lt;/span&gt;&lt;span&gt; configFilename) ：读取使用Java的特性文件编写的配置文件。  
-DOMConfigurator.configure ( &lt;/span&gt;&lt;span&gt;String&lt;/span&gt; filename ) ：读取XML形式的配置文件。
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;插入记录信息（格式化日志信息）&lt;/p&gt;
-&lt;p&gt;当上两个必要步骤执行完毕，您就可以轻松地使用不同优先级别的日志记录语句插入到您想记录日志的任何地方，其语法如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-Logger.debug ( &lt;span&gt;Object&lt;/span&gt;&lt;span&gt; message ) ;  
-Logger.info ( &lt;/span&gt;&lt;span&gt;Object&lt;/span&gt;&lt;span&gt; message ) ;  
-Logger.warn ( &lt;/span&gt;&lt;span&gt;Object&lt;/span&gt;&lt;span&gt; message ) ;  
-Logger.error ( &lt;/span&gt;&lt;span&gt;Object&lt;/span&gt; message ) ;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;3）日志级别&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;　每个Logger都被了一个日志级别（log level），用来控制日志信息的输出。日志级别从高到低分为：&lt;/p&gt;
-&lt;p&gt;　　A：off 最高等级，用于关闭所有日志记录。&lt;/p&gt;
-&lt;p&gt;　　B：fatal 指出每个严重的错误事件将会导致应用程序的退出。&lt;/p&gt;
-&lt;p&gt;　　C：error 指出虽然发生错误事件，但仍然不影响系统的继续运行。&lt;/p&gt;
-&lt;p&gt;　　D：warm 表明会出现潜在的错误情形。&lt;/p&gt;
-&lt;p&gt;　　E：info 一般和在粗粒度级别上，强调应用程序的运行全程。&lt;/p&gt;
-&lt;p&gt;　　F：debug 一般用于细粒度级别上，对调试应用程序非常有帮助。&lt;/p&gt;
-&lt;p&gt;　　G：all 最低等级，用于打开所有日志记录。&lt;/p&gt;
-&lt;p&gt;　　上面这些级别是定义在org.apache.log4j.Level类中。Log4j只建议使用4个级别，优先级从高到低分别是error,warn,info和debug。通过使用日志级别，可以控制应用程序中相应级别日志信息的输出。例如，如果使用b了info级别，则应用程序中所有低于info级别的日志信息(如debug)将不会被打印出来。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;三，Web项目中使用log4j&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;上面代码描述了Log4j的简单应用，其实使用Log4j也就是这样简单方便。当然除了上面的配置方法，还有其它，比如做一个J2EE应用，在J2EE应用使用Log4j，必须先在启动服务时加载Log4j的配置文件进行初始化，可以在web.xml中进行。&lt;/p&gt;
-
-&lt;p&gt;　　1、web应用的log4j使用基本上都采用：新建一个servlet，这个servlet在init函数中为log4j执行配置。一般就是读入配置文件。所以需要在web.xml中为这个servlet配置，同时设定load-on-startup为1。&lt;/p&gt;
-
-&lt;p&gt;　　2、这个servlet配置log4j就是读出配置文件，然后调用configure函数。这里有两个问题：一、需要知道文件在哪里；二、需要正确的文件类型&lt;/p&gt;
-
-&lt;p&gt;　　3、配置文件位置在web.xml中配置一个param即可，路径一般是相对于web的root目录&lt;/p&gt;
-
-&lt;p&gt;　　4、文件类型一般有两种，一个是Java的property文件，另一种是xml文件&lt;/p&gt;
-
-&lt;p&gt;　　配置文件的大致内容：log4j可以指定输出的log级别的最低等级，以及log的输出配置格式，每个log可以指定多个输出方式&lt;/p&gt;
-&lt;p&gt;接下来我们来创建一个WEB项目&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1462123/201809/1462123-20180924220216249-409653255.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然后我们配置WEB。xml&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
- &amp;lt;servlet&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JTestServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;com.miya.log4j.Log4JTestServlet&amp;lt;/servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-    &amp;lt;/servlet&amp;gt;  
-
-    &amp;lt;!--用来启动 log4jConfigLocation的servlet --&amp;gt;  
-    &amp;lt;servlet&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JInitServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;com.miya.log4j.Log4JInitServlet&amp;lt;/servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-        &amp;lt;init-param&amp;gt;  
-            &amp;lt;param-name&amp;gt;log4j-properties-location&amp;lt;/param-name&amp;gt;  
-            &amp;lt;param-value&amp;gt;/WEB-INF/classes/log4j.properties&amp;lt;/param-value&amp;gt;  
-        &amp;lt;/init-param&amp;gt;  
-        &amp;lt;load-on-startup&amp;gt;&lt;span&gt;1&lt;/span&gt;&amp;lt;/load-on-startup&amp;gt;  
-    &amp;lt;/servlet&amp;gt;  
-
-    &amp;lt;servlet-mapping&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JTestServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;url-pattern&amp;gt;/test&amp;lt;/url-pattern&amp;gt;  
-    &amp;lt;/servlet-mapping&amp;gt;  
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;配置log4j.properties&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; ### set log levels ###  
-log4j.rootLogger &lt;/span&gt;=&lt;span&gt; debug,stdout,D,E  
-
-log4j.appender.stdout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.ConsoleAppender  
-log4j.appender.stdout.Target &lt;/span&gt;=&lt;span&gt; System.out  
-log4j.appender.stdout.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout  
-log4j.appender.stdout.layout.ConversionPattern &lt;/span&gt;= [%-5p] %d{yyyy-MM-&lt;span&gt;dd HH:mm:ss,SSS} method:%l%n%m%n  
-
-log4j.appender.D &lt;/span&gt;=&lt;span&gt; org.apache.log4j.DailyRollingFileAppender  
-log4j.appender.D.File &lt;/span&gt;= F://logs/&lt;span&gt;log.log  
-log4j.appender.D.Append &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;  
-log4j.appender.D.Threshold &lt;/span&gt;=&lt;span&gt; DEBUG   
-log4j.appender.D.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout  
-log4j.appender.D.layout.ConversionPattern &lt;/span&gt;= %-d{yyyy-MM-dd HH:mm:ss}  [ %t:%r ] -&lt;span&gt; [ %p ]  %m%n  
-
-log4j.appender.E &lt;/span&gt;=&lt;span&gt; org.apache.log4j.DailyRollingFileAppender  
-log4j.appender.E.File &lt;/span&gt;=F://logs/&lt;span&gt;error.log   
-log4j.appender.E.Append &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;  
-log4j.appender.E.Threshold &lt;/span&gt;=&lt;span&gt; ERROR   
-log4j.appender.E.layout &lt;/span&gt;=&lt;span&gt; org.apache.log4j.PatternLayout  
-log4j.appender.E.layout.ConversionPattern &lt;/span&gt;= %-d{yyyy-MM-dd HH:mm:ss}  [ %t:%r ] - [ %p ]  %m%n
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;WEB容器一打开就加载servlet这样也是就行了。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;当我们需要在Spring项目中加入Log4j&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;首先百年不变配置Web.xml&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-    &amp;lt;servlet&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JTestServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;com.miya.log4j.Log4JTestServlet&amp;lt;/servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-    &amp;lt;/servlet&amp;gt;  
-
-    &amp;lt;!--用来启动 log4jConfigLocation的servlet --&amp;gt;  
-&amp;lt;!--     &amp;lt;servlet&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JInitServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;com.miya.log4j.Log4JInitServlet&amp;lt;/servlet-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-        &amp;lt;init-param&amp;gt;  
-            &amp;lt;param-name&amp;gt;log4j-properties-location&amp;lt;/param-name&amp;gt;  
-            &amp;lt;param-value&amp;gt;/WEB-INF/classes/log4j.properties&amp;lt;/param-value&amp;gt;  
-        &amp;lt;/init-param&amp;gt;  
-        &amp;lt;load-on-startup&amp;gt;&lt;span&gt;1&lt;/span&gt;&amp;lt;/load-on-startup&amp;gt;  
-    &amp;lt;/servlet&amp;gt;--&amp;gt;  
-
-    &amp;lt;servlet-mapping&amp;gt;  
-        &amp;lt;servlet-name&amp;gt;Log4JTestServlet&amp;lt;/servlet-name&amp;gt;  
-        &amp;lt;url-pattern&amp;gt;/test&amp;lt;/url-pattern&amp;gt;  
-    &amp;lt;/servlet-mapping&amp;gt;   
-
-        &amp;lt;!-- Spring 容器加载 --&amp;gt;  
-    &amp;lt;listener&amp;gt;  
-        &amp;lt;listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;org.springframework.web.context.ContextLoaderListener&amp;lt;/listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-    &amp;lt;/listener&amp;gt;  
-    &amp;lt;context-param&amp;gt;  
-        &amp;lt;param-name&amp;gt;contextConfigLocation&amp;lt;/param-name&amp;gt;  
-        &amp;lt;param-value&amp;gt;classpath:applicationContext.xml&amp;lt;/param-value&amp;gt;  
-    &amp;lt;/context-param&amp;gt;   
-
-    &amp;lt;!-- 设置根目录 --&amp;gt;  
-    &amp;lt;context-param&amp;gt;    
-        &amp;lt;param-name&amp;gt;webAppRootKey&amp;lt;/param-name&amp;gt;    
-        &amp;lt;param-value&amp;gt;webapp.root&amp;lt;/param-value&amp;gt;    
-    &amp;lt;/context-param&amp;gt;    
-
-    &amp;lt;context-param&amp;gt;  
-        &amp;lt;param-name&amp;gt;log4jConfigLocation&amp;lt;/param-name&amp;gt;  
-        &amp;lt;param-value&amp;gt;/WEB-INF/classes/log4j.properties&amp;lt;/param-value&amp;gt;  
-    &amp;lt;/context-param&amp;gt;  
-    &amp;lt;!-- 3000表示 开一条watchdog线程每60秒扫描一下配置文件的变化;这样便于日志存放位置的改变 --&amp;gt;  
-    &amp;lt;context-param&amp;gt;    
-         &amp;lt;param-name&amp;gt;log4jRefreshInterval&amp;lt;/param-name&amp;gt;    
-         &amp;lt;param-value&amp;gt;&lt;span&gt;3000&lt;/span&gt;&amp;lt;/param-value&amp;gt;    
-    &amp;lt;/context-param&amp;gt;   
-    &amp;lt;listener&amp;gt;  
-        &amp;lt;listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;org.springframework.web.util.Log4jConfigListener&amp;lt;/listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;  
-    &amp;lt;/listener&amp;gt;   
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;在spring的配置中applicationContext.xml中不需要加入任何bean。在我们程序一运行log4j的servlet也会跟着spring窗口启动了。&lt;/p&gt;
-
-</description>
-<pubDate>Mon, 24 Sep 2018 14:11:00 +0000</pubDate>
-<dc:creator>Miya。</dc:creator>
-<og:description>在我们的应用程序中日志是不可缺少的部分，在Apache中由一个功能无比强大的日志组件，它提供了方便的日志记录，这个开源的项目就是我们惯用的Log4j，jar包我么们一颗取Apache官网下载最新版本的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/SimpleWu/p/9696970.html</dc:identifier>
-</item>
-<item>
-<title>java异常查看利器之使用 jvmti 的Callback_JVMTI_EVENT_EXCEPTION 事件查看异常 - 来自非洲大草原的食人虎</title>
-<link>http://www.cnblogs.com/yql1986/p/9695319.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/yql1986/p/9695319.html</guid>
-<description>&lt;p&gt;　　阅读本文前需要了解什么是&lt;strong&gt;jvmti&lt;/strong&gt;，&lt;strong&gt;jvmti&lt;/strong&gt;全称称之为 &lt;strong&gt;JVM Tool Interface，&lt;/strong&gt;有关jvmti更详细的知识，本文不再详细列出。大家可以借助百度来了解有关它更为详尽的内容。&lt;/p&gt;
-&lt;p&gt;　　在开源文件大行其道的今天，基于java种种解决方案和框架纷绘踏至而来，浩瀚如海看不完也学不尽。在采用这些解决方案和框架进行项目开发时，往往会出现当程序卡壳时，既无异常提示信息亦没有与之对应的日志输出的局面。每每出现这样的困境时，往往只能通过打断点来一步步调试跟踪来解决。更有甚者，基于某一底层的框架进行相应的开发时，受限于框架开发者的精力和时间等因素的影响，如果框架针对某异常处理设计的不合理，处理异常时没有向外抛出异常，同时又没有输出日志信息。当出现问题时，雪上加霜的是框架又没有提供源码用于打断点调试，此时只能借助通过反编译工具，阅读框架源码来尝试解决问题。每每出现这些困境，真希望有一种工具能够洞悉那些被框架“吃掉”没有向往抛出的异常，以便加快问题的解决步伐。&lt;/p&gt;
-&lt;p&gt;　　为了方便开发，一直都想做一个有关java异常查看的小工具。想了很长时间，想到了如下几种实现方式：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;借助字节码工具，在每一个方法开头和结尾处插入java异常捕获代码。这种方式实现起来效率太低了，况且如果在方法体内，捕获异常并没有向外抛出的话，就算采用这种方式也看不到异常。&lt;/li&gt;
-&lt;li&gt;SpringMVC框架针对异常进行了统一的封装和处理，只要进行相应的扩展就能捕获到程序抛出的异常。这种实现方式较前一种比较看来，效率大大提高了，但是仍然没有解决前者提到的，如果应用程序内部自己“吃掉异常”，不向外抛出异常的话，依然无法捕捉到异常，而且这种实现实现方式仅仅局限于使用了SpringMVC框架的WEB应用程序，如果使用了其它的WEB架构或者非WEB的应用程序就会无能为力，局限性太强。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;　　思来索去，想到java应用程序的运行肯定是离不开jvm的，不妨看一下jvm中有没有提供这样的扩展。在网上搜索了一番，发现jvm还真提供了这样的扩展。&lt;/p&gt;
-&lt;p&gt;JVM Tool Interface 链接地址：&lt;a title=&quot;https://docs.oracle.com/javase/8/docs/platform/jvmti/jvmti.html#Exception&quot; href=&quot;https://docs.oracle.com/javase/8/docs/platform/jvmti/jvmti.html#Exception&quot; target=&quot;_blank&quot;&gt;https://docs.oracle.com/javase/8/docs/platform/jvmti/jvmti.html#Exception&lt;/a&gt;&lt;/p&gt;
-&lt;hr/&gt;
-&lt;p&gt;示例代码，在main方法中吃掉异常之后，不作任何处理。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.github.torlight.jvmtit;
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; 
-&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;/**&lt;/span&gt;
-&lt;span&gt; 4&lt;/span&gt; &lt;span&gt; * Hello world!
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; &lt;span&gt; *
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;  &lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; App {
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;     
-&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main( String[] args ){
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         
-&lt;span&gt;11&lt;/span&gt;         System.out.println( &quot;Hello World!&quot;&lt;span&gt; );
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;       
-&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;             &lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; NullPointerException(&quot;QQQ&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;             
-&lt;span&gt;17&lt;/span&gt; &lt;span&gt;        }    
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　程序加载相应的扩展，运行之后效果如下所示，可以看到在控制台上面，打印出空指针异常。如果不借助jvmti提供的异常事件进行相应的扩展话，控制台上就不会打印空指针异常信息。其实现原理也很简单，借助jvmti提供的异常事件进行相应的扩展，当jvm捕获到异常时，会回调针对该事件的扩展方法，在该方法体内部调用 printStackTrace 方法，打印异常提示信息。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;java.lang.ClassNotFoundException: com.github.torlight.jvmtit.App
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     at java.net.URLClassLoader.findClass(URLClassLoader.java:381&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:424&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:411&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     at sun.misc.Launcher$AppClassLoader.loadClass(Launcher.java:335&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:357&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;     at sun.launcher.LauncherHelper.checkAndLoadMain(LauncherHelper.java:495&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;java.lang.ClassNotFoundException: com.github.torlight.jvmtit.App
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;     at java.net.URLClassLoader.findClass(URLClassLoader.java:381&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:424&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:411&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;     at sun.misc.Launcher$AppClassLoader.loadClass(Launcher.java:335&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;     at java.lang.ClassLoader.loadClass(ClassLoader.java:357&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     at sun.launcher.LauncherHelper.checkAndLoadMain(LauncherHelper.java:495&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;15 java.lang.NullPointerException: QQQ
-16     at com.github.torlight.jvmtit.App.main(App.java:14)
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; Hello World!
-&lt;span&gt;18&lt;/span&gt; loaded &lt;span&gt;class&lt;/span&gt; name=&lt;span&gt;run in Callback_JVMTI_EVENT_EXCEPTION method
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;  Exception: Ljava/lang/&lt;span&gt;ClassNotFoundException;
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; loaded &lt;span&gt;class&lt;/span&gt; name=&lt;span&gt;run in Callback_JVMTI_EVENT_EXCEPTION method
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;  Exception: Ljava/lang/&lt;span&gt;ClassNotFoundException;
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; loaded &lt;span&gt;class&lt;/span&gt; name=&lt;span&gt;run in Callback_JVMTI_EVENT_EXCEPTION method
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;  Exception: Ljava/lang/&lt;span&gt;NullPointerException;
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; agent onload
-&lt;/pre&gt;&lt;/div&gt;
-&lt;hr/&gt;&lt;p&gt;下面贴出针对jvmti Callback_JVMTI_EVENT_EXCEPTION 事件进行扩展的agent代码。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;77&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;  1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这是主 DLL 文件。&lt;/span&gt;
-&lt;span&gt;  2&lt;/span&gt; 
-&lt;span&gt;  3&lt;/span&gt; #include &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;stdafx.h&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-&lt;span&gt;  4&lt;/span&gt; 
-&lt;span&gt;  5&lt;/span&gt; #include &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;jvmti_evt_ex.h&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-&lt;span&gt;  6&lt;/span&gt; #include &amp;lt;stdio.h&amp;gt;
-&lt;span&gt;  7&lt;/span&gt; #include &amp;lt;memory.h&amp;gt;
-&lt;span&gt;  8&lt;/span&gt; #include &amp;lt;&lt;span&gt;string&lt;/span&gt;.h&amp;gt;
-&lt;span&gt;  9&lt;/span&gt; #include &amp;lt;jvmti.h&amp;gt;
-&lt;span&gt; 10&lt;/span&gt; 
-&lt;span&gt; 11 void printStackTrace(JNIEnv* env, jobject exception) {
- 12     jclass throwable_class = (*env).FindClass(&quot;java/lang/Throwable&quot;);
- 13     jmethodID print_method = (*env).GetMethodID(throwable_class, &quot;printStackTrace&quot;, &quot;()V&quot;);
- 14     (*env).CallVoidMethod(exception, print_method);
- 15 }
-&lt;/span&gt;&lt;span&gt; 16&lt;/span&gt; 
-&lt;span&gt; 17&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; JNICALL Callback_JVMTI_EVENT_EXCEPTION (jvmtiEnv *&lt;span&gt;jvmti_env,
-&lt;/span&gt;&lt;span&gt; 18&lt;/span&gt;     JNIEnv*&lt;span&gt; jni_env,
-&lt;/span&gt;&lt;span&gt; 19&lt;/span&gt; &lt;span&gt;    jthread thread,
-&lt;/span&gt;&lt;span&gt; 20&lt;/span&gt; &lt;span&gt;    jmethodID method,
-&lt;/span&gt;&lt;span&gt; 21&lt;/span&gt; &lt;span&gt;    jlocation location,
-&lt;/span&gt;&lt;span&gt; 22&lt;/span&gt; &lt;span&gt;    jobject exception,
-&lt;/span&gt;&lt;span&gt; 23&lt;/span&gt; &lt;span&gt;    jmethodID catch_method,
-&lt;/span&gt;&lt;span&gt; 24&lt;/span&gt; &lt;span&gt;    jlocation catch_location) {
-&lt;/span&gt;&lt;span&gt; 25&lt;/span&gt; 
-&lt;span&gt; 26&lt;/span&gt;     printf(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;loaded class name=%s\n &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;run in Callback_JVMTI_EVENT_EXCEPTION method&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 27&lt;/span&gt;     &lt;span&gt;char&lt;/span&gt;*&lt;span&gt; class_name;
-&lt;/span&gt;&lt;span&gt; 28&lt;/span&gt; 
-&lt;span&gt; 29&lt;/span&gt;     jclass exception_class = jni_env-&amp;gt;&lt;span&gt;GetObjectClass(exception);
-&lt;/span&gt;&lt;span&gt; 30&lt;/span&gt;     jvmti_env-&amp;gt;GetClassSignature(exception_class, &amp;amp;&lt;span&gt;class_name, NULL);
-&lt;/span&gt;&lt;span&gt; 31&lt;/span&gt;     printf(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Exception: %s\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, class_name);    
-&lt;/span&gt;&lt;span&gt; 32&lt;/span&gt; 
-&lt;span&gt; 33&lt;/span&gt; &lt;span&gt;    printStackTrace(jni_env, exception);
-&lt;/span&gt;&lt;span&gt; 34&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 35&lt;/span&gt; 
-&lt;span&gt; 36&lt;/span&gt; 
-&lt;span&gt; 37&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; JNICALL Callback_JVMTI_EVENT_Exception_Catch (jvmtiEnv *&lt;span&gt;jvmti_env,
-&lt;/span&gt;&lt;span&gt; 38&lt;/span&gt;     JNIEnv*&lt;span&gt; jni_env,
-&lt;/span&gt;&lt;span&gt; 39&lt;/span&gt; &lt;span&gt;    jthread thread,
-&lt;/span&gt;&lt;span&gt; 40&lt;/span&gt; &lt;span&gt;    jmethodID method,
-&lt;/span&gt;&lt;span&gt; 41&lt;/span&gt; &lt;span&gt;    jlocation location,
-&lt;/span&gt;&lt;span&gt; 42&lt;/span&gt; &lt;span&gt;    jobject exception)    {
-&lt;/span&gt;&lt;span&gt; 43&lt;/span&gt; 
-&lt;span&gt; 44&lt;/span&gt;     &lt;span&gt;char&lt;/span&gt;*&lt;span&gt; class_name;
-&lt;/span&gt;&lt;span&gt; 45&lt;/span&gt;     jclass exception_class = jni_env-&amp;gt;&lt;span&gt;GetObjectClass(exception);
-&lt;/span&gt;&lt;span&gt; 46&lt;/span&gt;     jvmti_env-&amp;gt;GetClassSignature(exception_class, &amp;amp;&lt;span&gt;class_name, NULL);
-&lt;/span&gt;&lt;span&gt; 47&lt;/span&gt;     printf(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Exception: %s\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, class_name);    
-&lt;/span&gt;&lt;span&gt; 48&lt;/span&gt; 
-&lt;span&gt; 49&lt;/span&gt; &lt;span&gt;    printStackTrace(jni_env, exception);    
-&lt;/span&gt;&lt;span&gt; 50&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 51&lt;/span&gt; 
-&lt;span&gt; 52&lt;/span&gt; 
-&lt;span&gt; 53&lt;/span&gt; JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm, &lt;span&gt;char&lt;/span&gt; *options, &lt;span&gt;void&lt;/span&gt; *&lt;span&gt;reserved){
-&lt;/span&gt;&lt;span&gt; 54&lt;/span&gt;     jvmtiEnv *jvmti =&lt;span&gt; NULL;
-&lt;/span&gt;&lt;span&gt; 55&lt;/span&gt;     
-&lt;span&gt; 56&lt;/span&gt;     fprintf(stderr,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;agent onload&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 57&lt;/span&gt; 
-&lt;span&gt; 58&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取JVMTI environment&lt;/span&gt;
-&lt;span&gt; 59&lt;/span&gt;     jint erno = vm-&amp;gt;GetEnv((&lt;span&gt;void&lt;/span&gt; **)&amp;amp;&lt;span&gt;jvmti, JVMTI_VERSION_1_1);
-&lt;/span&gt;&lt;span&gt; 60&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt; (erno !=&lt;span&gt; JNI_OK) {
-&lt;/span&gt;&lt;span&gt; 61&lt;/span&gt;         fprintf(stderr, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ERROR: Couldn't get JVMTI environment&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 62&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; JNI_ERR;
-&lt;/span&gt;&lt;span&gt; 63&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 64&lt;/span&gt;     
-&lt;span&gt; 65&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;注册功能&lt;/span&gt;
-&lt;span&gt; 66&lt;/span&gt; &lt;span&gt;    jvmtiCapabilities capabilities;
-&lt;/span&gt;&lt;span&gt; 67&lt;/span&gt;     (&lt;span&gt;void&lt;/span&gt;)memset(&amp;amp;capabilities, &lt;span&gt;0&lt;/span&gt;, &lt;span&gt;sizeof&lt;/span&gt;&lt;span&gt;(jvmtiCapabilities));
-&lt;/span&gt;&lt;span&gt; 68&lt;/span&gt;    &lt;span&gt; capabilities.can_generate_exception_events=1;
-&lt;/span&gt;&lt;span&gt; 69&lt;/span&gt; 
-&lt;span&gt; 70&lt;/span&gt;     jvmtiError error = jvmti-&amp;gt;AddCapabilities(&amp;amp;&lt;span&gt;capabilities);
-&lt;/span&gt;&lt;span&gt; 71&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;(error !=&lt;span&gt; JVMTI_ERROR_NONE) {
-&lt;/span&gt;&lt;span&gt; 72&lt;/span&gt;         fprintf(stderr, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ERROR: Unable to AddCapabilities JVMTI&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 73&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt;  error;
-&lt;/span&gt;&lt;span&gt; 74&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 75&lt;/span&gt; 
-&lt;span&gt; 76&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置JVM事件 (JVMTI_EVENT_EXCEPTION) 回调&lt;/span&gt;
-&lt;span&gt; 77&lt;/span&gt; &lt;span&gt;    jvmtiEventCallbacks ex_callbacks;
-&lt;/span&gt;&lt;span&gt; 78&lt;/span&gt;     ex_callbacks.Exception = &amp;amp;&lt;span&gt;Callback_JVMTI_EVENT_EXCEPTION;
-&lt;/span&gt;&lt;span&gt; 79&lt;/span&gt;     error = jvmti-&amp;gt;SetEventCallbacks(&amp;amp;ex_callbacks, (jint)&lt;span&gt;sizeof&lt;/span&gt;&lt;span&gt;(ex_callbacks));
-&lt;/span&gt;&lt;span&gt; 80&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;(error !=&lt;span&gt; JVMTI_ERROR_NONE) {
-&lt;/span&gt;&lt;span&gt; 81&lt;/span&gt;         fprintf(stderr, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ERROR: Unable to SetEventCallbacks JVMTI!&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);        
-&lt;/span&gt;&lt;span&gt; 82&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; error;
-&lt;/span&gt;&lt;span&gt; 83&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 84&lt;/span&gt; 
-&lt;span&gt; 85&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置事件通知&lt;/span&gt;
-&lt;span&gt; 86&lt;/span&gt;     error = jvmti-&amp;gt;&lt;span&gt;SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_EXCEPTION, (jthread)NULL);
-&lt;/span&gt;&lt;span&gt; 87&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;(error !=&lt;span&gt; JVMTI_ERROR_NONE) {
-&lt;/span&gt;&lt;span&gt; 88&lt;/span&gt;         fprintf(stderr, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; ERROR: Unable to SetEventNotificationMode JVMTI!,the error code=%d&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,error);
-&lt;/span&gt;&lt;span&gt; 89&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt;  error;
-&lt;/span&gt;&lt;span&gt; 90&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 91&lt;/span&gt; 
-&lt;span&gt; 92&lt;/span&gt;     &lt;span&gt;return&lt;/span&gt;&lt;span&gt; JNI_OK;
-&lt;/span&gt;&lt;span&gt; 93&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 94&lt;/span&gt; 
-&lt;span&gt; 95&lt;/span&gt; &lt;span&gt;JNIEXPORT jint JNICALL
-&lt;/span&gt;&lt;span&gt; 96&lt;/span&gt;     Agent_OnAttach(JavaVM* vm, &lt;span&gt;char&lt;/span&gt; *options, &lt;span&gt;void&lt;/span&gt; *&lt;span&gt;reserved){
-&lt;/span&gt;&lt;span&gt; 97&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;do nothing&lt;/span&gt;
-&lt;span&gt; 98&lt;/span&gt;         
-&lt;span&gt; 99&lt;/span&gt;     &lt;span&gt;return&lt;/span&gt;&lt;span&gt; JNI_OK;
-&lt;/span&gt;&lt;span&gt;100&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt;101&lt;/span&gt; 
-&lt;span&gt;102&lt;/span&gt; JNIEXPORT &lt;span&gt;void&lt;/span&gt;&lt;span&gt; JNICALL
-&lt;/span&gt;&lt;span&gt;103&lt;/span&gt;     Agent_OnUnload(JavaVM *&lt;span&gt;vm){
-&lt;/span&gt;&lt;span&gt;104&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;do nothing&lt;/span&gt;
-&lt;span&gt;105&lt;/span&gt;     
-&lt;span&gt;106&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　示例代码和agent代码均已经上传至github上面（链接地址：&lt;a title=&quot;https://github.com/gittorlight/java-other/tree/master/jvmti_evt_ex&quot; href=&quot;https://github.com/gittorlight/java-other/tree/master/jvmti_evt_ex&quot; target=&quot;_blank&quot;&gt;https://github.com/gittorlight/java-other/tree/master/jvmti_evt_ex&lt;/a&gt;），我是用 visual studio 2010 来编译agent的，编译的时候需要根据所下载的jdk是32位还是64位来选择相对应的头文件。我使用的是64位的jdk 1.8，所以使用的是64位的头文件。截图如下所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924130203159-1055216388.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　编译agent截图（一）&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924130504435-479079391.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;编译agent截图（二）&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924130613296-465417498.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;编译agent截图（三）&lt;/p&gt;
-
-&lt;p&gt; 编译完成agent之后，在应用程序的启动参数上面使用-agentpath 参数来加载该agent。以eclipse为例，截图如下所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924131334766-1335582774.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;加载agent截图（一）&lt;/p&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924131510978-1138930543.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;加载agent截图（二）&lt;/p&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/112331/201809/112331-20180924131639429-1501259367.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;加载agent截图（三）&lt;/p&gt;
-</description>
-<pubDate>Mon, 24 Sep 2018 14:03:00 +0000</pubDate>
-<dc:creator>来自非洲大草原的食人虎</dc:creator>
-<og:description>阅读本文前需要了解什么是jvmti，jvmti全称称之为 JVM Tool Interface，有关jvmti更详细的知识，本文不再详细列出。大家可以借助百度来了解有关它更为详尽的内容。 在</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/yql1986/p/9695319.html</dc:identifier>
-</item>
-<item>
-<title>微服务 SpringBoot 2.0（三）：启动剖析之@SpringBootApplication - Java面试必修</title>
-<link>http://www.cnblogs.com/itmsbx/p/9696598.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/itmsbx/p/9696598.html</guid>
-<description>&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;我原以为就一个注解，背后竟然还有3个 —— Java面试必修&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3&gt;引言&lt;/h3&gt;
-&lt;p&gt;前面两章我们先后认识了SpringBoot和它的极简配置，为新手入门的学习降低了门槛，会基本的使用后，接下来我们将进一步认识SpringBoot，它为何能做到服务秒开，就来跟随我一起分析SpringBoot运行启动的原理吧。&lt;/p&gt;
-&lt;p&gt;启动原理分2章讲解，本章讲解&lt;code&gt;@SpringBootApplication&lt;/code&gt;注解部分，若需了解&lt;a href=&quot;https://www.itmsbx.com/article/13&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;SpringApplication.run&lt;/a&gt;方法部分请点击此处&lt;/p&gt;
-&lt;h3&gt;运行启动&lt;/h3&gt;
-&lt;h4&gt;工具&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;SpringBoot版本：2.0.4&lt;/li&gt;
-&lt;li&gt;开发工具：IDEA 2018&lt;/li&gt;
-&lt;li&gt;Maven：3.3 9&lt;/li&gt;
-&lt;li&gt;JDK：1.8&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;首先我们看一段启动代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@SpringBootApplication
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DemoApplication {
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-        SpringApplication.run(DemoApplication.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;这不就是个启动类嘛？从字面理解我都知道Spring启动的入口，有啥好看的。可别小瞧了这几行代码&lt;/p&gt;
-&lt;h4&gt;开始推理&lt;/h4&gt;
-&lt;p&gt;从上面代码来看，&lt;code&gt;@SpringBootApplication&lt;/code&gt; 和 &lt;code&gt;SpringApplication.run&lt;/code&gt;长得很相似，比较诡异，所以我们从这两个开始分析，首先先看注解&lt;/p&gt;
-&lt;h5&gt;@SpringBootApplication&lt;/h5&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Target({ElementType.TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-@Documented
-@Inherited
-@SpringBootConfiguration
-@EnableAutoConfiguration
-@ComponentScan(
-    excludeFilters &lt;/span&gt;=&lt;span&gt; {@Filter(
-    type &lt;/span&gt;=&lt;span&gt; FilterType.CUSTOM,
-    classes &lt;/span&gt;= {TypeExcludeFilter.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;}
-), @Filter(
-    type &lt;/span&gt;=&lt;span&gt; FilterType.CUSTOM,
-    classes &lt;/span&gt;= {AutoConfigurationExcludeFilter.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;}
-)}
-)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; @&lt;span&gt;interface&lt;/span&gt;&lt;span&gt; SpringBootApplication {
-...
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;不要被那么多元注解声明所吓到，仔细查看可以看出其中有3个重要的注解&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;@SpringBootConfiguration&lt;/li&gt;
-&lt;li&gt;@EnableAutoConfiguration&lt;/li&gt;
-&lt;li&gt;@ComponentScan&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;所以我觉得，这3个才是真正的幕后主使，&lt;code&gt;@SpringBootApplication&lt;/code&gt;只是他们找来挡枪口的，他们合体应该等价于&lt;code&gt;@SpringBootApplication&lt;/code&gt;，如下代码正常运行&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@SpringBootConfiguration
-@EnableAutoConfiguration
-@ComponentScan
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DemoApplication {
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-        SpringApplication.run(DemoApplication.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;, args);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;哈哈，经过查询资料发现，Spring Boot 1.2版之前，真的是由这3个注解出面，之后呢，才隐居幕后，由小喽喽在前面挡枪&lt;/p&gt;
-&lt;hr/&gt;&lt;h6&gt;@SpringBootConfiguration&lt;/h6&gt;
-&lt;p&gt;首先我们来分析这个，点开看到源码之后我慌了，这特么什么都没有，唯一的疑点在@Configuration。&lt;br/&gt;好吧，还挺会伪装，我们就分析&lt;code&gt;@Configuration&lt;/code&gt;这个注解吧&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;用之前spring的思维，我推断这个应该是解决当前Class的XML配置问题，凡是经过该注解修饰的，均被实例化到Spring应用程序上下文中，由spring统一管理生命周期，我说IoC大家应该熟悉了吧。&lt;/li&gt;
-&lt;li&gt;举个例子&lt;br/&gt;传统的XML配置对象的写法&lt;/li&gt;
-&lt;/ol&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;?&lt;/span&gt;&lt;span&gt;xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;?&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;beans &lt;/span&gt;&lt;span&gt;xmlns&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/beans&quot;&lt;/span&gt;&lt;span&gt;
-       xmlns:xsi&lt;/span&gt;&lt;span&gt;=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;&lt;/span&gt;&lt;span&gt;
-       xsi:schemaLocation&lt;/span&gt;&lt;span&gt;=&quot;http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.0.xsd&quot;&lt;/span&gt;&lt;span&gt;
-       default-lazy-init&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;bean定义&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;userService&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;..UserServiceImpl&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-    ...
-  &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;bean&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;beans&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;使用&lt;code&gt;@Configuration&lt;/code&gt;之后的写法&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Configuration
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; SpringConfiguration{
-    @Bean
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; UserService userService(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; UserServiceImpl();
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;任何一个标注了&lt;code&gt;@Configuration&lt;/code&gt;的Java类定义都是一个JavaConfig配置类。&lt;br/&gt;任何一个标注了@Bean的方法，其返回值将作为一个bean定义注册到Spring的IoC容器，方法名将默认成该bean定义的id。&lt;/p&gt;
-&lt;ol start=&quot;3&quot;&gt;&lt;li&gt;表达依赖注入关系层面&lt;/li&gt;
-&lt;/ol&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;userService&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;..UserServiceImpl&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;propery &lt;/span&gt;&lt;span&gt;name &lt;/span&gt;&lt;span&gt;=&quot;dependencyService&quot;&lt;/span&gt;&lt;span&gt; ref&lt;/span&gt;&lt;span&gt;=&quot;dependencyService&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;bean&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;bean &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;dependencyService&quot;&lt;/span&gt;&lt;span&gt; class&lt;/span&gt;&lt;span&gt;=&quot;DependencyServiceImpl&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;bean&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Configuration
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; SpringConfiguration{
-    @Bean
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; UserService userService(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; UserServiceImpl(dependencyService());
-    }
-    
-    @Bean
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; DependencyService dependencyService(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; DependencyServiceImpl();
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;如果一个bean的定义依赖其他bean,则直接调用对应的JavaConfig类中依赖bean的创建方法即可，如上方的&lt;code&gt;dependencyService()&lt;/code&gt;。&lt;/p&gt;
-&lt;hr/&gt;&lt;h6&gt;@ComponentScan&lt;/h6&gt;
-&lt;p&gt;这个注解在Spring中很重要，它对应XML配置中的元素，&lt;code&gt;@ComponentScan&lt;/code&gt;的功能其实就是自动扫描并加载符合条件的组件（比如&lt;code&gt;@Component&lt;/code&gt;和&lt;code&gt;@Repository&lt;/code&gt;等）或者bean定义，最终将这些bean定义加载到IoC容器中。&lt;/p&gt;
-&lt;p&gt;我们可以通过&lt;code&gt;basePackages&lt;/code&gt;等属性来细粒度的定制&lt;code&gt;@ComponentScan&lt;/code&gt;自动扫描的范围，如果不指定，则默认Spring框架实现会从声明&lt;code&gt;@ComponentScan&lt;/code&gt;所在类的package进行扫描。&lt;/p&gt;
-&lt;p&gt;以前xml中是这么定义的，如下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;context:component-scan &lt;/span&gt;&lt;span&gt;base-package&lt;/span&gt;&lt;span&gt;=&quot;com.platform.fox.html.**.controller&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;context:component-scan &lt;/span&gt;&lt;span&gt;base-package&lt;/span&gt;&lt;span&gt;=&quot;com.platform.fox.html.**.repository&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;context:component-scan &lt;/span&gt;&lt;span&gt;base-package&lt;/span&gt;&lt;span&gt;=&quot;com.platform.fox.html.**.service&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;context:component-scan &lt;/span&gt;&lt;span&gt;base-package&lt;/span&gt;&lt;span&gt;=&quot;com.platform.fox.html.**.wshandler&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;注：所以SpringBoot的启动类最好是放在root package下，因为默认不指定&lt;code&gt;basePackages&lt;/code&gt;。&lt;/p&gt;
-&lt;hr/&gt;&lt;h6&gt;@EnableAutoConfiguration&lt;/h6&gt;
-&lt;p&gt;Enable，通常来说我们认为它一定是在开启或者支持什么功能，比如：&lt;code&gt;@EnableScheduling&lt;/code&gt;、&lt;code&gt;@EnableCaching&lt;/code&gt;，所以他们要做的事情应该都是相似的，根据源码判断，简单概括一下就是，借助@Import的支持，收集和注册特定场景相关的bean定义。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Target({ElementType.TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-@Documented
-@Inherited
-@AutoConfigurationPackage
-@Import({AutoConfigurationImportSelector.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;})
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; @&lt;span&gt;interface&lt;/span&gt;&lt;span&gt; EnableAutoConfiguration {
-    String ENABLED_OVERRIDE_PROPERTY &lt;/span&gt;= &quot;spring.boot.enableautoconfiguration&quot;&lt;span&gt;;
-
-    Class&lt;/span&gt;&amp;lt;?&amp;gt;[] exclude() &lt;span&gt;default&lt;/span&gt;&lt;span&gt; {};
-
-    String[] excludeName() &lt;/span&gt;&lt;span&gt;default&lt;/span&gt;&lt;span&gt; {};
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;我理解就是要开船了，&lt;code&gt;EnableAutoConfigurationImportSelector&lt;/code&gt;根据名单把水手，舵手、安检员都统一叫过来各就各位。帮助SpringBoot应用将所有符合条件的&lt;code&gt;@Configuration&lt;/code&gt;配置都加载到当前SpringBoot创建并使用的IoC容器。就像一管理员一样&lt;/p&gt;
-&lt;p&gt;借助于Spring框架原有的一个工具类：&lt;code&gt;SpringFactoriesLoader&lt;/code&gt;的支持，&lt;code&gt;@EnableAutoConfiguration&lt;/code&gt;可以智能的自动配置功效才得以大功告成！&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;EnableAutoConfigurationImportSelector&lt;/code&gt;中自动配置的关键方法如下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;protected&lt;/span&gt; List&amp;lt;String&amp;gt;&lt;span&gt; getCandidateConfigurations(AnnotationMetadata metadata, AnnotationAttributes attributes) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取符合条件的带有Configuration的注解示例类&lt;/span&gt;
-        List&amp;lt;String&amp;gt; configurations = SpringFactoriesLoader.loadFactoryNames(&lt;span&gt;this&lt;/span&gt;.getSpringFactoriesLoaderFactoryClass(), &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.getBeanClassLoader());
-        Assert.notEmpty(configurations, &lt;/span&gt;&quot;No auto configuration classes found in META-INF/spring.factories. If you are using a custom packaging, make sure that file is correct.&quot;&lt;span&gt;);
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; configurations;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;SpringFactoriesLoader&lt;br/&gt;所以真正的工作者是&lt;code&gt;SpringFactoriesLoader&lt;/code&gt;，&lt;code&gt;SpringFactoriesLoader&lt;/code&gt;属于Spring框架私有的一种扩展方案，其主要功能就是从指定的配置文件&lt;code&gt;META-INF/spring.factories&lt;/code&gt;加载配置&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;abstract&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; SpringFactoriesLoader {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;...&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &amp;lt;T&amp;gt; List&amp;lt;T&amp;gt; loadFactories(Class&amp;lt;T&amp;gt;&lt;span&gt; factoryClass, @Nullable ClassLoader classLoader) {
-        ...
-    }
-
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; List&amp;lt;String&amp;gt; loadFactoryNames(Class&amp;lt;?&amp;gt;&lt;span&gt; factoryClass, @Nullable ClassLoader classLoader) {
-        ....
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;配合&lt;code&gt;@EnableAutoConfiguration&lt;/code&gt;使用的话，它更多是提供一种配置查找的功能支持，即根据&lt;code&gt;@EnableAutoConfiguration&lt;/code&gt;的完整类名&lt;code&gt;org.springframework.boot.autoconfigure.EnableAutoConfiguration&lt;/code&gt;作为查找的Key,获取对应的一组@Configuration类&lt;/p&gt;
-&lt;div class=&quot;image-package&quot;&gt;
-&lt;div class=&quot;image-container&quot;&gt;
-
-&lt;div class=&quot;image-view&quot; data-width=&quot;1708&quot; data-height=&quot;665&quot;&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5190738-55176cc2f041e374.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1000/format/webp&quot; alt=&quot;&quot; data-original-src=&quot;//upload-images.jianshu.io/upload_images/5190738-55176cc2f041e374.png&quot; data-original-width=&quot;1708&quot; data-original-height=&quot;665&quot; data-original-format=&quot;image/png&quot; data-original-filesize=&quot;221164&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;spring.factories&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;上图就是从&lt;code&gt;SpringBoot的autoconfigure&lt;/code&gt;依赖包中的&lt;code&gt;META-INF/spring.factories&lt;/code&gt;配置文件中摘录的一段内容，可以很好地说明问题。我从中随机挑取一个类查看源代码&lt;/p&gt;
-&lt;div class=&quot;image-package&quot;&gt;
-&lt;div class=&quot;image-container&quot;&gt;
-
-&lt;div class=&quot;image-view&quot; data-width=&quot;1046&quot; data-height=&quot;609&quot;&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5190738-a6c13e7530313280.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1000/format/webp&quot; alt=&quot;&quot; data-original-src=&quot;//upload-images.jianshu.io/upload_images/5190738-a6c13e7530313280.png&quot; data-original-width=&quot;1046&quot; data-original-height=&quot;609&quot; data-original-format=&quot;image/png&quot; data-original-filesize=&quot;77398&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;WebMvcAutoConfiguration&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;所以，其底层真正实现是从classpath中搜寻所有的&lt;code&gt;META-INF/spring.factories&lt;/code&gt;配置文件，并将其中&lt;code&gt;org.springframework.boot.autoconfigure.EnableutoConfiguration&lt;/code&gt;对应的配置项通过反射实例化为对应的标注了@Configuration的JavaConfig形式的IoC容器配置类，然后汇总为一个并加载到IoC容器。&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;@SpringBootApplication&lt;/code&gt;注解说完了，接下来我们来分析&lt;code&gt;SpringApplication.run&lt;/code&gt;方法&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;作者有话说：喜欢的话就请关注&lt;a href=&quot;https://www.itmsbx.com/&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;Java面试必修&lt;/a&gt; ，请自备水，更多干、干、干货等着你&lt;/p&gt;
-</description>
-<pubDate>Mon, 24 Sep 2018 12:38:00 +0000</pubDate>
-<dc:creator>Java面试必修</dc:creator>
-<og:description>前面两章我们先后认识了SpringBoot和它的极简配置，为新手入门的学习降低了门槛，会基本的使用后，接下来我们将进一步认识SpringBoot，它为何能做到服务秒开，就来跟随我一起分析SpringB</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/itmsbx/p/9696598.html</dc:identifier>
-</item>
-<item>
-<title>自己动手，写一个分布式系统（附c#代码示例） - 源之缘</title>
-<link>http://www.cnblogs.com/yuanchenhui/p/remoteCall.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/yuanchenhui/p/remoteCall.html</guid>
-<description>&lt;p&gt;分布式系统有很多成熟的解决方案。如：微软的WCF。WCF太过于复杂，配置也麻烦。其实可以自己动手设计一个小的分布式系统。系统的原理完全在自己掌握之中，可以根据业务随机而变。这里展示远程调用最核心最基本的处理逻辑，其实远程调用并不复杂神秘。&lt;/p&gt;
-&lt;p&gt;分布式系统其实是数据流的交换。数据必须快速的从一段传送到另一端，否则系统性能就大打折扣。对于.net，本人设计一个非常优化易于使用的网络库（EasyNetMessage）。使用该库，不需要关心底层细节，所有处理对象是string、byte；发送时，不需要处理分包（几十M的数据也可以一次发送）；收包时，不需要处理粘包。本文所示例代码，就是基于该网络库。本文章实例代码见底部。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;实现目标&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;实现一个非常简单的应用   internal int AddCall(int value1, int value2)；就是两个整数相加。调用过程和本地完全一样，只是执行加法操作是在远程服务器实现的。操作非常简单，但是揭示了远程调用的核心处理流程。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/245753/201809/245753-20180924190821070-1438474728.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;处理过程：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;a) 数据发送&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　&lt;/strong&gt;每次函数调用必须有一个唯一标识CallId，这个也是发包的唯一标识；服务端处理完后，返回的结果也带有此标识。通过此标识，将发送端数据和返回数据关联起来了。&lt;/p&gt;
-&lt;p&gt;　　发送完数据后，客户端线程要挂起，等待服务器端的处理结果。线程挂起使用ManualResetEvent。并建立起CallId与ManualResetEvent的对应关系。当数据返回时，就能找到对应的ManualResetEvent。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-  &lt;span&gt;//&lt;/span&gt;&lt;span&gt;callid与事件关联&lt;/span&gt;
-        Dictionary&amp;lt;&lt;span&gt;int&lt;/span&gt;, ManualResetEvent&amp;gt; _callEventGroup = &lt;span&gt;new&lt;/span&gt; Dictionary&amp;lt;&lt;span&gt;int&lt;/span&gt;, ManualResetEvent&amp;gt;&lt;span&gt;();
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;callId与返回结果关联&lt;/span&gt;
-        Dictionary&amp;lt;&lt;span&gt;int&lt;/span&gt;, NetCallAddAck&amp;gt; _callResultGroup = &lt;span&gt;new&lt;/span&gt; Dictionary&amp;lt;&lt;span&gt;int&lt;/span&gt;, NetCallAddAck&amp;gt;&lt;span&gt;();
-        &lt;/span&gt;&lt;span&gt;internal&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; AddCall(&lt;span&gt;int&lt;/span&gt; value1, &lt;span&gt;int&lt;/span&gt;&lt;span&gt; value2)
-        {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;组织发送包&lt;/span&gt;
-            NetCallAdd add = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; NetCallAdd();
-            add.Value1 &lt;/span&gt;=&lt;span&gt; value1.ToString();
-            add.Value2 &lt;/span&gt;=&lt;span&gt; value2.ToString();
-
-            MonitorClient client &lt;/span&gt;=&lt;span&gt; GetCurAppClient();
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (client == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Exception(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;socket未连接！&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;生成线程事件，并与CallId关联&lt;/span&gt;
-            ManualResetEvent callEvent = &lt;span&gt;new&lt;/span&gt; ManualResetEvent(&lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
-            &lt;/span&gt;&lt;span&gt;lock&lt;/span&gt;&lt;span&gt; (_callEventGroup)
-            {
-                _callEventGroup.Add(add.CallId, callEvent);
-            }
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送数据&lt;/span&gt;
-            EN_SendDataResult result =&lt;span&gt; _netServer.SendData(client.ClientSocket, add.ToEasyMessage().ToNetPacket());
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (result !=&lt;span&gt; EN_SendDataResult.ok)
-            {
-                &lt;/span&gt;&lt;span&gt;lock&lt;/span&gt;&lt;span&gt; (_callEventGroup)
-                {
-                    _callEventGroup.Remove(add.CallId);
-                }
-                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Exception(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;网络发送异常！&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-            }
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;等待结果&lt;/span&gt;
-            callEvent.WaitOne(&lt;span&gt;3000&lt;/span&gt;&lt;span&gt;);
-            _callEventGroup.Remove(add.CallId);
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;查看结果集&lt;/span&gt;
-            &lt;span&gt;lock&lt;/span&gt;&lt;span&gt; (_callResultGroup)
-            {
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_callResultGroup.ContainsKey(add.CallId))
-                {
-                    NetCallAddAck ack &lt;/span&gt;=&lt;span&gt; _callResultGroup[add.CallId];
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt;.Parse(ack.Result);
-                }
-            }
-
-            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Exception(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;没有返回结果！&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;b）数据返回&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;  数据返回后的处理是在另一个线程。数据返回后，先根据CallId查找对应的ManualResetEvent；如果找不到，有可能服务器处理太慢，超时了。&lt;/p&gt;
-&lt;p&gt;  先将返回结果存储到哈希数组中，key为CallId。再调用ManualResetEvent的Set函数，唤醒调用端线程。调用端线程根据CallId到哈希表中获取结果。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-        &lt;span&gt;internal&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; OnRcvAck(NetCallAddAck addAck)
-        {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据callid找到事件&lt;/span&gt;
-            ManualResetEvent callEvent = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-            &lt;/span&gt;&lt;span&gt;lock&lt;/span&gt;&lt;span&gt; (_callEventGroup)
-            {
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;_callEventGroup.ContainsKey(addAck.CallId))
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-                callEvent &lt;/span&gt;=&lt;span&gt;_callEventGroup[addAck.CallId];
-            }
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;结果存放到哈希表中&lt;/span&gt;
-            &lt;span&gt;lock&lt;/span&gt;&lt;span&gt; (_callResultGroup)
-            {
-                _callResultGroup.Remove(addAck.CallId);
-                _callResultGroup.Add(addAck.CallId, addAck);
-            }
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置事件为有信号,调用方挂起的线程可以继续执行&lt;/span&gt;
-&lt;span&gt;            callEvent.Set();
-        }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;进一步说明：&lt;/strong&gt;可以在此基础上，进一步扩展。开发出类似Redis的内存库。客户端的调用也不一定是同步 ，可以采用异步回调的方式处理。其实如果知道处理的原理，可以根据自己的业务做裁剪。只有知其所以然，才能开发出最符合自己业务的系统，才可能进一步优化。&lt;/p&gt;
-&lt;p&gt;实例代码&lt;a title=&quot;远程过程实例程序代码&quot; href=&quot;https://download.csdn.net/download/qq_29939347/10684858&quot; target=&quot;_blank&quot;&gt; https://download.csdn.net/download/qq_29939347/10684858&lt;/a&gt; （代码已上传，但是需要审核，最近可能无法下载）&lt;/p&gt;
-</description>
-<pubDate>Mon, 24 Sep 2018 11:34:00 +0000</pubDate>
-<dc:creator>源之缘</dc:creator>
-<og:description>分布式系统有很多成熟的解决方案。如：微软的WCF。WCF太过于复杂，配置也麻烦。其实可以自己动手设计一个小的分布式系统。系统的原理完全在自己掌握之中，可以根据业务随机而变。这里展示远程调用最核心最基本</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/yuanchenhui/p/remoteCall.html</dc:identifier>
 </item>
 </channel>
 </rss>
