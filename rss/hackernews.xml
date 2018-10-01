@@ -9,6 +9,334 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>A cache invalidation bug in Linux memory management</title>
+<link>https://googleprojectzero.blogspot.com/2018/09/a-cache-invalidation-bug-in-linux.html</link>
+<guid isPermaLink="true" >https://googleprojectzero.blogspot.com/2018/09/a-cache-invalidation-bug-in-linux.html</guid>
+<description>&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Posted by Jann Horn, Google Project Zero&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This blogpost describes a way to exploit a Linux kernel bug (CVE-2018-17182) that exists since kernel version 3.16. While the bug itself is in code that is reachable even from relatively strongly sandboxed contexts, this blogpost only describes a way to exploit it in environments that use Linux kernels that haven't been configured for increased security (specifically, Ubuntu 18.04 with kernel linux-image-4.15.0-34-generic at version 4.15.0-34.37). This demonstrates how the kernel configuration can have a big impact on the difficulty of exploiting a kernel bug.&lt;/span&gt;&lt;/div&gt;
+&lt;strong id=&quot;docs-internal-guid-0d8726e8-7fff-6f30-9d60-d2b184792093&quot;&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The bug report and the exploit are filed in our issue tracker as&lt;/span&gt; &lt;a href=&quot;https://bugs.chromium.org/p/project-zero/issues/detail?id=1664&quot;&gt;&lt;span&gt;issue 1664&lt;/span&gt;&lt;/a&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Fixes for the issue are in the upstream stable releases 4.18.9, 4.14.71, 4.9.128, 4.4.157 and 3.16.58.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Whenever a userspace page fault occurs because e.g. a page has to be paged in on demand, the Linux kernel has to look up the VMA (virtual memory area;&lt;/span&gt; &lt;span&gt;struct vm_area_struct&lt;/span&gt;&lt;span&gt;) that contains the fault address to figure out how the fault should be handled. The slowpath for looking up a VMA (in&lt;/span&gt; &lt;span&gt;find_vma()&lt;/span&gt;&lt;span&gt;) has to walk a red-black tree of VMAs. To avoid this performance hit, Linux also has a fastpath that can bypass the tree walk if the VMA was recently used.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The implementation of the fastpath has changed over time;&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=615d6e8756c87149f2d4c1b93d471bca002bd849&quot;&gt;&lt;span&gt;since version 3.15&lt;/span&gt;&lt;/a&gt;&lt;span&gt;, Linux uses per-thread VMA caches with four slots, implemented in&lt;/span&gt; &lt;span&gt;mm/vmacache.c&lt;/span&gt; &lt;span&gt;and&lt;/span&gt; &lt;span&gt;include/linux/vmacache.h&lt;/span&gt;&lt;span&gt;. Whenever a successful lookup has been performed through the slowpath,&lt;/span&gt; &lt;span&gt;vmacache_update()&lt;/span&gt; &lt;span&gt;stores a pointer to the VMA in an entry of the array&lt;/span&gt; &lt;span&gt;current-&amp;gt;vmacache.vmas&lt;/span&gt;&lt;span&gt;, allowing the next lookup to use the fastpath.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Note that VMA caches are per-thread, but VMAs are associated with a whole process (more precisely with a&lt;/span&gt; &lt;span&gt;struct mm_struct&lt;/span&gt;&lt;span&gt;; from now on, this distinction will largely be ignored, since it isn't relevant to this bug). Therefore, when a VMA is freed, the VMA caches of all threads must be invalidated - otherwise, the next VMA lookup would follow a dangling pointer. However, since a process can have many threads, simply iterating through the VMA caches of all threads would be a performance problem.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;To solve this, both the&lt;/span&gt; &lt;span&gt;struct mm_struct&lt;/span&gt; &lt;span&gt;and the per-thread&lt;/span&gt; &lt;span&gt;struct vmacache&lt;/span&gt; &lt;span&gt;are tagged with sequence numbers; when the VMA lookup fastpath discovers in&lt;/span&gt; &lt;span&gt;vmacache_valid()&lt;/span&gt; &lt;span&gt;that&lt;/span&gt; &lt;span&gt;current-&amp;gt;vmacache.seqnum&lt;/span&gt; &lt;span&gt;and&lt;/span&gt; &lt;span&gt;current-&amp;gt;mm-&amp;gt;vmacache_seqnum&lt;/span&gt; &lt;span&gt;don't match, it wipes the contents of the current thread's VMA cache and updates its sequence number.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The sequence numbers of the&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt; &lt;span&gt;and the VMA cache were only 32 bits wide, meaning that it was possible for them to overflow. To ensure that a VMA cache can't incorrectly appear to be valid when&lt;/span&gt; &lt;span&gt;current-&amp;gt;mm-&amp;gt;vmacache_seqnum&lt;/span&gt; &lt;span&gt;has actually been incremented 2&lt;/span&gt;&lt;span&gt;32&lt;/span&gt; &lt;span&gt;times,&lt;/span&gt; &lt;span&gt;vmacache_invalidate()&lt;/span&gt; &lt;span&gt;(the helper that increments&lt;/span&gt; &lt;span&gt;current-&amp;gt;mm-&amp;gt;vmacache_seqnum&lt;/span&gt;&lt;span&gt;) had a special case: When&lt;/span&gt; &lt;span&gt;current-&amp;gt;mm-&amp;gt;vmacache_seqnum&lt;/span&gt; &lt;span&gt;wrapped to zero, it would call&lt;/span&gt; &lt;span&gt;vmacache_flush_all()&lt;/span&gt; &lt;span&gt;to wipe the contents of all VMA caches associated with&lt;/span&gt; &lt;span&gt;current-&amp;gt;mm&lt;/span&gt;&lt;span&gt;. Executing&lt;/span&gt; &lt;span&gt;vmacache_flush_all()&lt;/span&gt; &lt;span&gt;was very expensive: It would iterate over every thread on the entire machine, check which&lt;/span&gt; &lt;span&gt;struct mm_struct&lt;/span&gt; &lt;span&gt;it is associated with, then if necessary flush the thread's VMA cache.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;In version 3.16,&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=6b4ebc3a9078c5b7b8c4cf495a0b1d2d0e0bfe7a&quot;&gt;&lt;span&gt;an optimization was added&lt;/span&gt;&lt;/a&gt;&lt;span&gt;: If the&lt;/span&gt; &lt;span&gt;struct mm_struct&lt;/span&gt; &lt;span&gt;was only associated with a single thread,&lt;/span&gt; &lt;span&gt;vmacache_flush_all()&lt;/span&gt; &lt;span&gt;would do nothing, based on the realization that every VMA cache invalidation is preceded by a VMA lookup; therefore, in a single-threaded process, the VMA cache's sequence number is always close to the&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt;&lt;span&gt;'s sequence number:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;* Single threaded tasks need not iterate the entire&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;* list of process. We can avoid the flushing as well&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;* since the mm's seqnum was increased and don't have&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;* to worry about other threads' seqnum. Current's&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;* flush will occur upon the next lookup.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;if (atomic_read(&amp;amp;mm-&amp;gt;mm_users) == 1)&lt;/span&gt;&lt;/div&gt;
+
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;However, this optimization is incorrect because it doesn't take into account what happens if a previously single-threaded process creates a new thread immediately after the&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt;&lt;span&gt;'s sequence number has wrapped around to zero. In this case, the sequence number of the first thread's VMA cache will still be&lt;/span&gt; &lt;span&gt;0xffffffff&lt;/span&gt;&lt;span&gt;, and the second thread can drive the&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt;&lt;span&gt;'s sequence number up to&lt;/span&gt; &lt;span&gt;0xffffffff&lt;/span&gt; &lt;span&gt;again. At that point, the first thread's VMA cache, which can contain dangling pointers, will be considered valid again, permitting the use of freed VMA pointers in the first thread's VMA cache.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The bug&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/mm/vmacache.c?id=7a9cdebdcc17e426fb5287e4a82db1dfe86339b2&quot;&gt;&lt;span&gt;was fixed&lt;/span&gt;&lt;/a&gt; &lt;span&gt;by changing the sequence numbers to 64 bits, thereby making an overflow infeasible, and removing the overflow handling logic.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Fundamentally, this bug can be triggered by any process that can run for a sufficiently long time to overflow the reference counter (about an hour if&lt;/span&gt; &lt;span&gt;MAP_FIXED&lt;/span&gt; &lt;span&gt;is usable) and has the ability to use&lt;/span&gt; &lt;span&gt;mmap()&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;munmap()&lt;/span&gt; &lt;span&gt;(to manage memory mappings) and&lt;/span&gt; &lt;span&gt;clone()&lt;/span&gt; &lt;span&gt;(to create a thread). These syscalls do not require any privileges, and they are often permitted even in seccomp-sandboxed contexts, such as the Chrome renderer sandbox (&lt;/span&gt;&lt;a href=&quot;https://cs.chromium.org/chromium/src/sandbox/linux/seccomp-bpf-helpers/baseline_policy.cc?l=192&quot;&gt;&lt;span&gt;mmap&lt;/span&gt;&lt;/a&gt;&lt;span&gt;,&lt;/span&gt; &lt;a href=&quot;https://cs.chromium.org/chromium/src/sandbox/linux/seccomp-bpf-helpers/syscall_sets.cc?l=498&amp;amp;dr=C&quot;&gt;&lt;span&gt;munmap&lt;/span&gt;&lt;/a&gt;&lt;span&gt;,&lt;/span&gt; &lt;a href=&quot;https://cs.chromium.org/chromium/src/sandbox/linux/seccomp-bpf-helpers/baseline_policy.cc?l=144&quot;&gt;&lt;span&gt;clone&lt;/span&gt;&lt;/a&gt;&lt;span&gt;),&lt;/span&gt; &lt;a href=&quot;https://github.com/google/gvisor/blob/master/runsc/boot/filter/config.go&quot;&gt;&lt;span&gt;the sandbox of the main gVisor host component&lt;/span&gt;&lt;/a&gt;&lt;span&gt;, and&lt;/span&gt; &lt;a href=&quot;https://github.com/moby/moby/blob/master/profiles/seccomp/seccomp_default.go&quot;&gt;&lt;span&gt;Docker's seccomp policy&lt;/span&gt;&lt;/a&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;To make things easy, my exploit uses various other kernel interfaces, and therefore doesn't just work from inside such sandboxes; in particular, it uses&lt;/span&gt; &lt;span&gt;/dev/kmsg&lt;/span&gt; &lt;span&gt;to read dmesg logs and uses an eBPF array to spam the kernel's page allocator with user-controlled, mutable single-page allocations. However, an attacker willing to invest more time into an exploit would probably be able to avoid using such interfaces.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The function in which the first use-after-free access occurs is&lt;/span&gt; &lt;span&gt;vmacache_find()&lt;/span&gt;&lt;span&gt;.&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/mm/vmacache.c?id=615d6e8756c87149f2d4c1b93d471bca002bd849&quot;&gt;&lt;span&gt;When this function was first added&lt;/span&gt;&lt;/a&gt; &lt;span&gt;- before the bug was introduced -, it accessed the VMA cache as follows:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;      for (i = 0; i &amp;lt; VMACACHE_SIZE; i++) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;              struct vm_area_struct *vma = current-&amp;gt;vmacache[i];&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;              if (vma &amp;amp;&amp;amp; vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;                      &lt;/span&gt;&lt;span&gt;BUG_ON(vma-&amp;gt;vm_mm != mm);&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;                      return vma;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;              }&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;      }&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;When this code encountered a cached VMA whose bounds contain the supplied address&lt;/span&gt; &lt;span&gt;addr&lt;/span&gt;&lt;span&gt;, it checked whether the VMA's&lt;/span&gt; &lt;span&gt;-&amp;gt;vm_mm&lt;/span&gt; &lt;span&gt;pointer matches the expected&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt; &lt;span&gt;- which should always be the case, unless a memory safety problem has happened -, and if not, terminated with a&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;assertion failure.&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;is intended to handle cases in which a kernel thread detects a severe problem that can't be cleanly handled by bailing out of the current context. In a default upstream kernel configuration,&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;will normally print a backtrace with register dumps to the dmesg log buffer, then forcibly terminate the current thread. This can sometimes prevent the rest of the system from continuing to work properly - for example, if the crashing code held an important lock, any other thread that attempts to take that lock will then deadlock -, but it is often successful in keeping the rest of the system in a reasonably usable state. Only when the kernel detects that the crash is in a critical context such as an interrupt handler, it brings down the whole system with a kernel panic.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The same handler code is used for dealing with unexpected crashes in kernel code, like page faults and general protection faults at non-whitelisted addresses: By default, if possible, the kernel will attempt to terminate only the offending thread.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The handling of kernel crashes is a tradeoff between availability, reliability and security. A system owner might want a system to keep running as long as possible, even if parts of the system are crashing, if a sudden kernel panic would cause data loss or downtime of an important service. Similarly, a system owner might want to debug a kernel bug on a live system, without an external debugger; if the whole system terminated as soon as the bug is triggered, it might be harder to debug an issue properly.&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;On the other hand, an attacker attempting to exploit a kernel bug might benefit from the ability to retry an attack multiple times without triggering system reboots; and an attacker with the ability to read the crash log produced by the first attempt might even be able to use that information for a more sophisticated second attempt.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The kernel provides two sysctls that can be used to adjust this behavior, depending on the desired tradeoff:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;ul&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;kernel.panic_on_oops&lt;/span&gt; &lt;span&gt;will automatically cause a kernel panic when a&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;assertion triggers or the kernel crashes; its initial value can be configured using the build configuration variable&lt;/span&gt; &lt;span&gt;CONFIG_PANIC_ON_OOPS&lt;/span&gt;&lt;span&gt;. It is off by default in the upstream kernel - and enabling it by default in distributions would probably be a bad idea -, but it is e.g.&lt;/span&gt; &lt;a href=&quot;https://android.googlesource.com/platform/system/core/+/fa14d21ca44377f2c70769b6ebb2cc28a65d53d7/rootdir/init.rc#118&quot;&gt;&lt;span&gt;enabled by Android&lt;/span&gt;&lt;/a&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;kernel.dmesg_restrict&lt;/span&gt; &lt;span&gt;controls whether non-root users can access dmesg logs, which, among other things, contain register dumps and stack traces for kernel crashes; its initial value can be configured using the build configuration variable&lt;/span&gt; &lt;span&gt;CONFIG_SECURITY_DMESG_RESTRICT&lt;/span&gt;&lt;span&gt;. It is off by default in the upstream kernel, but is enabled by some distributions, e.g.&lt;/span&gt; &lt;a href=&quot;https://salsa.debian.org/kernel-team/linux/raw/master/debian/config/config&quot;&gt;&lt;span&gt;Debian&lt;/span&gt;&lt;/a&gt;&lt;span&gt;. (Android relies on SELinux to block access to dmesg.)&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Ubuntu, for example, enables neither of these.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;br/&gt;&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The code snippet from above&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/mm/vmacache.c?id=50f5aa8a9b248fa4262cf379863ec9a531b49737&quot;&gt;&lt;span&gt;was amended&lt;/span&gt;&lt;/a&gt; &lt;span&gt;in the same month as it was committed:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;      for (i = 0; i &amp;lt; VMACACHE_SIZE; i++) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;               struct vm_area_struct *vma = current-&amp;gt;vmacache[i];&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               if (vma &amp;amp;&amp;amp; vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-                       BUG_ON(vma-&amp;gt;vm_mm != mm);&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               if (!vma)&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       continue;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               if (WARN_ON_ONCE(vma-&amp;gt;vm_mm != mm))&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       break;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               if (vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr)&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;                       return vma;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               }&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;       }&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This amended code is what distributions like Ubuntu are currently shipping.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The first change here is that the sanity check for a dangling pointer happens before the address comparison. The second change is somewhat more interesting:&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;is replaced with&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;WARN_ON_ONCE()&lt;/span&gt; &lt;span&gt;prints debug information to dmesg that is similar to what&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;would print. The differences to&lt;/span&gt; &lt;span&gt;BUG_ON()&lt;/span&gt; &lt;span&gt;are that&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt; &lt;span&gt;only prints debug information the first time it triggers, and that execution continues: Now when the kernel detects a dangling pointer in the VMA cache lookup fastpath - in other words, when it heuristically detects that a use-after-free has happened -, it just bails out of the fastpath and falls back to the red-black tree walk. The process continues normally.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This fits in with the kernel's policy of attempting to keep the system running as much as possible by default; if an accidental use-after-free bug occurs here for some reason, the kernel can probably heuristically mitigate its effects and keep the process working.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The policy of only printing a warning even when the kernel has discovered a memory corruption is problematic for systems that should kernel panic when the kernel notices security-relevant events like kernel memory corruption. Simply making&lt;/span&gt; &lt;span&gt;WARN()&lt;/span&gt; &lt;span&gt;trigger kernel panics isn't really an option because&lt;/span&gt; &lt;span&gt;WARN()&lt;/span&gt; &lt;span&gt;is also used for various events that are not important to the kernel's security. For this reason, a few uses of&lt;/span&gt; &lt;span&gt;WARN_ON()&lt;/span&gt; &lt;span&gt;in security-relevant places have been replaced with&lt;/span&gt; &lt;span&gt;CHECK_DATA_CORRUPTION()&lt;/span&gt;&lt;span&gt;, which permits toggling the behavior between&lt;/span&gt; &lt;span&gt;BUG()&lt;/span&gt; &lt;span&gt;and&lt;/span&gt; &lt;span&gt;WARN()&lt;/span&gt; &lt;span&gt;at kernel configuration time. However,&lt;/span&gt; &lt;span&gt;CHECK_DATA_CORRUPTION()&lt;/span&gt; &lt;span&gt;is only used in the linked list manipulation code and in&lt;/span&gt; &lt;span&gt;addr_limit_user_check()&lt;/span&gt;&lt;span&gt;; the check in the VMA cache, for example, still uses a classic&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;br/&gt;&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;A third important change&lt;/span&gt; &lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/mm/vmacache.c?id=ddbf369c0a33924f76d092985bd20d9310f43d7f&quot;&gt;&lt;span&gt;was made to this function&lt;/span&gt;&lt;/a&gt;&lt;span&gt;; however, this change is relatively recent and will first be in the 4.19 kernel, which hasn't been released yet, so it is irrelevant for attacking currently deployed kernels.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;      for (i = 0; i &amp;lt; VMACACHE_SIZE; i++) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               struct vm_area_struct *vma = current-&amp;gt;vmacache.vmas[i];&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               struct vm_area_struct *vma = current-&amp;gt;vmacache.vmas[idx];&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               if (!vma)&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-                       continue;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               if (WARN_ON_ONCE(vma-&amp;gt;vm_mm != mm))&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-                       break;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-               if (vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-                       count_vm_vmacache_event(VMACACHE_FIND_HITS);&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;-                       return vma;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               if (vma) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+#ifdef CONFIG_DEBUG_VM_VMACACHE&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       if (WARN_ON_ONCE(vma-&amp;gt;vm_mm != mm))&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                               break;&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       if (vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr) {&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                               count_vm_vmacache_event(VMACACHE_FIND_HITS);&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                               return vma;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       }&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;               }&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+               if (++idx == VMACACHE_SIZE)&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;+                       idx = 0;&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;       }&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;After this change, the sanity check is skipped altogether unless the kernel is built with the debugging option&lt;/span&gt; &lt;span&gt;CONFIG_DEBUG_VM_VMACACHE&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The exploit has to increment the sequence number roughly 2&lt;/span&gt;&lt;span&gt;33&lt;/span&gt; &lt;span&gt;times. Therefore, the efficiency of the primitive used to increment the sequence number is important for the runtime of the whole exploit.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;It is possible to cause two sequence number increments per syscall as follows: Create an anonymous VMA that spans three pages. Then repeatedly use&lt;/span&gt; &lt;span&gt;mmap()&lt;/span&gt; &lt;span&gt;with&lt;/span&gt; &lt;span&gt;MAP_FIXED&lt;/span&gt; &lt;span&gt;to replace the middle page with an equivalent VMA. This causes&lt;/span&gt; &lt;span&gt;mmap()&lt;/span&gt; &lt;span&gt;to first split the VMA into three VMAs, then replace the middle VMA, and then merge the three VMAs together again, causing VMA cache invalidations for the two VMAs that are deleted while merging the VMAs.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Enumerating all potential ways to attack the use-after-free without releasing the slab's backing page (according to&lt;/span&gt; &lt;span&gt;/proc/slabinfo&lt;/span&gt;&lt;span&gt;, the Ubuntu kernel uses one page per&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;slab) back to the buddy allocator / page allocator:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;ol&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Get the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;reused in the same process. The process would then be able to use this VMA, but this doesn't result in anything interesting, since the VMA caches of the process would be allowed to contain pointers to the VMA anyway.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Free the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;such that it is on the slab allocator's freelist, then attempt to access it. However, at least the SLUB allocator that Ubuntu uses replaces the first 8 bytes of the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;(which contain&lt;/span&gt; &lt;span&gt;vm_start&lt;/span&gt;&lt;span&gt;, the userspace start address) with a kernel address. This makes it impossible for the VMA cache lookup function to return it, since the condition&lt;/span&gt; &lt;span&gt;vma-&amp;gt;vm_start &amp;lt;= addr &amp;amp;&amp;amp; vma-&amp;gt;vm_end &amp;gt; addr&lt;/span&gt; &lt;span&gt;can't be fulfilled, and therefore nothing interesting happens.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Free the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;such that it is on the slab allocator's freelist, then allocate it in another process. This would (with the exception of a very narrow race condition that can't easily be triggered repeatedly) result in hitting the&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt;&lt;span&gt;, and therefore the VMA cache lookup function wouldn't return the VMA.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Free the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;such that it is on the slab allocator's freelist, then make an allocation from a slab that has been merged with the&lt;/span&gt; &lt;span&gt;vm_area_struct&lt;/span&gt; &lt;span&gt;slab. This requires the existence of an aliasing slab; in a Ubuntu 18.04 VM, no such slab seems to exist.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Therefore, to exploit this bug, it is necessary to release the backing page back to the page allocator, then reallocate the page in some way that permits placing controlled data in it. There are various kernel interfaces that could be used for this; for example:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;pipe pages:&lt;/span&gt;&lt;/div&gt;
+&lt;ul&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;advantage: not wiped on allocation&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;advantage: permits writing at an arbitrary in-page offset if&lt;/span&gt; &lt;span&gt;splice()&lt;/span&gt; &lt;span&gt;is available&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;advantage: page-aligned&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;disadvantage: can't do multiple writes without first freeing the page, then reallocating it&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+&lt;ul&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;advantage: can repeatedly read and write contents from userspace&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;advantage: page-aligned&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;disadvantage: wiped on allocation&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This exploit uses BPF maps.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The exploit wants to have the following information:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;ul&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;address of the&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;address of the use-after-free'd VMA&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;load address of kernel code&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;At least in the Ubuntu 18.04 kernel, the first two of these are directly visible in the register dump triggered by&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt;&lt;span&gt;, and can therefore easily be extracted from dmesg: The&lt;/span&gt; &lt;span&gt;mm_struct'&lt;/span&gt;&lt;span&gt;s address is in RDI, and the VMA's address is in RAX. However, an instruction pointer is not directly visible because RIP and the stack are symbolized, and none of the general-purpose registers contain an instruction pointer.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;A kernel backtrace can contain multiple sets of registers: When the stack backtracing logic encounters an interrupt frame, it generates another register dump. Since we can trigger the&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt; &lt;span&gt;through a page fault on a userspace address, and page faults on userspace addresses can happen at any userspace memory access in syscall context (via&lt;/span&gt; &lt;span&gt;copy_from_user()&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;copy_to_user()&lt;/span&gt;&lt;span&gt;/...), we can pick a call site that has the relevant information in a register from a wide range of choices. It turns out that writing to an eventfd triggers a usercopy while R8 still contains the pointer to the&lt;/span&gt; &lt;span&gt;eventfd_fops&lt;/span&gt; &lt;span&gt;structure.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;When the exploit runs, it replaces the VMA with zeroed memory, then triggers a VMA lookup against the broken VMA cache, intentionally triggering the&lt;/span&gt; &lt;span&gt;WARN_ON_ONCE()&lt;/span&gt;&lt;span&gt;. This generates a warning that looks as follows - the leaks used by the exploit are highlighted:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271265] WARNING: CPU: 0 PID: 1871 at /build/linux-SlLHxe/linux-4.15.0/mm/vmacache.c:102 vmacache_find+0x9c/0xb0&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271298] RIP: 0010:vmacache_find+0x9c/0xb0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271299] RSP: 0018:ffff9e0bc2263c60 EFLAGS: 00010203&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271300] RAX:&lt;/span&gt; &lt;span&gt;ffff8c7caf1d61a0&lt;/span&gt; &lt;span&gt;RBX: 00007fffffffd000 RCX: 0000000000000002&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271301] RDX: 0000000000000002 RSI: 00007fffffffd000 RDI:&lt;/span&gt; &lt;span&gt;ffff8c7c214c7380&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271301] RBP: ffff9e0bc2263c60 R08: 0000000000000000 R09: 0000000000000000&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271302] R10: 0000000000000000 R11: 0000000000000000 R12: ffff8c7c214c7380&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271303] R13: ffff9e0bc2263d58 R14: ffff8c7c214c7380 R15: 0000000000000014&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271304] FS:  00007f58c7bf6a80(0000) GS:ffff8c7cbfc00000(0000) knlGS:0000000000000000&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271305] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271305] CR2: 00007fffffffd000 CR3: 00000000a143c004 CR4: 00000000003606f0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271308] DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271309] DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000400&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271309] Call Trace:&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271314]  find_vma+0x1b/0x70&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271318]  __do_page_fault+0x174/0x4d0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271320]  do_page_fault+0x2e/0xe0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271323]  do_async_page_fault+0x51/0x80&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271326]  async_page_fault+0x25/0x50&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271329] RIP: 0010:copy_user_generic_unrolled+0x86/0xc0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271330] RSP: 0018:ffff9e0bc2263e08 EFLAGS: 00050202&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271330] RAX: 00007fffffffd008 RBX: 0000000000000008 RCX: 0000000000000001&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271331] RDX: 0000000000000000 RSI: 00007fffffffd000 RDI: ffff9e0bc2263e30&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271332] RBP: ffff9e0bc2263e20 R08:&lt;/span&gt; &lt;span&gt;ffffffffa7243680&lt;/span&gt; &lt;span&gt;R09: 0000000000000002&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271333] R10: ffff8c7bb4497738 R11: 0000000000000000 R12: ffff9e0bc2263e30&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271333] R13: ffff8c7bb4497700 R14: ffff8c7cb7a72d80 R15: ffff8c7bb4497700&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271337]  ? _copy_from_user+0x3e/0x60&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271340]  eventfd_write+0x74/0x270&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271343]  ? common_file_perm+0x58/0x160&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271345]  ? wake_up_q+0x80/0x80&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271347]  __vfs_write+0x1b/0x40&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271348]  vfs_write+0xb1/0x1a0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271349]  SyS_write+0x55/0xc0&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271353]  do_syscall_64+0x73/0x130&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271355]  entry_SYSCALL_64_after_hwframe+0x3d/0xa2&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271356] RIP: 0033:0x55a2e8ed76a6&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271357] RSP: 002b:00007ffe71367ec8 EFLAGS: 00000202 ORIG_RAX: 0000000000000001&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271358] RAX: ffffffffffffffda RBX: 0000000000000000 RCX: 000055a2e8ed76a6&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271358] RDX: 0000000000000008 RSI: 00007fffffffd000 RDI: 0000000000000003&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271359] RBP: 0000000000000001 R08: 0000000000000000 R09: 0000000000000000&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271359] R10: 0000000000000000 R11: 0000000000000202 R12: 00007ffe71367ec8&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271360] R13: 00007fffffffd000 R14: 0000000000000009 R15: 0000000000000000&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271361] Code: 00 48 8b 84 c8 10 08 00 00 48 85 c0 74 11 48 39 78 40 75 17 48 39 30 77 06 48 39 70 08 77 8d 83 c2 01 83 fa 04 75 ce 31 c0 5d c3 &amp;lt;0f&amp;gt; 0b 31 c0 5d c3 90 90 90 90 90 90 90 90 90 90 90 90 90 90 0f&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;[ 3482.271381] ---[ end trace bf256b6e27ee4552 ]---&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;At this point, the exploit can create a fake VMA that contains the correct&lt;/span&gt; &lt;span&gt;mm_struct&lt;/span&gt; &lt;span&gt;pointer (leaked from RDI). It also populates other fields with references to fake data structures (by creating pointers back into the fake VMA using the leaked VMA pointer from RAX) and with pointers into the kernel's code (using the leaked R8 from the page fault exception frame to bypass KASLR).&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;It is probably possible to exploit this bug in some really elegant way by abusing the ability to overlay a fake writable VMA over existing readonly pages, or something like that; however, this exploit just uses classic jump-oriented programming.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;To trigger the use-after-free a second time, a writing memory access is performed on an address that has no pagetable entries. At this point, the kernel's page fault handler comes in via&lt;/span&gt; &lt;span&gt;page_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;do_page_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;__do_page_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;handle_mm_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;__handle_mm_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;handle_pte_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;do_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;do_shared_fault&lt;/span&gt; &lt;span&gt;-&amp;gt;&lt;/span&gt; &lt;span&gt;__do_fault&lt;/span&gt;&lt;span&gt;, at which point it performs an indirect call:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;static int __do_fault(struct vm_fault *vmf)&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;struct vm_area_struct *vma = vmf-&amp;gt;vma;&lt;/span&gt;&lt;/div&gt;
+
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ret = vma-&amp;gt;vm_ops-&amp;gt;fault(vmf);&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;vma&lt;/span&gt; &lt;span&gt;is the VMA structure we control, so at this point, we can gain instruction pointer control. R13 contains a pointer to&lt;/span&gt; &lt;span&gt;vma&lt;/span&gt;&lt;span&gt;. The JOP chain that is used from there on follows; it is quite crude (for example, it crashes after having done its job), but it works.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;First, to move the VMA pointer to RDI:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c21: 49 8b 45 70           mov rax,QWORD PTR [r13+0x70]&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c25: 48 8b 80 88 00 00 00  mov rax,QWORD PTR [rax+0x88]&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c2c: 48 85 c0              test rax,rax&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c2f: 74 08                 je ffffffff810b5c39&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c31: 4c 89 ef              mov rdi,r13&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810b5c34: e8 c7 d3 b4 00        call ffffffff81c03000 &amp;lt;__x86_indirect_thunk_rax&amp;gt;&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Then, to get full control over RDI:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810a4aaa: 48 89 fb              mov rbx,rdi&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810a4aad: 48 8b 43 20           mov rax,QWORD PTR [rbx+0x20]&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810a4ab1: 48 8b 7f 28           mov rdi,QWORD PTR [rdi+0x28]&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;ffffffff810a4ab5: e8 46 e5 b5 00        call ffffffff81c03000 &amp;lt;__x86_indirect_thunk_rax&amp;gt;&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;At this point, we can call into&lt;/span&gt; &lt;span&gt;run_cmd()&lt;/span&gt;&lt;span&gt;, which spawns a root-privileged usermode helper, using a space-delimited path and argument list as its only argument. This gives us the ability to run a binary we have supplied with root privileges. (Thanks to Mark for pointing out that if you control RDI and RIP, you don't have to try to do crazy things like flipping the SM*P bits in CR4, you can just spawn a usermode helper...)&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;After launching the usermode helper, the kernel crashes with a page fault because the JOP chain doesn't cleanly terminate; however, since that only kills the process in whose context the fault occured, it doesn't really matter.&lt;/span&gt;&lt;/div&gt;
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This bug was reported 2018-09-12. Two days later, 2018-09-14, a fix was in the upstream kernel tree. This is exceptionally fast, compared to the fix times of other software vendors. At this point, downstream vendors could theoretically backport and apply the patch. The bug is essentially public at this point, even if its security impact is obfuscated by the commit message, which is&lt;/span&gt; &lt;a href=&quot;https://twitter.com/grsecurity/status/1042376315045916672&quot;&gt;&lt;span&gt;frequently&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://twitter.com/grsecurity/status/1036346838121689091&quot;&gt;&lt;span&gt;demonstrated&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://twitter.com/grsecurity/status/1034034322389573632&quot;&gt;&lt;span&gt;by&lt;/span&gt;&lt;/a&gt; &lt;span&gt;grsecurity.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;However, a fix being in the upstream kernel does not automatically mean that users' systems are actually patched. The normal process for shipping fixes to users who use distribution kernels based on upstream stable branches works roughly as follows:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;ol&gt;&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;A patch lands in the upstream kernel.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The patch is backported to an upstream-supported stable kernel.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The distribution merges the changes from upstream-supported stable kernels into its kernels.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;li dir=&quot;ltr&quot;&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Users install the new distribution kernel.&lt;/span&gt;&lt;/div&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;Note that the patch becomes public after step 1, potentially allowing attackers to develop an exploit, but users are only protected after step 4.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;In this case, the backport to the upstream-supported stable kernels 4.18, 4.14, 4.9 and 4.4 were published 2018-09-19, five days after the patch became public, at which point the distributions could pull in the patch.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.72 on 2018-09-26&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.71 on 2018-09-19&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.70 on 2018-09-15&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.69 on 2018-09-09&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.68 on 2018-09-05&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.67 on 2018-08-24&lt;/span&gt;&lt;/div&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;4.14.66 on 2018-08-22&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The 4.9 and 4.4 longterm maintenance kernels are updated similarly frequently; only the 3.16 longterm maintenance kernel has not received any updates between the most recent update on 2018-09-25 (&lt;/span&gt;&lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/bwh/linux-stable.git/tag/?h=v3.16.58&quot;&gt;&lt;span&gt;3.16.58&lt;/span&gt;&lt;/a&gt;&lt;span&gt;) and the previous one on 2018-06-16 (&lt;/span&gt;&lt;a href=&quot;https://git.kernel.org/pub/scm/linux/kernel/git/bwh/linux-stable.git/tag/?h=v3.16.57&quot;&gt;&lt;span&gt;3.16.57&lt;/span&gt;&lt;/a&gt;&lt;span&gt;).&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;However, Linux distributions often don't publish distribution kernel updates very frequently. For example, Debian stable&lt;/span&gt; &lt;a href=&quot;https://packages.debian.org/search?keywords=linux-image-amd64&amp;amp;searchon=names&amp;amp;suite=stable&amp;amp;section=all&quot;&gt;&lt;span&gt;ships a kernel based on 4.9&lt;/span&gt;&lt;/a&gt;&lt;span&gt;, but as of 2018-09-26, this kernel&lt;/span&gt; &lt;a href=&quot;http://metadata.ftp-master.debian.org/changelogs//main/l/linux/linux_4.9.110-3+deb9u4_changelog&quot;&gt;&lt;span&gt;was last updated 2018-08-21&lt;/span&gt;&lt;/a&gt;&lt;span&gt;. Similarly, Ubuntu 16.04 ships a kernel that was&lt;/span&gt; &lt;a href=&quot;http://changelogs.ubuntu.com/changelogs/pool/main/l/linux-signed/linux-signed_4.15.0-34.37/changelog&quot;&gt;&lt;span&gt;last updated 2018-08-27&lt;/span&gt;&lt;/a&gt;&lt;span&gt;. Android only ships security updates once a month. Therefore, when a security-critical fix is available in an upstream stable kernel, it can still take weeks before the fix is actually available to users - especially if the security impact is not announced publicly.&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;In this case, the security issue was announced on the oss-security mailing list on 2018-09-18, with a CVE allocation on 2018-09-19, making the need to ship new distribution kernels to users clearer. Still: As of 2018-09-26, both Debian and Ubuntu (in releases 16.04 and 18.04) track the bug as unfixed:&lt;/span&gt;&lt;/div&gt;
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+
+&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
+
+
+&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;This exploit shows how much impact the kernel configuration can have on how easy it is to write an exploit for a kernel bug. While simply turning on every security-related kernel configuration option is probably a bad idea, some of them - like the&lt;/span&gt; &lt;span&gt;kernel.dmesg_restrict&lt;/span&gt; &lt;span&gt;sysctl - seem to provide a reasonable tradeoff when enabled.&lt;/span&gt;&lt;/div&gt;
+&lt;br/&gt;&lt;div dir=&quot;ltr&quot;&gt;&lt;span&gt;The fix timeline shows that the kernel's approach to handling severe security bugs is very efficient at quickly landing fixes in the git master tree, but leaves a window of exposure between the time an upstream fix is published and the time the fix actually becomes available to users - and this time window is sufficiently large that a kernel exploit could be written by an attacker in the meantime.&lt;/span&gt;&lt;/div&gt;
+
+</description>
+<pubDate>Sun, 30 Sep 2018 16:32:05 +0000</pubDate>
+<dc:creator>known</dc:creator>
+<og:url>https://googleprojectzero.blogspot.com/2018/09/a-cache-invalidation-bug-in-linux.html</og:url>
+<og:title>A cache invalidation bug in Linux memory management</og:title>
+<og:description>Posted by Jann Horn, Google Project Zero This blogpost describes a way to exploit a Linux kernel bug (CVE-2018-17182) that exists since...</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://googleprojectzero.blogspot.com/2018/09/a-cache-invalidation-bug-in-linux.html</dc:identifier>
+</item>
+<item>
 <title>Questions</title>
 <link>https://patrickcollison.com/questions</link>
 <guid isPermaLink="true" >https://patrickcollison.com/questions</guid>
@@ -95,8 +423,8 @@
 <description>[unable to retrieve full-text content]
 &lt;p&gt;Article URL: &lt;a href=&quot;https://productforums.google.com/forum/#!msg/gmail/465HItQGwVI/_QQsSD6TAQAJ&quot;&gt;https://productforums.google.com/forum/#!msg/gmail/465HItQGwVI/_QQsSD6TAQAJ&lt;/a&gt;&lt;/p&gt;
 &lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=18104400&quot;&gt;https://news.ycombinator.com/item?id=18104400&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Points: 230&lt;/p&gt;
-&lt;p&gt;# Comments: 153&lt;/p&gt;
+&lt;p&gt;Points: 258&lt;/p&gt;
+&lt;p&gt;# Comments: 163&lt;/p&gt;
 </description>
 <pubDate>Sun, 30 Sep 2018 04:03:44 +0000</pubDate>
 <dc:creator>firic</dc:creator>
@@ -178,16 +506,16 @@
 <description>&lt;tr readability=&quot;0.55737704918033&quot;&gt;&lt;td bgcolor=&quot;#FF6600&quot;&gt;
 &lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;13.769614835949&quot;&gt;&lt;td&gt;
-&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;8.7207560627675&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18103640&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;13.789285714286&quot;&gt;&lt;td&gt;
+&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;8.7332142857143&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18103640&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
 &lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
 &lt;center&gt;
 
 &lt;/center&gt;
 &lt;/td&gt;
 &lt;td class=&quot;title&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18103640&quot; class=&quot;storylink&quot;&gt;Ask HN: How do you decide when you've done enough work for the day?&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;0.76923076923077&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18103640&quot;&gt;214 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=zzaip&quot; class=&quot;hnuser&quot;&gt;zzaip&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18103640&quot;&gt;16 hours ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18103640&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18103640&amp;amp;goto=item%3Fid%3D18103640&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Ask%20HN%3A%20How%20do%20you%20decide%20when%20you've%20done%20enough%20work%20for%20the%20day%3F&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Ask%20HN%3A%20How%20do%20you%20decide%20when%20you've%20done%20enough%20work%20for%20the%20day%3F&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18103640&amp;amp;auth=ab18e99342abd041634f13ad43620cdf7dc2b775&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18103640&quot;&gt;96 comments&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;0.78947368421053&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
+&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18103640&quot;&gt;253 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=zzaip&quot; class=&quot;hnuser&quot;&gt;zzaip&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18103640&quot;&gt;1 day ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18103640&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18103640&amp;amp;goto=item%3Fid%3D18103640&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Ask%20HN%3A%20How%20do%20you%20decide%20when%20you've%20done%20enough%20work%20for%20the%20day%3F&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Ask%20HN%3A%20How%20do%20you%20decide%20when%20you've%20done%20enough%20work%20for%20the%20day%3F&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18103640&amp;amp;auth=ab18e99342abd041634f13ad43620cdf7dc2b775&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18103640&quot;&gt;111 comments&lt;/a&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
 &lt;/tr&gt;&lt;tr readability=&quot;28&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
 &lt;td readability=&quot;29&quot;&gt;I'm a relatively junior software engineer, a little over a year out from university, with a cushy remote job working for big-co. And I &lt;em&gt;never&lt;/em&gt; know how much work to do on a given day.
@@ -463,23 +791,6 @@
 <dc:language>en-US</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://www.rollingstone.com/culture/culture-features/drug-war-mexico-gas-oil-cartel-717563/</dc:identifier>
-</item>
-<item>
-<title>Solid – Reshape the web as we know it</title>
-<link>https://solid.inrupt.com/</link>
-<guid isPermaLink="true" >https://solid.inrupt.com/</guid>
-<description>&lt;div class=&quot;field__item&quot; readability=&quot;14.672489082969&quot;&gt;
-&lt;h2&gt;Supported by Inrupt&lt;/h2&gt;
-&lt;p&gt;Inrupt is building a commercial ecosystem to fuel Solid’s success and protect the integrity of the next phase of the web. Inrupt's mission is to restore rightful ownership of data back to every web user and unleash a new wave of innovation - for developers, for business, for everyone.&lt;/p&gt;
-&lt;p&gt;A place where entrepreneurial developers can innovate and generate revenue, and trusted businesses provide ancillary products and services.&lt;/p&gt;
-&lt;p&gt;&lt;a class=&quot;button-solid&quot; href=&quot;https://www.inrupt.com&quot;&gt;Learn More&lt;/a&gt;&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Sat, 29 Sep 2018 15:28:03 +0000</pubDate>
-<dc:creator>yarapavan</dc:creator>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://solid.inrupt.com/</dc:identifier>
 </item>
 </channel>
 </rss>
