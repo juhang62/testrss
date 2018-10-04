@@ -9,16 +9,771 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>在asp.net core2.1中添加中间件以扩展Swashbuckle.AspNetCore3.0支持简单的文档访问权限控制 - 易墨</title>
+<link>http://www.cnblogs.com/morang/p/9741511.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/morang/p/9741511.html</guid>
+<description>&lt;h2 id=&quot;swashbuckle.aspnetcore3.0-介绍&quot;&gt;Swashbuckle.AspNetCore3.0 介绍&lt;/h2&gt;
+&lt;blockquote readability=&quot;6.9050279329609&quot;&gt;
+&lt;p&gt;一个使用 ASP.NET Core 构建的 API 的 Swagger 工具。直接从您的路由，控制器和模型生成漂亮的 API 文档，包括用于探索和测试操作的 UI。&lt;br/&gt;项目主页：&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore&quot; class=&quot;uri&quot;&gt;https://github.com/domaindrivendev/Swashbuckle.AspNetCore&lt;/a&gt;&lt;br/&gt;划重点，使用多看看 Readme,然后看下&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore/tree/master/test/WebSites&quot;&gt;项目官方示例&lt;/a&gt;，遇到问题找找 issues&lt;br/&gt;继上篇&lt;a href=&quot;https://www.cnblogs.com/morang/p/9740190.html&quot;&gt;Swashbuckle.AspNetCore3.0 的二次封装与使用&lt;/a&gt;分享了二次封装的代码，本篇将分享如何给文档添加一个登录页，控制文档的访问权限(文末附完整 Demo)&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;关于生产环境接口文档的显示&quot;&gt;关于生产环境接口文档的显示&lt;/h2&gt;
+&lt;p&gt;在此之前的接口项目中，若使用了 Swashbuckle.AspNetCore，都是控制其只在开发环境使用，不会就这样将其发布到生产环境(安全第一) 。&lt;br/&gt;那么，怎么安全的发布 swagger 呢？我有两种想法&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;将路由前缀改得超级复杂&lt;/li&gt;
+&lt;li&gt;添加一个拦截器控制 swagger 文档的访问必须获得授权(登录)&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;大佬若有更好的想法，还望指点一二&lt;/p&gt;
+&lt;p&gt;下面我将介绍基于 asp.net core2.1 且使用了 Swashbuckle.AspNetCore3.0 的项目种是怎么去实现安全校验的&lt;br/&gt;通过本篇文章之后，可以放心的将项目中的 swagger 文档发布到生产环境，并使其可通过用户名密码去登录访问,得以安全且方便的测试接口。&lt;/p&gt;
+&lt;h2 id=&quot;实现思路&quot;&gt;实现思路&lt;/h2&gt;
+&lt;p&gt;前面已经说到，需要一个拦截器，而这个拦截器还需要是全局的，在 asp.net core 中，自然就需要用到的是&lt;a href=&quot;https://docs.microsoft.com/zh-cn/aspnet/core/fundamentals/middleware/?view=aspnetcore-2.1&quot;&gt;中间件&lt;/a&gt;了&lt;/p&gt;
+&lt;p&gt;步骤如下，在 UseSwagger 之前使用自定义的中间件&lt;br/&gt;拦截所有 swagger 相关请求，判断是否授权登录&lt;br/&gt;若未登录则跳转到授权登录页，登录后即可访问 swagger 的资源&lt;/p&gt;
+&lt;p&gt;如果项目本身有登录系统，可在自定义中间件中使用项目中的登录，&lt;br/&gt;没有的话，我会分享一个简单的用户密码登录的方案&lt;/p&gt;
+&lt;p&gt;Demo 如下图所示&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://dn-coding-net-production-pp.qbox.me/b05ad408-74b6-48c1-9cbc-73f1a529d272.gif&quot; alt=&quot;图片&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;为使用-swashbuckle.aspnetcore3-的项目添加接口文档登录功能&quot;&gt;为使用 Swashbuckle.AspNetCore3 的项目添加接口文档登录功能&lt;/h2&gt;
+&lt;p&gt;在写此功能之前，已经&lt;a href=&quot;https://www.cnblogs.com/morang/p/9740190.html&quot;&gt;封装了一部分代码&lt;/a&gt;，此功能算是在此之前的代码封装的一部分，不过是后面完成的。文中代码删除了耦合，和 demo 中会有一点差异。&lt;/p&gt;
+&lt;h3 id=&quot;定义模型存放用户密码&quot;&gt;定义模型存放用户密码&lt;/h3&gt;
+&lt;pre class=&quot;cs&quot;&gt;
+&lt;code&gt;    public class CustomSwaggerAuth
+    {
+        public CustomSwaggerAuth() { }
+        public CustomSwaggerAuth(string userName,string userPwd)
+        {
+            UserName = userName;
+            UserPwd = userPwd;
+        }
+        public string UserName { get; set; }
+        public string UserPwd { get; set; }
+        //加密字符串
+        public string AuthStr
+        {
+            get
+            {
+                return SecurityHelper.HMACSHA256(UserName + UserPwd);
+            }
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;加密方法hmacsha256&quot;&gt;加密方法(HMACSHA256)&lt;/h3&gt;
+&lt;pre class=&quot;cs&quot;&gt;
+&lt;code&gt;    public static string HMACSHA256(string srcString, string key=&quot;abc123&quot;)
+    {
+        byte[] secrectKey = Encoding.UTF8.GetBytes(key);
+        using (HMACSHA256 hmac = new HMACSHA256(secrectKey))
+        {
+            hmac.Initialize();
+
+            byte[] bytes_hmac_in = Encoding.UTF8.GetBytes(srcString);
+            byte[] bytes_hamc_out = hmac.ComputeHash(bytes_hmac_in);
+
+            string str_hamc_out = BitConverter.ToString(bytes_hamc_out);
+            str_hamc_out = str_hamc_out.Replace(&quot;-&quot;, &quot;&quot;);
+
+            return str_hamc_out;
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;自定义中间件&quot;&gt;自定义中间件&lt;/h3&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;此中间件中有使用的 login.html，其属性均为内嵌资源，故事用 GetManifestResourceStream 读取文件流并输出，这样可以方便的将其进行封装到独立的类库中，而不与输出项目耦合&lt;br/&gt;关于退出按钮，可以参考前文自定义 index.html&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;pre class=&quot;cs&quot;&gt;
+&lt;code&gt;    private const string SWAGGER_ATUH_COOKIE = nameof(SWAGGER_ATUH_COOKIE);
+    public void Configure(IApplicationBuilder app)
+    {
+        var options=new {
+            RoutePrefix=&quot;swagger&quot;,
+            SwaggerAuthList = new List&amp;lt;CustomSwaggerAuth&amp;gt;()
+            {
+                new CustomSwaggerAuth(&quot;swaggerloginer&quot;,&quot;123456&quot;)
+            },
+        }
+        var currentAssembly = typeof(CustomSwaggerAuth).GetTypeInfo().Assembly;
+        app.Use(async (context, next) =&amp;gt;
+        {
+            var _method = context.Request.Method.ToLower();
+            var _path = context.Request.Path.Value;
+            // 非swagger相关请求直接跳过
+            if (_path.IndexOf($&quot;/{options.RoutePrefix}&quot;) != 0)
+            {
+                await next();
+                return;
+            }
+            else if (_path == $&quot;/{options.RoutePrefix}/login.html&quot;)
+            {
+                //登录
+                if (_method == &quot;get&quot;)
+                {
+                    //读取CustomSwaggerAuth所在程序集内嵌的login.html并输出
+                    var stream = currentAssembly.GetManifestResourceStream($&quot;{currentAssembly.GetName().Name}.login.html&quot;);
+                    byte[] buffer = new byte[stream.Length];
+                    stream.Read(buffer, 0, buffer.Length);
+                    context.Response.ContentType = &quot;text/html;charset=utf-8&quot;;
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    context.Response.Body.Write(buffer, 0, buffer.Length);
+                    return;
+                }
+                else if (_method == &quot;post&quot;)
+                {
+                    var userModel = new CustomSwaggerAuth(context.Request.Form[&quot;userName&quot;], context.Request.Form[&quot;userPwd&quot;]);
+                    if (!options.SwaggerAuthList.Any(e =&amp;gt; e.UserName == userModel.UserName &amp;amp;&amp;amp; e.UserPwd == userModel.UserPwd))
+                    {
+                        await context.Response.WriteAsync(&quot;login error!&quot;);
+                        return;
+                    }
+                    //context.Response.Cookies.Append(&quot;swagger_auth_name&quot;, userModel.UserName);
+                    context.Response.Cookies.Append(SWAGGER_ATUH_COOKIE, userModel.AuthStr);
+                    context.Response.Redirect($&quot;/{options.RoutePrefix}&quot;);
+                    return;
+                }
+            }
+            else if (_path == $&quot;/{options.RoutePrefix}/logout&quot;)
+            {
+                //退出
+                context.Response.Cookies.Delete(SWAGGER_ATUH_COOKIE);
+                context.Response.Redirect($&quot;/{options.RoutePrefix}/login.html&quot;);
+                return;
+            }
+            else
+            {
+                //若未登录则跳转登录
+                if (!options.SwaggerAuthList.Any(s =&amp;gt; !string.IsNullOrEmpty(s.AuthStr) &amp;amp;&amp;amp; s.AuthStr == context.Request.Cookies[SWAGGER_ATUH_COOKIE]))
+                {
+                    context.Response.Redirect($&quot;/{options.RoutePrefix}/login.html&quot;);
+                    return;
+                }
+            }
+            await next();
+        });
+        app.UseSwagger();
+        app.UseSwaggerUI(c=&amp;gt;{
+            if (options.SwaggerAuthList.Count &amp;gt; 0)
+            {
+                //index.html中添加ConfigObject属性
+                c.ConfigObject[&quot;customAuth&quot;] = true;
+                c.ConfigObject[&quot;loginUrl&quot;] = $&quot;/{options.RoutePrefix}/login.html&quot;;
+                c.ConfigObject[&quot;logoutUrl&quot;] = $&quot;/{options.RoutePrefix}/logout&quot;;
+            }
+        });
+        app.UseMvc();
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;index.html-添加退出按钮&quot;&gt;index.html 添加退出按钮&lt;/h3&gt;
+&lt;pre class=&quot;js&quot;&gt;
+&lt;code&gt;if (configObject.customAuth) {
+  var logOutEle = document.createElement('button')
+  logOutEle.className = 'btn '
+  logOutEle.innerText = '退出'
+  logOutEle.onclick = function() {
+    location.href = configObject.logoutUrl
+  }
+  document.getElementsByClassName('topbar-wrapper')[0].appendChild(logOutEle)
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;自定义的-index.htmllogin.html&quot;&gt;自定义的 index.html，login.html&lt;/h3&gt;
+&lt;p&gt;注意：需要将其改为内嵌资源(属性-&amp;gt;生成操作-&amp;gt;嵌入的资源)&lt;/p&gt;
+&lt;h2 id=&quot;完整-demo-下载&quot;&gt;完整 Demo 下载&lt;/h2&gt;
+</description>
+<pubDate>Wed, 03 Oct 2018 23:48:00 +0000</pubDate>
+<dc:creator>易墨</dc:creator>
+<og:description>Swashbuckle.AspNetCore3.0 介绍 一个使用 ASP.NET Core 构建的 API 的 Swagger 工具。直接从您的路由，控制器和模型生成漂亮的 API 文档，包括用于探</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/morang/p/9741511.html</dc:identifier>
+</item>
+<item>
+<title>CSS魔法堂：改变单选框颜色就这么吹毛求疵！ - ^_^肥仔John</title>
+<link>http://www.cnblogs.com/fsjohnhuang/p/9741345.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/fsjohnhuang/p/9741345.html</guid>
+<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
+&lt;p&gt; 是否曾经被业务提出&quot;能改改这个单选框的颜色吧！让它和主题颜色搭配一下吧！&quot;，然后苦于原生不支持换颜色，最后被迫自己手撸一个凑合使用。若抛开&lt;code&gt;input[type=radio]&lt;/code&gt;重新开发一个，发现要模拟选中、未选中、不可用等状态很繁琐，而涉及单选框组就更烦人了，其实我们可以通过&lt;code&gt;label&lt;/code&gt;、&lt;code&gt;::before&lt;/code&gt;、&lt;code&gt;:checked&lt;/code&gt;和&lt;code&gt;tabindex&lt;/code&gt;，然后外加少量JavaScript脚本就能很好地模拟出一个样式更丰富的“原生”单选框。下面我们一起来尝试吧！&lt;/p&gt;
+&lt;h2 id=&quot;单选框了解一下&quot;&gt;单选框了解一下&lt;/h2&gt;
+&lt;p&gt; 由于我们的目标是改变单选框颜色，其他外观特征和行为与原来的单选框一致，那么我们就必须先了解单选框原来的外观特征和行为主要有哪些。&lt;br/&gt;1.外观特征&lt;br/&gt;1.1.常态样式&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;margin: 3px 3px 0px 5px;
+border: none 0;
+padding: 0;
+box-sizing: border-box;
+display: inline-block;
+line-height: normal;
+position: static;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意：外观上我们必须要保证布局特性和原生的一致，否则采用自定义单选框替换后很大机会会影响整体的布局，最后导致被迫调整其他元素的布局特性来达到整体的协调，从而扩大了修改范围。&lt;/p&gt;
+&lt;p&gt;1.2.获得焦点的样式&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;outline-offset: 0px;
+outline: -webkit-focu-ring-color auto 5px;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意：这里的获取焦点的样式仅通过键盘&lt;code&gt;Tab&lt;/code&gt;键才生效，若通过鼠标点击虽然单选框已获得焦点，但上述样式并不会生效。&lt;/p&gt;
+&lt;p&gt;1.3.设置为&lt;code&gt;disabled&lt;/code&gt;的样式&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;color: rgb(84, 84, 84);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;2.行为特征&lt;br/&gt; 单选框的行为特征，明显就是选中与否，及选中状态的改变事件，因此我们必须保持对外提供&lt;code&gt;change&lt;/code&gt;事件。&lt;br/&gt; 另外值得注意的是，当通过键盘的&lt;code&gt;Tab&lt;/code&gt;键让单选框获得焦点后，再按下&lt;code&gt;Space&lt;/code&gt;键则会选中该单选框。&lt;/p&gt;
+&lt;p&gt; 有了上述的了解，我们可以开始着手撸代码了！&lt;/p&gt;
+&lt;h2 id=&quot;少废话撸代码&quot;&gt;少废话，撸代码&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/347002/201810/347002-20181003235455237-2000911162.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上图中左侧就是原生单选框，右侧为我们自定义的单选框。从上到下依次为&lt;em&gt;未选中&lt;/em&gt;、&lt;em&gt;选中&lt;/em&gt;、&lt;em&gt;获得焦点&lt;/em&gt;和&lt;em&gt;disabled&lt;/em&gt;状态的样式。&lt;/p&gt;
+&lt;p&gt;CSS部分&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;label.radio {
+  /* 保证布局特性保持一致 */
+  margin: 3px 3px 0px 5px;
+  display: inline-block;
+  box-sizing: border-box;
+
+  width: 12px;
+  height: 12px;
+}
+
+.radio__appearance{
+  display: block; /* 设置为block则不受vertical-align影响，从而不会意外影响到.radio的linebox高度 */
+  position: relative;
+  box-shadow: 0 0 0 1px tomato; /* box-shadow不像border那样会影响盒子的框高 */
+  border-radius: 50%;
+  height: 90%;
+  width: 90%;
+  text-align: center;
+}
+label.radio [type=radio] + .radio__appearance::before{
+  content: &quot;&quot;;
+  display: block;
+  border-radius: 50%;
+  width: 85%;
+  height: 85%;
+
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+
+  transition: background .3s;
+}
+label.radio [type=radio]:checked + .radio__appearance::before{
+  background: tomato;
+}
+label.radio [type=radio][disabled] + .radio__appearance{
+  opacity: .5;
+}
+label.radio:focus{
+  outline-offset: 0px;
+  outline: #999 auto 5px;
+}
+/* 通过鼠标单击获得焦点时，outline效果不生效 */
+label.radio.clicked{
+  outline: none 0;
+}
+/* 自定义单选框的行为主要是基于原生单选框的，因此先将原生单选框隐藏 */
+label.radio input {
+  display: none;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;HTML部分&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;!-- 未选中状态 --&amp;gt;
+&amp;lt;label class=&quot;radio&quot; tabindex=&quot;0&quot;&amp;gt;
+  &amp;lt;input type=&quot;radio&quot; name=&quot;a&quot;&amp;gt;
+  &amp;lt;i class=&quot;radio__appearance&quot;&amp;gt;&amp;lt;/i&amp;gt;
+&amp;lt;/label&amp;gt;
+
+&amp;lt;br&amp;gt;
+
+&amp;lt;!-- 选中状态 --&amp;gt;
+&amp;lt;label class=&quot;radio&quot; tabindex=&quot;0&quot;&amp;gt;
+  &amp;lt;input type=&quot;radio&quot; name=&quot;a&quot; checked&amp;gt;
+  &amp;lt;i class=&quot;radio__appearance&quot;&amp;gt;&amp;lt;/i&amp;gt;
+&amp;lt;/label&amp;gt;
+
+&amp;lt;br&amp;gt;
+
+&amp;lt;!-- disabled状态 --&amp;gt;
+&amp;lt;label class=&quot;radio&quot;&amp;gt;
+  &amp;lt;input type=&quot;radio&quot; name=&quot;a&quot; disabled&amp;gt;
+  &amp;lt;i class=&quot;radio__appearance&quot;&amp;gt;&amp;lt;/i&amp;gt;
+&amp;lt;/label&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;JavaScript部分&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;var radios = document.querySelectorAll(&quot;.radio&quot;)
+radios.forEach(radio =&amp;gt; {
+  // 模拟鼠标点击后:focus样式无效
+  radio.addEventListener(&quot;mousedown&quot;, e =&amp;gt; {
+    var tar = e.currentTarget
+    tar.classList.add(&quot;clicked&quot;)
+    var fp = setInterval(function(){
+      if (document.activeElement != tar){
+        tar.classList.remove(&quot;clicked&quot;)
+        clearInterval(fp)
+      }
+    }, 400)
+  })
+  // 模拟通过键盘获得焦点后，按`Space`键执行选中操作
+  radio.addEventListener(&quot;keydown&quot;, e =&amp;gt; {
+    if (e.keyCode === 32){
+      e.target.click()
+    }
+  })
+})&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这个实现有3个注意点：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;通过&lt;code&gt;label&lt;/code&gt;传递鼠标点击事件到关联的&lt;code&gt;input[type=radio]&lt;/code&gt;，因此可以安心隐藏单选框又可以利用单选框自身特性。但由于&lt;code&gt;label&lt;/code&gt;控件自身的限制，如默认不是可获得焦点元素，因此无法传递键盘按键事件到单选框，即使添加&lt;code&gt;tabindex&lt;/code&gt;特性也需手写JS来实现；&lt;/li&gt;
+&lt;li&gt;当tabindex大于等于0时表示该元素可以获得焦点，为0时表示根据元素所在位置安排获得焦点的顺序，而大于0则表示越小越先获得焦点；&lt;/li&gt;
+&lt;li&gt;由于单选框的&lt;code&gt;display&lt;/code&gt;为&lt;code&gt;inline-block&lt;/code&gt;，因此单选框将影响line box高度。当自定义单选框内元素采用&lt;code&gt;inline-block&lt;/code&gt;时，若&lt;code&gt;vertical-align&lt;/code&gt;设置稍有不慎就会导致内部元素所在的line box被撑高，从而导致自定义单选框所在的line box高度变大。因此这里采用将内部元素的&lt;code&gt;display&lt;/code&gt;均设置为&lt;code&gt;block&lt;/code&gt;的做法，直接让&lt;code&gt;vertical-align&lt;/code&gt;失效，提高可控性。&lt;/li&gt;
+&lt;/ol&gt;&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt; 对于复选框我们可以稍加修改就可以了，然后通过VUE、React等框架稍微封装一下提供更简约的API，使用起来就更方便了。&lt;br/&gt; 尊重原创，转载请注明来自：&lt;a href=&quot;https://www.cnblogs.com/fsjohnhuang/p/9741345.html&quot; class=&quot;uri&quot;&gt;https://www.cnblogs.com/fsjohnhuang/p/9741345.html&lt;/a&gt; ^_^肥仔John&lt;/p&gt;
+</description>
+<pubDate>Wed, 03 Oct 2018 23:16:00 +0000</pubDate>
+<dc:creator>^_^肥仔John</dc:creator>
+<og:description>前言  是否曾经被业务提出</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/fsjohnhuang/p/9741345.html</dc:identifier>
+</item>
+<item>
+<title>Linux 桌面玩家指南：06. 优雅地使用命令行及 Bash 脚本编程语言中的美学与哲学 - 京山游侠</title>
+<link>http://www.cnblogs.com/youxia/p/LinuxDesktop006.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/youxia/p/LinuxDesktop006.html</guid>
+<description>&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;&lt;strong&gt;特别说明：&lt;/strong&gt;要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用&lt;code&gt;$&lt;/code&gt;标记数学公式的开始和结束。如果某条评论中出现了两个&lt;code&gt;$&lt;/code&gt;，MathJax 会将两个&lt;code&gt;$&lt;/code&gt;之间的内容按照数学公式进行排版，从而导致评论区格式混乱。如果大家的评论中用到了&lt;code&gt;$&lt;/code&gt;，但是又不是为了使用数学公式，就请使用&lt;code&gt;\$&lt;/code&gt;转义一下，谢谢。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;想从头阅读该系列吗？下面是传送门：&lt;/p&gt;
+&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
+&lt;p&gt;虽然我们玩的是 Linux 桌面系统，但是很多时候我们仍然离不开命令行。有时候，是因为某些工具只有命令行版本，要解决某些问题必须使用命令行，特别是对于我们程序猿和系统管理员来说更是这样。有时候，是因为使用命令行解决问题确实比使用图形界面更加高效。还有些时候，为了自动化、批量化运行程序，我们也不得不使用命令行。得益于 Unix 系统的传统，在命令行中使用管道和文件重定向以及 Shell 脚本语言作为粘合剂，可以将许多简单的工具组合到一起完成更加复杂的任务。总之，Linux 系统中的命令行是相当舒服和优雅的。&lt;/p&gt;
+&lt;p&gt;我这里使用的终端程序就是 Gnome 3 桌面自带的 gnome-terminal，而我使用的 Shell 就是 Bash。网上有很多人推崇 Z Shell，但是我并没有改弦易辙，而是坚持使用 Bash。我认为，Bash 的功能也是很强大的，只是我自己水平有限，不能发挥出它全部的威力而已。关于高效使用命令行这个话题，在网上已经是老生常谈了。我这里主要的参考资料是 Bash 的官方文档，使用&lt;code&gt;man bash&lt;/code&gt;即可以阅读，当然也可以&lt;a href=&quot;http://www.gnu.org/software/bash/manual/bash.pdf&quot;&gt;到 Bash 的官网上下载 pdf 版的文档&lt;/a&gt;，放到手机上有空的时候慢慢看。在本文中，也有不少我自己的观点和体会，我会提到有些快捷键要熟记，有些则完全不需要记，毕竟我们的记忆力也是有限的，我还会提到一些助记的方法。所以，本文绝对不是照本宣科，值得大家拥有，请大家一定记得点赞。&lt;/p&gt;
+&lt;p&gt;四年前，我脑子一抽，写了一篇 &lt;a href=&quot;https://www.cnblogs.com/youxia/p/linux010.html&quot;&gt;Bash 脚本编程语言中的美学与哲学&lt;/a&gt;，还非常洋洋得意。现在回看起来，觉得还是幼稚了一些。但是我觉得我写的这些也不是完全没有帮助，相比于长达 171 页的详细的 &lt;a href=&quot;http://www.gnu.org/software/bash/manual/bash.pdf&quot;&gt;Bash 官方文档&lt;/a&gt;，也许我对 Bash 脚本编程语言的定位——面向字符串的编程语言——更能让大家理解记住并熟练使用命令行呢。&lt;/p&gt;
+&lt;h2 id=&quot;使用-tmux-复用控制台窗口&quot;&gt;使用 tmux 复用控制台窗口&lt;/h2&gt;
+&lt;p&gt;高效使用命令行的首要原则就是要尽量避免干扰，什么意思呢？就是说一但开启了一个控制台窗口，就尽量不要再在桌面上切换来切换去了，不要一会儿被别的窗口挡住控制台，一会儿又让别的窗口破坏了控制台的背景，最好是把控制台最大化或全屏，甚至连鼠标都不要用。但是在实际工作中，我们又经常需要同时在多个控制台窗口中进行工作，例如：在一个控制台窗口中运行录制屏幕的命令，在另外一个控制台窗口中工作；或者在一个控制台窗口中工作，在另外一个控制台窗口中阅读文档。如果既想在多个控制台窗口中工作，又不想一大堆窗口挡来挡去、换来换去的话，就可以考虑试试 tmux 了。如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201608/16576-20160810160336168-1326564124.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;tmux 的功能很多，什么 Session 啊、Atach 啊、Detach 啊等功能都非常强大。但是我们暂时不用去关心这些，只把重点放在它的控制台窗口复用功能上就行了。tmux 中有 window 和 pane 的概念，tmux 可以创建多个 window，这些 window 是不会互相遮挡的，每次只显示一个 window，其它的 window 会自动隐藏，可以使用快捷键在 window 之间切换。同时，可以把一个 window 切分成多个 pane，这些 pane 同时显示在屏幕上，可以使用快捷键在 pane 之间切换。&lt;/p&gt;
+&lt;p&gt;tmux 的快捷键很多，要想全面了解 tmux 的最好办法当然是使用&lt;code&gt;man tmux&lt;/code&gt;命令阅读 tmux 的文档。但是我们只需要记住少数几个重要的快捷键就可以了，如下表：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;7&quot;&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;Ctrl+B c&lt;/td&gt;
+&lt;td&gt;创建一个 window&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl+B　[n][p]&lt;/td&gt;
+&lt;td&gt;切换到下一个窗口或上一个窗口&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;Ctrl+B　&amp;amp;&lt;/td&gt;
+&lt;td&gt;关闭当前窗口&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl+B　&quot;&lt;/td&gt;
+&lt;td&gt;将当前 window 或 pane 切分成两个 pane，上下排列&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl+B　%&lt;/td&gt;
+&lt;td&gt;将当前 window 或 pane 切分成两个 pane，左右排列&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;Ctrl+B　x&lt;/td&gt;
+&lt;td&gt;关闭当前 pane&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl+B　[↑][↓][←][→]&lt;/td&gt;
+&lt;td&gt;在 pane 之间移动&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;Ctrl+[↑][↓][←][→]&lt;/td&gt;
+&lt;td&gt;调整当前 pane 的大小，一次调整一格&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Alt+[↑][↓][←][→]&lt;/td&gt;
+&lt;td&gt;调整当前 pane 的大小，一次调整五格&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;tmux 的快捷键比较特殊，除了调整 pane 大小的快捷键之外，其它的都是先按 Ctrl+B，再按一个字符。先按 Ctrl+B，再按 c，就会创建一个 window，这里 c 就是 create window。先按 Ctrl+B，再按 n 或者 p，就可以在窗口之间切换，它们是 next window 和 previous window 的意思。关闭窗口是先按 Ctrl+B，再按 &amp;amp;，这个只能死记。先按 Ctrl+B，再按 &quot; ，表示上下拆分窗口，可以想象成单引号和双引号在键盘上是上下铺关系。先按 Ctrl+B，再按 % 表示左右拆分窗口，大概是因为百分数都是左右书写的吧。至于在 pane 之间移动和调整 pane 大小的方向键，就不用多说了吧。&lt;/p&gt;
+&lt;h2 id=&quot;在命令行中快速移动光标&quot;&gt;在命令行中快速移动光标&lt;/h2&gt;
+&lt;p&gt;在命令行中输入命令时，经常要在命令行中移动光标。这个很简单嘛，使用左右方向键就可以了，但是有时候我们输入了很长一串命令，却突然要修改这个命令最开头的内容，如果使用向左的方向键一个字符一个字符地把光标移到命令的开头，是否太慢了呢？有时我们需要直接在命令的开头和结尾之间切换，有时又需要能够一个单词一个单词地移动光标，在命令行中，其实这都不是事儿。如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181001195415464-1553942298.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这几种移动方式都是有快捷键的。其实一个字符一个字符地移动光标也有快捷键 Ctrl+B 和 Ctrl+F，但是这两个快捷键我们不需要记，有什么能比左右方向键更方便的呢？我们真正要记的是下面这几个：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + A&lt;/td&gt;
+&lt;td&gt;将光标移动到命令行的开头&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + E&lt;/td&gt;
+&lt;td&gt;将光标移动到命令行的结尾&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Alt + B&lt;/td&gt;
+&lt;td&gt;将光标向左移动一个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Alt + F&lt;/td&gt;
+&lt;td&gt;将光标向右移动一个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这几个快捷键太好记了，A 代表 ahead，E 代表 end，B 代表 back，F 代表 forward。为什么按单词移动光标的快捷键都是以 Alt 开头呢？那是因为按字符移动光标的快捷键把 Ctrl 占用了。但是按字符移动光标的快捷键我们用不到啊，因为我们有左右方向键啊。&lt;/p&gt;
+&lt;h2 id=&quot;在命令行中快速删除文本&quot;&gt;在命令行中快速删除文本&lt;/h2&gt;
+&lt;p&gt;对输入的内容进行修改也是我们经常要干的事情，对命令行进行修改就涉及到先删除一部分内容，再输入新内容。我们碰到的情况是有时候只需要修改个别字符，有时候需要修改个别单词，而有时候，输入了半天的很长的一段命令，我们说不要就全都不要了，要整行删除。常用的删除键当然是 BackSpace 和 Delete 啦，不过一次删除一个字符，还是太慢了些。要在命令行中快速删除文本，请熟记以下几个快捷键吧：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;5.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + U&lt;/td&gt;
+&lt;td&gt;删除从光标到行首的所有内容，如果光标在行尾，自然就整行都删除了啊&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + K&lt;/td&gt;
+&lt;td&gt;删除从光标到行尾的所有内容，如果光标在行首，自然也是整行都删除了啊&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + W&lt;/td&gt;
+&lt;td&gt;删除光标前的一个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Alt + D&lt;/td&gt;
+&lt;td&gt;删除光标后的一个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;Ctrl + Y&lt;/td&gt;
+&lt;td&gt;将刚删除的内容粘贴到光标处，有时候删错了可以用这个快捷键恢复删除的内容&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;效果请看下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181001200043896-1772486592.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这几个快捷键也是蛮好记的，U 代表 undo，K 代表 kill，W 代表 word，D 代表 delete， Y 代表 yank。其中比较奇怪的是 Alt+D 又是以 Alt 开头的，那是因为 Ctrl+D 又被占用了。Ctrl+D 有两个意思，一是在编辑命令行的时候它代表删除一个字符，当然，这个快捷键其实我们用不到，因为 BackSpace 和 Delete 方便多了；二是在某些程序从 stdin 读取数据的时候，Ctrl+D 代表 EOF，这个我们偶尔会用到。&lt;/p&gt;
+&lt;h2 id=&quot;快速查看和搜索历史命令&quot;&gt;快速查看和搜索历史命令&lt;/h2&gt;
+&lt;p&gt;对于曾经运行过的命令，除非特别短，我们一般不会重复输入，从历史记录中找出来用自然要快得多。我们用得最多的就是 ↑ 和 ↓，特别是不久前才刚刚输入过的命令，使用 ↑ 向上翻几行就找到了，按一下 Enter 就执行，多舒服。但是有时候，明明记得是不久前才用过的命令，但是向上翻了半天也没找到，怎么办？那只好使用&lt;code&gt;history&lt;/code&gt;命令来查看所有的历史记录了。历史记录又特别长，怎么办？可以使用 &lt;code&gt;history | less&lt;/code&gt;和&lt;code&gt;history | grep '...'&lt;/code&gt;。除此之外，还有终极大杀招，那就是按 Ctrl+R 从历史记录中进行搜索。按了 Ctrl+R 之后，每输入一个字符，都会和历史记录中进行增量匹配，输入得越多，匹配越精确。当然，有时候含有相同搜索字符串的命令特别多，怎么办？继续按 Ctrl+R，就会继续搜索下一条匹配的历史记录。如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201608/16576-20160810160504246-1565497989.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这里，需要记住的命令和快捷键如下表：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;6&quot;&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;history&lt;/td&gt;
+&lt;td&gt;查看历史记录&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;history | less&lt;/td&gt;
+&lt;td&gt;分页查看历史记录&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;history | grep '...'&lt;/td&gt;
+&lt;td&gt;在历史记录中搜索匹配的命令，并显示&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + R&lt;/td&gt;
+&lt;td&gt;逆向搜索历史记录，和输入的字符进行增量匹配&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Esc&lt;/td&gt;
+&lt;td&gt;停止搜索历史记录，并将当前匹配的结果放到当前输入的命令行上&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Enter&lt;/td&gt;
+&lt;td&gt;停止搜索历史记录，并将当前匹配的结果立即执行&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Ctrl + G&lt;/td&gt;
+&lt;td&gt;停止搜索历史记录，并放弃当前匹配的结果&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Alt + &amp;gt;&lt;/td&gt;
+&lt;td&gt;将历史记录中的位置标记移动到历史记录的尾部&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这里需要注意的是，当我们在历史记录中搜索的时候，是有位置标记的，Ctrl+R 是指从当前位置开始，逆向搜索，R 代表的是 reverse，每搜索一条记录，位置标记都会向历史记录的头部移动，下次搜索又从这里开始继续向头部搜索。所以，我们一定要记住快捷键 Alt+&amp;gt;，它可以把历史记录的位置标记还原。另外需要注意的是停止搜索历史记录的快捷键有三个，如果按 Enter 键，匹配的命令就立即执行了，如果你还想有修改这条命令的机会的话，一定不要按 Enter，而要按 Esc。如果什么都不想要，就按 Ctrl+G，它会还你一个空白的命令行。&lt;/p&gt;
+&lt;h2 id=&quot;快速引用和修饰历史命令&quot;&gt;快速引用和修饰历史命令&lt;/h2&gt;
+&lt;p&gt;除了查看和搜索历史记录，我们还可以以更灵活的方式引用历史记录中的命令。常见的简单的例子有&lt;code&gt;!!&lt;/code&gt;代表引用上一条命令，&lt;code&gt;!$&lt;/code&gt;代表引用上一条命令的最后一个参数，&lt;code&gt;^oldstring^newstring^&lt;/code&gt;代表将上一条命令中的 oldstring 替换成 newstring。这些操作是我们平时使用命令行的时候的一些常用技巧，其实它们的本质，是由 history 库提供的 history expansion 功能。Bash 使用了 history 库，所以也能使用这些功能。其完整的文档可以查看&lt;code&gt;man history&lt;/code&gt;手册页。知道了 history expansion 的理论，我们还可以做一些更加复杂的操作，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201608/16576-20160810160529746-102762218.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;引用和修饰历史命令的完整格式是这样的：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;![!|[?]string|[-]number]:[n|x-y|^|$|*|n*|%]:[h|t|r|e|p|s|g]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;可以看到，一个对历史命令的引用被 : 分为了三个部分，第一个部分决定了引用哪一条历史命令；第二部分决定了选取该历史命令中的第几个单词，单词是从0开始编号的，也就是说第0个单词代表命令本身，第1个到最后一个单词代表命令的参数；第三部分决定了对选取的单词如何修饰。下面我列出完整表格：&lt;/p&gt;
+&lt;p&gt;表格一、引用哪一条历史命令：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;8&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!&lt;/td&gt;
+&lt;td&gt;所有对历史命令的引用都以 ! 开始，除了 ^oldstring^newstring^ 形式的快速替换&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!n&lt;/td&gt;
+&lt;td&gt;引用第 n 条历史命令&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!-n&lt;/td&gt;
+&lt;td&gt;引用倒数第 n 条历史命令&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!!&lt;/td&gt;
+&lt;td&gt;引用上一条命令，等于 !-1&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!string&lt;/td&gt;
+&lt;td&gt;逆向搜索历史记录，第一条以 string 开头的命令&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!?string[?]&lt;/td&gt;
+&lt;td&gt;逆向搜索历史记录，第一条包含 string 的命令&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;^oldstring^newstring^&lt;/td&gt;
+&lt;td&gt;对上一条命令进行快速替换，将 oldstring 替换为 newstring&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;!#&lt;/td&gt;
+&lt;td&gt;引用当前输入的命令&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;表格二、选取哪一个单词：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;8&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;第0个单词，在 shell 中就是命令本身&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;n&lt;/td&gt;
+&lt;td&gt;第n个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;^&lt;/td&gt;
+&lt;td&gt;第1个单词，使用 ^ 时可以省略前面的冒号&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;$&lt;/td&gt;
+&lt;td&gt;最后一个单词，使用 $ 时可以省略前面的冒号&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;%&lt;/td&gt;
+&lt;td&gt;和 ?string? 匹配的单词，可以省略前面的冒号&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;x-y&lt;/td&gt;
+&lt;td&gt;从第 x 个单词到第 y 个单词，-y 代表 0-y&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;*&lt;/td&gt;
+&lt;td&gt;除第 0 个单词外的所有单词，等于 1-$&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;x*&lt;/td&gt;
+&lt;td&gt;从第 x 个单词到最后一个单词，等于 x-$，可以省略前面的冒号&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;x-&lt;/td&gt;
+&lt;td&gt;从第 x 个单词到倒数第二个单词&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;表格三、对选取的单词做什么修饰：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;7&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;h&lt;/td&gt;
+&lt;td&gt;选取路径开头，不要文件名&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;t&lt;/td&gt;
+&lt;td&gt;选取路径结尾，只要文件名&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;r&lt;/td&gt;
+&lt;td&gt;选取文件名，不要扩展名&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;e&lt;/td&gt;
+&lt;td&gt;选取扩展名，不要文件名&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;s/oldstring/newstring/&lt;/td&gt;
+&lt;td&gt;将 oldstring 替换为 newstring&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;g&lt;/td&gt;
+&lt;td&gt;全局替换，和 s 配合使用&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;p&lt;/td&gt;
+&lt;td&gt;只打印修饰后的命令，不执行&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这几个命令其实挺好记的，h 代表 head，只要路径开头不要文件名，t 代表 tail，只要路径结尾的文件名，r 代表 realname，只要文件名不要扩展名，e 代表 extension，只要扩展名不要文件名，s 代表 substitute，执行替换功能，g 代表 global，全局替换，p 代表 print，只打印不执行。有时候光使用 :p 还不够，我们还可以把这个经过引用修饰后的命令直接在当前命令行上展开而不立即执行，它的快捷键是：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;1.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;Ctrl + Alt + E&lt;/td&gt;
+&lt;td&gt;在当前命令行上展开历史命令引用，展开后不立即执行，可以修改，按 Enter 后才会执行&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;Alt + ^&lt;/td&gt;
+&lt;td&gt;和上面的功能一样&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这两个快捷键，记住一个就行。这样，当我们对历史命令的引用修饰完成后，可以先展开来看一看，如果正确再执行。眼见为实嘛，反正我是每次都展开看看才放心。&lt;/p&gt;
+&lt;h2 id=&quot;使用-tab-键进行补全&quot;&gt;使用 Tab 键进行补全&lt;/h2&gt;
+&lt;p&gt;在使用命令行的时候，可以使用 Tab 键对命令和文件名进行补全。一般如果你输入一条命令的前面几个字符后，按 Tab 键两次，将会提示所有可用的命令。输入命令后，在输入参数的位置，如果输入了一个文件名的前几个字符，按 Tab 键，Shell 会查找当前目录下的文件，对文件名进行补全。或者在输入参数的位置直接按两次 Tab 键，将提示所有可用的文件名。效果如下：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181001203512415-44335216.gif&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;快速切换当前目录&quot;&gt;快速切换当前目录&lt;/h2&gt;
+&lt;p&gt;在使用命令行时，可以使用&lt;code&gt;cd&lt;/code&gt;命令切换当前目录，但是，如果每次都输入一个超长的目录名，则会严重影响效率，特别是在多个目录之间快速切换的时候。例如，在我前面几篇中，经常需要进入&lt;code&gt;/usr/share/backgrounds/contest&lt;/code&gt;目录和&lt;code&gt;/etc/fonts/conf.d&lt;/code&gt;目录查看配置文件，也会进入&lt;code&gt;/usr/src/linux-source-4.15.0&lt;/code&gt;目录查看内核源代码，这些目录名都比较长，如果每次都自己输入，效率低不说，还容易出错。这时，可以通过 Bash 提供的&lt;code&gt;pushd&lt;/code&gt;命令和&lt;code&gt;popd&lt;/code&gt;命令维护一个目录堆栈，并使用&lt;code&gt;dirs&lt;/code&gt;命令查看目录堆栈，使用&lt;code&gt;pushd&lt;/code&gt;命令在目录之间切换。效果如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181001205443850-579448965.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这三个命令的具体参数如下：&lt;/p&gt;
+&lt;p&gt;1、dirs——显示当前目录栈中的所有记录（不带参数的dirs命令显示当前目录栈中的记录）&lt;/p&gt;
+&lt;pre class=&quot;nohighlight&quot;&gt;
+&lt;code&gt;格式：dirs  [-clpv]  [+n]  [-n]
+选项
+-c    删除目录栈中的所有记录
+-l     以完整格式显示
+-p    一个目录一行的方式显示
+-v    每行一个目录来显示目录栈的内容，每个目录前加上的编号
++N  显示从左到右的第n个目录，数字从0开始
+-N   显示从右到左的第n个日录，数字从0开始&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;2、pushd——pushd命令常用于将目录加入到栈中，加入记录到目录栈顶部，并切换到该目录；若pushd命令不加任何参数，则会将位于记录栈最上面的2个目录对换位置&lt;/p&gt;
+&lt;pre class=&quot;nohighlight&quot;&gt;
+&lt;code&gt;格式：pushd  [目录 | -N | +N]   [-n]
+选项
+目录   将该目录加入到栈顶，并执行&quot;cd 目录&quot;，切换到该目录
++N   将第N个目录移至栈顶（从左边数起，数字从0开始）
+-N    将第N个目录移至栈顶（从右边数起，数字从0开始）
+-n    将目录入栈时，不切换目录&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;3、popd——popd用于删除目录栈中的记录；如果popd命令不加任何参数，则会先删除目录栈最上面的记录，然后切换到删除过后的目录栈中的最上面的目录&lt;/p&gt;
+&lt;pre class=&quot;nohighlight&quot;&gt;
+&lt;code&gt;格式：popd  [-N | +N]   [-n]
+选项
++N   将第N个目录删除（从左边数起，数字从0开始）
+-N    将第N个目录删除（从右边数起，数字从0开始）
+-n    将目录出栈时，不切换目录&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;bash-脚本编程语言的本质一切都是字符串&quot;&gt;Bash 脚本编程语言的本质：一切都是字符串&lt;/h2&gt;
+&lt;p&gt;下面，我将探讨 Bash 脚本语言中的美学与哲学。 这不是一篇 Bash 脚本编程的教程，但是却能让人更加深入地了解 Bash 脚本编程，更加快速地学习 Bash 脚本编程。 阅读以下内容，不需要你有 Bash 编程的经验，但一定要和我一样热衷于探索各种编程语言的本质，感悟它们的魅力。&lt;/p&gt;
+&lt;p&gt;我们平时喜欢对编程语言进行分类，把编程语言分为面向过程的编程语言、面向对象的编程语言、函数式编程语言等等。在我心中，我认为 Bash 就是一个面向字符串的编程语言。Bash 脚本语言的本质：一切皆是字符串。 Bash 脚本语言的一切哲学都围绕着字符串：它们从哪里来？到哪里去？使命是什么？ Bash 脚本语言的一切美学都源自字符串： 由键盘上几乎所有的符号 “$ ~ ! # &amp;amp; ( ) [ ] { } | &amp;gt; &amp;lt; - . , ; * @ ' &quot; ` \ ^” 排列组合而成的极富视觉冲击力的、功能极其复杂的字符串。&lt;/p&gt;
+&lt;p&gt;Bash 是一个 Shell，Shell 出现的初衷是为了将系统中的各种工具粘合在一起，所以它最根本的功能是调用各种命令。而命令以及命令的参数都是由字符串组成的，所以 Bash 脚本语言最终进化成一个面向字符串的语言。 Bash 语言的本质就是：一切都是字符串。 看看下图中的这些变量：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181002211704670-748266758.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上图是我在交互式的 Bash 命令行中做的一些演示。在上图中，我对变量分别赋值，不管等号右边是一个不带引号的字符串，还是带有引号的字符串，甚至数字，或者数学表达式，最终的结果，变量里面存储的都是字符串。我使用一个 for 循环显示所有的变量，可以看到数学表达式也只是以字符串的形式储存，没有被求值。&lt;/p&gt;
+&lt;h2 id=&quot;bash-脚本编程语言中的引号元字符和反斜杠&quot;&gt;Bash 脚本编程语言中的引号、元字符和反斜杠&lt;/h2&gt;
+&lt;p&gt;如果一切都是没有特殊功能的平凡的字符串，那就无法构成一门编程语言。在 Bash 中，有很多符号具有特殊含义，如&lt;code&gt;$&lt;/code&gt;符号被用于字符串展开，&lt;code&gt;&amp;amp;&lt;/code&gt;符号用于让命令在后台执行， &lt;code&gt;|&lt;/code&gt;用作管道，&lt;code&gt;&amp;gt;&lt;/code&gt; &lt;code&gt;&amp;lt;&lt;/code&gt;用于输入输出重定向等等。所以在 Bash 中，虽然同样是字符串，但是被引号包围的字符串和不被引号包围的字符串使用起来是不一样的，被单引号包围的字符串和被双引号包围起来的字符串也是不一样的。&lt;/p&gt;
+&lt;p&gt;究竟带引号的字符串和不带引号的字符串使用起来有什么不一样呢？下图是我构建的一些比较典型的例子：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181002214815389-1686713103.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在上图中，我展示了 Bash 中生成字符串的 7 种方法：大括号展开、波浪符展开、参数展开、命令替换、算术展开、单词分割和文件路径展开。还有历史命令展开没有在上图展示，但是历史命令展开在前面快速引用和修饰历史命名那一节有展示，可以看到历史命令展开都是使用&lt;code&gt;!&lt;/code&gt;开头的。在使用 Bash 脚本编程的时候，了解以上 7 种字符串生成的方式就够了。在交互式使用 Bash 命令行的时候，才需要了解历史命令展开，熟练使用历史命令展开可以让人事半功倍。&lt;/p&gt;
+&lt;p&gt;在上面的图片中可以看到，有一些展开方式在被双引号包围的字符串中是不起作用的，如大括号展开、波浪符展开、单词分割、文件路径展开，而只有参数展开、命令替换和算术展开是起作用的。从图片中还可以看出，字符串中的参数展开、命令替换和算术展开都是由&lt;code&gt;$&lt;/code&gt;符号引导，命令替换还可以由&lt;code&gt;`&lt;/code&gt; 引导。所以，可以进一步总结为，在双引号包围的字符串中，只有&lt;code&gt;$ \ `&lt;/code&gt;这三个字符具有特殊含义。&lt;/p&gt;
+&lt;p&gt;如果想让任何一个字符都不具有特殊含义，可以使用单引号将字符串包围，例如使用正则表达式的时候。还有就是在使用 sed、awk 等工具的时候，由于 sed 和 awk 自己执行的命令中往往包含有很多特殊字符，所以它们的命令最好用单引号包围。 例如使用 awk 命令显示&lt;code&gt;/etc/passwd&lt;/code&gt;文件中的每个用户的用户名和全名，可以使用这个命令&lt;code&gt;awk -e '{print $1,$5}'&lt;/code&gt;，其中，传递给 awk 的命令用单引号包围，说明 bash 不执行其中的任何替换或展开。&lt;/p&gt;
+&lt;p&gt;另外一个特殊的字符是&lt;code&gt;\&lt;/code&gt;，它也是引用的一种。它可以解除紧跟在它后面的一个特殊字符的特殊含义（引用）。之所以需要&lt;code&gt;\&lt;/code&gt;的存在，是因为在 Bash 中，有些字符称为元字符，这些字符一旦出现，就会将一个字符串分割为多个子串。如果需要在一个字符串中包含这些元字符本身，就必须对它们进行引用。如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003094919920-1121899522.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最常见的元字符就是空格。 从上面几张图片可以看出，如果要将一个含有空格的字符串赋值给一个变量，要么把这个字符串用双引号包围，要么使用&lt;code&gt;\&lt;/code&gt;对空格进行引用。 从上图中可以看出，Bash 中只有9个元字符，它们分别是&lt;code&gt;| &amp;amp; ( ) ; &amp;lt; &amp;gt; space tab&lt;/code&gt;，而在其它编程语言中经常出现的元字符&lt;code&gt;. { } [ ]&lt;/code&gt;以及作为数学运算的加减乘除，在 Bash 中都不是元字符。&lt;/p&gt;
+&lt;h2 id=&quot;字符串从哪里来到哪里去&quot;&gt;字符串从哪里来，到哪里去&lt;/h2&gt;
+&lt;p&gt;介绍完字符串、介绍完引用和元字符，下一个目标就是来探讨这一个哲学问题：字符串从哪里来、到哪里去？通过该哲学问题的探讨，可以推导出 Bash 脚本语言的整个语法。字符串从哪里来？很显然，其中一个很直接的来源就是我们从键盘上敲上去的。除此之外，就是我前面提到的七八九种字符串展开的方法了。&lt;/p&gt;
+&lt;p&gt;字符串展开的流程如下：&lt;/p&gt;
+&lt;p&gt;1.先用元字符将一个字符串分割为多个子串；&lt;/p&gt;
+&lt;p&gt;2.如果字符串是用来给变量赋值，则不管它是否被双引号包围，都认为它被双引号包围；&lt;/p&gt;
+&lt;p&gt;3.如果字符串不被单引号和双引号包围，则进行大括号展开，即将 {a,b}c 展开为 ab ac；&lt;/p&gt;
+&lt;p&gt;以上三个流程可以通过下图证明：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003095601229-1542468681.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;4.如果字符串不被单引号或双引号包围，则进行波浪符展开，即将 &lt;code&gt;~/&lt;/code&gt; 展开为用户的主目录，将 &lt;code&gt;~+/&lt;/code&gt; 展开为当前工作目录（PWD），将 &lt;code&gt;~-/&lt;/code&gt; 展开为上一个工作目录（OLDPWD）；&lt;/p&gt;
+&lt;p&gt;5.如果字符串不被单引号包围，则进行参数和变量展开；这一类的展开全都以&lt;code&gt;$&lt;/code&gt;开头，这是整个 Bash 字符串展开中最复杂的，其中包括用户定义的变量，包括所有的环境变量，以上两种展开方式都是&lt;code&gt;$&lt;/code&gt;后跟变量名，还包括位置变量&lt;code&gt;$1 $2 ... $9&lt;/code&gt;，其它特殊变量：&lt;code&gt;$@&lt;/code&gt; &lt;code&gt;$*&lt;/code&gt; &lt;code&gt;$#&lt;/code&gt; &lt;code&gt;$-&lt;/code&gt; &lt;code&gt;$!&lt;/code&gt; &lt;code&gt;$0&lt;/code&gt; &lt;code&gt;$?&lt;/code&gt; &lt;code&gt;$_&lt;/code&gt;，甚至还有数组：&lt;code&gt;${var[i]}&lt;/code&gt;， 还可以在展开的过程中对字符串进行各种复杂的操作，如：&lt;code&gt;${parameter:-word}&lt;/code&gt; &lt;code&gt;${parameter:=word}&lt;/code&gt; &lt;code&gt;${parameter:+word}&lt;/code&gt; &lt;code&gt;${parameter:?word}&lt;/code&gt; &lt;code&gt;${parameter:offset}&lt;/code&gt; &lt;code&gt;${parameter:offset:length}&lt;/code&gt; &lt;code&gt;${!prefix*}&lt;/code&gt; &lt;code&gt;${!prefix@}&lt;/code&gt; &lt;code&gt;${name[@]}&lt;/code&gt; &lt;code&gt;${!name[*]}&lt;/code&gt; &lt;code&gt;${#parameter}&lt;/code&gt; &lt;code&gt;${parameter#word}&lt;/code&gt; &lt;code&gt;${parameter##word}&lt;/code&gt; &lt;code&gt;${parameter%word}&lt;/code&gt; &lt;code&gt;${parameter%%word}&lt;/code&gt; &lt;code&gt;${parameter/pattern/string}&lt;/code&gt; &lt;code&gt;${parameter^pattern}&lt;/code&gt; &lt;code&gt;${parameter^^pattern}&lt;/code&gt; &lt;code&gt;${parameter,pattern}&lt;/code&gt; &lt;code&gt;${parameter,,pattern}&lt;/code&gt;；&lt;/p&gt;
+&lt;p&gt;6.如果字符串不被单引号包围，则进行命令替换；命令替换有两种格式，一种是 &lt;code&gt;$(...)&lt;/code&gt;，一种是 &lt;code&gt;`...`&lt;/code&gt;；也就是将命令的输出作为字符串的内容；&lt;/p&gt;
+&lt;p&gt;7.如果字符串不被单引号包围，则进行算术展开；算术展开的格式为 &lt;code&gt;$((...))&lt;/code&gt;；&lt;/p&gt;
+&lt;p&gt;8.如果字符串不被单引号或双引号包围，则进行单词分割；&lt;/p&gt;
+&lt;p&gt;9.如果字符串不被单引号或双引号包围，则进行文件路径展开；&lt;/p&gt;
+&lt;p&gt;10.以上流程全部完成后，最后去掉字符串外面的引号（如果有的话）。以上流程只按以上顺序进行一遍。不会在变量展开后再进行大括号展开，更不会在第 10 步去除引用后执行前面的任何一步。如果需要将流程再走一遍，请使用 eval。&lt;/p&gt;
+&lt;p&gt;探讨完了字符串从哪里来，下面来看看字符串到哪里去。也就是怎么使用这些字符串。使用字符串有以下几种方式：&lt;/p&gt;
+&lt;p&gt;1.把它当命令执行；这是 Bash 中的最根本的用法，毕竟 Shell 的存在就是为了粘合各种命令。如果一个字符串出现在本该命令出现的地方（一行的开头，或者关键字 then、do 等的后面），它将会被当成命令执行，如果它不是个合法的命令，就会报错；&lt;/p&gt;
+&lt;p&gt;2.把它当成表达式；Bash 中本没有表达式，但是有了 &lt;code&gt;((...))&lt;/code&gt; 和 &lt;code&gt;[[...]]&lt;/code&gt;，就有了表达式；&lt;code&gt;((...))&lt;/code&gt; 可以把它里面的字符串当成算术表达式，而 &lt;code&gt;[[...]]&lt;/code&gt; 会把它里面的字符串当逻辑表达式，仅此两个特例；&lt;/p&gt;
+&lt;p&gt;3.给变量赋值；这也是一个特例，有点破坏 Bash 编程语言语法哲学的完整性。为什么这么说呢？因为&lt;code&gt;=&lt;/code&gt;即不是一个元字符，也不允许两边有空格，而且只有第 1 个等号会被当成赋值运算符。&lt;/p&gt;
+&lt;p&gt;下面图片为以上观点给出证据：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003101634967-224384257.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;再加上一点点的定义就可以推导出整个-bash-脚本语言的语法了&quot;&gt;再加上一点点的定义，就可以推导出整个 Bash 脚本语言的语法了&lt;/h2&gt;
+&lt;p&gt;前面我已经展示了我对字符串从哪里来、到哪里去这个问题的理解。关于字符串的去向，除了两个表达式和一个为变量赋值这三个特例，剩下的就只有当命令来执行了。在前面，我提到了元字符和引用的概念，这里，还得再增加一点点定义：&lt;/p&gt;
+&lt;p&gt;定义1：控制操作符（Control Operator）　前面提到元字符是为了把一个字符串分割为多个子串，而控制操作符就是为了把一系列的字符串分割成多个命令。举例说明，在 Bash中，一个字符串 &lt;code&gt;cat /etc/passwd&lt;/code&gt; 就是一个命令，第一个单词 &lt;code&gt;cat&lt;/code&gt; 是命令，第 2 个单词 &lt;code&gt;/etc/passwd&lt;/code&gt; 是命令的参数，而字符串 &lt;code&gt;cat /etc/passwd | grep youxia&lt;/code&gt; 就是两个命令，这两个命令分别是 &lt;code&gt;cat&lt;/code&gt; 和 &lt;code&gt;grep&lt;/code&gt;，它们之间通过&lt;code&gt;|&lt;/code&gt;分割，所以这里的&lt;code&gt;|&lt;/code&gt;是控制操作符。熟悉 Shell 的朋友肯定知道&lt;code&gt;|&lt;/code&gt;代表的是管道，所以它的作用是：1.把一个字符串分割为两个命令，2.将第一个命令的输出作为第二个命令的输入。在 Bash 中，总共只有 10 个控制操作符，它们分别是&lt;code&gt;||&lt;/code&gt; &lt;code&gt;&amp;amp;&lt;/code&gt; &lt;code&gt;&amp;amp;&amp;amp;&lt;/code&gt; &lt;code&gt;|&lt;/code&gt; &lt;code&gt;;&lt;/code&gt; &lt;code&gt;;;&lt;/code&gt; &lt;code&gt;()&lt;/code&gt; &lt;code&gt;|&amp;amp;&lt;/code&gt; &lt;code&gt;&amp;lt;newline&amp;gt;&lt;/code&gt;。只要看到这些控制操作符，就可以认为它前面的字符串是一个完整的命令。&lt;/p&gt;
+&lt;p&gt;定义2：关键字（Reserved Words）　我没有将其翻译成保留字，很显然，作为编程语言来说，它们应该叫做关键字。一门编程语言肯定必须得提供选择、循环等流程控制语句，还得提供定义函数的功能。这些功能只能通过关键字实现。在 Bash 中，只有 22 个关键字，它们是“! case coproc do done elif else esac fi for function if in select then until while { } time [[ ]]”。这其中有不少的特别之处，比如“! { } [[ ]]”等符号都是关键字，也就是说它们当关键字使用时相当于一个单词，也就是说它们和别的单词必须以元字符分开（否则无法成为独立的单词）。这也是为什么在 Bash 中使用“! { } [[ ]]”时经常要在它们周围留空格的原因。（再一次证明&lt;code&gt;=&lt;/code&gt;是一个很变态的特例，因为它既不是元字符，也不是控制操作符，更加不是关键字，它到底是什么？）&lt;/p&gt;
+&lt;p&gt;下面开始推导 Bash 脚本语言的语法：&lt;/p&gt;
+&lt;p&gt;推导1：简单命令（Simple command）　就是一条简单的命令，它可以是一个以上述控制操作符结尾的字符串。比如单独放在一行的 &lt;code&gt;uname -r&lt;/code&gt; 命令（单独放在一行的命令其实是以&amp;lt;newline&amp;gt;结尾，&amp;lt;newline&amp;gt;是控制操作符），或者虽然不单独放在一行，但是以&lt;code&gt;;&lt;/code&gt;或&lt;code&gt;&amp;amp;&lt;/code&gt;结尾，比如 &lt;code&gt;uname -r; who; pwd; gvim&amp;amp;&lt;/code&gt; 其中每一个命令都是一个简单命令（当然，这四个命令放在一起的这行代码不叫简单命令），&lt;code&gt;;&lt;/code&gt;就是简单地分割命令，而&lt;code&gt;&amp;amp;&lt;/code&gt;还有让命令在后台执行的功能。这里比较特殊的是双分号&lt;code&gt;;;&lt;/code&gt;，它只用在 case 语句中。&lt;/p&gt;
+&lt;p&gt;推导2：管道（Pipe Line）　管道是 Shell 中的精髓，就是让前一个命令的输出成为后一个命令的输入。管道的完整语法是这样 &lt;code&gt;[time [-p]] [ ! ] command1 | command2&lt;/code&gt; 或这样 &lt;code&gt;[time [-p]] [ ! ] command1 |&amp;amp; command2&lt;/code&gt; 的。其中 time 关键字和 ! 关键字都是可选的（使用[...]指出哪些部分是可选的），&lt;code&gt;time&lt;/code&gt; 关键字可以计算命令运行的时间，而 &lt;code&gt;!&lt;/code&gt; 关键字是将命令的返回状态取反。看清楚 &lt;code&gt;!&lt;/code&gt; 关键字周围的空格哦。如果使用&lt;code&gt;|&lt;/code&gt;，就是把第一个命令的标准输出作为第二个命令的标准输入，如果使用&lt;code&gt;|&amp;amp;&lt;/code&gt;，则将第一个命令的标准输出和标准错误输出都当成第二个命令的输入。&lt;/p&gt;
+&lt;p&gt;推导3：命令序列（List）　如果多个简单命令或多个管道放在一起，它们之间以&lt;code&gt;;&lt;/code&gt; &lt;code&gt;&amp;amp;&lt;/code&gt; &lt;code&gt;&amp;lt;newline&amp;gt;&lt;/code&gt; &lt;code&gt;||&lt;/code&gt; &lt;code&gt;&amp;amp;&amp;amp;&lt;/code&gt;等控制操作符分开，就称之为一个命令序列。关于&lt;code&gt;||&lt;/code&gt;和&lt;code&gt;&amp;amp;&amp;amp;&lt;/code&gt;，熟悉 C、C++、Java 等编程语言的朋友们肯定也不会陌生，它们遵循同样的短路求值的思想。比如 &lt;code&gt;command1 || command2&lt;/code&gt; 只有当 command1 执行不成功的时候才执行 command2，而 &lt;code&gt;command1 &amp;amp;&amp;amp; command2&lt;/code&gt; 只有当 command1 执行成功的时候才执行 command2。&lt;/p&gt;
+&lt;p&gt;推导4：复合命令（Compound Commands）　如果将前面的简单命令、管道或者命令序列以更复杂的方式组合在一起，就可以构成复合命令。在 Bash 中，有 4 种形式的复合命令，它们分别是 &lt;code&gt;(list)&lt;/code&gt; 、 &lt;code&gt;{ list; }&lt;/code&gt; 、 &lt;code&gt;((expression))&lt;/code&gt; 、 &lt;code&gt;[[ expression ]]&lt;/code&gt; 。请注意第 2 种形式和第 4 种形式大括号和中括号周围的空格，也请注意第 2 种形式中 &lt;code&gt;list&lt;/code&gt; 后面的&lt;code&gt;;&lt;/code&gt;，不过如果&lt;code&gt;}&lt;/code&gt;另起一行，则不需要&lt;code&gt;;&lt;/code&gt;，因为&lt;code&gt;&amp;lt;newline&amp;gt;&lt;/code&gt;和&lt;code&gt;;&lt;/code&gt;是起同样作用的。在以上4种复合命令中， &lt;code&gt;(list)&lt;/code&gt; 是在一个新的Shell中执行命令序列，这些命令的执行不会影响当前Shell的环境变量，而 &lt;code&gt;{ list; }&lt;/code&gt; 只是简单地将命令序列分组。后面两种表达式求值前面已经讲过，这里就不讲了。后面可能会详细列出逻辑表达式求值的选项。&lt;/p&gt;
+&lt;p&gt;上面的4步推导是一步更进一步的，是由简单逐渐到复杂的，最简单的命令可以组合成稍复杂的管道，再组合成更复杂的命令序列，最后组成最复杂的复合命令。&lt;/p&gt;
+&lt;p&gt;下面是 Bash 脚本语言的流程控制语句，如下：&lt;/p&gt;
+&lt;p&gt;　　1. &lt;code&gt;for name [ [ in [ word ... ] ] ; ] do list ; done&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　2. &lt;code&gt;for (( expr1 ; expr2 ; expr3 )) ; do list ; done&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　3. &lt;code&gt;select name [ in word ] ; do list ; done&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　4. &lt;code&gt;case word in [ [(] pattern [ | pattern ] ... ) list ;; ] ... esac&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　5. &lt;code&gt;if list; then list; [ elif list; then list; ] ... [ else list; ] fi&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　6. &lt;code&gt;while list-1; do list-2; done&lt;/code&gt; ；&lt;/p&gt;
+&lt;p&gt;　　7. &lt;code&gt;until list-1; do list-2; done&lt;/code&gt; 。&lt;/p&gt;
+&lt;p&gt;上面的公式大家看得懂吧，我相信大家肯定看得懂。其中的 [...] 代表的是可以有也可以真没有的部分。在以上公式中，请注意第 2 个公式 for 循环中的双括号，它执行的是其中的表达式的算术运算，这是和其它高级语言的 for 循环最像的，但是很遗憾，Bash 中的算术表达式目前只能计算整数。再请注意第 3 个公式，select 语法，和 for...in... 循环的语法比较类似，但是它可以在屏幕上显示一个菜单。如果我没有记错的话，Basic 语言中应该有这个功能。其它的控制结构在别的高级语言中都很常见，就不需要我在这里啰嗦了。&lt;/p&gt;
+&lt;p&gt;最后，再来展示一下如何定义函数：&lt;/p&gt;
+&lt;p&gt;　　 &lt;code&gt;name () compound-command [redirection]&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;　　或者&lt;/p&gt;
+&lt;p&gt;　　 &lt;code&gt;function name [()] compound-command [redirection]&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;可以看出，如果有 &lt;code&gt;function&lt;/code&gt; 关键字，则&lt;code&gt;()&lt;/code&gt;是可选的，如果没有 &lt;code&gt;function&lt;/code&gt; 关键字，则&lt;code&gt;()&lt;/code&gt;是必须的。这里需要特别指出的是：函数体只要求是 compound-command，我前面总结过 compound-command 有四种形式，所以有时候定义一个函数并不会出现&lt;code&gt;{ }&lt;/code&gt;哦。如下图，这样的函数也是合法的：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003103425479-386152724.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;That's all。这就是 Bash 脚本语言的全部语法。就这么简单。&lt;/p&gt;
+&lt;p&gt;好像忘了点什么？对了，还有输入输出重定向没有讲。输入输出重定向是 Shell 中又一个伟大的发明，它的存在有着它独特的哲学意义。这个请看下一节。&lt;/p&gt;
+&lt;h2 id=&quot;输入输出重定向&quot;&gt;输入输出重定向&lt;/h2&gt;
+&lt;p&gt;Unix 世界有一个伟大的哲学：一切皆是文件。（这个扯得有点远。） Unix 世界还有一个伟大的哲学：创建进程比较方便。（这个扯得也有点远。）而且，每一个进程一创建，就会自动打开三个文件，它们分别是标准输入、标准输出、标准错误输出，普通情况下，它们连接到用户的控制台。在 Shell 中，使用数字来标识一个打开的文件，称为文件描述符，而且数字 0、 1、 2 分别代表标准输入、标准输出和标准错误输出。在 Shell 中，可以通过&lt;code&gt;&amp;gt;&lt;/code&gt;、&lt;code&gt;&amp;lt;&lt;/code&gt;将命令的输入、输出进行重定向。结合 &lt;code&gt;exec&lt;/code&gt; 命令，可以非常方便地打开和关闭文件。需要注意的是，当文件描述符出现在&lt;code&gt;&amp;gt;&lt;/code&gt;、&lt;code&gt;&amp;lt;&lt;/code&gt;右边的时候，前面要使用&lt;code&gt;&amp;amp;&lt;/code&gt;符号，这可能是为了和数学表达式中的大于和小于进行区别吧。使用&lt;code&gt;&amp;amp;-&lt;/code&gt;可以关闭文件描述符。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;&amp;gt; &amp;lt; &amp;amp; 数字 exec -&lt;/code&gt;，这就是输入输出重定向的全部。下面的公式中，我使用 n 代表数字，如果是两个不同的数字，则使用 n1、n2，使用 [...] 代表可选参数。输入输出重定向的语法如下：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;[n]&amp;gt; file        #重定向标准输出(或 n)到file。
+[n]&amp;gt;&amp;gt; file       #重定向标准输出(或 n)到file，追加到file末尾。
+[n]&amp;lt; file        #将file重定向到标准输入（或 n）。
+[n1]&amp;gt;&amp;amp;n2         #重定向标准输出(或 n1)到n2。
+2&amp;gt; file &amp;gt;&amp;amp;2      #重定向标准输出和错误输出到file。
+| command        #将标准输出通过管道传递给command。
+2&amp;gt;&amp;amp;1 | command   #将标准输出和错误输出一起通过管道传递给command，等同于|&amp;amp;。&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;请注意，数字和&lt;code&gt;&amp;gt;&lt;/code&gt;、&lt;code&gt;&amp;lt;&lt;/code&gt;符号之间是没有空格的。结合 exec，可以非常方便地使用一个文件描述符来打开、关闭文件，如下：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;echo Hello &amp;gt;file1
+exec 3&amp;lt;file1 4&amp;gt;file2  #打开文件
+cat &amp;lt;&amp;amp;3 &amp;gt;&amp;amp;4           #重定向标准输入到 3,标准输出到 4，相当于读取file1的内容然后写入file2
+exec 3&amp;lt;&amp;amp;- 4&amp;gt;&amp;amp;-        #关闭文件
+cat file2
+#显示结果为 Hello
+ 
+#还可以暂存和恢复文件描述符，如下：
+exec 5&amp;gt;&amp;amp;2            #把原来的标准错误输出保存到文件描述符5上
+exec 2&amp;gt; /tmp/$0.log  #重定向标准错误输出
+...
+exec 2&amp;gt;&amp;amp;5            #恢复标准错误输出
+exec 5&amp;gt;&amp;amp;-            #关闭文件描述符5，因为不需要了&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;还可以将&lt;code&gt;&amp;lt;&amp;gt;&lt;/code&gt;一起使用，表示打开一个文件进行读写。&lt;/p&gt;
+&lt;p&gt;除了 exec，输入输出重定向和 read 命令配合也很好用，read 命令每次读取文件的一行。但是要注意的是，输入输出重定向放到 for、while 等循环的循环体和循环外，效果是不一样的。如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003105128857-1806168710.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003105146809-1254155416.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;另外，输入输出重定向符号&lt;code&gt;&amp;gt;&lt;/code&gt;、&lt;code&gt;&amp;lt;&lt;/code&gt;还可以和&lt;code&gt;()&lt;/code&gt;一起使用，表示进程替换（Process substitution），如&lt;code&gt;&amp;gt;(list)&lt;/code&gt;、&lt;code&gt;&amp;lt;(list)&lt;/code&gt;。结合前面提到的&lt;code&gt;&amp;lt;&lt;/code&gt;、&lt;code&gt;&amp;gt;&lt;/code&gt;、&lt;code&gt;(list)&lt;/code&gt;的含义，进程替换的作用是很容易猜到的哦。&lt;/p&gt;
+&lt;h2 id=&quot;bash-脚本语言的美学大道至简&quot;&gt;Bash 脚本语言的美学：大道至简&lt;/h2&gt;
+&lt;p&gt;如果你问我 Bash 脚本语言哪里美？我会回答：简洁就是美。请看下面逐条论述：&lt;/p&gt;
+&lt;p&gt;1.使用了简洁的抽象的符号。Bash 脚本语言几乎使用到了键盘上能够找到的所有符号，&lt;code&gt;$&lt;/code&gt;用作字符串展开，&lt;code&gt;|&lt;/code&gt;用作管道，&lt;code&gt;&amp;lt;&lt;/code&gt;、&lt;code&gt;&amp;gt;&lt;/code&gt;用作输入输出重定向，一点都不浪费；&lt;/p&gt;
+&lt;p&gt;2.只使用了 9 个元字符、10 个控制操作符和 22 个关键字，就构建了一个完整的、面向字符串编程的语言；&lt;/p&gt;
+&lt;p&gt;3.概念上具有很好的一致性；例如 &lt;code&gt;(list)&lt;/code&gt; 复合命令的功能是执行括号内的命令序列，而&lt;code&gt;$&lt;/code&gt;用于引导字符串展开，所以 &lt;code&gt;$(list)&lt;/code&gt; 用于命令替换（所以我前面说&lt;code&gt;$()&lt;/code&gt;形式的命令替换比&lt;code&gt;`...`&lt;/code&gt;形式的命令替换更加具有一致性）。再例如 &lt;code&gt;((expresion))&lt;/code&gt; 用于数学表达式求值，所以 &lt;code&gt;$((expression))&lt;/code&gt; 代表算术展开。再例如&lt;code&gt;{}&lt;/code&gt;和&lt;code&gt;,&lt;/code&gt;配合使用，且中间没有空格时，代表大括号展开，但是当需要使用&lt;code&gt;{ }&lt;/code&gt;来定义复合命令时，必须把&lt;code&gt;{ }&lt;/code&gt;当关键字，它们和它里面的内容必须以空格隔开，而且&lt;code&gt;}&lt;/code&gt;和它前面的一条命令之间必须有一个&lt;code&gt;;&lt;/code&gt;或者&lt;code&gt;&amp;lt;newline&amp;gt;&lt;/code&gt;。这些概念上的一致性设计得非常精妙，使用起来自然而然可以让人体会到一种美感；&lt;/p&gt;
+&lt;p&gt;4.完美解决了一个命令执行时的输出和运行状态的分离。有其它编程语言经历的人也经常会遇到这样的问题：当我们调用一个函数的时候，函数可能会产生两个结果，一个是函数的返回值，一个是函数调用是否成功。在 C# 和 Java 等高级语言中，往往使用 try...catch 等捕获异常的方式来判断函数调用是否成功，但仍然有程序员让函数返回 null 代表失败，而 C 语言这种没有异常机制的语言，实在是难以判断一个函数的返回值究竟如何表示该函数调用是否成功（比如就有很多 API 让函数返回 -1 代表失败，而有的函数运行失败是会设置 errno 全局变量）。在 Bash 中，命令运行的状态和命令的标准输出区分很明确，如果你需要命令的标准输出，使用命令替换来生成字符串，如果你只需要命令的运行状态，直接将命令写在 if 语句之中即可，或者使用 &lt;code&gt;$?&lt;/code&gt; 特殊变量来检查上一条命令的运行状态。如果不想在检查命令运行状态的时候让命令的标准输出影响用户，可以把它重定向到 &lt;code&gt;/dev/null&lt;/code&gt;，像这样：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;if cat /etc/passwd | grep youxia &amp;gt; /dev/null; then echo 'youxia is exist'; fi&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;5.使用管道和输入输出重定向让文件的读写变得简单。想一想在 C 语言中怎么读文件吧，除了麻烦的 open、close 不说，每读一个字符串还得先准备一个 buffer，准备长了怕浪费空间，准备短了怕缓冲区溢出，虐心啦。使用 Bash，那真的是太方便了。&lt;/p&gt;
+&lt;p&gt;6.它还有邪恶的 eval 哦，eval 命令实在是太强大了，请看下图，模拟指针进行查表：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181003105832803-1722874679.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当然，自从 Bash 3 之后，Bash 本身就提供了间接引用的功能（使用“${!var}”）。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;例外：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　Bash 语言也并不是在所有的方面都是完美的，还存在几个特别的例外，像前面说的&lt;code&gt;=&lt;/code&gt;。除了&lt;code&gt;=&lt;/code&gt;之外，&lt;code&gt;()&lt;/code&gt;也有一个使用不一致的地方，那就是对数组的初始化，例如 &lt;code&gt;array=(a b c d e f)&lt;/code&gt; ，这和前面讲的&lt;code&gt;()&lt;/code&gt;用于在子 Shell 中执行命令序列还真的是不一致。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;以上内容是我的胡言乱语，因为以上内容即无法教会大家完整的 Bash 语法，也无法教会大家用 Bash 做任何一点有意义的工作。如果想用 Bash 干点实事，建议大家阅读 O'Reilly 出的《Shell脚本学习指南》。&lt;/p&gt;
+&lt;h2 id=&quot;求打赏&quot;&gt;求打赏&lt;/h2&gt;
+&lt;p&gt;我对这次写的这个系列要求是非常高的：首先内容要有意义、够充实，信息量要足够丰富；其次是每一个知识点要讲透彻，不能模棱两可含糊不清；最后是包含丰富的截图，让那些不想装 Linux 系统的朋友们也可以领略到 Linux 桌面的风采。如果我的努力得到大家的认可，可以扫下面的二维码打赏一下：&lt;br/&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/16576/201808/16576-20180831154735325-1276475036.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;版权申明&quot;&gt;版权申明&lt;/h2&gt;
+&lt;p&gt;该随笔由京山游侠在2018年10月04日发布于博客园，引用请注明出处，转载或出版请联系博主。QQ邮箱：1841079@qq.com&lt;/p&gt;
+</description>
+<pubDate>Wed, 03 Oct 2018 21:27:00 +0000</pubDate>
+<dc:creator>京山游侠</dc:creator>
+<og:description>特别说明： 要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用 标记数学公式的开始和结束。如果某条评论中出现了两个 ，MathJax 会将两个</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/youxia/p/LinuxDesktop006.html</dc:identifier>
+</item>
+<item>
+<title>mybatis源码-解析配置文件（四）之配置文件Mapper解析 - 阿进的写字台</title>
+<link>http://www.cnblogs.com/homejim/p/9741404.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/homejim/p/9741404.html</guid>
+<description>&lt;p&gt;在 &lt;a href=&quot;https://www.cnblogs.com/homejim/p/9672224.html&quot;&gt;mybatis源码-解析配置文件（三）之配置文件Configuration解析&lt;/a&gt; 中， 讲解了 &lt;code&gt;Configuration&lt;/code&gt; 是如何解析的。&lt;/p&gt;
+&lt;p&gt;其中， &lt;code&gt;mappers&lt;/code&gt;作为&lt;code&gt;configuration&lt;/code&gt;节点的一部分配置， 在本文章中， 我们讲解解析&lt;code&gt;mappers&lt;/code&gt;节点， 即 &lt;strong&gt;xxxMapper.xml&lt;/strong&gt; 文件的解析。&lt;/p&gt;
+&lt;h2 id=&quot;解析入口&quot;&gt;1 解析入口&lt;/h2&gt;
+&lt;p&gt;在解析 &lt;strong&gt;mybatis-config.xml&lt;/strong&gt; 时， 会进行解析 xxxMapper.xml 的文件。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img-blog.csdn.net/20181004003305693?watermark/2/text/aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl8zNzEzOTE5Nw==/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70&quot; alt=&quot;解析的入口&quot;/&gt;&lt;br/&gt;在图示流程的 &lt;code&gt;XMLConfigBuilder.parse()&lt;/code&gt; 函数中, 该函数内部， 在解析 &lt;code&gt;mappers&lt;/code&gt; 节点时， 会调用 &lt;code&gt;mapperElement(root.evalNode(&quot;mappers&quot;))&lt;/code&gt;。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;private void mapperElement(XNode parent) throws Exception {
+    if (parent != null) {
+      // 遍历其子节点
+      for (XNode child : parent.getChildren()) {
+        // 如果配置的是包(packege)
+        if (&quot;package&quot;.equals(child.getName())) {
+          String mapperPackage = child.getStringAttribute(&quot;name&quot;);
+          configuration.addMappers(mapperPackage);
+        } else {
+          // 如果配置的是类（有三种情况 resource / class / url）
+          String resource = child.getStringAttribute(&quot;resource&quot;);
+          String url = child.getStringAttribute(&quot;url&quot;);
+          String mapperClass = child.getStringAttribute(&quot;class&quot;);
+          // 配置一：使用 resource 类路径
+          if (resource != null &amp;amp;&amp;amp; url == null &amp;amp;&amp;amp; mapperClass == null) {
+            ErrorContext.instance().resource(resource);
+            InputStream inputStream = Resources.getResourceAsStream(resource);
+            // 创建 XMLMapperBuilder 对象
+            XMLMapperBuilder mapperParser = new XMLMapperBuilder(inputStream, configuration, resource, configuration.getSqlFragments());
+            // 解析 xxxMapper.xml 
+            mapperParser.parse();
+            // 配置二： 使用 url 绝对路径
+          } else if (resource == null &amp;amp;&amp;amp; url != null &amp;amp;&amp;amp; mapperClass == null) {
+            ErrorContext.instance().resource(url);
+            InputStream inputStream = Resources.getUrlAsStream(url);
+            // 创建 XMLMapperBuilder 对象
+            XMLMapperBuilder mapperParser = new XMLMapperBuilder(inputStream, configuration, url, configuration.getSqlFragments());
+            // 解析 xxxMapper.xml 
+            mapperParser.parse();
+            // 配置三： 使用 class 类名
+          } else if (resource == null &amp;amp;&amp;amp; url == null &amp;amp;&amp;amp; mapperClass != null) {
+            // 通过反射创建对象
+            Class&amp;lt;?&amp;gt; mapperInterface = Resources.classForName(mapperClass);
+            // 添加
+            configuration.addMapper(mapperInterface);
+          } else {
+            throw new BuilderException(&quot;A mapper element may only specify a url, resource or class, but not more than one.&quot;);
+          }
+        }
+      }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;从以上源码中可以发现， 配置时， 一种是通过包的方式， 一种是通过指定文件的方式。&lt;/p&gt;
+&lt;p&gt;但不管是怎么配置， 最后的找落点都是 &lt;strong&gt;xxxMapper.xml&lt;/strong&gt; 文件的解析。&lt;/p&gt;
+&lt;h2 id=&quot;解析&quot;&gt;2 解析&lt;/h2&gt;
+&lt;p&gt;包扫描时， 会加载指定包下的文件， 最终会调用&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;private void loadXmlResource() {
+    // 判断是否已经加载过
+    if (!configuration.isResourceLoaded(&quot;namespace:&quot; + type.getName())) {
+      String xmlResource = type.getName().replace('.', '/') + &quot;.xml&quot;;
+      InputStream inputStream = null;
+      try {
+        inputStream = Resources.getResourceAsStream(type.getClassLoader(), xmlResource);
+      } catch (IOException e) {
+        // ignore, resource is not required
+      }
+      if (inputStream != null) {
+        XMLMapperBuilder xmlParser = new XMLMapperBuilder(inputStream, assistant.getConfiguration(), xmlResource, configuration.getSqlFragments(), type.getName());
+        // 解析
+        xmlParser.parse();
+      }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;因此， 不管是包扫描还是文件扫描， 最终都经历一下 &lt;code&gt;xmlParser.parse()&lt;/code&gt; 解析过程。&lt;/p&gt;
+&lt;h3 id=&quot;解析流程&quot;&gt;2.1 解析流程&lt;/h3&gt;
+&lt;p&gt;解析 &lt;strong&gt;xxxMapper.xml&lt;/strong&gt; 文件的是下面这个函数，解析 &lt;strong&gt;mapper&lt;/strong&gt; 节点。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;  public void parse() {
+    // 判断是否已经加载过
+    if (!configuration.isResourceLoaded(resource)) {
+      // 解析 &amp;lt;mapper&amp;gt; 节点
+      configurationElement(parser.evalNode(&quot;/mapper&quot;));
+      // 标记一下，已经加载过了
+      configuration.addLoadedResource(resource);
+      // 绑定映射器到namespace
+      bindMapperForNamespace();
+    }
+    // 处理 configurationElement 中解析失败的&amp;lt;resultMap&amp;gt;
+    parsePendingResultMaps();
+    // 处理configurationElement 中解析失败的&amp;lt;cache-ref&amp;gt;
+    parsePendingCacheRefs();
+    // 处理 configurationElement 中解析失败的 SQL 语句
+    parsePendingStatements();
+  }
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;大致流程&lt;/strong&gt;：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;解析调用 &lt;code&gt;configurationElement()&lt;/code&gt; 函数来解析各个节点&lt;/li&gt;
+&lt;li&gt;标记传入的文件已经解析了&lt;/li&gt;
+&lt;li&gt;绑定文件到相应的 namespace， 所以 namespace 需要是唯一的&lt;/li&gt;
+&lt;li&gt;处理解析失败的节点&lt;/li&gt;
+&lt;/ol&gt;&lt;h3 id=&quot;解析各个节点&quot;&gt;2.2 解析各个节点&lt;/h3&gt;
+&lt;pre&gt;
+&lt;code&gt;  private void configurationElement(XNode context) {
+    try {
+      // 获取namespace属性， 其代表者这个文档的标识
+      String namespace = context.getStringAttribute(&quot;namespace&quot;);
+      if (namespace == null || namespace.equals(&quot;&quot;)) {
+        throw new BuilderException(&quot;Mapper's namespace cannot be empty&quot;);
+      }
+      builderAssistant.setCurrentNamespace(namespace);
+      // 解析 &amp;lt;cache-ref&amp;gt; 节点
+      cacheRefElement(context.evalNode(&quot;cache-ref&quot;));
+      // 解析 &amp;lt;cache&amp;gt; 节点
+      cacheElement(context.evalNode(&quot;cache&quot;));
+      // 解析 &amp;lt;/mapper/parameterMap&amp;gt; 节点
+      parameterMapElement(context.evalNodes(&quot;/mapper/parameterMap&quot;));
+      // 解析 &amp;lt;/mapper/resultMap&amp;gt; 节点
+      resultMapElements(context.evalNodes(&quot;/mapper/resultMap&quot;));
+      // 解析 &amp;lt;/mapper/sql&amp;gt; 节点
+      sqlElement(context.evalNodes(&quot;/mapper/sql&quot;));
+      // 解析 select|insert|update|delet 节点
+      buildStatementFromContext(context.evalNodes(&quot;select|insert|update|delete&quot;));
+    } catch (Exception e) {
+      throw new BuilderException(&quot;Error parsing Mapper XML. Cause: &quot; + e, e);
+    }
+  }
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;为了避免篇幅太长， 在此就不深入讲解各个解析过程， 后续会开专门的章节。&lt;/p&gt;
+</description>
+<pubDate>Wed, 03 Oct 2018 16:37:00 +0000</pubDate>
+<dc:creator>阿进的写字台</dc:creator>
+<og:description>在</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/homejim/p/9741404.html</dc:identifier>
+</item>
+<item>
 <title>MyBatis(4)动态SQL - MrChengs</title>
 <link>http://www.cnblogs.com/Mrchengs/p/9741325.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/Mrchengs/p/9741325.html</guid>
-<description>&lt;p&gt;动态SQL&lt;/p&gt;
-&lt;p&gt;动态SQLMyBatis最强大的特性之一就是它的动态SQL功能。&lt;/p&gt;
-&lt;p&gt;如果您有任何JDBC或类似框架的经验，那么您就会理解有条件地将SQL字符串连接在一起是多么痛苦，确保不要忘记空格或在列列表末尾省略al逗号。&lt;/p&gt;
-&lt;p&gt;动态SQL处理起来可能非常痛苦，而使用动态SOL永远都不会是一件很麻烦的事情，MyBatis使用一种强大的动态SQL语言(可以在任何映射的SQL语句中使用)无疑改善了这种情况。&lt;/p&gt;
-&lt;p&gt;使用JSTL或任何类似的基于XML的文本处理器的人都应该熟悉动态SOL元素。&lt;/p&gt;
-&lt;p&gt;在以前的MyBatis版本中，有很多元素需要了解和理解。MyBatis 3在此基础上有了很大的改进，现在只有不到一半的元素。&lt;/p&gt;
-&lt;p&gt;一起工作。MyBatis使用了强大的基于OGNL的表达式来消除大多数其他元素&lt;/p&gt;
+<description>&lt;div readability=&quot;18&quot;&gt;
+&lt;p&gt;MyBatis 的强大特性之一便是它的动态 SQL。如果你有使用 JDBC 或其它类似框架的经验，你就能体会到根据不同条件拼接 SQL 语句的痛苦。例如拼接时要确保不能忘记添加必要的空格，还要注意去掉列表最后一个列名的逗号。利用动态 SQL 这一特性可以彻底摆脱这种痛苦。&lt;/p&gt;
+     
+&lt;p&gt;虽然在以前使用动态 SQL 并非一件易事，但正是 MyBatis 提供了可以被用在任意 SQL 映射语句中的强大的动态 SQL 语言得以改进这种情形。&lt;/p&gt;
+     
+&lt;p&gt;动态 SQL 元素和 JSTL 或基于类似 XML 的文本处理器相似。在 MyBatis 之前的版本中，有很多元素需要花时间了解。MyBatis 3 大大精简了元素种类，现在只需学习原来一半的元素便可。MyBatis 采用功能强大的基于 OGNL 的表达式来淘汰其它大部分元素。&lt;/p&gt;
+&lt;/div&gt;
 
 &lt;p&gt;---&amp;gt;if&lt;/p&gt;
 &lt;p&gt;---&amp;gt;choose(when,otherwise)&lt;/p&gt;
@@ -829,25 +1584,10 @@ xml文件：
 </description>
 <pubDate>Wed, 03 Oct 2018 15:46:00 +0000</pubDate>
 <dc:creator>MrChengs</dc:creator>
-<og:description>动态SQL 动态SQLMyBatis最强大的特性之一就是它的动态SQL功能。 如果您有任何JDBC或类似框架的经验，那么您就会理解有条件地将SQL字符串连接在一起是多么痛苦，确保不要忘记空格或在列列表</og:description>
+<og:description>MyBatis 的强大特性之一便是它的动态 SQL。如果你有使用 JDBC 或其它类似框架的经验，你就能体会到根据不同条件拼接 SQL 语句的痛苦。例如拼接时要确保不能忘记添加必要的空格，还要注意去掉</og:description>
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/Mrchengs/p/9741325.html</dc:identifier>
-</item>
-<item>
-<title>生成器、迭代器的区别？ - Python有话说</title>
-<link>http://www.cnblogs.com/hellohorld/p/9741291.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hellohorld/p/9741291.html</guid>
-<description>&lt;p&gt;&lt;br/&gt;迭代器是一个更抽象的概念，任何对象，如果它的类有 next 方法和 iter 方法返回自己本身，对于 string、list、&lt;br/&gt;dict、tuple 等这类容器对象，使用 for 循环遍历是很方便的。在后台 for 语句对容器对象调用 iter()函数，iter()&lt;br/&gt;是 python 的内置函数。iter()会返回一个定义了 next()方法的迭代器对象，它在容器中逐个访问容器内元素，next()&lt;br/&gt;也是 python 的内置函数。在没有后续元素时，next()会抛出一个 StopIteration 异常。&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;生成器（Generator）是创建迭代器的简单而强大的工具。它们写起来就像是正规的函数，只是在需要返回数&lt;br/&gt;据的时候使用 yield 语句。每次 next()被调用时，生成器会返回它脱离的位置（它记忆语句最后一次执行的位置&lt;br/&gt;和所有的数据值）&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;区别：生成器能做到迭代器能做的所有事,而且因为自动创建了 iter()和 next()方法,生成器显得特别简洁,而且&lt;br/&gt;生成器也是高效的，使用生成器表达式取代列表解析可以同时节省内存。除了创建和保存程序状态的自动方法,当&lt;br/&gt;发生器终结时,还会自动抛出 StopIteration 异常。&lt;/p&gt;
-</description>
-<pubDate>Wed, 03 Oct 2018 15:31:00 +0000</pubDate>
-<dc:creator>Python有话说</dc:creator>
-<og:description>迭代器是一个更抽象的概念，任何对象，如果它的类有 next 方法和 iter 方法返回自己本身，对于 string、list、dict、tuple 等这类容器对象，使用 for 循环遍历是很方便的。在</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hellohorld/p/9741291.html</dc:identifier>
 </item>
 <item>
 <title>CDN使用心得：加速双刃剑 - GodBMW</title>
@@ -1979,482 +2719,6 @@ public abstract void connectFailed(URI uri, SocketAddress sa, IOException ioe)&l
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/throwable/p/9740425.html</dc:identifier>
-</item>
-<item>
-<title>论文笔记：目标检测算法（R-CNN，Fast R-CNN，Faster R-CNN，YOLOv1-v3） - PilgrimHui</title>
-<link>http://www.cnblogs.com/liaohuiqiang/p/9740382.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/liaohuiqiang/p/9740382.html</guid>
-<description>[unable to retrieve full-text content]介绍几个经典的目标检测算法，R-CNN系列和YOLOv1-v3</description>
-<pubDate>Wed, 03 Oct 2018 10:24:00 +0000</pubDate>
-<dc:creator>PilgrimHui</dc:creator>
-<og:description>介绍几个经典的目标检测算法，R-CNN系列和YOLOv1-v3</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/liaohuiqiang/p/9740382.html</dc:identifier>
-</item>
-<item>
-<title>教你用 jVectorMap 制作属于自己的旅行足迹 - 吴佳轶</title>
-<link>http://www.cnblogs.com/hellowujiayi/p/9740293.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hellowujiayi/p/9740293.html</guid>
-<description>&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/4169639-d077819644f9ae8e.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;我的足迹地图&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;jvectormap&quot;&gt;jVectorMap&lt;/h2&gt;
-&lt;p&gt;JVectorMap 是一个优秀的、兼容性强的 jQuery 地图插件。&lt;/p&gt;
-&lt;p&gt;它可以工作在包括 IE6 在内的各款浏览器中，矢量图输出，除官方提供各国地图数据外，用户可以使用数据转换程序定制地图数据。例如街道地图、小区地图等等。&lt;/p&gt;
-&lt;p&gt;JVectorMap 官方网站提供了很多相关文档和使用示例，感兴趣的小伙伴可以自己研究一下。&lt;/p&gt;
-&lt;p&gt;官方网站：&lt;a href=&quot;http://jvectormap.com/&quot; class=&quot;uri&quot;&gt;http://jvectormap.com/&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/4169639-092e8986b08fa534.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;jVectorMap&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;今天教大家通过 jVectorMap 制作旅行足迹地图，最终的效果可以查看下面的 Demo 演示（中国），并教大家如何将制作好的足迹地图嵌入到我们自己的博客中。&lt;/p&gt;
-&lt;p&gt;Demo : &lt;a href=&quot;http://www.wujiayi.vip/footprint/&quot; class=&quot;uri&quot;&gt;http://www.wujiayi.vip/footprint/&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;目录结构&quot;&gt;目录结构&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/4169639-84e298a6c20e792d.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image&quot;/&gt;&lt;/p&gt;
-&lt;ul readability=&quot;0.42412451361868&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;红色框中的文件是必须要引入的内容。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;绿色框中的文件是展示的地图，可自行到官网下载需要的地图 : &lt;a href=&quot;http://jvectormap.com/maps/world/world/&quot; class=&quot;uri&quot;&gt;http://jvectormap.com/maps/world/world/&lt;/a&gt;，拷贝到 js 目录。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;index.html 中需要添加足迹位置和相关样式。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;开始&quot;&gt;开始&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;index.html&lt;/code&gt; 分为三部分介绍：&lt;/p&gt;
-&lt;ul readability=&quot;0&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;如何更换不同国家地图。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;如何修改地图颜色等相关样式。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;如何添加足迹位置。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;第一部分如何更换不同国家地图&quot;&gt;第一部分：如何更换不同国家地图。&lt;/h2&gt;
-&lt;pre class=&quot;html&quot;&gt;
-&lt;code&gt;&amp;lt;html&amp;gt;
-    &amp;lt;head&amp;gt;
-        &amp;lt;!--引入jQuery框架--&amp;gt;
-        &amp;lt;script type=&quot;text/javascript&quot; src=&quot;js/jquery-1.9.1.min.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-        &amp;lt;!--引入jVectorMap库--&amp;gt;
-        &amp;lt;script type=&quot;text/javascript&quot; src=&quot;js/jquery-jvectormap-1.2.2.min.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-        &amp;lt;!--引入样式表--&amp;gt;
-        &amp;lt;link href=&quot;js/jquery-jvectormap-1.2.2.css&quot; rel=&quot;stylesheet&quot; media=&quot;screen&quot;&amp;gt;
-
-
-        &amp;lt;!--引入中国地图数据库--&amp;gt;
-        &amp;lt;script type=&quot;text/javascript&quot; src=&quot;js/jquery-jvectormap-cn-merc-en.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-
-        &amp;lt;!--引入美国地图数据库--&amp;gt;
-        &amp;lt;!--script type=&quot;text/javascript&quot; src=&quot;js/jquery-jvectormap-us-aea.js&quot;&amp;gt;&amp;lt;/script--&amp;gt;
-        &amp;lt;!--引入世界地图数据库--&amp;gt;
-        &amp;lt;!--script type=&quot;text/javascript&quot; src=&quot;js/jquery-jvectormap-world-mill.js&quot;&amp;gt;&amp;lt;/script--&amp;gt;
-
-    &amp;lt;/head&amp;gt;
-&amp;lt;body&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;提前下载需要的国家地图，拷贝到 js 目录下。&lt;/p&gt;
-&lt;p&gt;在 &lt;code&gt;&amp;lt;head&amp;gt;&lt;/code&gt; 标签里引入地图数据： &lt;code&gt;&amp;lt;script type=&quot;text/javascript&quot; src=&quot;js/地图文件名&quot;&amp;gt;&amp;lt;/script&amp;gt;&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;注意&lt;/strong&gt; ：同时只能有一个地图库，注意不要引入多个地图数据。可以选择注释掉其他的，方便更改。&lt;/p&gt;
-&lt;h2 id=&quot;第二部分如何修改地图颜色等相关样式&quot;&gt;第二部分：如何修改地图颜色等相关样式。&lt;/h2&gt;
-&lt;pre class=&quot;html&quot;&gt;
-&lt;code&gt;    &amp;lt;!--background-color: 地图背景颜色--&amp;gt;
-    &amp;lt;div id=&quot;map&quot; style=&quot;background-color:#353535&quot;&amp;gt; &amp;lt;/div&amp;gt;
-    &amp;lt;script&amp;gt;
-        $('#map').vectorMap({
-
-            // 此处更改地图
-            map: 'cn_merc_en',   // 中国地图
-            //map: 'us-aea',     // 美国地图
-            //map: 'world-mill', // 世界地图
-
-
-            backgroundColor: 'transparent',
-            zoomMin: 0.9, // 鼠标缩放时的最小比例
-            zoomMax: 2.4, // 鼠标缩放时的最大比例
-            focusOn: {
-                x: 0.55,
-                y: 2,
-                scale: 0.9
-            },
-            regionStyle: {
-                initial: {
-                    fill: '#e5e5e5',   // 地图颜色
-                    &quot;fill-opacity&quot;: 1, // 省份（州）是否隐藏，鼠标滑动时显示; 1：显示，2：隐藏。
-                    stroke: 'none',
-                    &quot;stroke-width&quot;: 0,
-                    &quot;stroke-opacity&quot;: 1
-                },
-                hover: {
-                    fill: '#ccc',  // 鼠标滑动至某省份的高亮颜色。
-                    &quot;fill-opacity&quot;: 0.8
-                },
-                selected: {
-                    fill: 'yellow'
-                },
-                selectedHover: {}
-            },
-            markerStyle: {
-                initial: {
-                    fill: '#fd8888', // 足迹位置的填充颜色
-                    stroke: '#fff'   // 足迹位置的描边颜色
-                },
-                hover: {
-                    fill: '#fd2020', // 鼠标滑动至足迹位置后的填充颜色
-                    stroke: '#fff',  // 鼠标滑动至足迹位置后的描边颜色
-                    &quot;fill-opacity&quot;: 0.8
-                },
-            },
-        });
-    &amp;lt;/script&amp;gt;
-&amp;lt;/html&amp;gt;
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;参照代码注释修改颜色和相关样式。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;千万注意&lt;/strong&gt; ：在更改地图时 &lt;code&gt;map: '地图名称'&lt;/code&gt; ，地图名称是地图数据文件名的后半部分。&lt;/p&gt;
-&lt;p&gt;例如：&lt;/p&gt;
-&lt;p&gt;美国地图文件名：jquery-jvectormap-us-aea.js&lt;/p&gt;
-&lt;p&gt;那地图的名称是：us-aea&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;但是要注意把 &lt;code&gt;-&lt;/code&gt; (横杠)更改成 &lt;code&gt;_&lt;/code&gt;（下划线）。 否则不会显示地图。&lt;/strong&gt;&lt;/p&gt;
-&lt;h2 id=&quot;第三部分如何添加足迹位置&quot;&gt;第三部分：如何添加足迹位置。&lt;/h2&gt;
-&lt;pre class=&quot;html&quot;&gt;
-&lt;code&gt;    markers: [ // 足迹位置
-
-        // {latLng: [经度（保留两位小数）, 纬度（保留两位小数）], name: '城市名称'},
-        // 推荐查询经纬度网站：http://www.gpsspg.com/maps.htm
-
-        {latLng: [39.90, 116.41], name: '北京'},
-        {latLng: [31.24, 121.50], name: '上海'},
-
-        {latLng: [46.06, 122.06], name: '内蒙古 - 乌兰浩特'}
-    ]
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;推荐查询经纬度网站：&lt;a href=&quot;http://www.gpsspg.com/maps.htm&quot; class=&quot;uri&quot;&gt;http://www.gpsspg.com/maps.htm&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;语法：&lt;code&gt;{latLng: [经度（保留两位小数）, 纬度（保留两位小数）], name: '城市名称'},&lt;/code&gt;。&lt;/p&gt;
-&lt;h2 id=&quot;如何嵌入式到博客中&quot;&gt;如何嵌入式到博客中&lt;/h2&gt;
-&lt;pre class=&quot;html&quot;&gt;
-&lt;code&gt;&amp;lt;iframe style=&quot;max-width: 100%&quot; 
-      frameborder=&quot;no&quot; 
-      border=&quot;0&quot; 
-      marginwidth=&quot;0&quot; 
-      marginheight=&quot;0&quot; 
-      width=&quot;100%&quot; 
-      height=&quot;750px&quot; 
-      src=&quot;替换成你的足迹地图链接&quot;&amp;gt;                                        
-&amp;lt;/iframe&amp;gt;
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;把制作好的足迹地图文件放在服务器上，把访问连接放在 &lt;code&gt;src&lt;/code&gt; 中。&lt;/p&gt;
-&lt;p&gt;然后将上面的代码复制到你的博客页面上即可。&lt;/p&gt;
-&lt;p&gt;可适配手机端和等比例缩放。&lt;/p&gt;
-&lt;h2 id=&quot;获取源码&quot;&gt;获取源码&lt;/h2&gt;
-&lt;p&gt;GitHub : &lt;a href=&quot;https://github.com/HelloWuJiaYi/jVectorMap-Footprint&quot; class=&quot;uri&quot;&gt;https://github.com/HelloWuJiaYi/jVectorMap-Footprint&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;广告时间&quot;&gt;广告时间&lt;/h2&gt;
-&lt;p&gt;欢迎访问我的个人博客:&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.wujiayi.vip/&quot; class=&quot;uri&quot;&gt;http://www.wujiayi.vip&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;我的微信公众号：&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;吴佳轶同学&lt;/code&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 03 Oct 2018 09:41:00 +0000</pubDate>
-<dc:creator>吴佳轶</dc:creator>
-<og:description>jVectorMap JVectorMap 是一个优秀的、兼容性强的 jQuery 地图插件。 它可以工作在包括 IE6 在内的各款浏览器中，矢量图输出，除官方提供各国地图数据外，用户可以使用数据转换</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hellowujiayi/p/9740293.html</dc:identifier>
-</item>
-<item>
-<title>Swashbuckle.AspNetCore3.0的二次封装与使用 - 易墨</title>
-<link>http://www.cnblogs.com/morang/p/9740190.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/morang/p/9740190.html</guid>
-<description>&lt;h2 id=&quot;关于-swashbuckle.aspnetcore3.0&quot;&gt;关于 Swashbuckle.AspNetCore3.0&lt;/h2&gt;
-&lt;blockquote readability=&quot;4.8181818181818&quot;&gt;
-&lt;p&gt;一个使用 ASP.NET Core 构建的 API 的 Swagger 工具。直接从您的路线，控制器和模型生成漂亮的 API 文档，包括用于探索和测试操作的 UI。&lt;br/&gt;项目主页：&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore&quot; class=&quot;uri&quot;&gt;https://github.com/domaindrivendev/Swashbuckle.AspNetCore&lt;/a&gt;&lt;br/&gt;项目官方示例：&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore/tree/master/test/WebSites&quot; class=&quot;uri&quot;&gt;https://github.com/domaindrivendev/Swashbuckle.AspNetCore/tree/master/test/WebSites&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;之前写过一篇&lt;a href=&quot;https://www.cnblogs.com/morang/p/8325729.html&quot;&gt;Swashbuckle.AspNetCore-v1.10 的使用&lt;/a&gt;,现在 &lt;code&gt;Swashbuckle.AspNetCore&lt;/code&gt; 已经升级到 3.0 了，正好开新坑(博客重构)重新封装了下，将所有相关的一些东西抽取到单独的类库中,尽可能的避免和项目耦合，使其能够在其他项目也能够快速使用。&lt;/p&gt;
-&lt;h2 id=&quot;运行示例&quot;&gt;运行示例&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662652/201810/662652-20181003165553661-1257097179.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;封装代码&quot;&gt;封装代码&lt;/h2&gt;
-&lt;p&gt;待博客重构完成再将完整代码开源，参考下面步骤可自行封装&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662652/201810/662652-20181003171716045-1402588702.png&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;新建类库并添加引用&quot;&gt;1. 新建类库并添加引用&lt;/h3&gt;
-&lt;p&gt;我引用的版本如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    &amp;lt;PackageReference Include=&quot;Microsoft.AspNetCore.Http.Abstractions&quot; Version=&quot;2.1.1&quot; /&amp;gt;
-    &amp;lt;PackageReference Include=&quot;Microsoft.AspNetCore.Mvc&quot; Version=&quot;2.1.1&quot; /&amp;gt;
-    &amp;lt;PackageReference Include=&quot;Swashbuckle.AspNetCore&quot; Version=&quot;3.0.0&quot; /&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;构建参数模型-custsomswaggeroptions.cs&quot;&gt;2. 构建参数模型 CustsomSwaggerOptions.cs&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    public class CustsomSwaggerOptions
-    {
-        /// &amp;lt;summary&amp;gt;
-        /// 项目名称
-        /// &amp;lt;/summary&amp;gt;
-        public string ProjectName { get; set; } = &quot;My API&quot;;
-        /// &amp;lt;summary&amp;gt;
-        /// 接口文档显示版本
-        /// &amp;lt;/summary&amp;gt;
-        public string[] ApiVersions { get; set; }
-        /// &amp;lt;summary&amp;gt;
-        /// 接口文档访问路由前缀
-        /// &amp;lt;/summary&amp;gt;
-        public string RoutePrefix { get; set; } = &quot;swagger&quot;;
-        /// &amp;lt;summary&amp;gt;
-        /// 使用自定义首页
-        /// &amp;lt;/summary&amp;gt;
-        public bool UseCustomIndex { get; set; }
-        /// &amp;lt;summary&amp;gt;
-        /// UseSwagger Hook
-        /// &amp;lt;/summary&amp;gt;
-        public Action&amp;lt;SwaggerOptions&amp;gt; UseSwaggerAction { get; set; }
-        /// &amp;lt;summary&amp;gt;
-        /// UseSwaggerUI Hook
-        /// &amp;lt;/summary&amp;gt;
-        public Action&amp;lt;SwaggerUIOptions&amp;gt; UseSwaggerUIAction { get; set; }
-        /// &amp;lt;summary&amp;gt;
-        /// AddSwaggerGen Hook
-        /// &amp;lt;/summary&amp;gt;
-        public Action&amp;lt;SwaggerGenOptions&amp;gt; AddSwaggerGenAction { get; set; }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;版本控制默认参数接口实现-swaggerdefaultvaluefilter.cs&quot;&gt;3. 版本控制默认参数接口实现 SwaggerDefaultValueFilter.cs&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    public class SwaggerDefaultValueFilter : IOperationFilter
-    {
-        public void Apply(Swashbuckle.AspNetCore.Swagger.Operation operation, OperationFilterContext context)
-        {
-            // REF: https://github.com/domaindrivendev/Swashbuckle.AspNetCore/issues/412
-            // REF: https://github.com/domaindrivendev/Swashbuckle.AspNetCore/pull/413
-            foreach (var parameter in operation.Parameters.OfType&amp;lt;NonBodyParameter&amp;gt;())
-            {
-                var description = context.ApiDescription.ParameterDescriptions.First(p =&amp;gt; p.Name == parameter.Name);
-
-                if (parameter.Description == null)
-                {
-                    parameter.Description = description.ModelMetadata.Description;
-                }
-
-                if (parameter.Default == null)
-                {
-                    parameter.Default = description.RouteInfo.DefaultValue;
-                }
-                parameter.Required |= !description.RouteInfo.IsOptional;
-            }
-        }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;customswaggerservicecollectionextensions.cs&quot;&gt;4. CustomSwaggerServiceCollectionExtensions.cs&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    public static class CustomSwaggerServiceCollectionExtensions
-    {
-        public static IServiceCollection AddCustomSwagger(this IServiceCollection services)
-        {
-            return AddCustomSwagger(services, new CustsomSwaggerOptions());
-        }
-
-        public static IServiceCollection AddCustomSwagger(this IServiceCollection services, CustsomSwaggerOptions options)
-        {
-            services.AddSwaggerGen(c =&amp;gt;
-            {
-                if (options.ApiVersions == null) return;
-                foreach (var version in options.ApiVersions)
-                {
-                    c.SwaggerDoc(version, new Info { Title = options.ProjectName, Version = version });
-                }
-                c.OperationFilter&amp;lt;SwaggerDefaultValueFilter&amp;gt;();
-                options.AddSwaggerGenAction?.Invoke(c);
-
-            });
-            return services;
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;swaggerbuilderextensions.cs&quot;&gt;5. SwaggerBuilderExtensions.cs&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    public static class SwaggerBuilderExtensions
-    {
-        public static IApplicationBuilder UseCustomSwagger(this IApplicationBuilder app)
-        {
-            return UseCustomSwagger(app, new CustsomSwaggerOptions());
-        }
-        public static IApplicationBuilder UseCustomSwagger(this IApplicationBuilder app, CustsomSwaggerOptions options)
-        {
-            app.UseSwagger(opt =&amp;gt;
-            {
-                if (options.UseSwaggerAction == null) return;
-                options.UseSwaggerAction(opt);
-            });
-            app.UseSwaggerUI(c =&amp;gt;
-            {
-                if (options.ApiVersions == null) return;
-                c.RoutePrefix = options.RoutePrefix;
-                c.DocumentTitle = options.ProjectName;
-                if (options.UseCustomIndex)
-                {
-                    c.UseCustomSwaggerIndex();
-                }
-                foreach (var item in options.ApiVersions)
-                {
-                    c.SwaggerEndpoint($&quot;/swagger/{item}/swagger.json&quot;, $&quot;{item}&quot;);
-                }
-                options.UseSwaggerUIAction?.Invoke(c);
-            });
-
-            return app;
-        }
-        /// &amp;lt;summary&amp;gt;
-        /// 使用自定义首页
-        /// &amp;lt;/summary&amp;gt;
-        /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
-        public static void UseCustomSwaggerIndex(this SwaggerUIOptions c)
-        {
-            var currentAssembly = typeof(CustsomSwaggerOptions).GetTypeInfo().Assembly;
-            c.IndexStream = () =&amp;gt; currentAssembly.GetManifestResourceStream($&quot;{currentAssembly.GetName().Name}.index.html&quot;);
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;模型初始化&quot;&gt;6. 模型初始化&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    private CustsomSwaggerOptions CURRENT_SWAGGER_OPTIONS = new CustsomSwaggerOptions()
-    {
-        ProjectName = &quot;墨玄涯博客接口&quot;,
-        ApiVersions = new string[] { &quot;v1&quot;, &quot;v2&quot; },//要显示的版本
-        UseCustomIndex = true,
-        RoutePrefix = &quot;swagger&quot;,
-        AddSwaggerGenAction = c =&amp;gt;
-        {
-            var filePath = System.IO.Path.Combine(System.AppContext.BaseDirectory, typeof(Program).GetTypeInfo().Assembly.GetName().Name + &quot;.xml&quot;);
-            c.IncludeXmlComments(filePath, true);
-        },
-        UseSwaggerAction = c =&amp;gt;
-        {
-
-        },
-        UseSwaggerUIAction = c =&amp;gt;
-        {
-
-        }
-    };&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;在-api-项目中使用&quot;&gt;7. 在 api 项目中使用&lt;/h3&gt;
-&lt;p&gt;添加对新建类库的引用，并在 webapi 项目中启用版本管理需要为输出项目添加 Nuget 包：&lt;code&gt;Microsoft.AspNetCore.Mvc.Versioning&lt;/code&gt;，&lt;code&gt;Microsoft.AspNetCore.Mvc.Versioning.ApiExplorer&lt;/code&gt; (如果需要版本管理则添加)&lt;/p&gt;
-&lt;p&gt;我引用的版本如下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;    &amp;lt;PackageReference Include=&quot;Microsoft.AspNetCore.Mvc.Versioning&quot; Version=&quot;2.3.0&quot; /&amp;gt;
-    &amp;lt;PackageReference Include=&quot;Microsoft.AspNetCore.Mvc.Versioning.ApiExplorer&quot; Version=&quot;2.2.0&quot; /&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Startup.cs 代码&lt;/p&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    public void ConfigureServices(IServiceCollection services)
-    {
-        services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
-        //版本控制
-        services.AddMvcCore().AddVersionedApiExplorer(o =&amp;gt; o.GroupNameFormat = &quot;'v'VVV&quot;);
-        services.AddApiVersioning(option =&amp;gt;
-        {
-            // allow a client to call you without specifying an api version
-            // since we haven't configured it otherwise, the assumed api version will be 1.0
-            option.AssumeDefaultVersionWhenUnspecified = true;
-            option.ReportApiVersions = false;
-        });
-        //custom swagger
-        services.AddCustomSwagger(CURRENT_SWAGGER_OPTIONS);
-    }
-
-    // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-    public void Configure(IApplicationBuilder app, IHostingEnvironment env, IApiVersionDescriptionProvider provider)
-    {
-        if (env.IsDevelopment())
-        {
-            app.UseDeveloperExceptionPage();
-        }
-        //custom swagger
-        //自动检测存在的版本
-        // CURRENT_SWAGGER_OPTIONS.ApiVersions = provider.ApiVersionDescriptions.Select(s =&amp;gt; s.GroupName).ToArray();
-        app.UseCustomSwagger(CURRENT_SWAGGER_OPTIONS);
-        app.UseMvc();
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;关键代码拆解&quot;&gt;关键代码拆解&lt;/h2&gt;
-&lt;h3 id=&quot;action-方法的-xml-注释&quot;&gt;action 方法的 xml 注释&lt;/h3&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;new CustsomSwaggerOptions(){
-    AddSwaggerGenAction = c =&amp;gt;
-    {
-        var filePath = System.IO.Path.Combine(System.AppContext.BaseDirectory, typeof(Program).GetTypeInfo().Assembly.GetName().Name + &quot;.xml&quot;);
-        //controller及action注释
-        c.IncludeXmlComments(filePath, true);
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;当然还需要生成xml，编辑解决方案添加(或者在vs中项目属性-&amp;gt;生成-&amp;gt;勾选生成xml文档文件)如下配置片段&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;  &amp;lt;PropertyGroup Condition=&quot;'$(Configuration)|$(Platform)'=='Release|AnyCPU'&quot;&amp;gt;
-    &amp;lt;DocumentationFile&amp;gt;.\项目名称.xml&amp;lt;/DocumentationFile&amp;gt;
-  &amp;lt;/PropertyGroup&amp;gt;
-
-  &amp;lt;PropertyGroup Condition=&quot;'$(Configuration)|$(Platform)'=='Debug|AnyCPU'&quot;&amp;gt;
-    &amp;lt;DocumentationFile&amp;gt;.\项目名称.xml&amp;lt;/DocumentationFile&amp;gt;
-  &amp;lt;/PropertyGroup&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;目前.net core2.1我这会将此 xml 生成到项目目录，故可能需要将其加入.gitignore中。&lt;/p&gt;
-&lt;h3 id=&quot;版本控制&quot;&gt;版本控制&lt;/h3&gt;
-&lt;p&gt;添加 Nuget 包：&lt;code&gt;Microsoft.AspNetCore.Mvc.Versioning&lt;/code&gt;，&lt;code&gt;Microsoft.AspNetCore.Mvc.Versioning.ApiExplorer&lt;/code&gt;&lt;br/&gt;并在 ConfigureServices 中设置&lt;/p&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    //版本控制
-    services.AddMvcCore().AddVersionedApiExplorer(o =&amp;gt; o.GroupNameFormat = &quot;'v'VVV&quot;);
-    services.AddApiVersioning(option =&amp;gt;
-    {
-        // allow a client to call you without specifying an api version
-        // since we haven't configured it otherwise, the assumed api version will be 1.0
-        option.AssumeDefaultVersionWhenUnspecified = true;
-        option.ReportApiVersions = false;
-    });&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;controller 使用&lt;/p&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    /// &amp;lt;summary&amp;gt;
-    /// 测试接口
-    /// &amp;lt;/summary&amp;gt;
-    [ApiVersion(&quot;1.0&quot;)]
-    [Route(&quot;api/v{api-version:apiVersion}/test&quot;)]
-    [ApiController]
-    public class TestController : ControllerBase
-    {
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;自定义主题&quot;&gt;自定义主题&lt;/h3&gt;
-&lt;p&gt;将 index.html 修改为内嵌资源就可以使用&lt;code&gt;GetManifestResourceStream&lt;/code&gt;获取文件流,使用此 html，可以自己使用&lt;code&gt;var configObject = JSON.parse('%(ConfigObject)');&lt;/code&gt;获取到 swagger 的配置信息，从而根据此信息去写自己的主题即可。&lt;/p&gt;
-&lt;pre class=&quot;cs&quot;&gt;
-&lt;code&gt;    /// &amp;lt;summary&amp;gt;
-    /// 使用自定义首页
-    /// &amp;lt;/summary&amp;gt;
-    /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
-    public static void UseCustomSwaggerIndex(this SwaggerUIOptions c)
-    {
-        var currentAssembly = typeof(CustsomSwaggerOptions).GetTypeInfo().Assembly;
-        c.IndexStream = () =&amp;gt; currentAssembly.GetManifestResourceStream($&quot;{currentAssembly.GetName().Name}.index.html&quot;);
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;若想注入 css，js 则在 UseSwaggerUIAction 委托中调用对应的方法接口，&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore#inject-custom-css&quot;&gt;官方文档&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;另外，目前 swagger-ui 3.19.0 并不支持多语言，不过可以根据需要使用 js 去修改一些东西&lt;br/&gt;比如在 index.html 的 onload 事件中这样去修改头部信息&lt;/p&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;document.getElementsByTagName(
-  'span'
-)[0].innerText = document
-  .getElementsByTagName('span')[0]
-  .innerText.replace('swagger', '项目接口文档')
-document.getElementsByTagName(
-  'span'
-)[1].innerText = document
-  .getElementsByTagName('span')[1]
-  .innerText.replace('Select a spec', '版本选择')&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在找汉化解决方案时追踪到 Swashbuckle.AspNetCore3.0 主题时使用的&lt;a href=&quot;https://github.com/domaindrivendev/Swashbuckle.AspNetCore/blob/master/src/Swashbuckle.AspNetCore.SwaggerUI/package.json&quot;&gt;swagger-ui 为 3.19.0&lt;/a&gt;，从&lt;a href=&quot;https://github.com/swagger-api/swagger-ui/issues/2488#issuecomment-344077847&quot;&gt;issues2488&lt;/a&gt;了解到目前不支持多语言，其他的问题也可以&lt;a href=&quot;https://github.com/swagger-api/swagger-ui&quot;&gt;查看此仓库&lt;/a&gt;&lt;br/&gt;在使用过程中遇到的问题，基本上 readme 和 issues 都有答案，遇到问题多多阅读即可&lt;/p&gt;
-&lt;h3 id=&quot;参考文章&quot;&gt;参考文章&lt;/h3&gt;
-</description>
-<pubDate>Wed, 03 Oct 2018 09:38:00 +0000</pubDate>
-<dc:creator>易墨</dc:creator>
-<og:description>关于 Swashbuckle.AspNetCore3.0 一个使用 ASP.NET Core 构建的 API 的 Swagger 工具。直接从您的路线，控制器和模型生成漂亮的 API 文档，包括用于探</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/morang/p/9740190.html</dc:identifier>
 </item>
 </channel>
 </rss>
