@@ -9,6 +9,307 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Java并发（9）- 从同步容器到并发容器 - knock_小新</title>
+<link>http://www.cnblogs.com/konck/p/9473665.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/konck/p/9473665.html</guid>
+<description>&lt;h2 id=&quot;引言&quot;&gt;引言&lt;/h2&gt;
+&lt;p&gt;容器是Java基础类库中使用频率最高的一部分，Java集合包中提供了大量的容器类来帮组我们简化开发，我前面的文章中对Java集合包中的关键容器进行过一个系列的分析，但这些集合类都是非线程安全的，即在多线程的环境下，都需要其他额外的手段来保证数据的正确性，最简单的就是通过synchronized关键字将所有使用到非线程安全的容器代码全部同步执行。这种方式虽然可以达到线程安全的目的，但存在几个明显的问题：首先编码上存在一定的复杂性，相关的代码段都需要添加锁。其次这种一刀切的做法在高并发情况下性能并不理想，基本相当于串行执行。JDK1.5中为我们提供了一系列的并发容器，集中在java.util.concurrent包下，用来解决这两个问题，先从同步容器说起。&lt;/p&gt;
+&lt;h2 id=&quot;同步容器vector和hashtable&quot;&gt;同步容器Vector和HashTable&lt;/h2&gt;
+&lt;p&gt;为了简化代码开发的过程，早期的JDK在java.util包中提供了Vector和HashTable两个同步容器，这两个容器的实现和早期的ArrayList和HashMap代码实现基本一样，不同在于Vector和HashTable在每个方法上都添加了synchronized关键字来保证同一个实例同时只有一个线程能访问，部分源码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;//Vector
+public synchronized int size() {};
+public synchronized E get(int index) {};
+
+//HashTable 
+public synchronized V put(K key, V value) {};
+public synchronized V remove(Object key) {};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通过对每个方法添加synchronized，保证了多次操作的串行。这种方式虽然使用起来方便了，但并没有解决高并发下的性能问题，与手动锁住ArrayList和HashMap并没有什么区别，不论读还是写都会锁住整个容器。其次这种方式存在另一个问题：当多个线程进行复合操作时，是线程不安全的。可以通过下面的代码来说明这个问题：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public static void deleteVector(){
+    int index = vectors.size() - 1;
+    vectors.remove(index);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;代码中对Vector进行了两步操作，首先获取size，然后移除最后一个元素，多线程情况下如果两个线程交叉执行，A线程调用size后，B线程移除最后一个元素，这时A线程继续remove将会抛出索引超出的错误。&lt;/p&gt;
+&lt;p&gt;那么怎么解决这个问题呢？最直接的修改方案就是对代码块加锁来防止多线程同时执行：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public static void deleteVector(){
+    synchronized (vectors) {
+        int index = vectors.size() - 1;
+        vectors.remove(index);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果上面的问题通过加锁来解决没有太直观的影响，那么来看看对vectors进行迭代的情况：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public static void foreachVector(){
+    synchronized (vectors) {
+        for (int i = 0; i &amp;lt; vectors.size(); i++) {
+            System.out.println(vectors.get(i).toString());
+        }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;为了避免多线程情况下在迭代的过程中其他线程对vectors进行了修改，就不得不对整个迭代过程加锁，想象这么一个场景，如果迭代操作非常频繁，或者vectors元素很大，那么所有的修改和读取操作将不得不在锁外等待，这将会对多线程性能造成极大的影响。那么有没有什么方式能够很好的对容器的迭代操作和修改操作进行分离，在修改时不影响容器的迭代操作呢？这就需要java.util.concurrent包中的各种并发容器了出场了。&lt;/p&gt;
+&lt;h2 id=&quot;并发容器copyonwrite&quot;&gt;并发容器CopyOnWrite&lt;/h2&gt;
+&lt;p&gt;CopyOnWrite--写时复制容器是一种常用的并发容器，它通过多线程下读写分离来达到提高并发性能的目的，和前面我们讲解StampedLock时所用的解决方案类似：任何时候都可以进行读操作，写操作则需要加锁。不同的是，在CopyOnWrite中，对容器的修改操作加锁后，通过copy一个新的容器来进行修改，修改完毕后将容器替换为新的容器即可。&lt;/p&gt;
+&lt;p&gt;这种方式的好处显而易见：通过copy一个新的容器来进行修改，这样读操作就不需要加锁，可以并发读，因为在读的过程中是采用的旧的容器，即使新容器做了修改对旧容器也没有影响，同时也很好的解决了迭代过程中其他线程修改导致的并发问题。&lt;/p&gt;
+&lt;p&gt;JDK中提供的并发容器包括CopyOnWriteArrayList和CopyOnWriteArraySet，下面通过CopyOnWriteArrayList的部分源码来理解这种思想：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;//添加元素
+public boolean add(E e) {
+    //独占锁
+    final ReentrantLock lock = this.lock;
+    lock.lock();
+    try {
+        Object[] elements = getArray();
+        int len = elements.length;
+        //复制一个新的数组newElements
+        Object[] newElements = Arrays.copyOf(elements, len + 1);
+        newElements[len] = e;
+        //修改后指向新的数组
+        setArray(newElements);
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+
+public E get(int index) {
+    //未加锁，直接获取
+    return get(getArray(), index);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;代码很简单，在add操作中通过一个共享的ReentrantLock来获取锁，这样可以防止多线程下多个线程同时修改容器内容。获取锁后通过Arrays.copyOf复制了一个新的容器，然后对新的容器进行了修改，最后直接通过setArray将原数组引用指向了新的数组，避免了在修改过程中迭代数据出现错误。get操作由于是读操作，未加锁，直接读取就行。CopyOnWriteArraySet类似，这里不做过多讲解。&lt;/p&gt;
+&lt;p&gt;CopyOnWrite容器虽然在多线程下使用是安全的，相比较Vector也大大提高了读写的性能，但它也有自身的问题。&lt;/p&gt;
+&lt;p&gt;首先就是性能，在讲解ArrayList的文章中提到过，ArrayList的扩容由于使用了Arrays.copyOf每次都需要申请更大的空间以及复制现有的元素到新的数组，对性能存在一定影响。CopyOnWrite容器也不例外，每次修改操作都会申请新的数组空间，然后进行替换。所以在高并发频繁修改容器的情况下，会不断申请新的空间，同时会造成频繁的GC，这时使用CopyOnWrite容器并不是一个好的选择。&lt;/p&gt;
+&lt;p&gt;其次还有一个数据一致性问题，由于在修改中copy了新的数组进行替换，同时旧数组如果还在被使用，那么新的数据就不能被及时读取到，这样就造成了数据不一致，如果需要强数据一致性，CopyOnWrite容器也不太适合。&lt;/p&gt;
+&lt;h2 id=&quot;并发容器concurrenthashmap&quot;&gt;并发容器ConcurrentHashMap&lt;/h2&gt;
+&lt;p&gt;ConcurrentHashMap容器相较于CopyOnWrite容器在并发加锁粒度上有了更大一步的优化，它通过修改对单个hash桶元素加锁的达到了更细粒度的并发控制。在了解ConcurrentHashMap容器之前，推荐大家先阅读我之前对HashMap源码分析的文章--&lt;a href=&quot;https://www.cnblogs.com/konck/p/7894503.html&quot;&gt;Java集合（5）一 HashMap与HashSet&lt;/a&gt;，因为在底层数据结构上，ConcurrentHashMap和HashMap都使用了数组+链表+红黑树的方式，只是在HashMap的基础上添加了并发相关的一些控制，所以这里只对ConcurrentHashMap中并发相关代码做一些分析。&lt;br/&gt;&lt;img src=&quot;https://images2017.cnblogs.com/blog/368583/201712/368583-20171211214839227-579415858.png&quot;/&gt;&lt;br/&gt;还是先从ConcurrentHashMap的写操作开始，这里就是put方法：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;final V putVal(K key, V value, boolean onlyIfAbsent) {
+    if (key == null || value == null) throw new NullPointerException();
+    int hash = spread(key.hashCode()); //计算桶的hash值
+    int binCount = 0;
+    //循环插入元素，避免并发插入失败
+    for (Node&amp;lt;K,V&amp;gt;[] tab = table;;) {
+        Node&amp;lt;K,V&amp;gt; f; int n, i, fh;
+        if (tab == null || (n = tab.length) == 0)
+            tab = initTable();
+        else if ((f = tabAt(tab, i = (n - 1) &amp;amp; hash)) == null) {
+            //如果当前桶无元素，则通过cas操作插入新节点
+            if (casTabAt(tab, i, null,
+                            new Node&amp;lt;K,V&amp;gt;(hash, key, value, null)))
+                break;                   
+        }
+        //如果当前桶正在扩容，则协助扩容
+        else if ((fh = f.hash) == MOVED)
+            tab = helpTransfer(tab, f);
+        else {
+            V oldVal = null;
+            //hash冲突时锁住当前需要添加节点的头元素，可能是链表头节点或者红黑树的根节点
+            synchronized (f) { 
+                if (tabAt(tab, i) == f) {
+                    if (fh &amp;gt;= 0) {
+                        binCount = 1;
+                        for (Node&amp;lt;K,V&amp;gt; e = f;; ++binCount) {
+                            K ek;
+                            if (e.hash == hash &amp;amp;&amp;amp;
+                                ((ek = e.key) == key ||
+                                    (ek != null &amp;amp;&amp;amp; key.equals(ek)))) {
+                                oldVal = e.val;
+                                if (!onlyIfAbsent)
+                                    e.val = value;
+                                break;
+                            }
+                            Node&amp;lt;K,V&amp;gt; pred = e;
+                            if ((e = e.next) == null) {
+                                pred.next = new Node&amp;lt;K,V&amp;gt;(hash, key,
+                                                            value, null);
+                                break;
+                            }
+                        }
+                    }
+                    else if (f instanceof TreeBin) {
+                        Node&amp;lt;K,V&amp;gt; p;
+                        binCount = 2;
+                        if ((p = ((TreeBin&amp;lt;K,V&amp;gt;)f).putTreeVal(hash, key,
+                                                        value)) != null) {
+                            oldVal = p.val;
+                            if (!onlyIfAbsent)
+                                p.val = value;
+                        }
+                    }
+                }
+            }
+            if (binCount != 0) {
+                if (binCount &amp;gt;= TREEIFY_THRESHOLD)
+                    treeifyBin(tab, i);
+                if (oldVal != null)
+                    return oldVal;
+                break;
+            }
+        }
+    }
+    addCount(1L, binCount);
+    return null;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在put元素的过程中，有几个并发处理的关键点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;如果当前桶对应的节点还没有元素插入，通过典型的无锁cas操作尝试插入新节点，减少加锁的概率，并发情况下如果插入不成功，很容易想到自旋，也就是&lt;code&gt;for (Node&amp;lt;K,V&amp;gt;[] tab = table;;)&lt;/code&gt;。&lt;/li&gt;
+&lt;li&gt;如果当前桶正在扩容，则协助扩容&lt;code&gt;((fh = f.hash) == MOVED)&lt;/code&gt;。这里是一个重点，ConcurrentHashMap的扩容和HashMap不一样，它在多线程情况下或使用多个线程同时扩容，每个线程扩容指定的一部分hash桶，当前线程扩容完指定桶之后会继续获取下一个扩容任务，直到扩容全部完成。扩容的大小和HashMap一样，都是翻倍，这样可以有效减少移动的元素数量，也就是使用2的幂次方的原因，在HashMap中也一样。&lt;/li&gt;
+&lt;li&gt;在发生hash冲突时仅仅只锁住当前需要添加节点的头元素即可，可能是链表头节点或者红黑树的根节点，其他桶节点都不需要加锁，大大减小了锁粒度。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;通过ConcurrentHashMap添加元素的过程，知道了ConcurrentHashMap容器是通过CAS + synchronized一起来实现并发控制的。这里有个额外的问题：为什么使用synchronized而不使用ReentrantLock？前面我的文章也对synchronized以及ReentrantLock的实现方式和性能做过分析，在这里我的理解是synchronized在后期优化空间上比ReentrantLock更大。&lt;/p&gt;
+&lt;h2 id=&quot;并发容器concurrentskiplistmap&quot;&gt;并发容器ConcurrentSkipListMap&lt;/h2&gt;
+&lt;p&gt;java.util中对应的容器在java.util.concurrent包中基本都可以找到对应的并发容器：List和Set有对应的CopyOnWriteArrayList与CopyOnWriteArraySet，HashMap有对应的ConcurrentHashMap，但是有序的TreeMap或并没有对应的ConcurrentTreeMap。&lt;/p&gt;
+&lt;p&gt;为什么没有ConcurrentTreeMap呢？这是因为TreeMap内部使用了红黑树来实现，红黑树是一种自平衡的二叉树，当树被修改时，需要重新平衡，重新平衡操作可能会影响树的大部分节点，如果并发量非常大的情况下，这就需要在许多树节点上添加互斥锁，那并发就失去了意义。所以提供了另外一种并发下的有序map实现：ConcurrentSkipListMap。&lt;/p&gt;
+&lt;p&gt;ConcurrentSkipListMap内部使用跳表（SkipList）这种数据结构来实现，他的结构相对红黑树来说非常简单理解，实现起来也相对简单，而且在理论上它的查找、插入、删除时间复杂度都为log(n)。在并发上，ConcurrentSkipListMap采用无锁的CAS+自旋来控制。&lt;/p&gt;
+&lt;p&gt;跳表简单来说就是一个多层的链表，底层是一个普通的链表，然后逐层减少，通常通过一个简单的算法实现每一层元素是下一层的元素的二分之一，这样当搜索元素时从最顶层开始搜索，可以说是另一种形式的二分查找。&lt;/p&gt;
+&lt;p&gt;一个简单的获取跳表层数概率算法实现如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;int random_level()  {  
+    K = 1;  
+    while (random(0,1))  
+        K++;  
+  
+    return K;  
+}  &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通过简单的0和1获取概率，1层的概率为50%，2层的概率为25%，3层的概率为12.5%，这样逐级递减。&lt;/p&gt;
+&lt;p&gt;一个三层的跳表添加元素的过程如下：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201810/368583-20181016221337596-871512137.jpg&quot;/&gt;&lt;br/&gt;插入值为15的节点：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201810/368583-20181016221347918-1622180007.jpg&quot;/&gt;&lt;br/&gt;插入后：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201810/368583-20181016221356896-1014202320.jpg&quot;/&gt;&lt;br/&gt;维基百科中有一个添加节点的动图，这里也贴出来方便理解：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/368583/201810/368583-20181016222522322-859138517.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;通过分析ConcurrentSkipListMap的put方法来理解跳表以及CAS自旋并发控制：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt; private V doPut(K key, V value, boolean onlyIfAbsent) {
+    Node&amp;lt;K,V&amp;gt; z;             // added node
+    if (key == null)
+        throw new NullPointerException();
+    Comparator&amp;lt;? super K&amp;gt; cmp = comparator;
+    outer: for (;;) {
+        for (Node&amp;lt;K,V&amp;gt; b = findPredecessor(key, cmp), n = b.next;;) { //查找前继节点
+            if (n != null) { //查找到前继节点
+                Object v; int c;
+                Node&amp;lt;K,V&amp;gt; f = n.next; //获取后继节点的后继节点
+                if (n != b.next)  //发生竞争，两次节点获取不一致，并发导致
+                    break;
+                if ((v = n.value) == null) {  // 节点已经被删除
+                    n.helpDelete(b, f);
+                    break;
+                }
+                if (b.value == null || v == n) 
+                    break;
+                if ((c = cpr(cmp, key, n.key)) &amp;gt; 0) { //进行下一轮查找，比当前key大
+                    b = n;
+                    n = f;
+                    continue;
+                }
+                if (c == 0) { //相等时直接cas修改值
+                    if (onlyIfAbsent || n.casValue(v, value)) {
+                        @SuppressWarnings(&quot;unchecked&quot;) V vv = (V)v;
+                        return vv;
+                    }
+                    break; // restart if lost race to replace value
+                }
+                // else c &amp;lt; 0; fall through
+            }
+
+            z = new Node&amp;lt;K,V&amp;gt;(key, value, n); //9. n.key &amp;gt; key &amp;gt; b.key
+            if (!b.casNext(n, z)) //cas修改值 
+                break;         // restart if lost race to append to b
+            break outer;
+        }
+    }
+
+    int rnd = ThreadLocalRandom.nextSecondarySeed(); //获取随机数
+    if ((rnd &amp;amp; 0x80000001) == 0) { // test highest and lowest bits
+        int level = 1, max;
+        while (((rnd &amp;gt;&amp;gt;&amp;gt;= 1) &amp;amp; 1) != 0) // 获取跳表层级
+            ++level;
+        Index&amp;lt;K,V&amp;gt; idx = null;
+        HeadIndex&amp;lt;K,V&amp;gt; h = head;
+        if (level &amp;lt;= (max = h.level)) { //如果获取的调表层级小于等于当前最大层级，则直接添加，并将它们组成一个上下的链表
+            for (int i = 1; i &amp;lt;= level; ++i)
+                idx = new Index&amp;lt;K,V&amp;gt;(z, idx, null);
+        }
+        else { // try to grow by one level //否则增加一层level，在这里体现为Index&amp;lt;K,V&amp;gt;数组
+            level = max + 1; // hold in array and later pick the one to use
+            @SuppressWarnings(&quot;unchecked&quot;)Index&amp;lt;K,V&amp;gt;[] idxs =
+                (Index&amp;lt;K,V&amp;gt;[])new Index&amp;lt;?,?&amp;gt;[level+1];
+            for (int i = 1; i &amp;lt;= level; ++i)
+                idxs[i] = idx = new Index&amp;lt;K,V&amp;gt;(z, idx, null);
+            for (;;) {
+                h = head;
+                int oldLevel = h.level;
+                if (level &amp;lt;= oldLevel) // lost race to add level
+                    break;
+                HeadIndex&amp;lt;K,V&amp;gt; newh = h;
+                Node&amp;lt;K,V&amp;gt; oldbase = h.node;
+                for (int j = oldLevel+1; j &amp;lt;= level; ++j) //新添加的level层的具体数据
+                    newh = new HeadIndex&amp;lt;K,V&amp;gt;(oldbase, newh, idxs[j], j);
+                if (casHead(h, newh)) {
+                    h = newh;
+                    idx = idxs[level = oldLevel];
+                    break;
+                }
+            }
+        }
+        // 逐层插入数据过程
+        splice: for (int insertionLevel = level;;) {
+            int j = h.level;
+            for (Index&amp;lt;K,V&amp;gt; q = h, r = q.right, t = idx;;) {
+                if (q == null || t == null)
+                    break splice;
+                if (r != null) {
+                    Node&amp;lt;K,V&amp;gt; n = r.node;
+                    // compare before deletion check avoids needing recheck
+                    int c = cpr(cmp, key, n.key);
+                    if (n.value == null) {
+                        if (!q.unlink(r))
+                            break;
+                        r = q.right;
+                        continue;
+                    }
+                    if (c &amp;gt; 0) {
+                        q = r;
+                        r = r.right;
+                        continue;
+                    }
+                }
+
+                if (j == insertionLevel) {
+                    if (!q.link(r, t))
+                        break; // restart
+                    if (t.node.value == null) {
+                        findNode(key);
+                        break splice;
+                    }
+                    if (--insertionLevel == 0)
+                        break splice;
+                }
+
+                if (--j &amp;gt;= insertionLevel &amp;amp;&amp;amp; j &amp;lt; level)
+                    t = t.down;
+                q = q.down;
+                r = q.right;
+            }
+        }
+    }
+    return null;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这里的插入方法很复杂，可以分为3大步来理解：第一步获取前继节点后通过CAS来插入节点；第二步对level层数进行判断，如果大于最大层数，则插入一层；第三步插入对应层的数据。整个插入过程全部通过CAS自旋的方式保证并发情况下的数据正确性。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;JDK中提供了丰富的并发容器供我们使用，文章中介绍的也并不全面，重点是要通过了解各种并发容器的原理，明白他们各自独特的使用场景。这里简单做个总结：当并发读远多于修改的场景下需要使用List和Set时，可以考虑使用CopyOnWriteArrayList和CopyOnWriteArraySet；当需要并发使用&amp;lt;Key, Value&amp;gt;键值对存取数据时，可以使用ConcurrentHashMap；当要保证并发&amp;lt;Key, Value&amp;gt;键值对有序时可以使用ConcurrentSkipListMap。&lt;/p&gt;
+</description>
+<pubDate>Tue, 16 Oct 2018 23:34:00 +0000</pubDate>
+<dc:creator>knock_小新</dc:creator>
+<og:description>引言 容器是Java基础类库中使用频率最高的一部分，Java集合包中提供了大量的容器类来帮组我们简化开发，我前面的文章中对Java集合包中的关键容器进行过一个系列的分析，但这些集合类都是非线程安全的，</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/konck/p/9473665.html</dc:identifier>
+</item>
+<item>
 <title>一个程序员的自白（无知之者） - wc的一些事一些情</title>
 <link>http://www.cnblogs.com/wcd144140/p/9801539.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/wcd144140/p/9801539.html</guid>
@@ -40,851 +341,6 @@
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/wcd144140/p/9801539.html</dc:identifier>
-</item>
-<item>
-<title>单例模式 - MrChengs</title>
-<link>http://www.cnblogs.com/Mrchengs/p/9801530.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Mrchengs/p/9801530.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;span&gt;具体可以参考博文地址：&lt;/span&gt;https://www.cnblogs.com/garryfu/p/7976546.html&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;定义&lt;/span&gt;：某个类仅有一个唯一的实例，并且提供一个全局的访问点来访问这一实例。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;注意&lt;/span&gt;：&lt;/p&gt;
-&lt;p&gt;　　1.该类只能有一个实例&lt;/p&gt;
-&lt;p&gt;　　2.必须是自己创建的这一个唯一的实例&lt;/p&gt;
-&lt;p&gt;　　3.必须自己向整个系统提供这个实例&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;代码实现&lt;/span&gt;：&lt;/p&gt;
-&lt;p&gt;　　1.目的是一个类只有一个实例，并且提供全局的访问点&lt;/p&gt;
-&lt;p&gt;　　2.包含的角色只有一个&lt;/p&gt;
-&lt;p&gt;　　3.构造函数是私有的，无法通过new对象的方式创建实例&lt;/p&gt;
-&lt;p&gt;　　4.有一个静态的私有成员变量和静态的共有的工厂方法&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;注意&lt;/span&gt;：&lt;/p&gt;
-&lt;p&gt;　　1.单例类构造器的可见行为private&lt;/p&gt;
-&lt;p&gt;　　2.提供一个类型为自身的静态私有成员变量&lt;/p&gt;
-&lt;p&gt;　　3.提供共有的静态工厂方法&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;优点：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　1.严格控制客户程序访问其唯一的实例。&lt;/p&gt;
-&lt;p&gt;　　2.单例类可以自带一些子类，它的每个子类都是单例类。&lt;/p&gt;
-&lt;p&gt;　　3.该模式的类可以比较容易允许创建一定数目的对象类。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;缺点&lt;/span&gt;：&lt;/p&gt;
-&lt;p&gt;　　1.单例模式，没有抽象层，扩展比较困难&lt;/p&gt;
-&lt;p&gt;　　2.在一定程度上违背了单一职责原则&lt;/p&gt;
-&lt;p&gt;　　3.容易导致单例状态丢失，系统存在垃圾回收机制，长时间不使用，会被系统自动回收，再次使用就需要再次实例&lt;/p&gt;
-&lt;p&gt; 、&lt;/p&gt;
-&lt;p&gt;实现：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1488757/201810/1488757-20181016231941951-1151997876.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;1.创建一个Singleton类&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;私有构造器&lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt;&lt;span&gt;  Singleton(){}
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;私有的Singleton对象&lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;  Singleton instance = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt;  Say(){
-        System.out.println(&lt;/span&gt;&quot;Hello Singleton&quot;&lt;span&gt;);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt; 2.创建TestSingleton类：&lt;/p&gt;
-&lt;p&gt;在类里使用new 的方法是会报错的&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestSingleton {
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-
-       &lt;span&gt; Singleton singleton &lt;/span&gt;&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&lt;span&gt; Singleton.getInstance();&lt;/span&gt;
-
-        singleton.Say();
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;3.运行结果是&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-Hello Singleton
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt; 单例模式的其他实现方式：&lt;/p&gt;
-&lt;p&gt;1.懒汉式，线程不安全&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否 Lazy 初始化：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否多线程安全：&lt;/strong&gt;否&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;实现难度：&lt;/strong&gt;易&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;描述：&lt;/strong&gt;这种方式是最基本的实现方式，这种实现最大的问题就是不支持多线程。因为没有加锁 synchronized，所以严格意义上它并不算单例模式。&lt;br/&gt;这种方式 lazy loading 很明显，不要求线程安全，在多线程不能正常工作。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-   &lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt;  Singleton instance;
-
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Singleton(){};
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt;  Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
-            instance &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
-    }&lt;/span&gt;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;2.懒汉式，线程安全&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否 Lazy 初始化：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否多线程安全：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;实现难度：&lt;/strong&gt;易&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;描述：&lt;/strong&gt;这种方式具备很好的 lazy loading，能够在多线程中很好的工作，但是，效率很低，99% 情况下不需要同步。&lt;br/&gt;优点：第一次调用才初始化，避免内存浪费。&lt;br/&gt;缺点：必须加锁 synchronized 才能保证单例，但加锁会影响效率。&lt;br/&gt;getInstance() 的性能对应用程序不是很关键（该方法使用不太频繁）。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;懒汉式&lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt;  Singleton instance;
-
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Singleton(){};
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;synchronized&lt;/span&gt;&lt;span&gt;   Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
-            instance &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
-    }&lt;/span&gt;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;3.饿汉式&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否 Lazy 初始化：&lt;/strong&gt;否&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否多线程安全：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;实现难度：&lt;/strong&gt;易&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;描述：&lt;/strong&gt;这种方式比较常用，但容易产生垃圾对象。&lt;br/&gt;优点：没有加锁，执行效率会提高。&lt;br/&gt;缺点：类加载时就初始化，浪费内存。&lt;br/&gt;它基于 classloader 机制避免了多线程的同步问题，不过，instance 在类装载时就实例化，虽然导致类装载的原因有很多种，在单例模式中大多数都是调用 getInstance 方法， 但是也不能确定有其他的方式（或者其他的静态方法）导致类装载，这时候初始化 instance 显然没有达到 lazy loading 的效果。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-    &lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt;&lt;span&gt;  Singleton(){}
-&lt;/span&gt;
-    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;  Singleton instance = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
-    }&lt;/span&gt;&lt;span&gt;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;4.双检锁/双重校验锁&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;JDK 版本：&lt;/strong&gt;JDK1.5 起&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否 Lazy 初始化：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否多线程安全：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;实现难度：&lt;/strong&gt;较复杂&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;描述：&lt;/strong&gt;这种方式采用双锁机制，安全且在多线程情况下能保持高性能。&lt;br/&gt;getInstance() 的性能对应用程序很关键。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;volatile &lt;/span&gt;&lt;span&gt;static&lt;/span&gt;&lt;span&gt; Singleton instance;
-
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Singleton(){}
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;  &lt;span&gt;static&lt;/span&gt;&lt;span&gt;  Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
-            &lt;/span&gt;&lt;span&gt;synchronized (Singleton.class) {
-                if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                    instance &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-                }
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;  instance;
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;5.登记式/静态内部类&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否 Lazy 初始化：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;是否多线程安全：&lt;/strong&gt;是&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;实现难度：&lt;/strong&gt;一般&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;描述：&lt;/strong&gt;这种方式能达到双检锁方式一样的功效，但实现更简单。对静态域使用延迟初始化，应使用这种方式而不是双检锁方式。这种方式只适用于静态域的情况，双检锁方式可在实例域需要延迟初始化时使用。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singleton {
-    
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Singletontest{
-        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;  &lt;span&gt;final &lt;/span&gt;Singleton &lt;span&gt;INSTANCE&lt;/span&gt; = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Singleton();
-    }
-    
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Singleton(){};
-    
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;  &lt;span&gt;static&lt;/span&gt;  &lt;span&gt;final&lt;/span&gt;&lt;span&gt;  Singleton getInstance(){
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; Singletontest.INSTANCE;
-    }
-    
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-
-
-&lt;p&gt;备注：&lt;/p&gt;
-&lt;p&gt;代码部分的实现以及部分讲解来源于：http://www.runoob.com/design-pattern/singleton-pattern.html&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 16 Oct 2018 15:48:00 +0000</pubDate>
-<dc:creator>MrChengs</dc:creator>
-<og:description>具体可以参考博文地址：https://www.cnblogs.com/garryfu/p/7976546.html 单例模式 定义：某个类仅有一个唯一的实例，并且提供一个全局的访问点来访问这一实例。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Mrchengs/p/9801530.html</dc:identifier>
-</item>
-<item>
-<title>第20天  内置模块一 - 沉沦的罚</title>
-<link>http://www.cnblogs.com/huwentao/p/9791370.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/huwentao/p/9791370.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;人生三问&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-1&lt;span&gt;. 内置模块是什么&lt;br/&gt;　　内置模块就是python编译器里面自带的一些模块，我们没有必要去写，但是可以直接使用！
-&lt;/span&gt;2&lt;span&gt;. 为什么要使用内置模块&lt;br/&gt;　　在日常工作中，我们需要去写一些模块去解决一些特定的功能，但是对于一些比较常用的功能，python解释器已经帮我们写好了，你说你是想直接拿来就用呢？还是再自己去写一个模块，当然是直接用啊。
-&lt;/span&gt;3. 内置模块怎么使用&lt;br/&gt;　　内置模块和我们自定义的模块是一样的，通过import和from导入进行使用
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;介绍的模块：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;time
-datetime&lt;br/&gt;sys&lt;br/&gt;shutil&lt;br/&gt;random&lt;br/&gt;os&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;模块一： time&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;1. 时间戳&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.time()  # 代表的是从1970年开始到现在经过的秒数
-&lt;/span&gt;1539593357.4160235   
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;2. 结构化时间&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
-&lt;pre&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.localtime()  # 通过localtime方法获得当前系统的结构化时间
-time.struct_time(tm_year&lt;/span&gt;=2018, tm_mon=10, tm_mday=15, tm_hour=16, tm_min=49, tm_sec=56, tm_wday=0, tm_yday=288, tm_isdst=&lt;span&gt;0)
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; a =&lt;span&gt; time.localtime()
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; a.tm_year   # 可以通过.后面跟上属性查看相应的值
-&lt;/span&gt;2018
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;3. 格式化字符串时间&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&amp;gt;&amp;gt;&amp;gt; time.strftime(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;%Y-%m-%d %X&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)  # 通过输入%多少来获得对应的值
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;2018-10-15 16:57:24&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 格式化的标准：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;&lt;img id=&quot;code_img_closed_5b648caf-0a13-4c4d-9854-3eed2e3ec16d&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_5b648caf-0a13-4c4d-9854-3eed2e3ec16d&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_5b648caf-0a13-4c4d-9854-3eed2e3ec16d&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;73&quot;&gt;
-&lt;pre&gt;
-%&lt;span&gt;a    Locale’s abbreviated weekday name.     
-&lt;/span&gt;%&lt;span&gt;A    Locale’s full weekday name.     
-&lt;/span&gt;%&lt;span&gt;b    Locale’s abbreviated month name.     
-&lt;/span&gt;%&lt;span&gt;B    Locale’s full month name.     
-&lt;/span&gt;%c    Locale’s appropriate date &lt;span&gt;and&lt;/span&gt;&lt;span&gt; time representation.     
-&lt;/span&gt;%d    Day of the month as a decimal number [01,31&lt;span&gt;].     
-&lt;/span&gt;%H    Hour (24-hour clock) as a decimal number [00,23&lt;span&gt;].     
-&lt;/span&gt;%I    Hour (12-hour clock) as a decimal number [01,12&lt;span&gt;].     
-&lt;/span&gt;%j    Day of the year as a decimal number [001,366&lt;span&gt;].     
-&lt;/span&gt;%m    Month as a decimal number [01,12&lt;span&gt;].     
-&lt;/span&gt;%M    Minute as a decimal number [00,59&lt;span&gt;].     
-&lt;/span&gt;%p    Locale’s equivalent of either AM &lt;span&gt;or&lt;/span&gt; PM.    (1&lt;span&gt;)
-&lt;/span&gt;%S    Second as a decimal number [00,61].    (2&lt;span&gt;)
-&lt;/span&gt;%U    Week number of the year (Sunday as the first day of the week) as a decimal number [00,53]. All days &lt;span&gt;in&lt;/span&gt; a new year preceding the first Sunday are considered to be &lt;span&gt;in&lt;/span&gt; week 0.    (3&lt;span&gt;)
-&lt;/span&gt;%w    Weekday as a decimal number [0(Sunday),6&lt;span&gt;].     
-&lt;/span&gt;%W    Week number of the year (Monday as the first day of the week) as a decimal number [00,53]. All days &lt;span&gt;in&lt;/span&gt; a new year preceding the first Monday are considered to be &lt;span&gt;in&lt;/span&gt; week 0.    (3&lt;span&gt;)
-&lt;/span&gt;%&lt;span&gt;x    Locale’s appropriate date representation.     
-&lt;/span&gt;%&lt;span&gt;X    Locale’s appropriate time representation.     
-&lt;/span&gt;%y    Year without century as a decimal number [00,99&lt;span&gt;].     
-&lt;/span&gt;%&lt;span&gt;Y    Year with century as a decimal number.     
-&lt;/span&gt;%z    Time zone offset indicating a positive &lt;span&gt;or&lt;/span&gt; negative time difference &lt;span&gt;from&lt;/span&gt; UTC/GMT of the form +HHMM &lt;span&gt;or&lt;/span&gt; -HHMM, where H represents decimal hour digits &lt;span&gt;and&lt;/span&gt; M represents decimal minute digits [-23:59, +23:59&lt;span&gt;].     
-&lt;/span&gt;%Z    Time zone name (no characters &lt;span&gt;if&lt;/span&gt;&lt;span&gt; no time zone exists).     
-&lt;/span&gt;%%    A literal &lt;span&gt;'&lt;/span&gt;&lt;span&gt;%&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; character.
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;格式化字符串的时间格式&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt; 4. 三种时间格式之间的转换&lt;/p&gt;
-&lt;p&gt;因为计算机认识的时间格式只有时间戳的格式，但是对于我们人类而言，时间戳的格式又太难懂，因此我们把时间戳的格式转换成【结构化的时间】或者是【格式化字符串的时间】类型，转换关系如下。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1181163/201810/1181163-20181015170451404-1870248891.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;5. 时间的转换&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#------------------------------------------------按照图1中的关系进行时间的转换&lt;br/&gt;#&lt;/span&gt;&lt;span&gt; 时间之间的转换操作&lt;/span&gt;
-
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 定义三个类型的时间&lt;/span&gt;
-a = time.time()     &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到时间戳&lt;/span&gt;
-b = time.localtime()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 结构化时间&lt;/span&gt;
-c = time.strftime(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;%Y-%m-%d %H-%M-%S&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 格式化字符串时间&lt;/span&gt;
-
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 结构化时间转为时间戳和格式化字符串时间的两种方式&lt;/span&gt;
-d =&lt;span&gt; time.mktime(b)
-e &lt;/span&gt;= time.strftime(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;%Y-%m-%d&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, b)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 时间戳转换成结构化时间&lt;/span&gt;
-f =&lt;span&gt; time.localtime(a)
-g &lt;/span&gt;=&lt;span&gt; time.gmtime(a)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 格式化字符串时间转化为结构化时间&lt;/span&gt;
-h = time.strptime(c, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;%Y-%m-%d %H-%M-%S&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)  # c是什么样格式的后面的格式就要写成什么样格式的
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1181163/201810/1181163-20181015172901770-1495628699.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 6. 图二的两种方式其实就是把时间转换成外国人能够接受的时间&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; ---------------------------按照图二的方式进行时间的转换&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 如果不进行传参，ctime和asctime得到得是一样的效果，都是转换成【week month day time year】&lt;/span&gt;
-
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.asctime()   
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Mon Oct 15 18:23:37 2018&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.ctime()
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Mon Oct 15 18:23:44 2018&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;
-
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 如果进行传参&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt; a =&lt;span&gt; time.time()  # 先得到时间戳
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; b =&lt;span&gt; time.localtime()   # 得到结构化时间
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.asctime(b)   # 通过asctime把结构化时间转换成固定的外国人接受的时间
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Mon Oct 15 18:28:12 2018&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; time.ctime(a)  # 通过ctime将时间戳转换成外国人能够接受的时间
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Mon Oct 15 18:28:06 2018&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;模块二：datatime&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(datetime.datetime.now())   # 通过datetime的now方法获取当前时间格式
-&lt;/span&gt;2018-10-15 18:40:17.028194
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; datetime.datetime.fromtimestamp(time.time())
-datetime.datetime(&lt;/span&gt;2018, 10, 15, 18, 40, 34, 551056&lt;span&gt;)
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(datetime.datetime.fromtimestamp(time.time()))  # 通过fromtimestamp转换成相应的时间格式
-&lt;/span&gt;2018-10-15 18:40:57.722764
-&amp;gt;&amp;gt;&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;datetime重要的作用，用来做时间的加减&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(datetime.datetime.now())　　# 展示现在的时间 格式为   【year:month:day hour:minute:second 】
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(datetime.datetime.fromtimestamp(time.time()))   # 将时间戳转换成datetime的形式
-
-
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;  当前时间加减三天&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(3&lt;span&gt;))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(-3&lt;span&gt;))
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 当前时间加减三个小时&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(hours=3&lt;span&gt;))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(hours=-3&lt;span&gt;))
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 当前时间加减三十分钟&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(minutes=30&lt;span&gt;))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(datetime.datetime.now() + datetime.timedelta(minutes=-30))
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;替换：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-c_time =&lt;span&gt; datetime.datetime.now()
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(c_time, type(c_time))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(c_time.replace(month=11, year=2020, minute=10&lt;span&gt;))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(c_time)
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;模块三： sys模块&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-sys模块(python解释器相关的)
-    1. sys.argv    # 这个是传入的参数，返回的是列表的形式，第一个是当前执行文件的名称
-    2. sys.path　　 # 系统的环境变量，可以通过append方法进行更改
-    3. sys.modules　　# 内存已经加载的模块，以字典的形式存在
-    4. sys.version　　# 解释器的版本
-    5. sys.platform   # 当前执行的平台
-    6. sys.exit()    # 退出当前执行的python解释器
-
-    # 了解
-    7. sys.api_version   # api版本号
-    8. sys.maxsize　　# 最大值得整数32位为 2 ** 32 - 1 64位为2 ** 64 -1 
-    9. sys.maxunicode   # 最大的unicode  0x10FFFF 
-&lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;54.5&quot;&gt;&lt;img id=&quot;code_img_closed_f6b59634-c873-42dd-84f2-43e106679f76&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_f6b59634-c873-42dd-84f2-43e106679f76&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_f6b59634-c873-42dd-84f2-43e106679f76&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;104&quot;&gt;
-&lt;pre&gt;
-&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; sys
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.version
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;3.6.4 (v3.6.4:d48eceb, Dec 19 2017, 06:04:45) [MSC v.1900 32 bit (Intel)]&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.api_version
-&lt;/span&gt;1013
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.platform
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;win32&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.path
-[&lt;/span&gt;&lt;span&gt;''&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\python36.zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\DLLs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\site-packages&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;]
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; ays.maxunicode
-Traceback (most recent call last):
-  File &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;lt;stdin&amp;gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, line 1, &lt;span&gt;in&lt;/span&gt; &amp;lt;module&amp;gt;&lt;span&gt;
-NameError: name &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;ays&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;is&lt;/span&gt; &lt;span&gt;not&lt;/span&gt;&lt;span&gt; defined
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.maxunicode
-&lt;/span&gt;1114111
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.maxsize
-&lt;/span&gt;2147483647
-&amp;gt;&amp;gt;&amp;gt;&lt;span&gt; sys.modules
-{&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;builtins&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;builtins&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_frozen_importlib&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_frozen_importlib&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (frozen)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_imp&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_imp&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_warnings&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_warnings&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_thread&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_thread&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_weakref&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_weakref&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_frozen_importlib_external&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_frozen_importlib_external&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (frozen)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_io&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;marshal&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;marshal&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;nt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;nt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;winreg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;winreg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;zipimport&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;zipimport&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\encodings\\__init__.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;codecs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;codecs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\codecs.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_codecs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_codecs&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.aliases&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.aliases&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\encodings\\aliases.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.utf_8&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.utf_8&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\encodings\\utf_8.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_signal&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_signal&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;__main__&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;__main__&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.latin_1&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;encodings.latin_1&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\encodings\\latin_1.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;io&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\io.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;abc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;abc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\abc.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_weakrefset&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_weakrefset&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\_weakrefset.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;site&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;site&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\site.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;os&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;os&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\os.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;errno&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;errno&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;stat&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;stat&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\stat.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_stat&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_stat&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;ntpath&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;ntpath&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\ntpath.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;genericpath&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;genericpath&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\genericpath.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;os.path&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;ntpath&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\ntpath.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_collections_abc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_collections_abc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\_collections_abc.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_sitebuiltins&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;_sitebuiltins&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\_sitebuiltins.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sysconfig&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sysconfig&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;from&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;E:\\software\\python3\\lib\\sysconfig.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&amp;gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;atexit&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;: &amp;lt;module &lt;span&gt;'&lt;/span&gt;&lt;span&gt;atexit&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; (built-&lt;span&gt;in&lt;/span&gt;)&amp;gt;&lt;span&gt;}
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; sys.exit()
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;sys模块常见的使用方法&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt; argv的应用：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;&lt;img id=&quot;code_img_closed_4008f5db-23a7-4f72-a8ca-2e7a51a9e456&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_4008f5db-23a7-4f72-a8ca-2e7a51a9e456&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_4008f5db-23a7-4f72-a8ca-2e7a51a9e456&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;63&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; sys
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 源文件为python解释器第二个参数&lt;/span&gt;
-src_file = sys.argv[1&lt;span&gt;]
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 目的文件问传入的第三个参数&lt;/span&gt;
-dst_file = sys.argv[2&lt;span&gt;]
-
-with open(src_file, &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) as read_f, open(dst_file, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;wb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;) as write_f:
-    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt;&lt;span&gt; read_f:
-        write_f.write(line)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 在终端中 执行当前文件&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; C:\Users\Administrator&amp;gt;python H:\python_study\day20\内容回顾.py H:\python_study\day20\test2.py H:\python_study\day20\test22.py&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;copy文件时当做参数使用&lt;/span&gt;&lt;/div&gt;
-&lt;p&gt;sys的应用（进度条）&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_8d8e7fed-e91c-4643-b1fa-c98043b64430&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_8d8e7fed-e91c-4643-b1fa-c98043b64430&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_8d8e7fed-e91c-4643-b1fa-c98043b64430&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; sys
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; time
-
-&lt;/span&gt;&lt;span&gt;def&lt;/span&gt; progress(percent, width=50&lt;span&gt;):
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 当百分比大于1的时候都按照1来显示&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; percent &amp;gt;= 1&lt;span&gt;:
-        percent &lt;/span&gt;= 1
-    &lt;span&gt;#&lt;/span&gt;&lt;span&gt; '[%%-%ds]' % width  ====&amp;gt; %-50s&lt;/span&gt;
-    &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 然后通过格式化得到我们想要的值&lt;/span&gt;
-    show_str = (&lt;span&gt;'&lt;/span&gt;&lt;span&gt;[%%-%ds]&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; % width) % (&lt;span&gt;'&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; * int((width *&lt;span&gt; percent)))
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 最后打印的时候加上百分比&lt;/span&gt;
-    &lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;{show_str} {percent}%&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;.format(
-        show_str&lt;/span&gt;=&lt;span&gt;show_str,
-        percent&lt;/span&gt;=int(percent * 100&lt;span&gt;)
-    ))
-
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 模拟下载数据数据大小为1024567&lt;/span&gt;
-data_size = 1024567&lt;span&gt;
-recv_size &lt;/span&gt;=&lt;span&gt; 0
-&lt;/span&gt;&lt;span&gt;while&lt;/span&gt; recv_size &amp;lt;&lt;span&gt; data_size:
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 模拟数据延迟0.1秒&lt;/span&gt;
-    time.sleep(0.1&lt;span&gt;)
-    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 每次下载1024&lt;/span&gt;
-    recv_size += 1024
-    &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到百分比打印&lt;/span&gt;
-    percent = recv_size /&lt;span&gt; data_size
-    progress(percent)&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;模拟下载数据显示打印条&lt;/span&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt; 模块四：random&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;56&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; random
-
-random.random()   &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到一个（0-1）之间的浮点数&lt;/span&gt;
-random.uniform(1, 3)  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到一个(1, 3)之间的一个小数&lt;/span&gt;
-&lt;span&gt;
-random.randint(&lt;/span&gt;1, 3)  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到一个[1, 3]之间的整数&lt;/span&gt;
-random.randrange(1, 3)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 得到一个[1, 3)之间的一个整数&lt;/span&gt;
-&lt;span&gt;
-random.choice([&lt;/span&gt;1, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, [4, 5]])  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 获得列表中的一个值&lt;/span&gt;
-random.choices([1, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, [4, 5]], k=2)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 获得列表中的两个值返回一个列表&lt;/span&gt;
-random.sample([1, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, [4, 5]], k=2)  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 列表元素任意2个组合&lt;/span&gt;
-
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 打乱顺序&lt;/span&gt;
-l = [1,2,3,4,5&lt;span&gt;]
-random.shuffle(l) &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 传递的必须是一个列表&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(l)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;生成一个随机验证码:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;&lt;img id=&quot;code_img_closed_d13d990a-f89f-45ac-8f92-cff665e6bd72&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_d13d990a-f89f-45ac-8f92-cff665e6bd72&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_d13d990a-f89f-45ac-8f92-cff665e6bd72&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;63&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 验证码包含数字和字母&lt;/span&gt;
-&lt;span&gt;def&lt;/span&gt;&lt;span&gt; get_auth_code(num):
-    temp_list &lt;/span&gt;=&lt;span&gt; []
-    &lt;/span&gt;&lt;span&gt;while&lt;/span&gt;&lt;span&gt; num:
-        num &lt;/span&gt;-= 1
-        &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 首先获得数字&lt;/span&gt;
-        a = str(random.randint(0, 10&lt;span&gt;))
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 其次获得字符&lt;/span&gt;
-        b = chr(random.randint(0, 120&lt;span&gt;))
-        &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 添加到列表中&lt;/span&gt;
-&lt;span&gt;        temp_list.append(random.choice([a, b]))
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; temp_list
-
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;.join(get_auth_code(4)))
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;随机验证码的生成&lt;/span&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;模块五： shutil&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-shutil 高级的文件，文件夹，压缩包处理模块
-
-文件处理：
-    shutil.copyfileobj  传入的是两个对象，源文件，目的文件
-    shutil.copyfile     传入的是两个路径，原路径，目的路径
-    shutil.copymode     只复制文件的权限，目的恩瑾可定是要存在
-    shutil.copystat     只复制文件的状态信息，修改时间，查看时间，更改时间，flag是
-    shutil.copy         拷贝文件和权限
-    shutil.copy2        拷贝文件和状态信息
-    shutil.move()       更改文件名称
-文件夹处理
-    shutil.copytree     拷贝目录
-    shutil.ignore_patterns  根据这个模块去设置是否不拷贝某个类型的文件
-    shutil.rmtree       删除目录
-压缩包处理
-    shutil.make_archive()    压缩后的目录名称，格式，源目录
-    shutile.unpack_archive() 压缩后的目录名称， 格式，解压后的目录
-    
-    tarfile.open().add() 
-    zipfile.ZipFile().write()
-&lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;文件的操作：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;方法1： copyfileobj:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 方法copyfileobj&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 我们要首先得到两个打开的文件对象&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; src就是源文件对象&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; dst目标文件对象&lt;/span&gt;
-src = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-dst &lt;/span&gt;= open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块2.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;wb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-shutil.copyfileobj(src, dst)
-src.close()
-dst.close()&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法2: copyfile &lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;# 和方法1类似，只不过它传递的是路径，而方法1传递的是对象&lt;br/&gt;#&lt;/span&gt;&lt;span&gt; 拷贝一个文件，而不是一个对象，目标文件可以不存在&lt;/span&gt;
-shutil.copyfile(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块3.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法3：copymode&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 拷贝源文件的权限，在linux下面就是xrw之类的&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 但是它的内容，用户，组都是不变的&lt;/span&gt;
-shutil.copymode(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块2.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)  # 目标文件必须要存在
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法4： copystat&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 拷贝源文件的状态信息&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 包括权限，查看时间，修改时间，flags等&lt;/span&gt;
-shutil.copystat(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块2.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法5： copy2和copy&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 拷贝的是文件的内容和权限&lt;/span&gt;
-shutil.copy(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块4.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 拷贝的是文件的内容和状态&lt;/span&gt;
-shutil.copy2(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块5.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;文件夹操作：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;方法1：copytree&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 拷贝一个目录，目标目录不能存在，而且还要对其父目录可以有写权限&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; symlinks 代表的是软连接，就相当于是一个快捷方式&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; shutil.ignore_patterns拷贝的时候把符合模式的给删除掉就是了&lt;/span&gt;
-&lt;span&gt;shutil.ignore_patterns()
-shutil.copytree(r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;..\day20&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;forlder3&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,
-                ignore&lt;/span&gt;=shutil.ignore_patterns(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;*pyc&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;tmp*&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;),
-                symlinks&lt;/span&gt;=&lt;span&gt;True
-                )&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法2：rmtree&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 递归的删除一个文件夹&lt;/span&gt;
-shutil.rmtree(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;forlder2&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法3：move&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 就像是linux下面的重命名mv命令&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 参数一为源文件名，参数二为目标文件名&lt;/span&gt;
-shutil.move(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;forlder3&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;forlder2&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;压缩文件夹&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;方法1： make_archive&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 参数一：压缩之后的名字&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 参数二: 以什么样的格式压缩，可以是zip,tar,bztar, gztar&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 参数三: 要压缩的目录&lt;/span&gt;
-&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-owner：    用户，默认当前用户
-group：    组，默认当前组
-logger：    用于记录日志，通常是logging.Logger对象
-&lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-shutil.make_archive(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;forlder2&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, root_dir=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;../day20&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;解压文件&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;方法1：unpack_archive&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 先打包一份zip的文件&lt;/span&gt;
-shutil.make_archive(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day19&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, root_dir=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;..\day19&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 解压文件，要加上后缀名称&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 参数一: 解压的文件&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; format: 解压的格式&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; extract_dir: 解压的目录&lt;/span&gt;
-shutil.unpack_archive(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day19.zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, format=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,extract_dir=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;hello&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法2：tarfile模块&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; tarfile
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 压缩&lt;/span&gt;
-t = tarfile.open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day.tar&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, mode=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.add(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.add(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块2.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.add(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块3.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.close()
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 解压&lt;/span&gt;
-t = tarfile.open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day.tar&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, mode=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.extractall(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;./day&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-t.close()&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;方法3:  zipfile模块&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; zipfile
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 压缩&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 首先得到一个zipfile的对象，然后通过write压缩进对象中&lt;/span&gt;
-z = zipfile.ZipFile(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day.zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, mode=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.write(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.write(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块2.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.write(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;sys模块3.py&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.close()
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 解压&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt; 也是先得到对象，然后通过extractall获得对象&lt;/span&gt;
-z = zipfile.ZipFile(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;day.zip&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, mode=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.extractall(path&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;./day&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-z.close()&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;模块六：os模块&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;'''&lt;/span&gt;&lt;span&gt;
-os模块： 指的是和操作系统相关的模块
-
-1. 目录操作
-    增
-        os.mkdir     创建一个单级目录
-        os.makedirs  创建多级目录，递归创建
-    删
-        os.rmdir     删除一个目录
-        os.removedirs  递归删除目录，如果目录为空
-    改
-        chdir       改变当前目录
-        pardir      当前执行目录的父目录
-        curdir      当前执行文件的目录
-    查
-        getcwd()    获得当前解释器执行文件目录
-        listdir()   以列表的形式返回当前目录下面有什么内容
-2. 文件操作
-    删
-        os.remove()   删除文件
-    改
-        os.rename()   修改文件名称
-    查
-        os.stat        查看当前文件的状态信息
-        os.path.getsize()   查看当前文件的大小
-        os.path.getatime()   查看当前文件的创建时间
-        os.path.getmtime()   查看当前文件的修改时间
-3. 变量信息
-    os.stat     # 文件的状态信息
-    os.name     # win是‘nt’， linux平台是'posix'
-    os.sep      # 操作系统特定的路径分隔符
-    os.linesep  # 换行符win为'\t\n', linux为'\t'
-    os.pathsep  # 分割文件路径的字符串win为;, linux为：
-    os.environ  # 系统环境变量
-    os.system() # 运行shell命令，直接显示
-4. 路径的判断
-    os.path.exists()   # 判断路径是否存在
-    os.path.isfile()   # 判断是否是个文件
-    os.path.isdir()    # 判断是否是个目录
-    os.path.join()     # 拼接路径
-5. 路径操作
-    os.path.split()  # 以列表的形式返回文件名和目录
-    os.path.basename # 获得得就是split的文件名
-    os.path.dirname  # 获得得就是split的目录
-5. 规范化路径
-    os.path.normcase()  # 将大写变小写，并将所有斜杠转成反斜杠(返回的是原字符串)
-    os.path.normpath()  # 会把反斜杠转换成斜杠，然后可以识别相对路径
-    os.path.abspath()   # 返回path规范化的绝对路径
-
-&lt;/span&gt;&lt;span&gt;'''&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 一般路径的处理使用这种方式&lt;/span&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; os, sys
-
-TOP_DIR &lt;/span&gt;=&lt;span&gt; os.path.normpath(os.path.join(
-    os.path.abspath(&lt;/span&gt;&lt;span&gt;__file__&lt;/span&gt;&lt;span&gt;),
-    os.pardir,
-))
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(TOP_DIR)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 不建议使用下面这种方式&lt;/span&gt;
-TOP_DIR = os.path.dirname(os.path.dirname(&lt;span&gt;__file__&lt;/span&gt;))
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;在Linux和Mac平台上，该函数会原样返回path，在windows平台上会将路径中所有字符转换为小写，并将所有斜杠转换为饭斜杠。
-&lt;/span&gt;&amp;gt;&amp;gt;&amp;gt; os.path.normcase(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;c:/windows\\system32\\&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)   
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;c:\\windows\\system32\\&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;   
-   
-
-规范化路径，如..和&lt;/span&gt;/
-&amp;gt;&amp;gt;&amp;gt; os.path.normpath(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;c://windows\\System32\\../Temp/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)   
-&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;c:\\windows\\Temp&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;   
-
-&amp;gt;&amp;gt;&amp;gt; a=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;/Users/jieli/test1/\\\a1/\\\\aa.py/../..&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&amp;gt;&amp;gt;&amp;gt; &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(os.path.normpath(a))
-&lt;/span&gt;/Users/jieli/test1
-&lt;/pre&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Tue, 16 Oct 2018 15:26:00 +0000</pubDate>
-<dc:creator>沉沦的罚</dc:creator>
-<og:description>人生三问 介绍的模块： 模块一： time 1. 时间戳 2. 结构化时间 3. 格式化字符串时间 格式化的标准： %a Locale’s abbreviated weekday name. %A L</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/huwentao/p/9791370.html</dc:identifier>
-</item>
-<item>
-<title>Unity游戏神经网络版坦克大战 - 卧龙浪士</title>
-<link>http://www.cnblogs.com/pojdd/p/9801400.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/pojdd/p/9801400.html</guid>
-<description>&lt;p&gt;基于遗传算法优化的神经网络来训练坦克AI是什么体验呢？下面有bulid好的demo。&lt;/p&gt;
-&lt;p&gt;包括window和安卓两个版本。&lt;/p&gt;
-&lt;p&gt;这是一个Unity项目。&lt;/p&gt;
-&lt;p&gt;下载链接：https://pan.baidu.com/s/1gJr6ZmiHdJqoFW7RUdtRZA&lt;br/&gt;提取码：zi2q&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1215297/201810/1215297-20181016230128156-17560570.png&quot; alt=&quot;&quot; width=&quot;629&quot; height=&quot;353&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;链接里面还有有一个神经网络训练框架，由于明天还有课，先到这,明天再来更新。&lt;/p&gt;
-&lt;p&gt;对了，感谢菠菜大佬的分享。&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 16 Oct 2018 15:15:00 +0000</pubDate>
-<dc:creator>卧龙浪士</dc:creator>
-<og:description>基于遗传算法优化的神经网络来训练坦克AI是什么体验呢？下面有bulid好的demo。 包括window和安卓两个版本。 这是一个Unity项目。 下载链接：https://pan.baidu.com/</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/pojdd/p/9801400.html</dc:identifier>
-</item>
-<item>
-<title>Ubuntu Server下docker实战 02: docker进阶配置 - Coolincy</title>
-<link>http://www.cnblogs.com/Luckey/p/9801306.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Luckey/p/9801306.html</guid>
-<description>&lt;p&gt;在上一篇文章里&lt;a title=&quot;Ubuntu Server下docker实战 01: 安装docker&quot; href=&quot;https://www.cnblogs.com/Luckey/p/9800939.html&quot; target=&quot;_blank&quot;&gt;《Ubuntu Server下docker实战 01: 安装docker》&lt;/a&gt;，我们已经把docker安装起来了，并运行了一个hello-world&lt;/p&gt;
-&lt;p&gt;这一篇，我们继续讲进阶配置。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;1. 配置docker在系统启动时候自动启动&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;sudo&lt;/span&gt; /lib/systemd/systemd-sysv-&lt;span&gt;install&lt;/span&gt;&lt;span&gt; enable docker
-&lt;/span&gt;&lt;span&gt;sudo&lt;/span&gt;&lt;span&gt; systemctl enable docker
-&lt;/span&gt;&lt;span&gt;sudo&lt;/span&gt; systemctl restart docker.service
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这样我们重启服务器后，docker服务也自动启动了&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2. 转移docker数据文件路径&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;修改配置文件&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;vi&lt;/span&gt; /etc/default/docker
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;我们假设要把数据移动到 /data/docker下，那么在配置文件中添加如下内容，保存退出&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-OPTIONS=--graph=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/data/docker&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; -H fd:&lt;span&gt;//&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;停止docker&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-service docker stop
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;确认不存在 /data/docker 目录&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;rm&lt;/span&gt; -rf /data/docker
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;转移文件，将docker数据从/var/lib/docker 移到 /data/docker，并创建连接&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;sudo&lt;/span&gt; &lt;span&gt;mv&lt;/span&gt; /var/lib/docker /data/&lt;span&gt;docker
-&lt;/span&gt;&lt;span&gt;sudo&lt;/span&gt; &lt;span&gt;ln&lt;/span&gt; -s /data/docker /var/lib
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;启动docker&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-service docker start
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;strong&gt;3. 创建docker子网，docker默认使用 172.17.0.0/24 子网，但我们可能有自己的需要，那么可以通过下面方法创建子网&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;显示已有子网&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-docker network &lt;span&gt;ls&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;创建一个172.18.0.0/24的子网&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-docker network create --subnet=&lt;span&gt;172.18&lt;/span&gt;.&lt;span&gt;0.0&lt;/span&gt;/&lt;span&gt;24&lt;/span&gt; dockernetwork
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;我们看下现在的子网列表&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-docker network &lt;span&gt;ls&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;NETWORK ID          NAME                DRIVER              SCOPE
-b295fdf8279f        bridge              bridge              local
-b338774b3d02        dockernetwork       bridge              local
-88b7535d052a        host                host                local
-79814a08c6d1        none                &lt;/span&gt;&lt;span&gt;null&lt;/span&gt;                local
-&lt;/pre&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Tue, 16 Oct 2018 15:08:00 +0000</pubDate>
-<dc:creator>Coolincy</dc:creator>
-<og:description>在上一篇文章里《Ubuntu Server下docker实战 01: 安装docker》，我们已经把docker安装起来了，并运行了一个hello-world 这一篇，我们继续讲进阶配置。 1. 配置</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Luckey/p/9801306.html</dc:identifier>
 </item>
 <item>
 <title>【Maven】---Linux搭建Nexus3.X私服 - 雨点的名字</title>
@@ -986,78 +442,6 @@ b338774b3d02        dockernetwork       bridge              local
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/qdhxhz/p/9801325.html</dc:identifier>
-</item>
-<item>
-<title>Jvm垃圾回收器（算法篇） - 致力it</title>
-<link>http://www.cnblogs.com/chenpt/p/9799095.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/chenpt/p/9799095.html</guid>
-<description>&lt;p&gt;　　在《&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/chenpt/p/9797126.html&quot; target=&quot;_blank&quot;&gt;Jvm垃圾回收器（基础篇）&lt;/a&gt;》中我们主要学习了判断对象是否存活还是死亡？两种基础的垃圾回收算法：引用计数法、可达性分析算法。以及Java引用的4种分类：强引用、软引用、弱引用、虚引用。和方法区的回收介绍。&lt;/p&gt;
-&lt;p&gt;那么接下来我们重点研究下虚拟机的几种常见的垃圾回收算法：标记-清除算法、复制算法、标记-整理算法、分代收集算法。&lt;/p&gt;
-&lt;h2&gt;一：标记-清除算法&lt;/h2&gt;
-&lt;p&gt;　　最基础的收集算法，总共分为‘ 标记 ’和‘ 清除 ’两个阶段&lt;/p&gt;
-&lt;h3&gt;1.标记&lt;/h3&gt;
-&lt;p&gt;　　标记出所有需要回收的对象&lt;/p&gt;
-&lt;p&gt;　　在《&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/chenpt/p/9797126.html&quot; target=&quot;_blank&quot;&gt;Jvm垃圾回收器（基础篇）&lt;/a&gt;》中说明了判断对象是否回收需要两次标记，现在我们再来回顾一下&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;一次标记&lt;/strong&gt;：在经过&lt;span&gt;可达性分析算法&lt;/span&gt;后，对象没有与GC Root相关的引用链，那么则被第一次标记。并且进行一次筛选：当对象有必要执行finalize()方法时，则把该对象放入F-Queue队列中。&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;二次标记&lt;/strong&gt;：对F-Queue队列中的对象进行二次标记。在执行finalize()方法时，如果对象重新与GC Root引用链上的任意对象建立了关联，则把他移除出“ 即将回收 ”集合。否则就等着被回收吧！！！&lt;/p&gt;
-&lt;p&gt;　　对被第一次标记切被第二次标记的，就可以判定位可回收对象了。&lt;/p&gt;
-&lt;h3&gt;2.清除&lt;/h3&gt;
-&lt;p&gt;　　两次标记后，还在“ 即将回收 ”集合的对象进行回收。&lt;/p&gt;
-&lt;p&gt;　　执行过程如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1326194/201810/1326194-20181016211110981-747164417.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　优点&lt;/strong&gt;：基础最基础的可达性算法，后续的收集算法都是基于这种思想实现的&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　缺点&lt;/strong&gt;：标记和清除效率不高，产生大量不连续的内存碎片，导致创建大对象时找不到连续的空间，不得不提前触发另一次的垃圾回收。&lt;/p&gt;
-&lt;h2&gt;二：复制算法&lt;/h2&gt;
-&lt;p&gt;　　将可用内存按容量分为大小相等的两块，每次只使用其中一块，当这一块的内存用完了，就将还存活的对象复制到另外一块内存上，然后再把已使用过的内存空间一次清理掉。&lt;/p&gt;
-&lt;p&gt;　　复制算法执行过程如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1326194/201810/1326194-20181016212130158-934403846.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;优点&lt;/strong&gt;：实现简单，效率高。解决了标记-清除算法导致的内存碎片问题。&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;缺点&lt;/strong&gt;：代价太大，将内存缩小了一半。效率随对象的存活率升高而降低。&lt;/p&gt;
-&lt;p&gt; 现在的商业虚拟机都采用这种算法（需要改良1:1的缺点）来回收新生代。&lt;/p&gt;
-&lt;h3&gt;2.1 HotSpot虚拟机的改良算法　&lt;/h3&gt;
-&lt;h4&gt;1.弱代理论　&lt;/h4&gt;
-&lt;p&gt;　　分代垃圾收集基于弱代理论。具体描述如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;大多说分配了内存的对象并不会存活太长时间，在处于年轻时代就会死掉。&lt;/li&gt;
-&lt;li&gt;很少有对象会从老年代变成年轻代。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt; 　　其中IBM研究表明：新生代中98%的对象都是&quot;朝生夕死&quot;； 所以并不需要按1:1比例来划分内存（解决了缺点1）；&lt;/p&gt;
-&lt;h3&gt; 2.Hotspot虚拟机新生代内存布局及算法&lt;/h3&gt;
-&lt;p&gt;　　新生代内存分配一块较大的Eden空间和两块较小的Survivor空间&lt;/p&gt;
-&lt;p&gt;　　每次使用Eden和其中一块Survivor空间&lt;/p&gt;
-&lt;p&gt;　　回收时将Eden和Survivor空间中存活的对象一次性复制到另一块Survivor空间上&lt;/p&gt;
-&lt;p&gt;　　最后清理掉Eden和使用过的Survivor空间。&lt;/p&gt;
-&lt;p&gt;Hotspot虚拟机默认Eden和Survivor的大小比例是8:1。&lt;/p&gt;
-&lt;h4&gt;分配担保&lt;/h4&gt;
-&lt;p&gt;　　如果另一块Survivor空间没有足够内存来存放上一次新生代收集下来的存活对象，那么这些对象则直接通过担保机制进入老年代。&lt;/p&gt;
-&lt;p&gt;关于分配担保的内容，我会在讲述垃圾收集器时详细描述。&lt;/p&gt;
-&lt;h2&gt;三：标记-整理算法&lt;/h2&gt;
-&lt;p&gt;　　标记-整理算法是根据老年代的特点应运而生。&lt;/p&gt;
-&lt;h3&gt;3.1 标记&lt;/h3&gt;
-&lt;p&gt;　　标记过程和标记-清理算法一致（也是基于可达性分析算法）。&lt;/p&gt;
-&lt;h3&gt;3.2 整理&lt;/h3&gt;
-&lt;p&gt;　　和标记-清理不同的是，该算法不是针对可回收对象进行清理，而是根据存活对象进行整理。让存活对象都向一端移动，然后直接清理掉边界以外的内存。&lt;/p&gt;
-&lt;p&gt;标记-整理算法示意图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1326194/201810/1326194-20181016222516407-1839539051.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　优点&lt;/strong&gt;：不会像复制算法那样随着存活对象的升高而降低效率，不像标记-清除算法那样产生不连续的内存碎片&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　缺点&lt;/strong&gt;：效率问题，除了像标记-清除算法的标记过程外，还多了一步整理过程，效率更低。&lt;/p&gt;
-&lt;h2&gt;四：分代收集算法&lt;/h2&gt;
-&lt;p&gt;　　当前商业虚拟机的垃圾收集都是采用“ 分代收集 ”算法。&lt;/p&gt;
-&lt;p&gt;根据对象存活周期的不同将内存划分为几块。一般把java堆分为新生代和老年代。JVM根据各个年代的特点采用不同的收集算法。&lt;/p&gt;
-&lt;p&gt;新生代中，每次进行垃圾回收都会发现大量对象死去，只有少量存活，因此比较适合复制算法。只需要付出少量存活对象的复制成本就可以完成收集。&lt;/p&gt;
-&lt;p&gt;老年代中，因为对象存活率较高，没有额外的空间进行分配担保，所以适合标记-清理、标记-整理算法来进行回收。&lt;/p&gt;
-
-
-&lt;p&gt;----对《深入理解Java虚拟机》第3章垃圾收集器与内存分配策略 3.3小节总结。接下来总结3.5垃圾收集器。&lt;/p&gt;
-&lt;p&gt;参考：&lt;/p&gt;
-&lt;p&gt;《深入理解Java虚拟机》&lt;/p&gt;
-&lt;p&gt;https://blog.csdn.net/tjiyu/article/details/53983064&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 16 Oct 2018 14:53:00 +0000</pubDate>
-<dc:creator>致力it</dc:creator>
-<og:description>在《Jvm垃圾回收器（基础篇）》中我们主要学习了判断对象是否存活还是死亡？两种基础的垃圾回收算法：引用计数法、可达性分析算法。以及Java引用的4种分类：强引用、软引用、弱引用、虚引用。和方法区的回收</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/chenpt/p/9799095.html</dc:identifier>
 </item>
 <item>
 <title>3DLut表实现log视频的后期调色原理 - 一棹烟波</title>
@@ -1582,6 +966,1311 @@ Install-Package Microsoft.AspNetCore.TestHost
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/willick/p/aspnetcore-unit-tests-with-xunit.html</dc:identifier>
+</item>
+<item>
+<title>ASP.NET Core Mvc中空返回值的处理方式 - LamondLu</title>
+<link>http://www.cnblogs.com/lwqlun/p/9801047.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/lwqlun/p/9801047.html</guid>
+<description>&lt;blockquote readability=&quot;2.158273381295&quot;&gt;
+&lt;p&gt;原文地址：&lt;a href=&quot;https://www.strathweb.com/2018/10/convert-null-valued-results-to-404-in-asp-net-core-mvc/&quot; class=&quot;uri&quot;&gt;https://www.strathweb.com/2018/10/convert-null-valued-results-to-404-in-asp-net-core-mvc/&lt;/a&gt;&lt;br/&gt;作者: Filip W.&lt;br/&gt;译者: Lamond Lu&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;.NET Core MVC在如何返回操作结果方面非常灵活的。&lt;br/&gt;你可以返回一个实现&lt;code&gt;IActionResult&lt;/code&gt;接口的对象, 比如我们熟知的ViewResult, FileResult, ContentResult等。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet]
+public IActionResult SayGood()
+{
+    return Content(&quot;Good!&quot;);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;当然你还可以直接返回一个类的实例。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet]
+public string HelloWorld()
+{
+    return &quot;Hello World&quot;;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在.NET Core 2.1中, 你还可以返回一个&lt;code&gt;ActionResult&lt;/code&gt;的泛型对象。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet]
+public ActionResult&amp;lt;IEnumerable&amp;lt;string&amp;gt;&amp;gt; Get()
+{
+    return new string[] { &quot;value1&quot;, &quot;value2&quot; };
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;今天的博客中，我们将一起看一下.NET Core Mvc是如何返回一个空值对象的，以及如何改变.NET Core Mvc针对空值对象结果的默认行为。&lt;/p&gt;
+
+&lt;p&gt;那么当我们在Action中返回null时, 结果是什么样的呢？&lt;br/&gt;下面我们新建一个ASP.NET Core WebApi项目，并添加一个&lt;code&gt;BookController&lt;/code&gt;, 其代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[Route(&quot;api/[controller]&quot;)]
+[ApiController]
+public class BookController : ControllerBase
+{
+    private readonly List&amp;lt;Book&amp;gt; _books = new List&amp;lt;Book&amp;gt; {
+        new Book(1, &quot;CLR via C#&quot;),
+        new Book(2, &quot;.NET Core Programming&quot;)
+    };
+
+    [HttpGet(&quot;{id}&quot;)]
+    public IActionResult GetById(int id)
+    {
+        var item = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+        return Ok(item);
+    }
+
+    //[HttpGet(&quot;{id}&quot;)]
+    //public ActionResult&amp;lt;Book&amp;gt; GetById(int id)
+    //{
+    //    var book = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+    //    return book;
+    //}
+
+    //[HttpGet(&quot;{id}&quot;)]
+    //public Book GetById(int id)
+    //{
+    //    var book = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+    //    return book;
+    //}
+}
+
+public class Book
+{
+    public Book(int bookId, string bookName)
+    {
+        BookId = bookId;
+        BookName = bookName;
+    }
+
+    public int BookId { get; set; }
+
+    public string BookName { get; set; }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在这个Controller中，我们定义了一个图书的集合，并提供了根据图书ID查询图书的三种实现方式。&lt;/p&gt;
+&lt;p&gt;然后我们启动项目, 并使用Postman, 并请求/api/book/3, 结果如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201810/65831-20181016221148873-1774594023.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;你会发现返回的Status是204 NoContent, 而不是我们想象中的200 OK。你可修改之前代码的注释, 使用其他2种方式，结果也是一样的。&lt;/p&gt;
+&lt;p&gt;你可以尝试创建一个普通的ASP.NET Mvc项目, 添加相似的代码，结果如下&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201810/65831-20181016221223224-319467595.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;返回的结果是200 OK, 内容是null&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;为什么会出现结果呢？&lt;/strong&gt;&lt;br/&gt;与前辈们(ASP.NET Mvc, ASP.NET WebApi)不同，ASP.NET Core Mvc非常巧妙的处理了null值，在以上的例子中，ASP.NET Core Mvc会选择一个合适的输出格式化器(output formatter)来输出响应内容。通常这个输出格式化器会是一个JSON格式化器或XML格式化器。&lt;/p&gt;
+&lt;p&gt;但是对于null值, ASP.NET Core Mvc使用了一种特殊的格式化器&lt;code&gt;HttpNoContentOutputFormatter&lt;/code&gt;, 它会将null值转换成204的状态码。这意味着null值不会被序列化成JSON或XML, 这可能不是我们期望的结果, 有时候我们希望返回200 OK, 响应内容为null。&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;Tips: 当Action返回值是&lt;code&gt;void&lt;/code&gt;或&lt;code&gt;Task&lt;/code&gt;时，ASP.NET Core Mvc默认也会使用&lt;code&gt;HttpNoContentOutputFormatter&lt;/code&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;通过修改配置移除默认的null值格式化器&quot;&gt;通过修改配置移除默认的null值格式化器&lt;/h2&gt;
+&lt;p&gt;我们可以通过设置&lt;code&gt;HttpNoContentOutputFormatter&lt;/code&gt;对象的&lt;code&gt;TreatNullValueAsNoContent&lt;/code&gt;属性为false，去除默认的HttpNoContentOutputFormatter对null值的格式化。&lt;/p&gt;
+&lt;p&gt;在Startup.cs文件的&lt;code&gt;ConfigureService&lt;/code&gt;方法中, 我们在添加Mvc服务的地方，修改默认的输出格式化器，代码如下&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;
+public void ConfigureServices(IServiceCollection services)
+{
+    services.AddMvc(o =&amp;gt;
+    {
+        o.OutputFormatters.RemoveType(typeof(HttpNoContentOutputFormatter));
+        o.OutputFormatters.Insert(0, new HttpNoContentOutputFormatter 
+        { 
+            TreatNullValueAsNoContent = false;
+        });
+    });
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;修改之后我们重新运行程序，并使用Postman访问/api/book/3&lt;/p&gt;
+&lt;p&gt;结果如下, 返回值200 OK, 内容为null, 这说明我们的修改成功了。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201810/65831-20181016221230436-213397760.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;使用404-not-found代替204-no-content&quot;&gt;使用404 Not Found代替204 No Content&lt;/h2&gt;
+&lt;p&gt;在上面的例子中， 我们禁用了204 No Content行为，响应结果变为了200 OK, 内容为null。 但是有时候，我们期望当找不到任何结果时，返回404 Not Found , 那么这时候我们应该修改代码，进行扩展呢？&lt;/p&gt;
+&lt;p&gt;在.NET Core Mvc中我们可以使用自定义过滤器(Custom Filter), 来改变这一行为。&lt;/p&gt;
+&lt;p&gt;这里我们创建2个特性类&lt;code&gt;NotFoundActionFilterAttribute&lt;/code&gt;和&lt;code&gt;NotFoundResultFilterAttribute&lt;/code&gt; , 代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public class NotFoundActionFilterAttribute : ActionFilterAttribute
+{
+    public override void OnActionExecuted(ActionExecutedContext context)
+    {
+        if (context.Result is ObjectResult objectResult &amp;amp;&amp;amp; objectResult.Value == null)
+        {
+            context.Result = new NotFoundResult();
+        }
+    }
+}
+
+public class NotFoundResultFilterAttribute : ResultFilterAttribute
+{
+    public override void OnResultExecuting(ResultExecutingContext context)
+    {
+        if (context.Result is ObjectResult objectResult &amp;amp;&amp;amp; objectResult.Value == null)
+        {
+            context.Result = new NotFoundResult();
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;代码解释&quot;&gt;代码解释&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;这里使用了&lt;code&gt;ActionFilterAttribute&lt;/code&gt;和&lt;code&gt;ResultFilterAttribute&lt;/code&gt;,&lt;code&gt;ActionFilterAttribute&lt;/code&gt;中的&lt;code&gt;OnActionExecuted&lt;/code&gt;方法会在action执行完后触发, &lt;code&gt;ResultFilterAttribute&lt;/code&gt;的&lt;code&gt;OnResultExecuting&lt;/code&gt;会在action返回结果前触发。&lt;/li&gt;
+&lt;li&gt;这2个方法都是针对action的返回结果进行了替换操作，如果返回结果的值是null, 就将其替换成&lt;code&gt;NotFoundResult&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;添加完成后，你可以任选一个类，将他们添加在&lt;/p&gt;
+&lt;p&gt;controller头部&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[Route(&quot;api/[controller]&quot;)]
+[ApiController]
+[NotFoundResultFilter]
+public class BookController : ControllerBase
+{
+    ...
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;或者action头部&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet(&quot;{id}&quot;)]
+[NotFoundResultFilter]
+public IActionResult GetById(int id)
+{
+    var item = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+    return Ok(item);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;你还可以在添加Mvc服务的时候配置他们&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public void ConfigureServices(IServiceCollection services)
+{
+    services.AddMvc(o =&amp;gt;
+    {
+        o.Filters.Add(new NotFoundResultFilterAttribute());
+    });
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;选择一种重新运行项目之后，效果和通过修改配置移除默认的null值格式化器是一样的。&lt;/p&gt;
+
+&lt;p&gt;以上的几种解决方案看似完美无缺，但实际上还是存在一点瑕疵。由于ASP.NET Core Mvc中过滤器的短路机制(即在任何一个过滤器中对Result赋值都会导致程序跳过管道中剩余的过滤器)，可能现在使用某些第三方组件后, 第三方组件在管道中插入自己的短路过滤器，从而导致我们的代码失效。&lt;/p&gt;
+&lt;blockquote readability=&quot;3.9090909090909&quot;&gt;
+&lt;p&gt;ASP.NET Core Mvc的过滤器，可以参见&lt;a href=&quot;https://www.cnblogs.com/dotNETCoreSG/p/aspnetcore-4_4_3-filters.html&quot;&gt;这篇文章&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;下面我们添加以下的短路过滤器。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public class ShortCircuitingFilterAttribute : ActionFilterAttribute
+{
+    public override void OnActionExecuting(ActionExecutingContext context)
+    {
+        context.Result = new ObjectResult(null);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后修改BookController中GetById的方法&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet(&quot;{id}&quot;)]
+[ShortCircuitingFilter]
+[NotFoundActionFilter]
+public IActionResult GetById(int id)
+{
+    var item = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+    return Ok(item);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;重新运行程序后，使用Postman访问/api/book/3, 程序又返回了204 Not Content, 这说明我们的代码失效了。&lt;/p&gt;
+&lt;p&gt;这时候，为了解决这个问题，我们需要使用.NET Core 2.1中新引入的接口&lt;code&gt;IAlwaysRunResultFilter&lt;/code&gt;。实现&lt;code&gt;IAlwaysRunResultFilter&lt;/code&gt;接口的过滤器总是会执行，不论前面的过滤器是否触发短路。&lt;/p&gt;
+&lt;p&gt;这里我们添加一个新的过滤器&lt;code&gt;NotFoundAlwaysRunFilterAttribute&lt;/code&gt;。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public class NotFoundAlwaysRunFilterAttribute : Attribute, IAlwaysRunResultFilter
+{
+    public void OnResultExecuted(ResultExecutedContext context)
+    {
+    }
+
+    public void OnResultExecuting(ResultExecutingContext context)
+    {
+        if (context.Result is ObjectResult objectResult &amp;amp;&amp;amp; objectResult.Value == null)
+        {
+            context.Result = new NotFoundResult();
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后我们继续修改BookController中的GetById方法, 为其添加&lt;code&gt;NotFoundAlwaysRunFilter&lt;/code&gt;特性&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[HttpGet(&quot;{id}&quot;)]
+[ShortCircuitingFilter]
+[NotFoundActionFilter]
+[NotFoundAlwaysRunFilter]
+public IActionResult GetById(int id)
+{
+    var item = _books.FirstOrDefault(p =&amp;gt; p.BookId == id);
+    return Ok(item);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;重新运行程序后，使用Postman访问/api/book/3, 程序又成功返回了404 Not Found, 这说明我们的代码又生效了。&lt;/p&gt;
+&lt;p&gt;本篇源代码： &lt;a href=&quot;https://github.com/lamondlu/NullAction&quot; class=&quot;uri&quot;&gt;https://github.com/lamondlu/NullAction&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Tue, 16 Oct 2018 14:16:00 +0000</pubDate>
+<dc:creator>LamondLu</dc:creator>
+<og:description>原文地址：</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/lwqlun/p/9801047.html</dc:identifier>
+</item>
+<item>
+<title>深入学习图像处理——图像相似度算法 - 战争热诚</title>
+<link>http://www.cnblogs.com/wj-1314/p/9472962.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/wj-1314/p/9472962.html</guid>
+<description>&lt;p&gt;　　最近一段时间学习并做的都是对图像进行处理，其实自己也是新手，各种尝试，所以我这个门外汉想总结一下自己学习的东西，图像处理的流程。但是动起笔来想总结，一下却不知道自己要写什么，那就把自己做过的相似图片搜索的流程整理一下，想到什么说什么吧。&lt;/p&gt;
+&lt;p&gt;　　首先在进行图片灰度化处理之前，我觉得有必要了解一下为什么要进行灰度化处理。&lt;/p&gt;
+&lt;h4&gt;图像灰度化的目的是什么？&lt;/h4&gt;
+&lt;p&gt;　　将彩色图像转化为灰度图像的过程是图像的灰度化处理。彩色图像中的每个像素的颜色由R，G，B三个分量决定，而每个分量有255中值可取，这样一个像素点可以有1600多万（255*255*255）的颜色的变化范围。而灰度图像是R，G，B三个分量相同的一种特殊的彩色图像，其中一个像素点的变化范围为255种，所以在数字图像处理中一般将各种格式的图像转化为灰度图像以使后续的图像的计算量少一些。灰度图像的描述与彩色图像一样仍然反映了整副图像的整体和局部的色度和高亮等级的分布和特征。&lt;/p&gt;
+&lt;h3&gt;一：图像灰度化处理&lt;/h3&gt;
+&lt;p&gt;　　灰度化处理就是将一幅色彩图像转化为灰度图像的过程。彩色图像分为R，G，B三个分量，分别显示出红绿蓝等各种颜色，灰度化就是使彩色的R，G，B分量相等的过程。灰度值大的像素点比较亮（像素值最大为255，为白色），反之比较暗（像素最下为0，为黑色）。&lt;/p&gt;
+&lt;h4&gt;1.1   图像灰度化的算法：&lt;/h4&gt;
+&lt;p&gt;　　&lt;strong&gt;1)最大值法&lt;/strong&gt;：使转化后的R，G，B得值等于转化前3个值中最大的一个，即：R=G=B=max（R，G，B）。这种方法转换的灰度图亮度很高。&lt;br/&gt;　　&lt;strong&gt;2)平均值法&lt;/strong&gt;：是转化后R，G，B的值为转化前R,G,B的平均值。即：R=G=B=(R+G+B)/3。这种方法产生的灰度图像比较柔和。&lt;br/&gt;　　&lt;strong&gt;3)加权平均值法&lt;/strong&gt;：按照一定权值，对R，G，B的值加权平均，即：&lt;img title=&quot;&quot; src=&quot;https://img-blog.csdn.net/20180106195145267?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvcXFfMzk1MDc0NDU=/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast&quot; alt=&quot;这里写图片描述&quot;/&gt;分别为R，G，B的权值，取不同的值形成不同的灰度图像。由于人眼对绿色最为敏感，红色次之，对蓝色的敏感性最低，因此使将得到较易识别的灰度图像。一般时，得到的灰度图像效果最好。&lt;/p&gt;
+&lt;h4&gt;1.2   代码实现（灰度化+二值化）&lt;/h4&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+from PIL import Image
+
+#  load a color image
+im = Image.open('durant.jpg' )
+
+#  convert to grey level image
+Lim = im.convert('L' )
+Lim.save('grey.jpg' )
+
+#  setup a converting table with constant threshold
+threshold = 185
+table = []
+for i in range(256):
+    if i &amp;lt; threshold:
+        table.append(0)
+    else:
+        table.append(1)
+
+# convert to binary image by the table
+bim = Lim.point(table, '1' )
+
+bim.save('durant_grey.jpg' )
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h4&gt;原图图片效果展示：&lt;/h4&gt;
+&lt;h4&gt;&lt;img src=&quot;data:image/jpeg;base64,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&quot; alt=&quot;&quot;/&gt; &lt;/h4&gt;
+&lt;h4&gt;灰度化图片效果展示：&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181011194315667-821516930.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt;二值化图片效果展示：&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181011194401439-356169580.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt; 1.3 convert() 方法详解&lt;/h4&gt;
+&lt;p&gt;　　Convert()会根据传入参数的不同将图像变成不同的模式。PIL中有九种不同模式。分别为1，L,P,RGB,RGBA,CMYK,YCbCr,I,F。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;37&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+    模式‘1’为二值图像，非黑即白。但是它每个像素用8个bit表示，
+0表示黑，255表示白。
+
+    模式‘L’为灰色图像它的每个像素用8个bit表示，0表示黑，
+255表示白，其他数字表示不同的灰度。在PIL中，从模式“RGB”转
+换为“L”模式是按照下面的公式转换的：
+    L = R * 299/1000 + G * 587/1000+ B * 114/1000
+
+    模式“P”为8位彩色图像，它的每个像素用8个bit表示，其对应的
+彩色值是按照调色板查询出来的。
+
+    模式“RGBA”为32位彩色图像，它的每个像素用32个bit表示，其
+中24bit表示红色、绿色和蓝色三个通道，另外8bit表示alpha通道，
+即透明通道。
+
+    模式“CMYK”为32位彩色图像，它的每个像素用32个bit表示。模
+式“CMYK”就是印刷四分色模式，它是彩色印刷时采用的一种套色模
+式，利用色料的三原色混色原理，加上黑色油墨，共计四种颜色混合
+叠加，形成所谓“全彩印刷”。
+
+    模式“YCbCr”为24位彩色图像，它的每个像素用24个bit表示。
+YCbCr其中Y是指亮度分量，Cb指蓝色色度分量，而Cr指红色色度分
+量。人的肉眼对视频的Y分量更敏感，因此在通过对色度分量进行子
+采样来减少色度分量后，肉眼将察觉不到的图像质量的变化。
+
+    模式“RGB”转换为“YCbCr”的公式如下：
+        Y= 0.257R+0.504G+0.098B+16
+        Cb = -0.148R-0.291G+0.439B+128
+        Cr = 0.439R-0.368G-0.071*B+128
+
+    模式“I”为32位整型灰色图像，它的每个像素用32个bit表示，0表示黑，
+255表示白，(0,255)之间的数字表示不同的灰度。在PIL中，从模式“RGB”
+转换为“I”模式是按照下面的公式转换的：
+    I = R * 299/1000 + G * 587/1000 + B * 114/1000
+
+    模式“F”为32位浮点灰色图像，它的每个像素用32个bit表示，0表示黑，
+255表示白，(0,255)之间的数字表示不同的灰度。在PIL中，从模式“RGB”转
+换为“F”模式是按照下面的公式转换的：
+    F = R * 299/1000+ G * 587/1000 + B * 114/1000    
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h3&gt;二：Python图像增强&lt;/h3&gt;
+&lt;h4&gt;2.1 图片增强三大类别：点增强，空间增强，频域增强&lt;/h4&gt;
+&lt;p&gt;　　图像增强是图像模式识别中非常重要的&lt;strong&gt;图像预处理过程&lt;/strong&gt;。图像增强的目的是通过对图像中的信息进行处理，使得有利于模式识别的信息得到增强，不利于模式识别的信息被抑制，扩大图像中不同物体特征之间的差别，为图像的信息提取及其识别奠定良好的基础。图像增强按实现方法不同可分为&lt;strong&gt;点增强、空域增强和频域增强。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;点增强&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　点增强主要指图像灰度变换和几何变换&lt;/strong&gt;。图像的灰度变换也称为点运算、对比度增强或对比度拉伸，它是图像数字化软件和图像显示软件的重要组成部分。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　灰度变换&lt;/strong&gt;是一种既简单又重要的技术，它能让用户改变图像数据占据的灰度范围。一幅输入图像经过灰度变换后将产生一幅新的输出图像，由输入像素点的灰度值决定相应的输出像素点的灰度值。&lt;strong&gt;灰度变换不会改变图像内的空间关系&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;　　图像的&lt;strong&gt;几何变换&lt;/strong&gt;是图像处理中的另一种基本变换。它通常包括图像的平移、图像的镜像变换、图像的缩放和图像的旋转。通过图像的几何变换可以实现图像的最基本的坐标变换及缩放功能。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;空域增强&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　图像的空间信息可以反映图像中物体的位置 、形状、大小等特征，而这些特征可以通过一定的物理模式来描述。&lt;/strong&gt;例如，物体的边缘轮廓由于灰度值变化剧烈一般出现高频率特征，而一个比较平滑的物体内部由于灰度值比较均一则呈现低频率特征。因此，根据需要可以分别增强图像的高频和低频特征。对图像的高频增强可以突出物体的边缘轮廓，从而起到锐化图像的作用。例如，对于人脸的比对查询，就需要通过高频增强技术来突出五宫的轮廓。相应地，对图像的低频部分进行增强可以对图像进行平滑处理，一般用于图像的噪声消除。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;频域增强&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　图像的空域增强一般只是对数字图像进行局部增强，而图像的频域增强可以对图像进行全局增强。&lt;/strong&gt;频域增强技术是在数字图像的频率域空间对图像进行滤波，因此需要将图像从空间域变换到频率域，一般通过傅里叶变换实现。在频率域空间的滤波与空域滤波一样可以通过卷积实现，因此&lt;strong&gt;傅里叶变换&lt;/strong&gt;和和&lt;strong&gt;卷积理论&lt;/strong&gt;是频域滤波技术的基础。&lt;/p&gt;
+&lt;h4&gt;2.2  python图像增强的目的是什么？&lt;/h4&gt;
+&lt;p&gt;　　图像增强的主要目的有：改变图像的灰度等级，提高图像对比度，消除边缘和噪声，平滑图像；突出边缘或者线性地物，锐化图像；合成彩色图像；压缩图像数据量，突出主要信息等。&lt;/p&gt;
+&lt;p&gt;　　图像增强的主要内容有：空间域增强、频率域增强、彩色增强、多图像代数运算、多光谱图像增强等。&lt;/p&gt;
+&lt;p&gt;　　在图像分类任务中，图像数据增强一般是大多数人会采用的方法之一，这是由于深度学习对数据集的大小有一定的要求，若原始的数据集比较小，无法很好地满足网络模型的训练，从而影响模型的性能，而图像增强是对原始图像进行一定的处理以扩充数据集，能够在一定程度上提升模型的性能。&lt;/p&gt;
+
+&lt;h4&gt;2.3  亮度，色度，对比度，锐度增强&lt;/h4&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+from PIL import Image
+from PIL import ImageEnhance
+# 原始图像
+image = Image.open('deal_with/A1.jpg')
+image.show()
+
+#亮度增强
+enh_bri = ImageEnhance.Brightness(image)
+brightness = 1.5
+image_brightened = enh_bri.enhance(brightness)
+image_brightened.show()
+image_brightened.save(&quot;image_brightened.jpg&quot;)
+
+#色度增强
+enh_col = ImageEnhance.Color(image)
+color = 1.5
+image_colored = enh_col.enhance(color)
+image_colored.show()
+image_colored.save(&quot;image_colored.jpg&quot;)
+
+#对比度增强
+enh_con = ImageEnhance.Contrast(image)
+contrast = 1.5
+image_contrasted = enh_con.enhance(contrast)
+image_contrasted.show()
+image_contrasted.save(&quot;image_contrasted.jpg&quot;)
+
+#锐度增强
+enh_sha = ImageEnhance.Sharpness(image)
+sharpness = 3.0
+image_sharped = enh_sha.enhance(sharpness)
+image_sharped.show()
+image_sharped.save(&quot;image_sharped.jpg&quot;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 原图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006200146545-656570921.png&quot; alt=&quot;&quot; width=&quot;501&quot; height=&quot;296&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;亮度增强：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006200117019-1696308476.png&quot; alt=&quot;&quot; width=&quot;500&quot; height=&quot;296&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;色度增强：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006200100025-1985879960.png&quot; alt=&quot;&quot; width=&quot;497&quot; height=&quot;288&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;对比度增强：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006200044075-1599321009.png&quot; alt=&quot;&quot; width=&quot;503&quot; height=&quot;296&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;锐度增强：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006200024186-234722099.png&quot; alt=&quot;&quot; width=&quot;508&quot; height=&quot;292&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt; 2.4  对图像进行翻转Flipping&lt;/h4&gt;
+&lt;p&gt;　　对图像进行翻转是最流行的图像数据增强方法之一，这主要是由于翻转图像操作的代码简单，以及对于大多数问题而言，对图像进行翻转操作能够提升模型的性能。下面的模型可以看到人是朝右而不是朝左边。&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;&quot; width=&quot;551&quot; height=&quot;413&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt; 三：图片相似度算法（对像素求方差并比对）的学习&lt;/h3&gt;
+&lt;h3 id=&quot;算法逻辑&quot;&gt;3.1 算法逻辑&lt;/h3&gt;
+&lt;h4 id=&quot;缩放图片&quot;&gt;3.1.1  缩放图片&lt;/h4&gt;
+&lt;p&gt;　　将需要处理的图片所放到指定尺寸，缩放后图片大小由图片的信息量和复杂度决定。譬如，一些简单的图标之类图像包含的信息量少，复杂度低，可以缩放小一点。风景等复杂场景信息量大，复杂度高就不能缩放太小，容易丢失重要信息。根据自己需求，弹性的缩放。在效率和准确度之间维持平衡。&lt;/p&gt;
+&lt;h4 id=&quot;灰度处理&quot;&gt;3.1.2  灰度处理&lt;/h4&gt;
+&lt;p&gt;　　通常对比图像相似度和颜色关系不是很大，所以处理为灰度图，减少后期计算的复杂度。如果有特殊需求则保留图像色彩。&lt;/p&gt;
+&lt;h4 id=&quot;计算平均值&quot;&gt;3.1.3 计算平均值&lt;/h4&gt;
+&lt;p&gt;　　此处开始，与传统的哈希算法不同：&lt;strong&gt;分别依次计算图像每行像素点的平均值&lt;/strong&gt;，记录每行像素点的平均值。每一个平均值对应着一行的特征。&lt;/p&gt;
+&lt;h4 id=&quot;计算方差&quot;&gt;3.1.4  计算方差&lt;/h4&gt;
+&lt;p&gt;　　对得到的所有平均值进行计算方差，得到的方差就是图像的特征值。方差可以很好的反应每行像素特征的波动，既记录了图片的主要信息。&lt;/p&gt;
+&lt;h4 id=&quot;比较方差&quot;&gt;3.1.5  比较方差&lt;/h4&gt;
+&lt;p&gt;　　经过上面的计算之后，每张图都会生成一个特征值（方差）。到此，比较图像相似度就是比较图像生成方差的接近成程度。&lt;br/&gt;　　一组数据方差的大小可以判断稳定性，多组数据方差的接近程度可以反应数据波动的接近程度。&lt;strong&gt;我们不关注方差的大小，只关注两个方差的差值的大小。方差差值越小图像越相似！&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h3&gt;3.2  代码：&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;47&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+import cv2
+import matplotlib.pyplot as plt
+
+#计算方差
+def getss(list):
+    #计算平均值
+    avg=sum(list)/len(list)
+    #定义方差变量ss，初值为0
+    ss=0
+    #计算方差
+    for l in list:
+        ss+=(l-avg)*(l-avg)/len(list)
+    #返回方差
+    return ss
+
+#获取每行像素平均值
+def getdiff(img):
+    #定义边长
+    Sidelength=30
+    #缩放图像
+    img=cv2.resize(img,(Sidelength,Sidelength),interpolation=cv2.INTER_CUBIC)
+    #灰度处理
+    gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+    #avglist列表保存每行像素平均值
+    avglist=[]
+    #计算每行均值，保存到avglist列表
+    for i in range(Sidelength):
+        avg=sum(gray[i])/len(gray[i])
+        avglist.append(avg)
+    #返回avglist平均值
+    return avglist
+
+#读取测试图片
+img1=cv2.imread(&quot;james.jpg&quot;)
+diff1=getdiff(img1)
+print('img1:',getss(diff1))
+
+#读取测试图片
+img11=cv2.imread(&quot;durant.jpg&quot;)
+diff11=getdiff(img11)
+print('img11:',getss(diff11))
+
+ss1=getss(diff1)
+ss2=getss(diff11)
+print(&quot;两张照片的方差为：%s&quot;%(abs(ss1-ss2)))
+
+x=range(30)
+
+plt.figure(&quot;avg&quot;)
+plt.plot(x,diff1,marker=&quot;*&quot;,label=&quot;$jiames$&quot;)
+plt.plot(x,diff11,marker=&quot;*&quot;,label=&quot;$durant$&quot;)
+plt.title(&quot;avg&quot;)
+plt.legend()
+plt.show()
+
+
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h4&gt; 两张原图：&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181011202007860-247616267.png&quot; alt=&quot;&quot; width=&quot;466&quot; height=&quot;700&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181011201608008-1027505445.png&quot; alt=&quot;&quot; width=&quot;485&quot; height=&quot;272&quot;/&gt;&lt;/p&gt;
+&lt;h4&gt;图像结果如下：&lt;/h4&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+img1: 357.03162469135805
+img11: 202.56193703703704
+两张照片的方差为：154.469687654321
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181011201754547-1118765723.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 　　实验环境开始设置了图片像素值，而且进行灰度化处理，此方法比对图像相似对不同的图片方差很大，结果很明显，但是对比比较相似，特别相似的图片不适应。&lt;/p&gt;
+&lt;h3&gt;四：图片相似度算法（感知哈希算法）的学习&lt;/h3&gt;
+&lt;p&gt;　　&quot;感知哈希算法&quot;（Perceptual hash algorithm），它的作用是对每张图片生成一个&quot;指纹&quot;（fingerprint）字符串，然后比较不同图片的指纹。结果越接近，就说明图片越相似。&lt;/p&gt;
+&lt;h3&gt;4.1  算法步骤&lt;/h3&gt;
+&lt;h4&gt;4.1.1 缩小尺寸&lt;/h4&gt;
+&lt;p&gt;　　将图片缩小到8x8的尺寸，总共64个像素。这一步的作用是去除图片的细节，只保留结构、明暗等基本信息，摒弃不同尺寸、比例带来的图片差异。&lt;/p&gt;
+&lt;h4&gt;4.1.2  简化色彩&lt;/h4&gt;
+&lt;p&gt;　　将缩小后的图片，转为64级灰度。也就是说，所有像素点总共只有64种颜色。&lt;/p&gt;
+&lt;h4&gt;4.1.3  计算平均值&lt;/h4&gt;
+&lt;p&gt;　　计算所有64个像素的灰度平均值&lt;/p&gt;
+&lt;h4&gt;4.1.4  比较像素的灰度平均值&lt;/h4&gt;
+&lt;p&gt;　　将每个像素的灰度，与平均值进行比较。大于或等于平均值，记为1；小于平均值，记为0。&lt;/p&gt;
+&lt;h4&gt;4.1.5 计算哈希值&lt;/h4&gt;
+&lt;p&gt;　　将上一步的比较结果，组合在一起，就构成了一个64位的整数，这就是这张图片的指纹。组合的次序并不重要，只要保证所有图片都采用同样次序就行了。&lt;/p&gt;
+&lt;p&gt;　　得到指纹以后，就可以对比不同的图片，看看64位中有多少位是不一样的。在理论上，这等同于计算&lt;a href=&quot;http://zh.wikipedia.org/wiki/%E6%B1%89%E6%98%8E%E8%B7%9D%E7%A6%BB&quot; target=&quot;_blank&quot;&gt;&quot;汉明距离&quot;&lt;/a&gt;（Hamming distance）。如果不相同的数据位不超过5，就说明两张图片很相似；如果大于10，就说明这是两张不同的图片。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+    此算法参考博客：http://www.ruanyifeng.com/blog/2011/07
+    /principle_of_similar_image_search.html
+    
+但是未实现代码，代码如下：
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;66&quot;&gt;
+&lt;pre class=&quot;brush:csharp;collapse:true;;gutter:true;&quot;&gt;
+#!/usr/bin/python
+
+import glob
+import os
+import sys
+
+from PIL import Image
+
+EXTS = 'jpg', 'jpeg', 'JPG', 'JPEG', 'gif', 'GIF', 'png', 'PNG'
+
+def avhash(im):
+    if not isinstance(im, Image.Image):
+        im = Image.open(im)
+    im = im.resize((8, 8), Image.ANTIALIAS).convert('L')
+    avg = reduce(lambda x, y: x + y, im.getdata()) / 64.
+    return reduce(lambda x, (y, z): x | (z &amp;lt;&amp;lt; y),
+                  enumerate(map(lambda i: 0 if i &amp;lt; avg else 1, im.getdata())),
+                  0)
+
+def hamming(h1, h2):
+    h, d = 0, h1 ^ h2
+    while d:
+        h += 1
+        d &amp;amp;= d - 1
+    return h
+
+if __name__ == '__main__':
+    if len(sys.argv) &amp;lt;= 1 or len(sys.argv) &amp;gt; 3:
+        print &quot;Usage: %s image.jpg [dir]&quot; % sys.argv[0]
+    else:
+        im, wd = sys.argv[1], '.' if len(sys.argv) &amp;lt; 3 else sys.argv[2]
+        h = avhash(im)
+
+        os.chdir(wd)
+        images = []
+        for ext in EXTS:
+            images.extend(glob.glob('*.%s' % ext))
+
+        seq = []
+        prog = int(len(images) &amp;gt; 50 and sys.stdout.isatty())
+        for f in images:
+            seq.append((f, hamming(avhash(f), h)))
+            if prog:
+                perc = 100. * prog / len(images)
+                x = int(2 * perc / 5)
+                print '\rCalculating... [' + '#' * x + ' ' * (40 - x) + ']',
+                print '%.2f%%' % perc, '(%d/%d)' % (prog, len(images)),
+                sys.stdout.flush()
+                prog += 1
+
+        if prog: print
+        for f, ham in sorted(seq, key=lambda i: i[1]):
+            print &quot;%d\t%s&quot; % (ham, f)
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h3&gt;五：marking——对OpenCV中cvWaitKey函数的学习&lt;/h3&gt;
+&lt;p&gt;　　用OpenCV来显示图像或者视频时，如果后面不加cvWaitKey这个函数，基本上是显示不出来的。&lt;/p&gt;
+&lt;p&gt;　　显示图像，一般要在cvShowImage()函数后面加一句cvWaitKey(0)；否则图像无法正常显示。&lt;/p&gt;
+
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;42&quot;&gt;
+&lt;pre class=&quot;brush:csharp;collapse:true;;gutter:true;&quot;&gt;
+def waitKey(delay=None): # real signature unknown; restored from __doc__
+    &quot;&quot;&quot;
+    waitKey([, delay]) -&amp;gt; retval
+    .   @brief Waits for a pressed key.
+    .   
+    .   The function waitKey waits for a key event infinitely (when \f$\texttt{delay}\leq 0\f$ ) or for delay
+    .   milliseconds, when it is positive. Since the OS has a minimum time between switching threads, the
+    .   function will not wait exactly delay ms, it will wait at least delay ms, depending on what else is
+    .   running on your computer at that time. It returns the code of the pressed key or -1 if no key was
+    .   pressed before the specified time had elapsed.
+    .   
+    .   @note
+    .   
+    .   This function is the only method in HighGUI that can fetch and handle events, so it needs to be
+    .   called periodically for normal event processing unless HighGUI is used within an environment that
+    .   takes care of event processing.
+    .   
+    .   @note
+    .   
+    .   The function only works if there is at least one HighGUI window created and the window is active.
+    .   If there are several HighGUI windows, any of them can be active.
+    .   
+    .   @param delay Delay in milliseconds. 0 is the special value that means &quot;forever&quot;.
+    &quot;&quot;&quot;
+    pass
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;h3&gt;六：marking——图像增强中一阶微分和二阶微分的区别&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+1，斜坡面上，一阶微分一直不为0 ；二阶微分只有终点和起点不为0
+
+2，一阶微分产生较粗的边缘，二阶微分则细得多
+
+3，一阶微分处理一般对灰度阶梯有较强的响应；二阶微分处理细节有较强的响应
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;h3&gt;七：关于OpenCV&lt;/h3&gt;
+&lt;p&gt;　　OpenCV的全称open Sourse Computer Vision Library ,是一个跨平台的计算机视觉库，OpenCV可用于开发实时的图像处理，计算机视觉以及模式识别的程序。&lt;/p&gt;
+&lt;p&gt;　　OpenCV是用C++语言编写，它的主要接口也是C++语言，但是依然保留了大量的C语言接口，该库也有大量的Python，Java和MATLAB的接口，另外，一个使用CUDA的GPU接口也用于2010.9 开始实现。&lt;/p&gt;
+&lt;h4&gt;7.1  为什么使用Python+OpenCV&lt;/h4&gt;
+&lt;p&gt;　　虽然python很强大，而且也有自己的图像处理库PIL，但是相对于OpenCV来讲，它还是弱小很多。跟很多开源软件一样OpenCV也提供了完善的python接口，非常便于调用。OpenCV 的稳定版是2.4.8，最新版是3.0，包含了超过2500个算法和函数，几乎任何一个能想到的成熟算法都可以通过调用OpenCV的函数来实现，超级方便。&lt;/p&gt;
+
+&lt;h4&gt; 7.2  import cv2发生错误的解决方案&lt;/h4&gt;
+&lt;p&gt; 　　错误如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1226410/201808/1226410-20180814145559259-388383145.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;1，进入cmd控制台，查看python版本&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/1226410/201808/1226410-20180814145948474-253056895.png&quot; alt=&quot;&quot; width=&quot;488&quot; height=&quot;92&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2 根据自己用的python版本，下载对应的OpenCV&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.lfd.uci.edu/~gohlke/pythonlibs/&quot; target=&quot;_blank&quot;&gt;https://www.lfd.uci.edu/~gohlke/pythonlibs/&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1226410/201810/1226410-20181006120009041-1853978328.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt; 3，下载numpy，对应的版本&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://pypi.python.org/pypi/numpy%20&quot; target=&quot;_blank&quot;&gt;&lt;code&gt;https://pypi.python.org/pypi/numpy&lt;/code&gt; &lt;/a&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+ cp36代表着匹配python3.6版本。
+
+win32、amd64代表着32位、64位系统。
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;4，安装OpenCV，下载下来是一个whl格式文件，把此文件放在安装的文件名下，直接安装。&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://images2018.cnblogs.com/blog/1226410/201808/1226410-20180814152141056-845204699.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　就这样安装成功。&lt;/p&gt;
+
+
+&lt;p&gt;参考文献：https://blog.csdn.net/wsp_1138886114/article/details/81368890&lt;/p&gt;
+</description>
+<pubDate>Tue, 16 Oct 2018 14:01:00 +0000</pubDate>
+<dc:creator>战争热诚</dc:creator>
+<og:description>最近一段时间学习并做的都是对图像进行处理，其实自己也是新手，各种尝试，所以我这个门外汉想总结一下自己学习的东西，图像处理的流程。但是动起笔来想总结，一下却不知道自己要写什么，那就把自己做过的相似图片搜</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/wj-1314/p/9472962.html</dc:identifier>
+</item>
+<item>
+<title>拆开 JavaScript Promise 理解一波再组装起来 - 野兽'</title>
+<link>http://www.cnblogs.com/ys-ys/p/9800971.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ys-ys/p/9800971.html</guid>
+<description>&lt;p&gt;准备好材料、工具，开拆！！！&lt;/p&gt;
+&lt;p&gt;一个 Promise 的运用：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; firstPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(resolve,reject){
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1:0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt;(result){
+            resolve(&lt;/span&gt;'resolved'&lt;span&gt;);
+        }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
+            reject(&lt;/span&gt;'rejected'&lt;span&gt;)
+        }
+    },&lt;/span&gt;1000&lt;span&gt;)
+})
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; secondPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(resolve,reject){
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1:0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt;(result){
+            resolve(&lt;/span&gt;'resolved'&lt;span&gt;);
+        }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
+            reject(&lt;/span&gt;'rejected'&lt;span&gt;)
+        }
+    },&lt;/span&gt;2000&lt;span&gt;)
+})
+
+firstPromise.then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(value){ 
+    console.log(value);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+},&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(reason){
+    console.log(reason);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+}).then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(value){ 
+    console.log(value);
+},&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(reason){
+    console.log(reason);
+})
+
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;  1s后随机输出结果 resolved 或者 rejected&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt;  再1s后随机输出结果 resolved 或者 rejected&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;效果如上，在一个 promise 被完成/被拒绝时执行对应的回调取到异步结果。&lt;/p&gt;
+&lt;p&gt;同时，以上代码使用 promise 避免了回调地狱，规范了回调操作。&lt;/p&gt;
+&lt;p&gt;接下来，把 promise 拆成几块，学习一下怎么样的实现过程。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;板块一、Promise 构造函数&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;创建 promise 对象的构造函数，是创造 promise 的工厂。&lt;/p&gt;
+&lt;p&gt;基础要求：Promise 函数仅产生一个对象，避免大量变量的污染，将该藏好的对象/值藏好，该暴露的暴露；Promise 接收一个函数作为参数，且该函数在构造 promise 对象时被执行；Promise 必须有个 .then 方法(后续方法可自行扩展)。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;function&lt;/span&gt;&lt;span&gt; Promise(fn){&lt;/span&gt;
+    &lt;span&gt;this&lt;/span&gt;.then = &lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){ };
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;板块二、初始化过程，处理参数fn&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Promise 构造函数参数 fn 中传入 resolve/reject；Promise 初始化的时候执行 fn 并在 promise 得到最终结果后执行传入的 resolve/reject ；resolve/reject 函数中执行 promise 中指定的完成/拒绝时回调函数，并以最终结果作为参数。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;function&lt;/span&gt;&lt;span&gt; Promise(fn){
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 完成时&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; resolve(value) {
+        console.log(&lt;/span&gt;'value '&lt;span&gt;,value);
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 拒绝时&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; reject(reason) {
+        console.log(&lt;/span&gt;'reason '&lt;span&gt;,reason);
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 执行传入的fn&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; init(fn, onResolved, onRejected) {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            fn(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (value) {
+                onResolved(value);
+            }, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (reason) {
+                onRejected(reason);
+            })
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+            onRejected(err);
+        }
+    }
+
+    init(fn, resolve, reject);
+    
+    &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.then = &lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){ };
+}
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; promise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(resolve,reject){ 
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1:0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt;(result){
+            resolve(&lt;/span&gt;'resolved'&lt;span&gt;) 
+        }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
+            reject(&lt;/span&gt;'rejected'&lt;span&gt;)
+        }
+    },&lt;/span&gt;1000&lt;span&gt;) 
+})
+
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1s后随机输出 value resolved 或者 reason rejected&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;板块三、.then 里的处理流程&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;在promise中， .then 将传入的 resolvedHandle 和 rejectedHandle 函数存入 promise 的 handlers 中作为回调列表中的一项，在需要的时候(Promise被完成的时候)携带最终结果执行。&lt;/p&gt;
+&lt;p&gt;首先，假设有个异步操作，而且已经知道回调函数是什么，代码如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; resolvedHandle = &lt;span&gt;function&lt;/span&gt;&lt;span&gt;(res){ console.log(res) };
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; rejectedHandle = &lt;span&gt;function&lt;/span&gt;&lt;span&gt;(err){ console.log(err) };
+
+setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt;(){
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1:0&lt;span&gt;;
+    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt;(result){
+        resolvedHandle(&lt;/span&gt;'resolved'&lt;span&gt;);
+    }&lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;{
+        rejectedHandle(&lt;/span&gt;'rejected'&lt;span&gt;);
+    }
+},&lt;/span&gt;1000&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1s后输出 resolved 或者 rejected&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;而对于 promise 而言，回调函数是在 .then 中传入并且在 promise 中给定义的，并且为了实现链式的操作， .then 中必须有返回一个对象，且对象须是一个携带 .then 方法的对象或函数或为一个 promise ，才足以继续执行.then。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;54&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt; fn 作为初始化Promise时传入的函数，应该被立即执行并取出其中的调用&lt;/span&gt;
+&lt;span&gt;function&lt;/span&gt;&lt;span&gt; Promise(fn) {
+
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; $resolveHandle = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (res) { };
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; $rejectHandle = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (err) { };
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 执行Promise被完成时函数&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; resolve(value) {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; then =&lt;span&gt; getThen(value);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (then) {
+                init(then.bind(value), resolve, reject);
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            };
+            fulfill(value);
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+            reject(err);
+        }
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 完成时&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; fulfill(value) {
+        $resolveHandle(value);
+        $resolveHandle &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 拒绝时&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; reject(reason) {
+        $rejectHandle(reason);
+        $rejectHandle &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    }
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 执行传入的fn并执行回调&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; init(fn, onResolved, onRejected) {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            fn(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (value) {
+                onResolved(value);
+            }, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (reason) {
+                onRejected(reason);
+            })
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+            onRejected(err);
+        }
+    }
+
+    init(fn, resolve, reject);
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; getThen(value) {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; t = &lt;span&gt;typeof&lt;/span&gt;&lt;span&gt; value;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (value &amp;amp;&amp;amp; (t === 'object' || t === 'function'&lt;span&gt;)) {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; then =&lt;span&gt; value.then;
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (&lt;span&gt;typeof&lt;/span&gt; then === 'function'&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; then;
+            }
+        }
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    };
+
+    &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.then = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolveHandle, rejectHandle) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+            $resolveHandle &lt;/span&gt;= &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (result) {
+                resolve(resolveHandle(result));
+            }
+            $rejectHandle &lt;/span&gt;= &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (reason) {
+                resolve(rejectHandle(reason));
+            }
+        })
+    }
+}
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; firstPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1 : 0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (result) {
+            resolve(&lt;/span&gt;'resolved'&lt;span&gt;);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            reject(&lt;/span&gt;'rejected'&lt;span&gt;);
+        }
+    }, &lt;/span&gt;1000&lt;span&gt;);
+})
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; secondPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1 : 0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (result) {
+            resolve(&lt;/span&gt;'resolved 2'&lt;span&gt;);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            reject(&lt;/span&gt;'rejected 2'&lt;span&gt;);
+        }
+    }, &lt;/span&gt;2000&lt;span&gt;);
+})
+
+firstPromise.then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (res) {
+    console.log(&lt;/span&gt;'res '&lt;span&gt;, res);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+}, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (err) {
+    console.log(&lt;/span&gt;'rej '&lt;span&gt;, err);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+}).then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (res) {
+    console.log(&lt;/span&gt;'res 2 '&lt;span&gt;, res);
+}, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (err) {
+    console.log(&lt;/span&gt;'rej 2 '&lt;span&gt;, err);
+})
+
+&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1s后随机输出 res resolved  或者  rej rejected&lt;/span&gt;&lt;span&gt;
+//&lt;/span&gt;&lt;span&gt; 又1s后输出 res 2 resolved 2 或者 rej 2 rejected 2 &lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;至此，上面的代码基本算是满足了一个 promise 的实现思路，但离正规军 promise 实现还存在一段距离&lt;/p&gt;
+&lt;p&gt;o(╥﹏╥)o...接下去学习吧。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;板块四、Promise/A+规范&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;由于 Promise/A+规范较长，就不放到文章里了，给链接吧(中午版是自己翻译的，有出入的地方还请以英文原版为准)&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://promisesaplus.com/&quot; target=&quot;_blank&quot;&gt;Promise/A+ 规范 [ 原文 ]&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/Program-Monkey/code-read/blob/master/promise-read/Promise-Aplus-Standard.md&quot; target=&quot;_blank&quot;&gt;Promise/A+ 规范 [ 译文 ]&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;对照promise/A+规范，以上的Promise代码还存在问题：&lt;/p&gt;
+&lt;p&gt;　　1.promise还需要存储promise状态和最终结果，以便后续被多次使用；&lt;/p&gt;
+&lt;p&gt;　　2.同一个promise的.then方法中注册的回调函数可被多次执行，且回调函数可以是个列表；&lt;/p&gt;
+&lt;p&gt;　　3.事件调度，回调函数应该在本轮.then方法所在事件队列结束后被调用；&lt;/p&gt;
+&lt;p&gt;　　4.捕捉错误并做拒绝处理；&lt;/p&gt;
+&lt;p&gt;　　更多细节...&lt;/p&gt;
+&lt;p&gt;继续改进，最后整改后的代码大致是这样的：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;60&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;function&lt;/span&gt;&lt;span&gt; Promise(fn) {
+    &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt; state
+    * 0 : pending 
+    * 1 : resloved 
+    * 2 : rejected 
+    &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;var&lt;/span&gt; state = 0&lt;span&gt;;
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; value = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; handlers =&lt;span&gt; [];
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; fulfill(result) {
+        state &lt;/span&gt;= 1&lt;span&gt;;
+        value &lt;/span&gt;=&lt;span&gt; result;
+        handlers.forEach(handle);
+        handlers &lt;/span&gt;=&lt;span&gt; [];
+    };
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; reject(error) {
+        state &lt;/span&gt;= 2&lt;span&gt;;
+        value &lt;/span&gt;=&lt;span&gt; error;
+        handlers.forEach(handle);
+        handlers &lt;/span&gt;=&lt;span&gt; [];
+    };
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; resolve(result) {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; then =&lt;span&gt; getThen(result);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (then) {
+                init(then.bind(result), resolve, reject);
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            }
+            fulfill(result);
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+            reject(err);
+        }
+    };
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; getThen(value) {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; type = &lt;span&gt;typeof&lt;/span&gt;&lt;span&gt; value;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (value &amp;amp;&amp;amp; (type === 'object' || type === 'function'&lt;span&gt;)) {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; then =&lt;span&gt; value.then;
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (&lt;span&gt;typeof&lt;/span&gt; then === 'function'&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; then;
+            }
+        }
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+    };
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; handle(handler) {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (state === 0&lt;span&gt;) {
+            handlers.push(handler);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (&lt;span&gt;typeof&lt;/span&gt; handler.onResolved === 'function'&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (state === 1&lt;span&gt;) {
+                    handler.onResolved(value);
+                };
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (state === 2&lt;span&gt;) {
+                    handler.onRejected(value);
+                };
+            }
+        }
+    };
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 放到事件队列最后，在本轮事件执行完后执行&lt;/span&gt;
+    &lt;span&gt;function&lt;/span&gt;&lt;span&gt; timeHandle(callback, newValue) {
+        setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+            callback(newValue);
+        }, &lt;/span&gt;0&lt;span&gt;)
+    }
+
+    &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; init(fn, onResolved, onRejected) {
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            fn(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (value) {
+                timeHandle(onResolved, value);
+            }, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (reason) {
+                timeHandle(onRejected, reason);
+            });
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+            timeHandle(onRejected, err);
+        }
+    };
+
+    init(fn, resolve, reject);
+
+    &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.then = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (onResolved, onRejected) {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!onResolved &amp;amp;&amp;amp; !&lt;span&gt;onRejected) {
+            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; TypeError('One of onResolved or onRejected must be a function.'&lt;span&gt;)
+        };
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+            handle({
+                onResolved: &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (result) {
+                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (&lt;span&gt;typeof&lt;/span&gt; onResolved === 'function'&lt;span&gt;) {
+                        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                            resolve(onResolved(result));
+                        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+                            reject(err);
+                        }
+                    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+                        resolve(result);
+                    }
+                },
+                onRejected: &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (error) {
+                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (&lt;span&gt;typeof&lt;/span&gt; onRejected === 'function'&lt;span&gt;) {
+                        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                            resolve(onRejected(error));
+                        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (err) {
+                            reject(err);
+                        }
+                    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+                        reject(error);
+                    }
+                }
+            })
+        })
+    };
+}
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; firstPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1 : 0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (result) {
+            resolve(&lt;/span&gt;'resolved 1'&lt;span&gt;);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            reject(&lt;/span&gt;'rejected 1'&lt;span&gt;);
+        }
+    }, &lt;/span&gt;1000&lt;span&gt;);
+})
+
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; secondPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+    setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1 : 0&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (result) {
+            resolve(&lt;/span&gt;'resolved 2'&lt;span&gt;);
+        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+            reject(&lt;/span&gt;'rejected 2'&lt;span&gt;);
+        }
+    }, &lt;/span&gt;3000&lt;span&gt;);
+})
+
+firstPromise.then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (res) {
+    console.log(&lt;/span&gt;'res 1 '&lt;span&gt;, res);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+}, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (err) {
+    console.log(&lt;/span&gt;'rej 1 '&lt;span&gt;, err);
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; secondPromise;
+}).then(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (res) {
+    console.log(&lt;/span&gt;'res 2 '&lt;span&gt;, res);
+}, &lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (err) {
+    console.log(&lt;/span&gt;'rej 2 '&lt;span&gt;, err);
+})
+
+&lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt; *
+ * 1s后输出 res 1 resolved 1 或者 rej 1 rejected 1
+ * 2s后输出 res 2 resolved 2 或者 rej 2 rejected 2
+ * &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;通过板块一、二、三的知识点，即可大致摸清promise的实现；板块四加上一些补充和限制，遵循一些规范，提高promise功能的可扩展性。&lt;/p&gt;
+&lt;p&gt;学会了怎么理解promise，更重要的是学会正确的使用它。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;正确使用 Promise&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;promise 在业务开发中多用来处理异步或者多层回调的情况。&lt;/p&gt;
+&lt;p&gt;基础使用 &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise&quot; target=&quot;_blank&quot;&gt;Promise MDN&lt;/a&gt; 及相关介绍文档中的案例为准，这里不一一赘述了... 这里简单的列出两个在使用 promise 过程中比较需要注意的点：&lt;/p&gt;
+&lt;p&gt;1. 不同平台环境下 Promise 的方法和遵循规则略微有些出入，详情以各平台环境下的 Promise 对象为基准。&lt;/p&gt;
+&lt;p&gt;　　如 es6 Promise 存在Promise.race，Promise.all等方法，node中则没有这些方法。&lt;/p&gt;
+&lt;p&gt;　　如 浏览器 Promise 事件调度走的是 setTimeout，node 走的是 process.nextTick 。(参考 [&lt;a href=&quot;https://github.com/kriskowal/asap&quot; target=&quot;_blank&quot;&gt;asap&lt;/a&gt;] )&lt;/p&gt;
+&lt;p&gt;2. Promise 虽可解决回调操作的规范问题(回调地狱)，但也不能滥用 Promise (可能会占用过多内存)。&lt;/p&gt;
+&lt;p&gt;promise 解决后的结果会被存于内存中，被对应 promise 引用着，将上面的最终代码中测试的两个 promise 改成如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;var&lt;/span&gt; firstPromise = &lt;span&gt;new&lt;/span&gt; Promise(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (resolve, reject) {
+        setTimeout(&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; result = Math.random() &amp;lt;= 0.5 ? 1 : 0&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; str = ''&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; i = 0, num = 500000&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (; i &amp;lt; num; i++&lt;span&gt;) {
+                str &lt;/span&gt;+= 'promise '&lt;span&gt;
+            }
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (result) {
+                resolve(&lt;/span&gt;'resolved 1 : ' +&lt;span&gt; str);
+            } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+                reject(&lt;/span&gt;'rejected 1 : ' +&lt;span&gt; str);
+            }
+        }, &lt;/span&gt;1000&lt;span&gt;);
+    })&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;则内存占用情况如下:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/702891/201810/702891-20181016215513204-2005294.png&quot; alt=&quot;&quot; width=&quot;758&quot; height=&quot;96&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这些是一些平台差异或业务需求方面的不同点，对 Promise 核心实现并影响甚微，对 Promise 扩展方法有影响，对业务中 Promise 的使用有影响。&lt;/p&gt;
+&lt;p&gt;参考&lt;/p&gt;
+&lt;p&gt;1. &lt;a href=&quot;https://www.promisejs.org/implementing/&quot; target=&quot;_blank&quot;&gt;Promise/implementing&lt;/a&gt; &lt;/p&gt;
+&lt;p&gt;2. &lt;a href=&quot;https://github.com/Program-Monkey/code-read/blob/master/promise-read/core.js&quot; target=&quot;_blank&quot;&gt;Promise 实现代码阅读&lt;/a&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Tue, 16 Oct 2018 13:58:00 +0000</pubDate>
+<dc:creator>野兽&amp;#39;</dc:creator>
+<og:description>准备好材料、工具，开拆！！！ 一个 Promise 的运用： 效果如上，在一个 promise 被完成/被拒绝时执行对应的回调取到异步结果。 同时，以上代码使用 promise 避免了回调地狱，规范了</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ys-ys/p/9800971.html</dc:identifier>
+</item>
+<item>
+<title>Chainsql使用相关笔记 - 一盏淡酒、醉了夕阳</title>
+<link>http://www.cnblogs.com/helloworldcode/p/9800948.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/helloworldcode/p/9800948.html</guid>
+<description>&lt;h2&gt;&lt;span&gt;安装&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;       按照&lt;/span&gt;github&lt;span&gt;上&lt;/span&gt;&lt;span&gt;chainsql&lt;/span&gt;&lt;span&gt;的&lt;a href=&quot;https://github.com/ChainSQL/chainsqld/blob/master/doc/manual/deploy.md#1-%E5%AE%89%E8%A3%85mysql&quot; target=&quot;_blank&quot;&gt;安装过程&lt;/a&gt;，&lt;/span&gt;&lt;span&gt;这里主要介绍区块网络搭建过程（&lt;/span&gt;4&lt;span&gt;个验证节点，其中只有一个节点[10.11.6.120]配置了数据库）：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　1、根据官方文档上&lt;a href=&quot;https://github.com/ChainSQL/chainsqld/blob/master/doc/chainsqld-example.cfg&quot; target=&quot;_blank&quot;&gt;配置文件&lt;/a&gt;的案例，修改&lt;/span&gt;chainsql.cfg&lt;span&gt;。&lt;/span&gt;&lt;span&gt;这里要注意&lt;/span&gt;peer,rpc,wss_admin,wss_public&lt;span&gt;的端口配置，如下案例中&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;&lt;span&gt;个节点的配置，其中一个节点的配置信息如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#端口配置列表
+[server]
+port_rpc_admin_local
+port_peer
+port_ws_admin_local
+
+#http端口配置
+[port_rpc_admin_local]
+port &lt;/span&gt;= &lt;span&gt;5005&lt;/span&gt;&lt;span&gt;
+ip &lt;/span&gt;= &lt;span&gt;127.0&lt;/span&gt;.&lt;span&gt;0.1&lt;/span&gt;&lt;span&gt;
+admin &lt;/span&gt;= &lt;span&gt;127.0&lt;/span&gt;.&lt;span&gt;0.1&lt;/span&gt;&lt;span&gt;
+protocol &lt;/span&gt;=&lt;span&gt; http
+
+#peer端口配置，用于p2p节点发现
+[port_peer]
+port &lt;/span&gt;= &lt;span&gt;51235&lt;/span&gt;&lt;span&gt;
+ip &lt;/span&gt;= &lt;span&gt;0.0&lt;/span&gt;.&lt;span&gt;0.0&lt;/span&gt;&lt;span&gt;
+protocol &lt;/span&gt;=&lt;span&gt; peer
+
+#websocket端口配置
+[port_ws_admin_local]
+port &lt;/span&gt;= &lt;span&gt;6006&lt;/span&gt;&lt;span&gt;
+ip &lt;/span&gt;= &lt;span&gt;127.0&lt;/span&gt;.&lt;span&gt;0.1&lt;/span&gt;&lt;span&gt;
+admin &lt;/span&gt;= &lt;span&gt;127.0&lt;/span&gt;.&lt;span&gt;0.1&lt;/span&gt;&lt;span&gt;
+protocol &lt;/span&gt;= ws
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 其余的配置信息部分如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#对等连接的其他主机的ip，以及对于的peer端口设置
+[ips_fixed]  
+&lt;/span&gt;&lt;span&gt;10.11&lt;/span&gt;.&lt;span&gt;6.116&lt;/span&gt; &lt;span&gt;51236&lt;/span&gt;
+&lt;span&gt;10.11&lt;/span&gt;.&lt;span&gt;6.117&lt;/span&gt; &lt;span&gt;51237&lt;/span&gt;
+&lt;span&gt;10.11&lt;/span&gt;.&lt;span&gt;6.118&lt;/span&gt; &lt;span&gt;51238&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 还有要注意的是，就是sync_db注意在centos下要修改unix_socket的配置。以及auto_sync开启设为1。&lt;/p&gt;
+&lt;p&gt;2、执行./chainsqld --conf=&quot;./ chainsqld-example.cfg&quot;  validation_create生成相应的validators、validation_seed（密钥）、validation_public_key（公钥），内容如下。将这些生成的内容加入chainsql.cfg中。其他四个节点也依此配置。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;{
+   &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;1&lt;/span&gt;&lt;span&gt;,
+   &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;result&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; : {
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;status&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;success&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;validation_key&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;OTT SOME DEE WOVE EAT SOME QUOD KUDO NIP HOW LEER HOSE&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;validation_private_key&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;pcvYu2QigM37t2jGar6EJSsRSdsV7H63R2Ae52WTZycZqNseT8a&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;validation_public_key&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;n9KnRfJ3wnCF8WaGmhf3EENSfMxc3KyWLzEKXmnP5pssZkci53DV&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;validation_seed&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; : &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;xxSm9kEKBDqrrfskWJV8wXRc6izLQ&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+   }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 根据文档中结构网络完成后，四个节点都启动后可以查看其他节点的运行情况，成功配置后节点的运行情况如下图所示：watch ./chainsqld peers。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1047362/201810/1047362-20181016205937831-1039031644.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;对chainsql 数据库的操作&lt;/h2&gt;
+&lt;p&gt;     按照chainsql的&lt;a href=&quot;http://www.chainsql.net/api_javascript.html&quot; target=&quot;_blank&quot;&gt;使用说明&lt;/a&gt;进行操作，去github上下载&lt;a href=&quot;https://github.com/ChainSQL/node-chainsql-api&quot; target=&quot;_blank&quot;&gt;node-chain-sql&lt;/a&gt;，在package.json的dependencies中添加“chainsql&quot;:&quot;^0.6.20”。执行 然后执行npm install命令和npm install chainsql --save，如果第二个语句执行不成功，则将执行语句换成npm install chainsql --save --force。要注意的是使用说明中一些测死案例是在node7.6的版本的基础上去使用的， 如果版本错误，会出现一些符号错误的问题(如await等异步同步问题)。&lt;/p&gt;
+&lt;p&gt;   1、创建用户&lt;/p&gt;
+&lt;p&gt;           根据&lt;a href=&quot;https://github.com/ChainSQL/chainsqld/blob/master/doc/ChainsqlBase.md&quot; target=&quot;_blank&quot;&gt;文档说明&lt;/a&gt;，首先要创建根用户，通过根账户（文档中说明了根账户如何创建）向新建的账户转账，才能激活新账户，创建账户的代码如下，其中owner是生成的根账户信息：　　&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;38&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+'use strict';
+const ChainsqlAPI = require('chainsql').ChainsqlAPI;
+const c = new ChainsqlAPI();
+
+var owner = {
+        secret: &quot;xnoPBzXtMeMyMHUVTgbuqAfg1SUTb&quot;,
+        address: &quot;zHb9CJAWyB4zj91VRWn96DkukG4bwdtyTh&quot;
+}
+//var user ={
+//  secret: 'xx26wgq6XbnTLrNgDn21dqjBMsD38',
+//  address: 'zp7mxMmrDwAGQqPeSBpT5wKaM4RpGaKWeW'
+//}
+
+let account = c.generateAddress();
+console.log(account)
+
+c.connect('ws://127.0.0.1:6006').then( ()=&amp;gt;{
+        console.log('连接成功')
+   c.as(owner);    //这里owner指一个有足够zxc的账户，第一个转账操作肯定要用根账户               
+   let ret = c.pay(account.address,100000000).then((ret)=&amp;gt;{
+   console.log(ret);
+  })
+}
+);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　输出结果为tesSUCCESS 说明提交成功。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1047362/201810/1047362-20181016213425427-537083706.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2、创建数据库，以及往数据库中插入数据&lt;/p&gt;
+&lt;p&gt;    根据官方的&lt;a href=&quot;http://www.chainsql.net/api_javascript.html&quot; target=&quot;_blank&quot;&gt;使用说明&lt;/a&gt;，可以根据以下的案例，其中的user是刚才激活的新账户。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;59&quot;&gt;
+&lt;pre class=&quot;brush:javascript;gutter:true;&quot;&gt;
+'use strict';
+const ChainsqlAPI = require('chainsql').ChainsqlAPI;
+const r = new ChainsqlAPI();
+
+var user = {
+        secret: 'xpiCV45NQ3bRxPJvmjBgkTLPwMqAC',
+  address: 'zNn8qGS3spd8vyRJ88NpymiGEqKxvxgikY',
+  publicKey: 'cBQFdZcmk5xsbqN8yPvk1Ay9L4PrgviGwcHxzoT7gN2XRtfqXzRR'
+}
+r.connect('ws://127.0.0.1:6006', function(err, data) {
+        if (err) {
+                console.log('连接失败. ');
+        return
+        }
+    console.log('连接成功');
+    r.as(user);
+        r.createTable(&quot;dc_universe&quot;, [
+        {
+                'field':'id',
+                'type':'int',
+                'length':11,
+                'PK':1,
+                'NN':1,
+                'UQ':1
+        },
+        {
+                'field':'name',
+                'type':'varchar',
+                'length':50,
+                'default':null
+        },
+        {
+                'field':'age',
+                'type':'int'
+        }]
+        ).submit();
+        r.table(&quot;dc_universe&quot;).insert({id:1, name: 'peera',age: 22},{id:2, name: 'peerb',age: 21}).submit();
+         getLedger();
+});
+
+function getLedger() {
+        r.getLedger({
+                ledgerVersion: 22
+        }, function(err, data) {
+                console.log(err, data)
+        })
+}
+      
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　一次性向数据库的表中插入多条数据，同时查看交易信息，可以根据以下的案例进行测试，这个user是另外激活的新账户，与上面不同：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;57&quot;&gt;
+&lt;pre class=&quot;brush:javascript;gutter:true;&quot;&gt;
+'use strict';
+const ChainsqlAPI = require('chainsql').ChainsqlAPI;
+const c = new ChainsqlAPI();
+
+
+var root = {
+         secret: 'xnoPBzXtMeMyMHUVTgbuqAfg1SUTb',
+  address: 'zHb9CJAWyB4zj91VRWn96DkukG4bwdtyTh'
+}
+
+var user ={
+  secret: 'xx26wgq6XbnTLrNgDn21dqjBMsD38',
+  address: 'zp7mxMmrDwAGQqPeSBpT5wKaM4RpGaKWeW'
+}
+c.connect('ws://127.0.0.1:6006').then( async ()=&amp;gt;{
+        console.log('连接成功')
+   c.as(root);    //这里owner指一个有足够zxc的账户，第一个转账操作肯定要用根账户               
+   c.setRestrict(false);
+  // var raw=[ { id: 61, name: 'peer61', age: 71 },{ id: 62, name: 'peer62', age: 72 }];
+  var raw=[];
+   for(var i=62;i&amp;lt;67;i++){
+        raw.push({'id':i, 'name': 'peer'+i,'age': i+10});
+    //  var raw=[{id:15+i, name: 'gqx'+i,age: 23+i}];
+     //   console.log(raw);
+   //    c.table(&quot;dc_universe&quot;).insert(raw).submit({expect:'db_success'});
+    }
+ // console.log(raw); 
+  // var raw=[
+//      {'id':7, 'name': 'gqx11','age': 25},
+//      {'id':8, 'name': 'gqx22','age': 45},
+  //      {'id':9, 'name': 'gqx33','age': 64}
+  // ]
+  // var rs=await c.table(&quot;dc_universe&quot;).insert(raw).submit({expect:&quot;db_success&quot;});
+  // console.log(rs);
+  var opt = {limit:200}
+  c.getTransactions('zp7mxMmrDwAGQqPeSBpT5wKaM4RpGaKWeW',opt,callback);
+
+}
+);
+
+function callback(err,data){
+        if(err){
+                console.error(err);
+        }else{
+                console.log(JSON.stringify(data));
+        }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;　　最后，要注意一些问题，比如官方文档的说明中有些错误，比如插入数据的格式问题，还有架设网络的第二步中检查是否成功，只需要在chainsql目录中执行（centOs）&lt;code&gt;watch ./chainsqld server_info等等。还有要注意插入数据时，插入数据的操作者要有足够的费用去支持插入的行为，否则即使插入不成功，也不会出现错误信息，很难发现错误。&lt;/code&gt;&lt;/p&gt;
+</description>
+<pubDate>Tue, 16 Oct 2018 13:56:00 +0000</pubDate>
+<dc:creator>一盏淡酒、醉了夕阳</dc:creator>
+<og:description>安装 按照github上chainsql的安装过程，这里主要介绍区块网络搭建过程（4个验证节点，其中只有一个节点[10.11.6.120]配置了数据库）： 1、根据官方文档上配置文件的案例，修改cha</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/helloworldcode/p/9800948.html</dc:identifier>
 </item>
 </channel>
 </rss>
