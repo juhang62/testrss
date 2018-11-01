@@ -9,6 +9,578 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>自己用C语言写RL78 serial bootloader - GeekyGeek</title>
+<link>http://www.cnblogs.com/geekygeek/p/hyperbootloader_rl78.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/geekygeek/p/hyperbootloader_rl78.html</guid>
+<description>&lt;p&gt;　　　　　　&lt;span&gt;&lt;strong&gt;了解更多关于bootloader 的C语言实现，请加我QQ: 1273623966 （验证信息请填 bootloader）,欢迎咨询或定制bootloader（在线升级程序）。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　&lt;span&gt;　&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;之前用C实现过多款PIC单片机的bootloader, 包括8-bit的PIC16，PIC18；16-bit的PIC24, dsPIC30, dsPIC33; 和32-bit的PIC32MX，PIC32MZ，我为这些类型PIC都写过C bootloader。今天要介绍的serial bootloader 是为我的RL78单片机学习板而写。RL78是Renesas的16-bit单片机。这是我第一次为Renesas的单片机写C 语言bootloader，遇到不少问题，通过不懈努力，总算成功的完成了我的第一个Renesas RL78 serial bootloader。我将这个RL78 serial bootloader命名为hyperboot_rl78, 因为hyperboot_rl78用到的上位机是hyperterm (超级终端）。写这篇博文的目的是来总结这次hyperboot_rl78的实现过程，总结内容包括bootloader的设计, bootloader的逻辑，bootloader的使用，实现环境，实现过程中遇到的问题，以及如何解决的。以上都会一一在这篇博文中介绍到。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;       首先介绍实现环境，IDE是CS+， C编译器是CC-RL， 硬件板是我的学习板,  详细如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;IDE ：        CS+  for CC V7.00.00 [13 Jun 2018]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;Compiler:    CC-RL V1.07.00&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;MCU:          RL78 F14 R5F10PPJ&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;Hardware:   QB-R5F10PPJ-TB(e)&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;      我的bootloader和application的memory map设计如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;bootloader code range: 0x0000~0x33FF&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;application code range: 0x3400~0x3FFFF&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;application reset vector remap：0x4000&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;interrupt vector remap: 0x4006~0x40CA&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;bootloader 不使用interrupt，interrupt vector 区间0x4~0x7C remap到application的code区间0x4006~0x40CA。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;bootloader code range设置, bootloader interrupt remap 都需要通过修改CS+ bootloader工程的Linker Option来实现。具体可以查阅CS+的帮助。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;application code range设置, application reset vector remap 也需要修改CS+ application工程的Linker Option来实现。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;另外，interrupt vector remap 到application code区间0x4006~0x40CA, application使用中断的话，需要在代码中建Juamp Table, 并将interrupt service routine的地址映射到Jump Table中。 我的做法是在application CS+ 工程的Linker Option中新增 .app_vector section,  .app_vector section的地址范围0x4000~0x40CA(包括reset vector 和 interrupt vector).&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;Jump Table指定到.app_vetor section, 在Jump Table 添加跳转指令和_start 地址(cstartup for reset vector)或interrupt service routine的地址(for interrupt vector)到相对应的位置中。Jump Table我是用CC-RL的汇编指令实现的，为此我查阅了RL78的Software Manual。Jump Table 中的汇编代码例子如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+      .DB                     _BR_                            ;BR
+        .DB2                    _r_uart0_interrupt_send         ;0x16, Interrupt Service Routine
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;       上面的bootloader 和application的Linker Option设置及Jump Table的实现费时最长，主要是对CS+项目的设置不熟， 对CC-RL的使用也不熟，查帮助，一步一步试错尝试，当所有的设置都OK了，Jump Table也实现了，我才长舒一口气，感觉本bootloader的实现即将完成。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;        虽然一切bootloader 和 application的设置都OK了，也感觉bootloader的实现即将完成。但实际上并没有那么顺利，原因是bootloader 需要用到FSL， FSL是操作flash的library. 需要添加FSL的头文件和library到bootloader的代码工程中。仔细的查阅了FSL 的介绍文档（r01us0050ej0103_rl78.pdf），发现FSL需要我们根据需求配置FCD, RCD, BCD等section 到bootloader的ROM 空间或RAM空间。 由于我只使用到FSL的基本功能，并且采用status check internal mode. 所以我将FCD，RCD， BCD配置到bootloader 的ROM 空间， 当然也是通过修改bootloader的Linker Option来完成这项配置。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;      bootloader 的配置完善了，接着就是bootloader功能和逻辑的实现了。 bootloader 的上位机是串口终端hyperterm(超级终端)。 hyperterm的配置（串口配置）如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;baud rate:   19200&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;data bytes:   8&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;parity:           none&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;stop bits:       1&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;flow control : none&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;line delay:     150ms&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;     上电后， bootloader 初始化uart （baudrate-data bytes-parity-stop bits-flow control 要和hyperterm的配置一致，19200-8-none-1-none, 否则通信不了）。bootloader 然后每隔1S左右打印一个 '.' , 打印完6个'.' （6S）就跳转到application. 如果要更新程序，就在6S内在hyperterm 串口中敲一回车。bootloader 收到回车（代表握手成功）就开始擦除application code range. 打印 “Erasing *********&quot;  每擦除一个block (1024 bytes) 就增加打印一个 ”*“直到所有application blocks都擦除完毕，并打印”Done“（代表擦除成功）。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;      hyperterm 窗口显示了bootloader 完成Erase后打印的”Done“，就操作hyperterm采用发用文本的方式发送application 的hex文件，一行接一行的发送，每发送一行就暂停150ms （配置hyperterm参数line delay = 150ms).&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;      bootloader 每接收一行，原样打印，并解读里面的数据类型，地址，长度，数据，和Checksum, 如果数据类型为S1或S2，就将接收到的数据烧写到对应的地址。直到最后一行也处理完毕。整个烧写过程都没问题就打印”Program Rewritten Complete“ “（代表更新成功）。并跳转到application。 如果烧写过程有问题就打印”Program Rewritten Complete with Error“。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;      以上就是bootloader的更新程序的整个逻辑。代码框架如下：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32.5&quot;&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:cpp;gutter:true;&quot;&gt;
+void M_Bootloader_MainFunc(void)
+{
+       switch (bootState)
+    {
+        case BOOT_HANDSHAKE:
+            M_Bootloader_Handshake();
+            break;
+        case BOOT_ERASE:
+            M_Bootloader_Erase();
+            break;
+        case BOOT_RECEIVE:
+            M_Bootloader_Receive();
+            break;
+        case BOOT_PROGRAM:
+            M_Bootloader_Write();
+            break;
+        case BOOT_VERIFY:
+            M_Bootloader_IVerify();
+            break;
+        case BOOT_PREJUMP:
+            Prejump_To_Application();
+            break;
+        case BOOT_JUMPTO_APP:
+            Jump_To_Application();
+            break;
+        default:
+            break;
+    }
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;       整个过程， hyperterm中打印出来的内容就是更新流程log. 下面是一个完整的更新流程的log.&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+....BOOT Mode             
+Erasing*************************************************************************                                                                                
+***********************************************Done                                                   
+S00E0000726C3738463134706D6F7439                                
+S1130000D040FFFF064009400C400F40124015400D                                          
+S113001018401B401E402140244027402A402D40C8                                          
+S113002030403340364039403C403F4042404540F8                                          
+S113003048404B404E405140544057405A405D4028                                          
+S113004060406340664069407C407F408240854018                                          
+S113005088408B408E409140944097409A409D4008                                          
+S1130060A040A340A640A940AC40AF40B240B54038                                          
+S1130070B840BB40BE40C140C440C740CA400                                   
+S10700C077FFE0855D                  
+S10D00C4000000000000000000002E                              
+S10D00CEFFFFFFFFFFFFFFFFFFFF2E                              
+S113340048656C6C6F20776F726C640D0A000D0A4E                                          
+S109341064000D0A6C00CB                      
+S1134000EDD040ED4C42ED4C42ED4C42ED4C42EDD6                                          
+S11340104C42ED4C42ED4C42ED4C42ED4C42ED4CE9                                          
+S113402042EDA841ED2341ED4C42ED4C42EDC64139                                          
+S1134030ED4C42ED4C42ED4C42ED4C42ED4C42ED28                                          
+S11340404C42ED4C42ED4C42ED4C42ED4C42ED4CB9                                          
+S113405042ED4C42ED4C42ED4C42ED4C42ED4C42B3                                          
+S1134060ED4C42ED4C42ED4C42ED4C42ED4C42EDF8                                          
+S11340704C42ED4C42ED4C42ED4C42ED4C42ED4C89                                          
+S113408042ED4C42ED4C42ED4C42                          
+S1134090ED4C42ED4C42ED4C42ED4C42ED4C42EDC8                                          
+S11340A04C42ED4C42ED4C42ED4C42ED4C42ED4C59                                          
+S11040B042ED4C42ED4C42ED4C42ED4C42D1                                    
+S11340D0CBF820FEFC4B43003600B43025B4EF048B                                          
+S11340E0CC0000A747DFF93620FE3020FEEF04CCD9                                          
+S11340F00000A747DFF94100320000EF08B311497F                                          
+S113410062454800B4F643DFF44100320000EF0892                                          
+S1134110B3114962454820FEF643DFF4FC954200A2                                          
+S1134120F6EFFEC1C3C5C78EFD708EFCC1C7AF02DA                                          
+S113413001605C0798008800318EBF06018800D1B9                                          
+S113414061E888008D129801AF16B44214B461D3AB                                          
+S113415045EB12B4880199A212B4A214B4AF16B4F8                                          
+S11341604214B4DF338F24B40CBCDD1B0CF8DD081F                                          
+S11341700CE8DD134C08DF205A067F3203003012AE                                          
+S113418034FCEB4400EF116A0680320300300E3435                                          
+S1134190FCEB4400EF028801712BE1C6C09EFC6079                                          
+S11341A09EFDC6C4C2C061FCC1C5AF10B46168DD68                                          
+S11341B00EEB0EB4899D10A515BF0EB4B210B471E8                                          
+S11341C01BE1C4C061FCC1C3C5C78EFD708EFCC1B8                                          
+S11341D0E6140218B412F61661D8A1021AB4BF1A72                                          
+S11341E0B413BF18B415021CB4121761D8A1021E6F                                          
+S11341F0B4BF1EB413BF1CB4AF18B4DB1AB436007A                                          
+S113420000340A00CEFB0B001705DF0661C8FC1B57                                          
+S11342104500AF1CB4DB1EB436000034F401CEFB01                                          
+S11342200B001705DF0561C87A0640AF22B4AF2042                                          
+S1134230B460310308E73024B4FCD34400715BE17B                                          
+S1134240C09EFC609EFDC6C4C2C061FC00EFFD615F                                          
+S1044250FC6D            
+S113425116C80300AEF82761D339315E12F643DD87                                          
+S113426127BBBC02BC04BC06BC08BC0ABC0CBC0E0B                                          
+S1134271BC10BC12BC14BC16BC18BC1ABC1CBC1EA1                                          
+S11342813704200037B3EFD6AEF847DD06F6BBA7F7                                          
+S1134291A7EFF5D7FE0200EFFE2004FC8F4400FCDB                                          
+S11342A1464500717AFA5A06BFF6B802B800A80268                                          
+S11342B1440000A80061F8446400DE1300A802145D                                          
+S11342C1A800040100121561D8A1B80213EFDD3270                                          
+S11342D10E00300034FCEB44001004D7                               
+S11342E104CA0000CA0100CA0200CA0300CA0400C9                                          
+S11342F1CA0500CA0600CA0700CA0800FC504300E8                                          
+S1134301FC7B4300FC0A4400FC114400FC144500FE                                          
+S1134311FC1F450034780015CA000004180016F685                                          
+S11343217182B802B800A802440000A80061F844F0                                          
+S11343310A00DE1300A80214A8000401001215618A                                          
+S1134341D8A1B80213EFDD1004D7717BFAEF8D36D3                                          
+S1134351C40234C402718215A116CEA000717AA1DF                                          
+S1134361714BA4CA030071A336C402716AA1716BB3                                          
+S1134371A4710BA1CA04C271A3D7CF0AB418F50B57                                          
+S1134381B4D7BF02B413BF04B415BF06B4CF08B485                                          
+S1134391043002B4FC7D45009F00B44CFFDF0800EB                                          
+S11343A100FCDE4500EFF1D716400CB4015110DFDB                                          
+S11343B11617BF02B413BF04B415BF06B4F508B48D                                          
+S11343C13002B4FC7D45009F00B4D7400CB401DF3A                                          
+S11343D11EBF02B4CF08B4033002B4FC7D45009F74                                          
+S11343E100B44CFFDF080000FCDE4500EFF1D7CF3D                                          
+S11343F100B4105110D7300AB4FC624500E50CB486                                          
+S1134401D7FCE44500F50CB4D7CD06C0CE263FD782                                          
+S113441136F00030330071A200000000BC26EF002A                                          
+S1134421347000AAA4086C0308BAA4711AE5711BBC                                          
+S1134431E1712AE5712BE1711AED711AE9712AED25                                          
+S1134441712AE9302280BA98309780BA9CC9100049                                          
+S11344519A89718A99300700BA96302201BA9A3042                                          
+S11344619740BA9EC912009AAAA8086C0108BAA872                                          
+S1134471AAB0BAB0AAAA086C0108BAAA51406F211D                                          
+S1134481FF9E216A012051DF5F21FF9E21D7341253                                          
+S113449101AA06086C0108BA06AA08086C0108BA40                                          
+S11344A108A9086C0308B9711BE1712BE1711BE5C3                                          
+S11344B1712BE5D7341401711AE5712AE5A9086C49                                          
+S11344C10308B9AA06085CFE08BA06711BE1712B40                                          
+S11344D1E1D714136168DF04308100D7F6BF14B447                                          
+S11344E113BF16B415BF12B4F6D714136168DF04F1                                          
+S11344F1308100D736E5FF15BF0EB413BF10B47178                                          
+S113450192EB0EB4899D10A515BF0EB4B210B4710F                                          
+S113451193F6D7710AE4710BE0D7CEABACD7304038                                          
+S1134521021404800016718289718B99715AE571A4                                          
+S11345315BE1715AED715AE9CA0200CA010030BF48                                          
+S11345415DBFF006D7344002715BE1715BE58971AF                                          
+S11345518A99D734400289718B99715AE5715BE16B                                          
+S1044561D77E            
+S11345627100900016BF04088C019F0108E503083E                                          
+S1134572F2FCF8FF0E62CF800804D716E503088C1C                                          
+S113458202088C03BF0408340010CF02080F8C0603                                          
+S11345929F81084C03DD2415080E00081E01BF008C                                          
+S11345A208148C04088C05BF06081251004E06DD5F                                          
+S11345B21BF98108FCF8FF0E62EF20300004BF06ED                                          
+S11345C2088C003129F005BF0008EFE5FB04080060                                      
+S11345D2899BA7A5B3F643DFF75100D7FC04F00E7D
+S11145E262D7FC08F00E71089000F58008D72F
+S21403FF00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF9
+S21403FF10FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE9
+S21403FF20FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD9
+S21403FF30FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC9
+S21403FF40FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFB9
+S21403FF50FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA9
+S21403FF60FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF99
+S21403FF70FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF89
+S21403FF80FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF79
+S21403FF90FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF69
+S21403FFA0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF59
+S21403FFB0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF49
+S21403FFC0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF39
+S21403FFD0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF29
+S21403FFE0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF19
+S21403FFF0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF09
+S9030000FC
+Program Rewritten Complete
+Hello world
+
+l
+d
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;  hyperboot_rl78 有以下两个缺点：&lt;/p&gt;
+&lt;p&gt;1。效率低， 每行delay 150ms&lt;/p&gt;
+&lt;p&gt;2。和上位机hyperterm(超级终端)之间交互没有通信协定。&lt;/p&gt;
+
+&lt;p&gt;       接下来计划完成一个全新RL78 bootloader，一个上位机，之间通信采用自定义协议， 或Xmodem协议，开发平台为CS+ 或 IAR。&lt;/p&gt;
+</description>
+<pubDate>Wed, 31 Oct 2018 16:42:00 +0000</pubDate>
+<dc:creator>GeekyGeek</dc:creator>
+<og:description>Renesas 16-bit MCU RL78 Serial bootloader</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/geekygeek/p/hyperbootloader_rl78.html</dc:identifier>
+</item>
+<item>
+<title>Linux 桌面玩家指南：09. X Window 的奥秘 - 京山游侠</title>
+<link>http://www.cnblogs.com/youxia/p/LinuxDesktop009.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/youxia/p/LinuxDesktop009.html</guid>
+<description>&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;&lt;strong&gt;特别说明：&lt;/strong&gt;要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用&lt;code&gt;$&lt;/code&gt;标记数学公式的开始和结束。如果某条评论中出现了两个&lt;code&gt;$&lt;/code&gt;，MathJax 会将两个&lt;code&gt;$&lt;/code&gt;之间的内容按照数学公式进行排版，从而导致评论区格式混乱。如果大家的评论中用到了&lt;code&gt;$&lt;/code&gt;，但是又不是为了使用数学公式，就请使用&lt;code&gt;\$&lt;/code&gt;转义一下，谢谢。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;想从头阅读该系列吗？下面是传送门：&lt;/p&gt;
+&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
+&lt;p&gt;大名鼎鼎的 X Window 大家肯定不陌生。都知道它是 Unix/Linux 下面的窗口系统，也都知道它基于 Server/Clinet 架构。在网上随便搜一搜，也可以找到不少 X Window 的介绍。有不少文章为了给用户留一个直观的印象，往往先让系统进入纯文本界面，然后使用 startx 来启动图形界面，或者直接使用 X 来启动 X Server，再然后运行一个 xterm 来做示范。我觉得以上这些文章对 X Window 的理解有限，不够深入。所以，我这里写一篇《X Window 的奥秘》，以最新的 Ubuntu-18.10 Desktop 为例，展示如何学习 X Window。&lt;/p&gt;
+&lt;p&gt;10 月是一个比较开心的月份。在这个月中，陆续发布了最新的 Ubuntu 18.10 和 Fedora 29，还有人在我的博客中问关于 CentOS 7 的问题。CentOS 7 固然是一个优秀的发行版，但并不是作为桌面系统的首选，Gnome 的版本太旧，官方仓库中的软件包也不够丰富，美化起来比较困难。在这一篇中，我要展示远程连接 X Server 的操作，需要两个外观差距稍微大一点的 Linux 桌面系统，所以选择了 CentOS 7 和 Ubuntu 18.10。&lt;/p&gt;
+&lt;p&gt;Ubuntu 18.10 这次外观大变样，使用了 Yaru 主题，下面的截图展示了其中 Terminal 和 GVim 的外观：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031150630510-1566358116.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;而 CentOS 7 默认的外观太丑了，所以我给他换上了最流行的 adapta-gtk-theme 和 paper-icon-theme，下面的截图展示了其中 Terminal 和 GVim 的外观：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031150743167-253533407.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这两种风格应该是比较好区分的，在后文中，很容易通过外观来判断一个 GUI 程序究竟来自于哪一个系统。&lt;/p&gt;
+&lt;h2 id=&quot;了解自己机器上的-x-window&quot;&gt;了解自己机器上的 X Window&lt;/h2&gt;
+&lt;p&gt;X Window 其实是一种规范，它有很多不同的实现，在 Linux 系统下最流行的是实现 Xorg 和 XFree86，微软 Windows 系统下也有 X Window 的实现，苹果的Mac 也是 X Window 的一种。要了解自己机器上运行的 X Window 究竟是哪一个，可以使用查看进程的ps命令，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031151318912-642586678.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从上图可以看出，Ubuntu 18.10 使用的 X Window 是 Xorg。如果使用 ps -ef 命令，还可以看到 Xorg 运行时的命令行参数。&lt;/p&gt;
+&lt;p&gt;想了解 X Window，下面这些文档需要看一遍先：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031151836068-826947610.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;下面来说一下也许是众所周知的基础知识：X Window 是一个分层的架构，它分为 Serve 和 Client。X Server 负责图形界面的显示，（也负责用户的输入），而Client 程序需要连接到 X Server，然后请求 X Server 绘制图形界面，同时从 X Server 接受用户的输入。在桌面系统上，X Server 和 Client 程序往往安装在同一台机器上，日常使用基本感觉不到它是分层的。但是很显然，X Server 和 Client 也可以分别运行在不同的机器上，在一台机器上运行程序，而在另外一台机器上显示图形界面。&lt;/p&gt;
+&lt;p&gt;X Window 中的 Server 和 Client 的概念和我们平时接触到的“Server/Client”概念刚好相反。很多熟悉 Internet 原理的人，第一次接触 X Window 的这两个概念都会搞错。比如，我在一台本地机器上运行 Ubuntu 18.10 桌面版，而在另外一台远程机器上运行 CentOS 7（纯字符界面），当我用 ssh 从 Ubuntu 连接到 CentOS 的时候，Ubuntu 是 Client，而 CentOS 是 Server。在 X Window 中，Server 偏偏是我面前的这台 Ubuntu，X Server 运行在 Ubuntu 上。我可以在 CentOS 中运行 GVim，但是窗口显示在 Ubuntu 中，这时，GVim 是一个 Client 程序，它在远程机器上运行，而它的窗口显示在本地。&lt;/p&gt;
+&lt;h2 id=&quot;理解-display-和虚拟控制台&quot;&gt;理解 display 和虚拟控制台&lt;/h2&gt;
+&lt;p&gt;前面提到网上很多介绍 X Window 的文章都是先让系统进入字符界面，然后手动启动一个 X Server。其实这完全没有必要，因为在同一台机器上完全可以运行多个 X Server，只需要让每个 X Server 的 display 不同即可。那么 display 究竟是什么？&lt;/p&gt;
+&lt;p&gt;在 X Window 中，可以通过 hostname:display_number.screen_number 来指定一个屏幕。可以这样理解：一台计算机可以有多个 display，一个 display 可以有多个屏幕。所以，display 相当于是计算机配备的一套输入输出设备，一般情况下，一台电脑只配一套键盘鼠标和一个显示器，特殊情况下，可以配多个显示器。&lt;/p&gt;
+&lt;p&gt;现在问题出来了，我的电脑只有一套键盘鼠标和一个显示器，也就是只有一个 display，那又怎么能运行多个 X Server 呢？那是因为在 Linux 中，还有虚拟控制台这样的高级特性。只需要同时按下 Ctrl+Alt+F1、Ctrl+Alt+F2、...、Ctrl+Alt+F7，就可以在不同的虚拟控制台中进行切换。在 Ubuntu 18.10 中，虚拟控制台 3 到 6 运行的是 agetty，也就是字符界面，虚拟控制台 2 运行的是 Xorg。（Fedora 中不一样，虚拟控制台 1 运行的是图形界面，其它的是字符界面。）如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031153336308-133929108.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;我们可以直接运行 X Server 程序来启动 X Server。/usr/bin/X 和 Xorg 都是 X Server 程序。其实 /usr/bin/X 是 Xorg 的符号链接，用哪一个都是一样的。&lt;/p&gt;
+&lt;p&gt;启动 X Server 的时候可以指定 display 参数，因为可以省略掉 hostname 和 screen_number，所以可以用 :0，:1 这样的格式来指定 display。在我的机器上，本来就有一个 X Server 在运行，display :0 已经被占用了，所以我使用 &lt;code&gt;sudo X vt8 :1 -auth /run/user/1000/gdm/Xauthority -retro&lt;/code&gt; 来在 display :1 上再运行一个 X Server，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031165906337-115987151.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;其中的 &lt;code&gt;-retro&lt;/code&gt; 参数是为了让 X Server 的背景显示为斜纹，否则背景为纯黑色，那就看不出来是否启动了 X Server。&lt;code&gt;vt8&lt;/code&gt; 参数指定将新启动的 X Server 放到第 8 个虚拟控制台。&lt;code&gt;:1&lt;/code&gt;参数指定新启动的 X Server 的 display number。启动 X Server 后的效果如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031165337027-1818856858.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;按 Ctrl+Alt+F2 回到 display :0，在新启动的 X Server 中运行一个 GVim 看看效果。运行 GVim 时，使用 -display :1 参数指定窗口显示在新启动的 X Server 上，使用 -geometry 参数指定窗口的大小和位置。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031165602853-830241496.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;再按 Ctrl+Alt+F8 切换到 display :1，看效果。如下：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031165708595-2035219253.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;不知道为什么，在 Ubuntu 18.10 中的虚拟控制台中切换两下，新启动的 X Server 就自动关闭了。而且切换到虚拟控制台 8 再切换回来，我的 Ubuntu 桌面的分辨率也变成了 800x600，非常不爽。当然，这里的展示只是为了证明能在一台机器上运行两个 X Server，能看到效果就行。&lt;/p&gt;
+&lt;h2 id=&quot;远程连接-x-server&quot;&gt;远程连接 X Server&lt;/h2&gt;
+&lt;p&gt;前面展示的在一个系统中运行两个 Xorg 并不是很吸引人，毕竟新启动的 X Server 太丑了，而且 Xorg 的参数一大堆，不是很容易搞。既然 X Client 和 X Server 可以分布在不同的机器上，那么，如果我们能够把别的系统中的 GUI 程序显示到本地机器中，那就比较过瘾了。理论上讲，如果在前面提到的 CentOS 7 中运行&lt;code&gt;gvim -display 192.168.40.135:0&lt;/code&gt;命令（这里的 192.168.40.135 是 Ubuntu 18.10 系统的内网 IP），就应该可以把界面显示到 Ubuntu 18.10 桌面上，反之，如果在 Ubuntu 18.10 中运行&lt;code&gt;gvim -display 192.168.40.130:0&lt;/code&gt;命令（这里的 192.168.40.130 是 CentOS 7 系统的内网 IP），就可以把界面显示到 CentOS 7 中。&lt;/p&gt;
+&lt;p&gt;但是，这是行不通的。行不通的原因首先是 Xorg 复杂的认证机制。如果没有认证机制把关，随便就能让别的系统把图形界面甩过来，那桌面上岂不是垃圾窗口满天飞吗？其次，Xorg 在启动时往往会带上&lt;code&gt;-nolisten tcp&lt;/code&gt;参数，禁止接受从 TCP/IP 网络上传过来的连接请求。要禁用该选项，往往需要去更改 gdm 的配置文件。&lt;/p&gt;
+&lt;p&gt;我这里就不折腾这些复杂的认证机制和命令行参数了，我这里来点简单的。最简单的把远程机器上的图形界面带回本地桌面的方式，是使用 SSH 的 X11 Forwarding 功能。该功能用起来非常简单，只需要在使用&lt;code&gt;ssh&lt;/code&gt;命令连接远程机器的时候，加上&lt;code&gt;-X&lt;/code&gt;或者&lt;code&gt;-Y&lt;/code&gt;参数就可以了。如下图，我在 Ubuntu 18.10 中使用&lt;code&gt;ssh -X 192.168.40.130&lt;/code&gt;远程连接到 CentOS 7 中，然后再运行&lt;code&gt;gvim&lt;/code&gt;命令，该 GVim 窗口就在 Ubuntu 桌面中显示出来了。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031231134863-1850551184.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;反之，如果在 CentOS 7 中使用&lt;code&gt;ssh -X 192.168.40.135&lt;/code&gt;远程连接到 Ubuntu 18.10 中，在运行&lt;code&gt;gvim&lt;/code&gt;命令，就可以把 Ubuntu 中的 GVim 显示到 CentOS 7 的桌面中，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031235719661-1031243835.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;SSH 的 X11 Forwarding 是一个非常强大的功能。我们甚至可以把 Linux 中的图形界面显示到 Windows 中，只需要在 Windows 中运行一个 X Server 就可以了。我选择的软件是 XMing，然后使用 PuTTY 连接到 Linux 系统。在 PuTTY 的设置中，开启 X11 Forwarding 功能，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201810/16576-20181031235957621-749634410.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;然后可以把 Linux 桌面中的图形界面带入 Windows 桌面，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201811/16576-20181101000035156-1573758396.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;理解-displaymanager-和-x-window-桌面环境的启动过程&quot;&gt;理解 DisplayManager 和 X Window 桌面环境的启动过程&lt;/h2&gt;
+&lt;p&gt;X Server 的启动方式有两种，一种是通过显示管理器启动，另一种是手动启动。在前面的例子中，我通过直接运行&lt;code&gt;sudo X vt8 :1 -auth /run/user/1000/gdm/Xauthority -retro&lt;/code&gt;来启动了一个 X Server，这就是手动启动。手动启动 X Server 的方法还有运行 startx 或者 xinit。手动启动 X Server 的缺点就是启动的 X Server 不好看。而显示管理器启动的不仅有 X Server，还有一大堆的 Client 程序，构成了一个完整的桌面环境，界面当然就漂亮多了。&lt;/p&gt;
+&lt;p&gt;显示管理器（Display Manager）是什么呢？前面我讲到 display 就是一个电脑配备的一套键盘鼠标和显示器，那么显示管理器就是这一套设备的管理器了。显示管理器可以直接管理这些设备，所以它可以控制 X Server 的运行，由它来启动 X Server 那是再合适不过了。系统启动过程是这样的：内核加载--&amp;gt;init程序运行--&amp;gt;显示管理器运行--&amp;gt; X Server 运行--&amp;gt;显示管理器连接到 X Server，显示登录界面--&amp;gt;用户登录后，登录界面关闭，加载桌面环境。从上面的流程可以看出，显示管理器是 X Server 的父进程，它负责启动 X Server，当 X Server 启动后，它又变成了 X Server 的一个 Client 程序，连接到 X Server 显示欢迎界面和登录界面，最后，显示管理器又是所有桌面环境的父进程，它负责启动桌面环境需要的其它 Client 程序。&lt;/p&gt;
+&lt;p&gt;在 Ubuntu 的早期版本中，使用 lightdm 取代了传统的 xdm、gdm 等显示管理器。从 Ubuntu 17.10 开始，Ubuntu 放弃了 Unity 桌面而回归 Gnome 3，则显示管理器又变回 gdm 了。&lt;/p&gt;
+&lt;p&gt;可以使用不同的方法对 X Server 进行配置，前面的例子是直接指定命令行参数。除了指定命令行参数，还可以使用环境变量和配置文件。X Server 的配置文件为一般是 /etc/X11/xorg.conf 或 /etc/X11/xorg.conf.d/ 目录下的 .conf 文件，当然，配置文件也可以放在其它的目录中，具体信息，请参看 man xorg.conf。&lt;/p&gt;
+&lt;p&gt;如果没有配置文件，X Server 将在启动的时候自动检测硬件，然后生成一个内置的配置。Ubuntu 系统就没有配置文件。不过没关系，如果需要使用配置文件的时候，可以通过 X Server 的 -configure 参数生成一个配置文件，里面包含当前自动检测出的配置。如果需要任何个性化的配置，对该文件进行修改即可。&lt;/p&gt;
+&lt;h2 id=&quot;运行嵌套的-x-server&quot;&gt;运行嵌套的 X Server&lt;/h2&gt;
+&lt;p&gt;我们上面运行的 X Server 都是直接占用了计算机的整个显示器和键盘鼠标，事实上，在现有的图形界面中，还可以以窗口模式运行另外一个 X Server，称为 nested X Server。最常用的 nested X Server 是 Xephyr，在 Ubuntu 中可以通过如下命令安装它：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo aptitude install xserver-xephyr&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Xephyr 的使用非常简单，可以通过&lt;code&gt;man Xephyr&lt;/code&gt;命令查看它的使用手册。如果输入&lt;code&gt;Xephyr :1 -screen 1024x768&lt;/code&gt;命令，就可以在现有图形界面中打开一个窗口模式的 X Server，其中&lt;code&gt;-screen&lt;/code&gt;参数用来指定 X Server 显示区域的大小。以后再启动 GUI 程序，就可以通过程序的 &lt;code&gt;-display :1&lt;/code&gt; 选项让程序运行在这个嵌套的 X Server 中，如下图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/16576/201811/16576-20181101000928719-1452715133.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;怎么样，是不是很好玩呢？除了好玩，还很有用，比如调试窗口管理器啊、连接远程桌面啊什么的都用得着。当然，我这里只是简单展示一下原来 X Window 还可以这么玩。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;1.在一个 Linux 系统中存在多个虚拟控制台，所以可以启动多个 X Server；&lt;/p&gt;
+&lt;p&gt;2.启动 X Server 的方式有两种，一种是使用 /usr/bin/X、startx、xinit 手动启动，一种是通过显示管理器启动；&lt;/p&gt;
+&lt;p&gt;3.远程计算机连接本地的 X Server，需要 X Server 开放 TCP 端口，还要搞定安全认证；&lt;/p&gt;
+&lt;p&gt;4.如果觉得搞定 X Server 的 TCP 端口和安全认证太麻烦，可以使用 SSH 的 X11 Forwarding 功能，远程连接 X Server 超级方便；&lt;/p&gt;
+&lt;p&gt;5.X Server 的配置，可以通过命令行参数，可以通过环境变量，还可以通过配置文件；&lt;/p&gt;
+&lt;p&gt;6.可以在现有的图形界面下以窗口模式运行嵌套的 X Server，常用的软件是 Xephyr；&lt;/p&gt;
+&lt;p&gt;7.使用 XMing 和 PuTTY，把 Linux 图形界面带入 Windows 不是梦。&lt;/p&gt;
+&lt;h2 id=&quot;求打赏&quot;&gt;求打赏&lt;/h2&gt;
+&lt;p&gt;我对这次写的这个系列要求是非常高的：首先内容要有意义、够充实，信息量要足够丰富；其次是每一个知识点要讲透彻，不能模棱两可含糊不清；最后是包含丰富的截图，让那些不想装 Linux 系统的朋友们也可以领略到 Linux 桌面的风采。如果我的努力得到大家的认可，可以扫下面的二维码打赏一下：&lt;br/&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/16576/201808/16576-20180831154735325-1276475036.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;版权申明&quot;&gt;版权申明&lt;/h2&gt;
+&lt;p&gt;该随笔由京山游侠在2018年11月01日发布于博客园，引用请注明出处，转载或出版请联系博主。QQ邮箱：1841079@qq.com&lt;/p&gt;
+</description>
+<pubDate>Wed, 31 Oct 2018 16:20:00 +0000</pubDate>
+<dc:creator>京山游侠</dc:creator>
+<og:description>特别说明： 要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用 标记数学公式的开始和结束。如果某条评论中出现了两个 ，MathJax 会将两个</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/youxia/p/LinuxDesktop009.html</dc:identifier>
+</item>
+<item>
+<title>一个磁盘I/O故障导致的AlwaysOn FailOver 过程梳理和分析 - 东山絮柳仔</title>
+<link>http://www.cnblogs.com/xuliuzai/p/9886686.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xuliuzai/p/9886686.html</guid>
+<description>&lt;p&gt;下面是我们在使用AlwaysOn过程中遇到的一个切换案例。这个案例发生在2014年8月，虽然时间相对久远了，但是对我们学习理解AlwaysOn的FailOver原理和过程还是很有帮助的。本次FailOver的触发原因是系统I/O问题。大家需要理解，操作系统I/O出现了问题不一定立即触发SQL Server发生漂移，因为坏的槽点可能不在SQL Server实例所用到的位置，但是随着时间持续 和数据堆积，问题槽点可能扩大升级。我们可以看到在本例中，第一次出现I/O问题到SQL Server 漂移间隔了16分钟，所以大家不要奇怪。我们重点可以FailOver的过程和触发条件设置上，即文章的第二和第三部分。&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;一 . 系统 I/O 异常 Log追踪 &lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;1.1  &lt;/strong&gt;&lt;span&gt;10:36:12&lt;/span&gt; &lt;strong&gt;发现I/O异常&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233108173-1833933547.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1.2   &lt;span&gt;10:45:43   &lt;/span&gt; 显示个别读写花费时间较长&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233151268-934544440.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1.3  &lt;/strong&gt;&lt;span&gt;10:45:28&lt;/span&gt; &lt;strong&gt;看似I/O严重&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233337171-1907524134.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1.4   &lt;span&gt;10:52:20&lt;/span&gt; 出现个别连接Fail&lt;/strong&gt;&lt;strong&gt;现象&lt;/strong&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;（查看表中的最后一笔数据显示为&lt;strong&gt;&lt;span&gt;10:53:17&lt;/span&gt;&lt;/strong&gt;）&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233549730-1549731348.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
+&lt;h2 align=&quot;left&quot;&gt;&lt;strong&gt;二&lt;/strong&gt;&lt;strong&gt; . AlwaysOn FailOver&lt;/strong&gt; &lt;strong&gt;过程&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;2.1&lt;/strong&gt; &lt;strong&gt;系统提示需要FailOver&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233722189-1003986653.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;2.2&lt;/strong&gt; &lt;strong&gt;高可用性组的本地副本需要离线。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031233826582-2041337265.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p class=&quot;Default&quot;&gt;（&lt;em&gt;&lt;strong&gt;相关知识：&lt;/strong&gt;&lt;/em&gt;Lease expired event from the cluster. Possible causes include loss of lease, possible network issues and sp_server_diagnostic query timeout. ）&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2.3&lt;/strong&gt; &lt;strong&gt;错误提示信息显示，SQL Instance&lt;/strong&gt;&lt;strong&gt;和WSFC&lt;/strong&gt;&lt;strong&gt;连接异常。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031234035768-599487092.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2.4&lt;/strong&gt; &lt;strong&gt;可用性副本的角色发生变换。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031234143457-2126959940.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;2.5 &lt;/strong&gt;&lt;strong&gt;角色为RESOLVING&lt;/strong&gt;&lt;strong&gt;无法访问DB&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031234240961-2082084270.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;（&lt;em&gt;&lt;strong&gt;相关知识：&lt;/strong&gt;&lt;/em&gt;When the role of an availability replica is indeterminate, such as during a failover, its databases are temporarily in a NOT SYNCHRONIZING state. Their role is set to RESOLVING until the role of the availability replica has resolved.）&lt;/p&gt;
+&lt;p&gt;此时： 通过SSMS管理器，连接数据也是不可以访问的，显示状态为不同步了。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780228/201810/780228-20181031234343938-860148562.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;三 . 相关知识点&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;3.1  &lt;/strong&gt;&lt;strong&gt;什么是resourceDell&lt;/strong&gt;&lt;strong&gt;？resourceDell&lt;/strong&gt;&lt;strong&gt;的用途？&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;由于AlwaysOn可用性组是建立在Windows故障转移群集之上的，Alwayson可用性组需要一个群集resourceDell来连接Windows群集和SQLServer实例。由于可用性组是一个群集资源，Windows群集需要透过AlwaysOn的resourceDell来控制资源的上线/离线，检查资源是否失败，更改资源的状态和属性，以及发生各种命令给可用性副本实例。（AlwaysOn可用性组的资源类型是“SQLServer Availability Group”）&lt;/p&gt;
+&lt;p&gt;AlwaysOn通过sp_server_diagnostics来检查可用性组的健康状况，不断地获得诊断信息。sp_server_diagnostics的评估结果会被用来和AlwaysOn可用性组的FailureConditionLevel设置相比较，来约定是否符合发生故障转移的条件。一旦条件满足，则可用性组就被切换到新的可用性副本上。&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;3.2  &lt;/strong&gt;&lt;strong&gt;HealthCheckTimeout&lt;/strong&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;The HealthCheckTimeout setting is used to specify the length of time, in milliseconds, that the SQL Server resource DLL should wait for information returned by the sp_server_diagnostics stored procedure before reporting the AlwaysOn Failover Cluster Instance (FCI) as unresponsive. Changes that are made to the timeout settings are effective immediately and do not require a restart of the SQL Server resource.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;The resource DLL determines the responsiveness of the SQL instance using a health check timeout. The HealthCheckTimeout property defines how long the resource DLL should wait for the sp_server_diagnostics stored procedure before it reports the SQL instance as unresponsive to the WSFC service.&lt;/p&gt;
+&lt;p&gt;The following items describe how this property affects timeout and repeat interval settings:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;The resource DLL calls the sp_server_diagnostics stored procedure and sets the repeat interval to one-third of the HealthCheckTimeout setting.&lt;/li&gt;
+&lt;li&gt;If the sp_server_diagnostics stored procedure is slow or is not returning information, the resource DLL will wait for the interval specified by HealthCheckTimeout before it reports to the WSFC service that the SQL instance is unresponsive.&lt;/li&gt;
+&lt;li&gt;If the dedicated connection is lost, the resource DLL will retry the connection to the SQL instance for the interval specified by HealthCheckTimeout before it reports to the WSFC service that the SQL instance is unresponsive.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;3.3  &lt;/strong&gt;&lt;strong&gt;FailureConditionLevel&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;The SQL Server Database Engine resource DLL determines whether the detected health status is a condition for failure using the FailureConditionLevel property. The FailureConditionLevel property defines which detected health statuses cause restarts or failovers.&lt;/p&gt;
+&lt;p&gt;Review sp_server_diagnostics (Transact-SQL) as this system stored procedure plays in important role in the failure condition levels.&lt;/p&gt;
+&lt;table border=&quot;1&quot; cellpadding=&quot;0&quot;&gt;&lt;tbody readability=&quot;18.5&quot;&gt;&lt;tr&gt;&lt;td&gt;
+&lt;p align=&quot;center&quot;&gt;&lt;strong&gt;Level&lt;/strong&gt;&lt;/p&gt;
+&lt;/td&gt;
+&lt;td&gt;
+&lt;p align=&quot;center&quot;&gt;&lt;strong&gt;Condition&lt;/strong&gt;&lt;/p&gt;
+&lt;/td&gt;
+&lt;td&gt;
+&lt;p align=&quot;center&quot;&gt;&lt;strong&gt;Description&lt;/strong&gt;&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;6&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;0&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;No automatic failover or restart&lt;/p&gt;
+&lt;/td&gt;
+&lt;td&gt;
+&lt;ul&gt;&lt;li&gt;Indicates that no failover or restart will be triggered automatically on any failure conditions. This level is for system maintenance purposes only.&lt;/li&gt;
+&lt;/ul&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;8&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;1&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Failover or restart on server down&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;7&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Indicates that a server restart or failover will be triggered if the following condition is raised:&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server service is down.&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;11&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;2&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Failover or restart on server unresponsive&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;11&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Indicates that a server restart or failover will be triggered if any of the following conditions are raised:&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server service is down.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server instance is not responsive (Resource DLL cannot receive data from sp_server_diagnostics within the HealthCheckTimeout settings).&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;13&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;3&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Failover or restart on critical server errors&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;13&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Indicates that a server restart or failover will be triggered if any of the following conditions are raised:&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server service is down.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server instance is not responsive (Resource DLL cannot receive data from sp_server_diagnostics within the HealthCheckTimeout settings).&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘system error’.&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;14&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;4&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Failover or restart on moderate server errors&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;15&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Indicates that a server restart or failover will be triggered if any of the following conditions are raised:&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server service is down.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server instance is not responsive (Resource DLL cannot receive data from sp_server_diagnostics within the HealthCheckTimeout settings).&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘system error’.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘resource error’.&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;15&quot;&gt;&lt;td&gt;
+&lt;p align=&quot;left&quot;&gt;5&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;5&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Failover or restart on any qualified failure conditions&lt;/p&gt;
+&lt;/td&gt;
+&lt;td readability=&quot;17&quot;&gt;
+&lt;p align=&quot;left&quot;&gt;Indicates that a server restart or failover will be triggered if any of the following conditions are raised:&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server service is down.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;SQL Server instance is not responsive (Resource DLL cannot receive data from sp_server_diagnostics within the HealthCheckTimeout settings).&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘system error’.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘resource error’.&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;System stored procedure sp_server_diagnostics returns ‘query_processing error’.&lt;/p&gt;
+&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p align=&quot;left&quot;&gt; &lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;3.4  &lt;/strong&gt;&lt;strong&gt;通过&lt;/strong&gt;&lt;strong&gt;SQL&lt;/strong&gt;&lt;strong&gt;更改相关配置。&lt;/strong&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;  The following example sets the HealthCheckTimeout option to 15,000 milliseconds (15 seconds).&lt;/p&gt;
+&lt;pre&gt;
+ALTER SERVER CONFIGURATION 
+&lt;/pre&gt;
+&lt;pre&gt;
+SET FAILOVER CLUSTER PROPERTY HealthCheckTimeout = 15000;
+&lt;/pre&gt;
+&lt;p align=&quot;left&quot;&gt;  The following example sets the FailureConditionLevel property to 0, indicating that failover or restart will not be triggered automatically on any failure conditions.&lt;/p&gt;
+&lt;pre&gt;
+ALTER SERVER CONFIGURATION SET FAILOVER CLUSTER PROPERTY FailureConditionLevel = 0;&lt;/pre&gt;
+&lt;h2&gt;&lt;strong&gt;四 . 结语&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;strong&gt;&lt;strong&gt;  可用性副本的FailOver不仅仅取决于Availability Mode 和FailOver Mode,还要受限于FailureConditionLevel。&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;strong&gt; &lt;/strong&gt;本文版权归作者所有，未经作者同意不得转载,谢谢配合！！！&lt;/strong&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 31 Oct 2018 15:59:00 +0000</pubDate>
+<dc:creator>东山絮柳仔</dc:creator>
+<og:description>下面是我们在使用AlwaysOn过程中遇到的一个切换案例。这个案例发生在2014年8月，虽然时间相对久远了，但是对我们学习理解AlwaysOn的FailOver原理和过程还是很有帮助的。本次FailO</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/xuliuzai/p/9886686.html</dc:identifier>
+</item>
+<item>
+<title>Kali Linux ——在无网络情况下安装无线网卡驱动 - moonfair</title>
+<link>http://www.cnblogs.com/moonfair/p/9886147.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/moonfair/p/9886147.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;&lt;span&gt;1、背景：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　今日刚刚开始学习kali linux，众所周知，安装完成后，系统是没有无线网卡驱动的，这就对学生党造成相当的困扰：校园网要连接有线是需要认证客户端的，而认证客户端只有windows端，如此一来，无线网也连不上，有线网也连不上，这就......很尴尬。&lt;/p&gt;
+&lt;p&gt;　　因此我走访各大博客，虽然没能直接解决问题，但也给了我一定的启发，最终摸索出一条不难实现的道路。&lt;/p&gt;
+&lt;p&gt;　　在此我将分享自己解决问题的过程，希望能对有需要的读者有所帮助。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;2、操作环境：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;span&gt;我的电脑是      联想ThinkPad E431&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　无线网卡是     Broadcom 802.11n &lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　linux 版本是     Kali linux 2018.3a amd64&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　linux 内核版本是    4.15.0-kali2-amd64&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　有配置不同的同学也不要着急，本文提供的方法具备一般性，相信可以给你一定的启发。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;3、原理：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　&lt;/strong&gt;&lt;span&gt;废话说到这里，来谈一谈我的想法：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　 这个方法是根据 “&lt;strong&gt;有线网环境下安装无线驱动&lt;/strong&gt;” 的情况改编的。我翻阅了大量博客后发现，安装无线网卡的&lt;span&gt;&lt;strong&gt;过程大多分为两步：&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;                                                           &lt;/strong&gt;&lt;/span&gt;&lt;/span&gt; &lt;span&gt;&lt;span&gt;&lt;strong&gt; 1、安装核心头文件&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　　　　　　　　　　　　　　　　2、安装无线网卡驱动 &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;4、过程：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　原文是通过 apt-get 直接安装的，而我们没有网络环境，但是转念一想，通过apt-get 安装，本质上也是从 软件源 的网站下载，既然如此，我们为什么不&lt;span&gt;&lt;strong&gt;直接从源网站下载需要的文件&lt;/strong&gt;&lt;/span&gt;呢？&lt;/p&gt;
+&lt;p&gt;　　于是我访问了中科大的 kali 镜像站：&lt;/p&gt;
+&lt;p&gt;　　　　&lt;a href=&quot;http://mirrors.ustc.edu.cn/kali&quot; target=&quot;_blank&quot;&gt;http://mirrors.ustc.edu.cn/kali&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;　　发现是这样一个页面，&lt;strong&gt;其中的文件是可以直接下载的&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1467200/201810/1467200-20181031194418171-1708764464.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;　　&lt;/strong&gt;但是我们同样面对两个问题：&lt;/p&gt;
+&lt;p&gt;　　　　&lt;span&gt;&lt;strong&gt;1、该下载什么&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　　　&lt;span&gt;&lt;strong&gt;2、要下载的文件在哪个目录下&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　下文将逐一解决这两个问题&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;5、下载什么文件&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;1、内核头文件&lt;/strong&gt;&lt;/span&gt;　　&lt;/p&gt;
+&lt;p&gt;　　　　　　  &lt;span&gt;&lt;strong&gt;&lt;span&gt;在终端执行命令：   uname -r&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　　　　　得到内核版本为 ：    4.15.0-kali2-amd64&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　　　　　记住这个版本号，这就是一会要下载的内核头文件版本&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　 　&lt;strong&gt;&lt;span&gt;2、网卡驱动&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;在终端执行命令： lspci | grep -i net&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　 &lt;span&gt;得到两行信息，第一行是你的有线网，第二行就是我们要的无线网&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　同样记住这个无线网卡的型号&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;strong&gt;3、前置驱动dkms，kbuild和debhelper&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　这个则没有特别的要求，会在下一节讲解如何下载&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;6、在哪个目录下载文件：&lt;/span&gt;（为了方便大家阅读，需要下载的文件都将用&lt;span&gt;绿底粗体&lt;/span&gt;标注出来）&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　&lt;span&gt;关于这点我则是借鉴了 “从ISO镜像安装” 的思路，不过原文是ubuntu的系统，他们的ISO镜像里集成了大量的资源，但我们 kali 没有啊，只能去镜像站下了。尽管如此，原文中列出了linux镜像中存放文件的规律，而这一规律在镜像站也同样适用，因此我得以顺利从网站找到需要的文件。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　如上文所见，要找的文件有三种：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　&lt;strong&gt;&lt;span&gt;1）内核头文件&lt;/span&gt;　（这里用 4.15.0-kali2-amd64 的内核版本来举例，在实际应用时，请替换成自己的版本号）&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　&lt;strong&gt;&lt;span&gt;路径：　/pool/main/l/linux/&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　&lt;strong&gt;&lt;span&gt;需要的文件：     linux-headers-4.15.0.kali2-amd64&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　可是啊，好事多磨，你多半会发现，&lt;span&gt;&lt;strong&gt;镜像站里的内核版本是4.18.0 的&lt;/strong&gt;&lt;/span&gt;，这和你的根本不一样啊，这怎么用呢。。。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　这里我没有贸然去尝试使用不同内核版本的头文件，而是&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　&lt;span&gt;&lt;strong&gt;选择升级kali的内核版本&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　当然这又是一个艰苦地翻博客的过程，其中辛酸就不足为外人道了，这里直接为大家献上解决方案：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　 在&lt;span&gt;&lt;strong&gt;同一个目录下&lt;/strong&gt;&lt;/span&gt;寻找以下文件并下载：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;strong&gt;&lt;span&gt;linux-kbuild-4.18_4.18.10-2kali1_amd64.deb&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;strong&gt;&lt;span&gt;linux-compiler-gcc-7-x86 4.18.10-2kali amd64.deb&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;span&gt;&lt;strong&gt;linux-headers-4.18.0-kali2-amd64_4.18.10-2kali_amd64.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;strong&gt;&lt;span&gt;linux-headers-4.18.0-kali2-common_4.18.10-2kali1_all.deb&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;span&gt;&lt;strong&gt;linux-image-4.18.0-kali2-cloud-amd64_4.18.10-2kali1_amd64.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;span&gt;&lt;strong&gt;linux-image-4.18.0-kali2-rt-amd64_4.18.10-2kali1_amd64.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　&lt;span&gt;&lt;strong&gt;linux-image-4.18.0-kali2-amd64_4.18.10-2kali1_amd64.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; 　　　　　　　　这些文件基本包含了安装新内核及其头文件所需的所有文件，但根据具体情况，可能仍有缺漏，因此在读者安装时，&lt;span&gt;&lt;strong&gt;仍可能会缺失一些依赖&lt;/strong&gt;&lt;/span&gt;，                     若发生这种情况，推荐读者&lt;span&gt;&lt;strong&gt;仍在该目录下进行寻找&lt;/strong&gt;&lt;/span&gt;，或&lt;span&gt;&lt;strong&gt;联系博主以获取帮助&lt;/strong&gt;&lt;/span&gt;。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　&lt;span&gt;&lt;strong&gt;2）网卡驱动&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;&lt;strong&gt;路径：  /pool/non-free/b/broadcom-sta&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;&lt;strong&gt;文件：  broadcom-sta-dkms_驱动版本号.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;strong&gt;注意：此文件的位置取决于读者自己的网卡型号，抱歉不能为其他网卡型号的朋友提供帮助，大家可以尝试参考其他博客或从网卡的官网寻找相应的linux驱动&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　&lt;span&gt;&lt;strong&gt;3）一些依赖文件&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;strong&gt;&lt;span&gt;路径： /pool/main/d/dkms&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;&lt;strong&gt;文件：dkms_2.6.1-1_all.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;&lt;strong&gt;路径：/pool/main/d/debhelper&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　&lt;span&gt;&lt;strong&gt;文件：debhelper_11.4.1_all.deb&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　　　　　　　　&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;7、安装&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　安装属于常规操作，不想看的大牛们可以跳过这一节&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　 &lt;strong&gt;1）&lt;/strong&gt;  用U盘将上一节中下载的文件拷贝到&lt;span&gt;&lt;strong&gt;文件管理器的一个目录下&lt;/strong&gt;&lt;/span&gt;，推荐选择  “下载”  这个目录&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　 　&lt;strong&gt;2）&lt;/strong&gt; 在这一目录下右击鼠标，选择 &lt;span&gt;&lt;strong&gt;“在终端打开”&lt;/strong&gt;&lt;/span&gt;  &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　 &lt;strong&gt;3）&lt;/strong&gt; 输入命令    &lt;span&gt;&lt;strong&gt; dpkg -i  文件名&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;            （提示：&lt;strong&gt;可以只输入一部分文件名，然后按Tab键来补全，再按一次以选择下一个有同样前缀的文件&lt;/strong&gt;）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　 &lt;strong&gt;4）重新启动&lt;/strong&gt;，如果一切顺利，你的无线驱动已经安装完成了！&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;8、可能出现的问题　&lt;/strong&gt;&lt;/span&gt;　　　&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　&lt;span&gt;&lt;strong&gt;1）安装过程中出现依赖缺失&lt;/strong&gt;&lt;/span&gt;　　&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　&lt;strong&gt;&lt;span&gt;请移步 &lt;a href=&quot;https://www.debian.org/distrib/packages#search_packages&quot; target=&quot;_blank&quot;&gt;&lt;span&gt; https://www.debian.org/distrib/packages#search_packages&lt;/span&gt;&lt;/a&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　　　　在选择&lt;span&gt;&lt;strong&gt;“搜索软件包目录”&lt;/strong&gt;&lt;/span&gt;后，输入缺失包的名称，进入搜索&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　 &lt;/span&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1467200/201810/1467200-20181031212945370-1825794436.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　&lt;strong&gt;然后进入该软件包的下载页面，即可在&lt;span&gt;高亮位置&lt;/span&gt;找到它所在的目录&lt;/strong&gt;&lt;span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;　　　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1467200/201810/1467200-20181031213451277-1806137152.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　&lt;span&gt;&lt;strong&gt;2）重新启动后没有使用新的内核版本&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　　    &lt;span&gt;&lt;strong&gt;若重新启动后使用   uname -r  发现内核版本并没有变化&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　　　　　　  则应该在&lt;span&gt;grub界面&lt;/span&gt;选择 &lt;span&gt;&quot;Advanced options for Kali GNU/Linux&quot;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;　　　　　　　  然后&lt;span&gt;选择新安装的内核版本&lt;/span&gt;即可&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;　　　　　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1467200/201810/1467200-20181031214234437-548809728.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;9、结语&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;　　本片教程就到这里了，博主也是刚开始学习kali，操作中可能有些疏漏和不妥当的地方，恳请各位看到的大牛们不吝指正，我一定会及时修改错误！&lt;br/&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+
+
+
+</description>
+<pubDate>Wed, 31 Oct 2018 15:48:00 +0000</pubDate>
+<dc:creator>moonfair</dc:creator>
+<og:description>本文主要介绍了如何在没有有线网的情况下安装Kali Linux 的无线网卡驱动，主要原理是通过从源网站直接下载缺失的软件包，希望能够帮到大家！</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/moonfair/p/9886147.html</dc:identifier>
+</item>
+<item>
 <title>JVM总括三-字节码、字节码指令、JIT编译执行 - 程序员自我修养张振力</title>
 <link>http://www.cnblogs.com/java-zzl/p/9862329.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/java-zzl/p/9862329.html</guid>
@@ -1214,1886 +1786,6 @@ where
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/mindwind/p/9885688.html</dc:identifier>
-</item>
-<item>
-<title>Java -- 基于JDK1.8的LinkedList源码分析 - 阿呆哥哥</title>
-<link>http://www.cnblogs.com/wjtaigwh/p/9883828.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wjtaigwh/p/9883828.html</guid>
-<description>&lt;p&gt;&lt;span&gt;1，&lt;/span&gt;上周末我们一起分析了ArrayList的源码并进行了一些总结，因为最近在看Collection这一块的东西，下面的图也是大致的总结了Collection里面重要的接口和类，如果没有意外的话后面基本上每一个都会和大家一起学习学习，所以今天也就和大家一起来看看LinkedList吧！&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/824232/201810/824232-20181031202744786-1806050107.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;哦，不对，放错图了，是下面的图，嘿嘿嘿。。。&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/824232/201810/824232-20181031153236363-524771887.png&quot; alt=&quot;&quot; width=&quot;653&quot; height=&quot;347&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;2，&lt;/span&gt;记得首次接触LinkedList还是在大学Java的时候，当时说起LinkedList的特性和应用场景：LinkedList基于双向链表适用于增删频繁且查询不频繁的场景，线程不安全的且适用于单线程（这点和ArrayList很像）。然后还记得一个很深刻的是可以用LinkedList来实现栈和队列，那让我们一起看一看源码到底是怎么来实现这些特点的&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;&lt;span&gt;2.1 构造函数&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;45&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public class LinkedList&amp;lt;E&amp;gt;
-    extends AbstractSequentialList&amp;lt;E&amp;gt;
-    implements List&amp;lt;E&amp;gt;, Deque&amp;lt;E&amp;gt;, Cloneable, java.io.Serializable
-{
-    transient int size = 0;
-    transient Node&amp;lt;E&amp;gt; first;
-    transient Node&amp;lt;E&amp;gt; last;
-    
-    public LinkedList() {
-    }
-
-    public LinkedList(Collection&amp;lt;? extends E&amp;gt; c) {
-        this();
-        addAll(c);
-    }
-    
-    public boolean addAll(Collection&amp;lt;? extends E&amp;gt; c) {
-        return addAll(size, c);
-    }
-    
-    public boolean addAll(int index, Collection&amp;lt;? extends E&amp;gt; c) {
-        checkPositionIndex(index);
-
-        Object[] a = c.toArray();
-        int numNew = a.length;
-        if (numNew == 0)
-            return false;
-
-        Node&amp;lt;E&amp;gt; pred, succ;
-        if (index == size) {
-            succ = null;
-            pred = last;
-        } else {
-            succ = node(index);
-            pred = succ.prev;
-        }
-
-        for (Object o : a) {
-            @SuppressWarnings(&quot;unchecked&quot;) E e = (E) o;
-            Node&amp;lt;E&amp;gt; newNode = new Node&amp;lt;&amp;gt;(pred, e, null);
-            if (pred == null)
-                first = newNode;
-            else
-                pred.next = newNode;
-            pred = newNode;
-        }
-
-        if (succ == null) {
-            last = pred;
-        } else {
-            pred.next = succ;
-            succ.prev = pred;
-        }
-
-        size += numNew;
-        modCount++;
-        return true;
-    }
-    
-    private static class Node&amp;lt;E&amp;gt; {
-        E item;
-        Node&amp;lt;E&amp;gt; next;
-        Node&amp;lt;E&amp;gt; prev;
-
-        Node(Node&amp;lt;E&amp;gt; prev, E element, Node&amp;lt;E&amp;gt; next) {
-            this.item = element;
-            this.next = next;
-            this.prev = prev;
-        }
-    }
-    
-    Node&amp;lt;E&amp;gt; node(int index) {
-        // assert isElementIndex(index);
-
-        if (index &amp;lt; (size &amp;gt;&amp;gt; 1)) {
-            Node&amp;lt;E&amp;gt; x = first;
-            for (int i = 0; i &amp;lt; index; i++)
-                x = x.next;
-            return x;
-        } else {
-            Node&amp;lt;E&amp;gt; x = last;
-            for (int i = size - 1; i &amp;gt; index; i--)
-                x = x.prev;
-            return x;
-        }
-    }    
-    
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　首先我们知道常见的构造是LinkedList()和LinkedList(Collection&amp;lt;? extends E&amp;gt; c)两种，然后再来看看我们继承的类和实现的接口&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-LinkedList 集成AbstractSequentialList抽象类，内部使用listIterator迭代器来实现重要的方法
-LinkedList 实现 List 接口，能对它进行队列操作。
-LinkedList 实现 Deque 接口，即能将LinkedList当作双端队列使用。
-LinkedList 实现了Cloneable接口，即覆盖了函数clone()，能克隆。
-LinkedList 实现java.io.Serializable接口，这意味着LinkedList支持序列化，能通过序列化去传输。
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　可以看到，相对于ArrayList，LinkedList多实现了Deque接口而少实现了RandomAccess接口，且LinkedList继承的是AbstractSequentialList类，而ArrayList继承的是AbstractList类。那么我们现在有一个疑问，这些多实现或少实现的接口和类会对我们LinkedList的特点产生影响吗？这里我们先将这个疑问放在心里，我们先走正常的流程，先把LinkedList的源码看完（主要是要解释这些东西看Deque的源码，还要去看Collections里面的逻辑，我怕扯远了）&lt;/p&gt;
-&lt;p&gt;　　第5-7行：定义记录元素数量size，因为我们之前说过LinkedList是个双向链表，所以这里定义了链表链表头节点first和链表尾节点last&lt;/p&gt;
-&lt;p&gt;　　第60-70行：定义一个节点Node类，next表示此节点的后置节点，prev表示侧节点的前置节点，element表示元素值&lt;/p&gt;
-&lt;p&gt;　　第22行：检查当前的下标是否越界，因为是在构造函数中所以我们这边的index为0，且size也为0&lt;/p&gt;
-&lt;p&gt;　　第24-29行：将集合c转化为数组a，并获取集合的长度；定义节点pred、succ，pred用来记录前置节点，succ用来记录后置节点&lt;/p&gt;
-&lt;p&gt;　   第70-89行：node()方法是获取LinkedList中第index个元素，且根据index处于前半段还是后半段 进行一个折半，以提升查询效率&lt;/p&gt;
-&lt;p&gt;　　第30-36行：如果index==size，则将元素追加到集合的尾部，pred = last将前置节点pred指向之前结合的尾节点，如果index！=size表明是插入集合，通过node(index)获取当前要插入index位置的节点，且pred = succ.prev表示将前置节点指向于当前要插入节点位置的前置节点&lt;/p&gt;
-&lt;p&gt;　　第38-46行：链表批量增加，是靠for循环遍历原数组，依次执行插入节点操作，第40行以前置节点 和 元素值e，构建new一个新节点；第41行如果前置节点是空，说明是头结点，且将成员变量first指向当前节点，如果不是头节点，则将上一个节点的尾节点指向当前新建的节点；第45行将当前的节点为前置节点了，为下次添加节点做准备。这些走完基本上我们的新节点也都创建出来了，可能这块代码有点绕，大家多看看&lt;/p&gt;
-&lt;p&gt;　　第48-53行：循环结束后，判断如果后置节点是null， 说明此时是在队尾添加的，设置一下队列尾节点last，如果不是在队尾，则更新之前插入位置节点的前节点和当前要插入节点的尾节点&lt;/p&gt;
-&lt;p&gt;　　第55-56行：修改当前集合数量、修改modCount记录值&lt;/p&gt;
-&lt;p&gt;　　ok,虽然说是分析的构造函数的源码，但是把node(int index)、addAll(int index, Collection&amp;lt;? extends E&amp;gt; c)方法也都看了，所以来小结一下：链表批量增加，是靠for循环遍历原数组，依次执行插入节点操作；通过下标index来获取节点Node是采用的折半法来提升效率的&lt;/p&gt;
-&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;2.2 增加元素&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　常见的方法有以下三种&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-linkedList.add(E e)
-linkedList.add(int index, E element)
-linkedList.addAll(Collection&amp;lt;? extends E&amp;gt; c)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　来看看具体的源码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;43&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public boolean add(E e) {
-        linkLast(e);
-        return true;
-    }
-
- void linkLast(E e) {
-        final Node&amp;lt;E&amp;gt; l = last;
-        final Node&amp;lt;E&amp;gt; newNode = new Node&amp;lt;&amp;gt;(l, e, null);
-        last = newNode;
-        if (l == null)
-            first = newNode;
-        else
-            l.next = newNode;
-        size++;
-        modCount++;
-}
-
-public void add(int index, E element) {
-        checkPositionIndex(index);
-
-        if (index == size)
-            linkLast(element);
-        else
-            linkBefore(element, node(index));
-    }
-
- void linkBefore(E e, Node&amp;lt;E&amp;gt; succ) {
-        // assert succ != null;
-        final Node&amp;lt;E&amp;gt; pred = succ.prev;
-        final Node&amp;lt;E&amp;gt; newNode = new Node&amp;lt;&amp;gt;(pred, e, succ);
-        succ.prev = newNode;
-        if (pred == null)
-            first = newNode;
-        else
-            pred.next = newNode;
-        size++;
-        modCount++;
-    }
-
-public boolean addAll(Collection&amp;lt;? extends E&amp;gt; c) {
-        return addAll(size, c);
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　第2、6-16行：创建一个newNode它的prev指向之前队尾节点last，并记录元素值e，之前的队尾节点last的next指向当前节点，size自增，modcount自增&lt;/p&gt;
-&lt;p&gt;　　第18-20，27-38行：首先去检查下标是否越界，然后判断如果加入的位置刚好位于队尾就和我们add（E element）的逻辑一样了，如果不是则需要通过 node(index)函数定位出当前位于index下标的node，再通过linkBefore()函数创建出newNode将其插入到原先index位置&lt;/p&gt;
-&lt;p&gt;　　第40-42行：就是我们在构造函数中看过的批量加入元素的方法&lt;/p&gt;
-&lt;p&gt;　　OK，添加元素也很简单，如果是在队尾进行添加的话只需要创建一个新Node将其前置节点指向之前的last，如果是在队中添加节点，首选拆散原先的index-1、index、index+1之间的联系，新建节点插入进去即可。&lt;/p&gt;
-&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;2.3 删除元素&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　常见方法有以下这几个方法&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-linkedList.remove(int index)
-linkedList.remove(Object o)
-linkedList.remove(Collection&amp;lt;?&amp;gt; c)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　源码如下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public E remove(int index) {
-        checkElementIndex(index);
-        return unlink(node(index));
-    }
-
-unlink(Node&amp;lt;E&amp;gt; x) {
-        // assert x != null;
-        final E element = x.item;
-        final Node&amp;lt;E&amp;gt; next = x.next;
-        final Node&amp;lt;E&amp;gt; prev = x.prev;
-
-        if (prev == null) {
-            first = next;
-        } else {
-            prev.next = next;
-            x.prev = null;
-        }
-
-        if (next == null) {
-            last = prev;
-        } else {
-            next.prev = prev;
-            x.next = null;
-        }
-
-        x.item = null;
-        size--;
-        modCount++;
-        return element;
-    }
-
-public boolean remove(Object o) {
-        if (o == null) {
-            for (Node&amp;lt;E&amp;gt; x = first; x != null; x = x.next) {
-                if (x.item == null) {
-                    unlink(x);
-                    return true;
-                }
-            }
-        } else {
-            for (Node&amp;lt;E&amp;gt; x = first; x != null; x = x.next) {
-                if (o.equals(x.item)) {
-                    unlink(x);
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
- public boolean removeAll(Collection&amp;lt;?&amp;gt; c) {
-        Objects.requireNonNull(c);
-        boolean modified = false;
-        Iterator&amp;lt;?&amp;gt; it = iterator();
-        while (it.hasNext()) {
-            if (c.contains(it.next())) {
-                it.remove();
-                modified = true;
-            }
-        }
-        return modified;
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　第1-4，6-30行：首先根据index通过方法值node(index)来确定出集合中的下标是index的node，咋们主要看unlink()方法，代码感觉很多，其实只是将当前要删除的节点node的头结点的尾节点指向node的尾节点、将node的尾结点的头节点指向node的头节点，可能有点绕（哈哈），看一下代码基本上就可以理解了，然后将下标为index的node置空，供GC回收&lt;/p&gt;
-&lt;p&gt;　　第32-49行：首先判断一下当前要删除的元素o是否为空，然后进行for循环定位出当前元素值等于o的节点node，然后再走的逻辑就是上面我们看到过的unlink()方法，也很简单，比remove(int index) 多了一步&lt;/p&gt;
-&lt;p&gt;　　第51-62行：这一块因为涉及到迭代器Iterator，而我们LinkedList使用的是ListItr，这个后面我们将迭代器的时候一起讲，不过大致的逻辑是都可以看懂的，和我们的ArrayList的迭代器方法的含义一样的，可以先那样理解&lt;/p&gt;
-&lt;p&gt;　　ok，小结一下， 按下标删，也是先根据index找到Node，然后去链表上unlink掉这个Node。 按元素删，会先去遍历链表寻找是否有该Node，考虑到允许null值，所以会遍历两遍，然后再去unlink它。&lt;/p&gt;
-&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;2.5 修改元素&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public E set(int index, E element) {
-        checkElementIndex(index);
-        Node&amp;lt;E&amp;gt; x = node(index);
-        E oldVal = x.item;
-        x.item = element;
-        return oldVal;
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　只有这一种方法，首先检查下标是否越界，然后根据下标获取当前Node，然后修改节点中元素值item，超级简单&lt;/p&gt;
-&lt;p&gt;　&lt;span&gt;&lt;strong&gt;　2.6 查找元素&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;36&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public E get(int index) {
-    checkElementIndex(index);//判断是否越界 [0,size)
-    return node(index).item; //调用node()方法 取出 Node节点，
-}
-
-
- public int indexOf(Object o) {
-        int index = 0;
-        if (o == null) {
-            for (Node&amp;lt;E&amp;gt; x = first; x != null; x = x.next) {
-                if (x.item == null)
-                    return index;
-                index++;
-            }
-        } else {
-            for (Node&amp;lt;E&amp;gt; x = first; x != null; x = x.next) {
-                if (o.equals(x.item))
-                    return index;
-                index++;
-            }
-        }
-        return -1;
-    }
-
- public int lastIndexOf(Object o) {
-        int index = size;
-        if (o == null) {
-            for (Node&amp;lt;E&amp;gt; x = last; x != null; x = x.prev) {
-                index--;
-                if (x.item == null)
-                    return index;
-            }
-        } else {
-            for (Node&amp;lt;E&amp;gt; x = last; x != null; x = x.prev) {
-                index--;
-                if (o.equals(x.item))
-                    return index;
-            }
-        }
-        return -1;
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　获取元素的源码也很简单，主要是通过node(index)方法获取节点，然后获取元素值，indexOf和lastIndexOf方法的区别在于一个是从头向尾开始遍历，一个是从尾向头开始遍历&lt;/p&gt;
-&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;2.7 迭代器&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;37&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
- public Iterator&amp;lt;E&amp;gt; iterator() {
-        return listIterator();
-    }
-
-public ListIterator&amp;lt;E&amp;gt; listIterator() {
-        return listIterator(0);
-    }
-
-public ListIterator&amp;lt;E&amp;gt; listIterator(final int index) {
-        rangeCheckForAdd(index);
-
-        return new ListItr(index);
-    }
-
-private class ListItr extends Itr implements ListIterator&amp;lt;E&amp;gt; {
-        ListItr(int index) {
-            cursor = index;
-        }
-
-        public boolean hasPrevious() {
-            return cursor != 0;
-        }
-
-        public E previous() {
-            checkForComodification();
-            try {
-                int i = cursor - 1;
-                E previous = get(i);
-                lastRet = cursor = i;
-                return previous;
-            } catch (IndexOutOfBoundsException e) {
-                checkForComodification();
-                throw new NoSuchElementException();
-            }
-        }
-
-        public int nextIndex() {
-            return cursor;
-        }
-
-        public int previousIndex() {
-            return cursor-1;
-        }
-
-        public void set(E e) {
-            if (lastRet &amp;lt; 0)
-                throw new IllegalStateException();
-            checkForComodification();
-
-            try {
-                AbstractList.this.set(lastRet, e);
-                expectedModCount = modCount;
-            } catch (IndexOutOfBoundsException ex) {
-                throw new ConcurrentModificationException();
-            }
-        }
-
-        public void add(E e) {
-            checkForComodification();
-
-            try {
-                int i = cursor;
-                AbstractList.this.add(i, e);
-                lastRet = -1;
-                cursor = i + 1;
-                expectedModCount = modCount;
-            } catch (IndexOutOfBoundsException ex) {
-                throw new ConcurrentModificationException();
-            }
-        }
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　可以看到，其实最后使用的迭代器是使用的ListIterator类，且集成自Itr，而Itr类就是我们昨天ArrayList内部使用的类，hasNext()方法和我们之前的一样，判断不等于size大小，然后next()获取元素主要也是E next = get(i);这行代码，这样就又走到我们之前的获取元素的源码当中，获得元素值。&lt;/p&gt;
-&lt;p&gt;　　OK，这样我们上面的基本方法都看完了，再来看看我们上面遗留的问题，首先来看Deque接口有什么作用，我们来一起看看&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;39&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-Deque 是 Double ended queue (双端队列) 的缩写,读音和 deck 一样，蛋壳。
-Deque 继承自 Queue,直接实现了它的有 LinkedList, ArayDeque, ConcurrentLinkedDeque 等。
-Deque 支持容量受限的双端队列，也支持大小不固定的。一般双端队列大小不确定。
-Deque 接口定义了一些从头部和尾部访问元素的方法。比如分别在头部、尾部进行插入、删除、获取元素。
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public interface Deque&amp;lt;E&amp;gt; extends Queue&amp;lt;E&amp;gt; {
-    void addFirst(E e);//插入头部，异常会报错
-    boolean offerFirst(E e);//插入头部，异常不报错
-    E getFirst();//获取头部，异常会报错
-    E peekFirst();//获取头部，异常不报错
-    E removeFirst();//移除头部，异常会报错
-    E pollFirst();//移除头部，异常不报错
-
-    void addLast(E e);//插入尾部，异常会报错
-    boolean offerLast(E e);//插入尾部，异常不报错
-    E getLast();//获取尾部，异常会报错
-    E peekLast();//获取尾部，异常不报错
-    E removeLast();//移除尾部，异常会报错
-    E pollLast();//移除尾部，异常不报错
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　Deque也就是一个接口，上面是接口里面的方法，然后了解Deque就必须了解Queue&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public interface Queue&amp;lt;E&amp;gt; extends Collection&amp;lt;E&amp;gt; {
-    //往队列插入元素，如果出现异常会抛出异常
-    boolean add(E e);
-    //往队列插入元素，如果出现异常则返回false
-    boolean offer(E e);
-    //移除队列元素，如果出现异常会抛出异常
-    E remove();
-    //移除队列元素，如果出现异常则返回null
-    E poll();
-    //获取队列头部元素，如果出现异常会抛出异常
-    E element();
-    //获取队列头部元素，如果出现异常则返回null
-    E peek();
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　然后我们知道LinkedList实现了Deque接口，也就是说可以使用LinkedList实现栈和队列的功能，让写写看&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-package com.ysten.leakcanarytest;
-
-import java.util.Collection;
-import java.util.LinkedList;
-
-/**
- * desc    : 实现栈
- * time    : 2018/10/31 0031 19:07
- *
- * @author : wangjitao
- */
-public class Stack&amp;lt;T&amp;gt;
-{
-    private LinkedList&amp;lt;T&amp;gt; stack;
-
-    //无参构造函数
-    public Stack()
-    {
-        stack=new LinkedList&amp;lt;T&amp;gt;();
-    }
-    //构造一个包含指定collection中所有元素的栈
-    public Stack(Collection&amp;lt;? extends T&amp;gt; c)
-    {
-        stack=new LinkedList&amp;lt;T&amp;gt;(c);
-    }
-    //入栈
-    public void push(T t)
-    {
-        stack.addFirst(t);
-    }
-    //出栈
-    public T pull()
-    {
-        return stack.remove();
-    }
-    //栈是否为空
-    boolean isEmpty()
-    {
-        return stack.isEmpty();
-    }
-
-    //打印栈元素
-    public void show()
-    {
-        for(Object o:stack)
-            System.out.println(o);
-    }
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　测试功能&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-public static void main(String[] args){
-        Stack&amp;lt;String&amp;gt; stringStack = new Stack&amp;lt;&amp;gt;();
-        stringStack.push(&quot;1&quot;);
-        stringStack.push(&quot;2&quot;);
-        stringStack.push(&quot;3&quot;);
-        stringStack.push(&quot;4&quot;);
-        stringStack. show();
-    }
-
-
-打印结果如下：
-4
-3
-2
-1
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　队列的实现类似的，大家可以下来自己写一下，然后继续我们的问题，实现Deque接口和实现RandomAccess接口有什么区别，我们上面看了Deque接口，实现Deque接口可以拥有双向链表功能，那我们再来看看RandomAccess接口&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; RandomAccess {
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　发现什么都没有，原来RandomAccess接口是一个标志接口（Marker），然而实现这个接口有什么作用呢？&lt;/p&gt;
-&lt;p&gt;　　答案是只要List集合实现这个接口，就能支持快速随机访问，然而又有人问，快速随机访问是什么东西？有什么作用？&lt;/p&gt;
-&lt;p&gt;　　google是这样定义的：给可以提供随机访问的List实现去标识一下，这样使用这个List的程序在遍历这种类型的List的时候可以有更高效率。仅此而已。&lt;/p&gt;
-&lt;p&gt;　　这时候看一下我们Collections类中的binarySearch方法&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;37&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-int binarySearch(List&amp;lt;? extends Comparable&amp;lt;? super T&amp;gt;&amp;gt; list, T key) {
-        if (list instanceof RandomAccess || list.size()&amp;lt;BINARYSEARCH_THRESHOLD)
-            return Collections.indexedBinarySearch(list, key);
-        else
-            return Collections.iteratorBinarySearch(list, key);
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　可以看到这时候去判断了如果当前集合实现了RandomAccess接口就会走Collections.indexedBinarySearch方法，那么我们来看一下Collections.indexedBinarySearch()方法和Collections.iteratorBinarySearch()的区别是什么呢？&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;38&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-int indexedBinarySearch(List&amp;lt;? extends Comparable&amp;lt;? super T&amp;gt;&amp;gt; list, T key) {
-        int low = 0;
-        int high = list.size()-1;
-
-        while (low &amp;lt;= high) {
-            int mid = (low + high) &amp;gt;&amp;gt;&amp;gt; 1;
-            Comparable&amp;lt;? super T&amp;gt; midVal = list.get(mid);
-            int cmp = midVal.compareTo(key);
-
-            if (cmp &amp;lt; 0)
-                low = mid + 1;
-            else if (cmp &amp;gt; 0)
-                high = mid - 1;
-            else
-                return mid; // key found
-        }
-        return -(low + 1);  // key not found
-    }
-
-
-
-int iteratorBinarySearch(List&amp;lt;? extends Comparable&amp;lt;? super T&amp;gt;&amp;gt; list, T key)
-    {
-        int low = 0;
-        int high = list.size()-1;
-        ListIterator&amp;lt;? extends Comparable&amp;lt;? super T&amp;gt;&amp;gt; i = list.listIterator();
-
-        while (low &amp;lt;= high) {
-            int mid = (low + high) &amp;gt;&amp;gt;&amp;gt; 1;
-            Comparable&amp;lt;? super T&amp;gt; midVal = get(i, mid);
-            int cmp = midVal.compareTo(key);
-
-            if (cmp &amp;lt; 0)
-                low = mid + 1;
-            else if (cmp &amp;gt; 0)
-                high = mid - 1;
-            else
-                return mid; // key found
-        }
-        return -(low + 1);  // key not found
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　通过查看源代码，发现实现RandomAccess接口的List集合采用一般的for循环遍历，而未实现这接口则采用迭代器&lt;/p&gt;
-&lt;p&gt;，那现在让我们以LinkedList为例子看一下，通过for循环、迭代器、removeFirst和removeLast来遍历的效率（之前忘记写这一块了，顺便一块先写了对于LinkedList那种访问效率要高一些）&lt;/p&gt;
-&lt;p&gt;　　迭代器遍历&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-LinkedList linkedList = new LinkedList();
-for(int i = 0; i &amp;lt; 100000; i++){
-          linkedList.add(i);
-}
-// 迭代器遍历
- long start = System.currentTimeMillis();
- Iterator iterator = linkedList.iterator();
- while(iterator.hasNext()){
-        iterator.next();
- }
- long end = System.currentTimeMillis();
-  System.out.println(&quot;Iterator：&quot;+ (end - start) +&quot;ms&quot;);
-
-打印结果：Iterator：28ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　for循环get遍历&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-// 顺序遍历(随机遍历)
- long start = System.currentTimeMillis();
- for(int i = 0; i &amp;lt; linkedList.size(); i++){
-            linkedList.get(i);
-}
-long end = System.currentTimeMillis();
-System.out.println(&quot;for ：&quot;+ (end - start) +&quot;ms&quot;);
-
-打印结果   for ：6295ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　使用增强for循环&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-long start = System.currentTimeMillis();
-for(Object  i : linkedList);
-long end = System.currentTimeMillis();
-System.out.println(&quot;增强for ：&quot;+ (end - start) +&quot;ms&quot;);
-
-输出结果 增强for ：6ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　removeFirst来遍历&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-long start = System.currentTimeMillis();
-while(linkedList.size() != 0){
-            linkedList.removeFirst();
-}
-long end = System.currentTimeMillis();
-System.out.println(&quot;removeFirst ：&quot;+ (end - start) +&quot;ms&quot;);
-
-输出结果 removeFirst ：3ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　综上结果可以看到，遍历LinkedList时，使用removeFirst()或removeLast()效率最高，而for循环get()效率最低，应避免使用这种方式进行。应当注意的是，使用removeFirst()或removeLast()遍历时，会删除原始数据，若只单纯的读取，应当选用迭代器方式或增强for循环方式。&lt;/p&gt;
-&lt;p&gt;　　ok，上述的都是只针对LinkedList而言测试的，然后我们接着上面的RandomAccess接口来讲，看看通过对比ArrayList的for循环和迭代器遍历看看访问效率&lt;/p&gt;
-&lt;p&gt;　　ArrayList的for循环&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-long start = System.currentTimeMillis();
-for (int i = 0; i &amp;lt; arrayList.size(); i++) {
-         arrayList.get(i);
-}
- long end = System.currentTimeMillis();
- System.out.println(&quot;for  ：&quot;+ (end - start) +&quot;ms&quot;);
-
-输出结果  for  ：3ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　ArrayList的迭代遍历&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
- long start = System.currentTimeMillis();
-Iterator iterable = arrayList.iterator() ;
-while (iterable.hasNext()){
-         iterable.next();
-}
- long end = System.currentTimeMillis();
- System.out.println(&quot;for  ：&quot;+ (end - start) +&quot;ms&quot;);
-
-输出结果 for  ：6ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　所以让我们来综上对比一下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
-ArrayList
-    普通for循环：3ms
-    迭代器：6ms
-LinkedList
-    普通for循环：6295ms    
-    迭代器：28ms
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　从上面数据可以看出，ArrayList用for循环遍历比iterator迭代器遍历快，LinkedList用iterator迭代器遍历比for循环遍历快,所以对于不同的List实现类，遍历的方式有所不用，RandomAccess接口这个空架子的存在，是为了能够更好地判断集合是否ArrayList或者LinkedList，从而能够更好选择更优的遍历方式，提高性能！&lt;/p&gt;
-&lt;p&gt;　　（在这里突然想起在去年跳槽的时候，有家公司的面试官问我，list集合的哪一种遍历方式要快一些，然后我说我没有每个去试过，结果那位大佬说的是for循环遍历最快，还叫我下去试试，现在想想，只有在集合是ArrayList的时候for循环才最快，对于LinkedList来说for循环反而是最慢的，那位大佬，你欠我一声对不起（手动斜眼微笑））&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;3，&lt;/span&gt;上面把我们该看的点都看了，那么我们再来总结总结：&lt;/p&gt;
-&lt;p&gt;　　LinkedList 是双向列表，链表批量增加，是靠for循环遍历原数组，依次执行插入节点操作。&lt;/p&gt;
-&lt;p&gt;　　ArrayList基于数组， LinkedList基于双向链表，对于随机访问， ArrayList比较占优势，但LinkedList插入、删除元素比较快，因为只要调整指针的指向。针对特定位置需要遍历时，所以LinkedList在随机访问元素的话比较慢。&lt;/p&gt;
-&lt;p&gt;　　LinkedList没有实现自己的 Iterator，使用的是 ListIterator。&lt;/p&gt;
-&lt;p&gt;　　LinkedList需要更多的内存，因为 ArrayList的每个索引的位置是实际的数据，而 LinkedList中的每个节点中存储的是实际的数据和前后节点的位置。&lt;/p&gt;
-&lt;p&gt;　　LinkedList也是非线程安全的，只有在单线程下才可以使用。为了防止非同步访问，Collections类里面提供了synchronizedList()方法。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/824232/201810/824232-20181031202257964-585293961.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　好了，也不早了，大家早点休息，下次再见。。。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 31 Oct 2018 12:29:00 +0000</pubDate>
-<dc:creator>阿呆哥哥</dc:creator>
-<og:description>1，上周末我们一起分析了ArrayList的源码并进行了一些总结，因为最近在看Collection这一块的东西，下面的图也是大致的总结了Collection里面重要的接口和类，如果没有意外的话后面基本</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wjtaigwh/p/9883828.html</dc:identifier>
-</item>
-<item>
-<title>Java入门系列-22-IO流 - 极客大全</title>
-<link>http://www.cnblogs.com/AIThink/p/9885564.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/AIThink/p/9885564.html</guid>
-<description>&lt;h2 id=&quot;file类的使用&quot;&gt;File类的使用&lt;/h2&gt;
-&lt;p&gt;Java程序如何访问文件？通过 java.io.File 类&lt;/p&gt;
-&lt;p&gt;使用File类需要先创建文件对象 &lt;code&gt;File file=new File(String pathname);&lt;/code&gt;，创建时在构造函数中指定物理文件或目录，然后通过文件对象的方法操作文件或目录的属性。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;\ 是特殊字符，要使用需要转义 \\&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;File 类常用方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;10.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;boolean exists()&lt;/td&gt;
-&lt;td&gt;判断文件或目录是否存在&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;boolean isFile()&lt;/td&gt;
-&lt;td&gt;判断是否是文件&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;boolean isDirectory()&lt;/td&gt;
-&lt;td&gt;判断是否是目录&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;String getPath()&lt;/td&gt;
-&lt;td&gt;返回此对象表示的文件的相对路径名&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;String getAbsolutePath()&lt;/td&gt;
-&lt;td&gt;返回此对象表示的文件的绝对路径&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;String getName()&lt;/td&gt;
-&lt;td&gt;返回此对象指定的文件或目录&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;boolean createNewFile()&lt;/td&gt;
-&lt;td&gt;创建名称的空文件，不创建文件夹&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;long length()&lt;/td&gt;
-&lt;td&gt;返回文件的长度，单位为字节，文件不存在则返回0L&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;File[] listFiles()&lt;/td&gt;
-&lt;td&gt;返回一个抽象路径名数组，这些路径名表示此抽象路径名表示的目录中的文件。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;static File[] listRoots()&lt;/td&gt;
-&lt;td&gt;列出可用文件系统根&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;boolean mkdirs()&lt;/td&gt;
-&lt;td&gt;创建此抽象路径名指定的目录，包括所有必需但不存在的父目录。&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;使用示例：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.File;
-import java.io.IOException;
-
-public class TestFile {
-
-    public static void main(String[] args) {
-        //创建File对象 传入文件的路径
-        File file=new File(&quot;D:\\a.txt&quot;);
-        //创建File对象 传入文件夹的路径
-        File dir=new File(&quot;D:/word&quot;);
-        //判断是否存在
-        if(file.exists()) {
-            if(file.isFile()) {
-                //getName()获取名字
-                System.out.println(file.getName()+&quot; 是文件&quot;);
-            }else if(file.isDirectory()){
-                System.out.println(file.getName()+&quot; 是目录&quot;);
-            }           
-        }else {
-            System.out.println(file.getName()+&quot; 不存在！&quot;);
-            try {
-                //创建文件
-                file.createNewFile();
-                System.out.println(&quot;文件大小：&quot;+file.length()+&quot; 字节&quot;);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        
-        if(dir.exists()) {
-            if(dir.isFile()) {
-                System.out.println(dir.getName()+&quot; 是文件&quot;);
-            }else if(dir.isDirectory()) {
-                System.out.println(dir.getName()+&quot; 是文件夹&quot;);
-                //绝对路径
-                System.out.println(dir.getAbsolutePath());
-            }           
-        }else {
-            System.out.println(dir.getName()+&quot; 不存在！&quot;);
-            //创建目录
-            dir.mkdirs();
-        }
-        
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;流&quot;&gt;流&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;流&lt;/strong&gt;：指一连串流动的字符，是以先进先出方式发送信息的通道&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;输入流&lt;/strong&gt;：源数据流向程序(读)&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;输入流&lt;/strong&gt;：程序中的数据流向目标数据源(写)&lt;/p&gt;
-&lt;h3 id=&quot;java流的分类&quot;&gt;Java流的分类&lt;/h3&gt;
-&lt;p&gt;按流向&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;输出流(OutputStream和Writer作为基类)&lt;/li&gt;
-&lt;li&gt;输入流(InputStream和Reader作为基类)&lt;/li&gt;
-&lt;/ul&gt;&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;输入输出流是相对于计算机内存来说的&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;按照处理数据单元划分&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;字节流
-&lt;ul&gt;&lt;li&gt;字节输入流(InputStream基类)&lt;/li&gt;
-&lt;li&gt;字节输出流(OutputStream基类)&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;字符流
-&lt;ul&gt;&lt;li&gt;字符输入流(Reader基类)&lt;/li&gt;
-&lt;li&gt;字符输出流(Writer基类)&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;字节流是8位(1B)通用字节流，字符流是16位(2B)Unicode字符流&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h2 id=&quot;字节流&quot;&gt;字节流&lt;/h2&gt;
-&lt;p&gt;FileInputStream 是 InputStream 的子类&lt;/p&gt;
-&lt;p&gt;InputStream 类常用方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;8&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;int read()&lt;/td&gt;
-&lt;td&gt;从输入流中读取数据的下一个字节。返回0到255的int值，如果到达流的末尾，则返回-1&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;3&quot;&gt;&lt;td&gt;int read(byte[] b)&lt;/td&gt;
-&lt;td&gt;从输入流中读取一定数量的字节，并将其存储在缓冲区数组 b 中。返回读入缓冲区的总字节数，如果达到末尾则返回-1&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;6&quot;&gt;&lt;td&gt;int read(byte[] b,int off,int len)&lt;/td&gt;
-&lt;td&gt;将输入流中最多 len 个数据字节读入 byte数组&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void close()&lt;/td&gt;
-&lt;td&gt;关闭此输入流并释放与该流关联的所有系统资源&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;int available()&lt;/td&gt;
-&lt;td&gt;返回此输入流下一个方法调用可以不受阻塞地从此输入流读取的估计字节数&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;FileInputStream 类常用构造方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;5&quot;&gt;&lt;td&gt;FileInputStream(File file)&lt;/td&gt;
-&lt;td&gt;通过打开一个到实际文件的连接来创建一个 FileInputStream，该文件通过文件系统中的 File 对象 file 指定。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;5&quot;&gt;&lt;td&gt;FileInputStream(String name)&lt;/td&gt;
-&lt;td&gt;通过打开一个到实际文件的连接来创建一个 FileInputStream，该文件通过文件系统中的路径名 name 指定。&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;使用 FileInputStream 读取文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-
-public class TestFileInputStream {
-
-    public static void main(String[] args) {
-        FileInputStream fis=null;
-        try {
-            fis=new FileInputStream(&quot;D:\\a.txt&quot;);
-            //读取结果存入StringBuffer
-            StringBuffer sb=new StringBuffer();
-            System.out.println(&quot;预计读取：&quot;+fis.available()+&quot;字节&quot;);
-            //记录每次读取的长度
-            int len=0;
-            //缓冲区字节数组
-            byte[] buff=new byte[1024];
-            while((len=fis.read(buff))!=-1) {
-                System.out.println(&quot;还剩余：&quot;+fis.available()+&quot;字节&quot;);
-                sb.append(new String(buff,0,len));
-            }
-            System.out.println(&quot;结果：&quot;);
-            System.out.println(sb);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            if (fis!=null) {
-                try {
-                    fis.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;FileOutputStream 是 OutputStream 的子类&lt;/p&gt;
-&lt;p&gt;OutputStream 类常用方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;6&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void write(int c)&lt;/td&gt;
-&lt;td&gt;将制定的字节写入此输出流&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void write(byte[] buf)&lt;/td&gt;
-&lt;td&gt;将 b.length 个字节从指定的 byte 数组写入此输入流&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;6&quot;&gt;&lt;td&gt;void write(byte[] b,int off,int len)&lt;/td&gt;
-&lt;td&gt;将指定 byte 数组中从偏移量 off 开始的 len 个字节写入此输出流&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void close()&lt;/td&gt;
-&lt;td&gt;关闭此输出流并释放与此流有关的所有系统资源&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;FileOutputStream的构造方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;6.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;FileOutputStream(File file)&lt;/td&gt;
-&lt;td&gt;创建一个向指定 File 对象表示的文件中写入数据的文件输出流&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;FileOutputStream(String name)&lt;/td&gt;
-&lt;td&gt;创建一个向具有指定名称的文件中写入数据的输出文件流&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;5&quot;&gt;&lt;td&gt;FileOutputStream(String name,boolean append)&lt;/td&gt;
-&lt;td&gt;第二个参数为 true，则将字节写入文件末尾处，而不是写入文件开始处&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;使用 FileOutputStream 写文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-
-public class TestFileOutputStream {
-
-    public static void main(String[] args) {
-        FileOutputStream fos=null;
-        try {
-            //创建输出流对象
-            fos=new FileOutputStream(&quot;D:\\c.txt&quot;);
-            //要输出的字符
-            String str=&quot;hello world 你好&quot;;
-            //将字符串转成字节数组并写入到流中
-            fos.write(str.getBytes());
-            //刷新流
-            fos.flush();
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            if (fos!=null) {
-                try {
-                    fos.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;字符流&quot;&gt;字符流&lt;/h2&gt;
-&lt;p&gt;上面的内容我们看到，字节流不能直接操作字符，所以操作字符用字符流。&lt;/p&gt;
-&lt;p&gt;FileReader 是 Reader 的子类&lt;/p&gt;
-&lt;p&gt;Reader 类常用方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4&quot;&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;int read()&lt;/td&gt;
-&lt;td&gt;读取单个字符&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;int read(char[] c)&lt;/td&gt;
-&lt;td&gt;将字符读入数组&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;6&quot;&gt;&lt;td&gt;read(char[] c,int off,int len)&lt;/td&gt;
-&lt;td&gt;将字符读入数组的某一部分&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void close()&lt;/td&gt;
-&lt;td&gt;关闭该流并释放与之关联的所有资源&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;使用 FileReader 读取文本文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.FileNotFoundException;
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.Reader;
-
-public class TestReader {
-
-    public static void main(String[] args) {
-        Reader r=null;
-        try {
-            //创建FileReader对象
-            r=new FileReader(&quot;D:\\a.txt&quot;);
-            //字符缓冲数组
-            char[] chrs=new char[512];
-            //记录每次读取的个数
-            int len=0;
-            //循环读取
-            while((len=r.read(chrs))!=-1) {
-                String str=new String(chrs, 0, len);
-                System.out.println(str);
-            }
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            if (r!=null) {
-                try {
-                    r.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;FileWriter 是 Writer 的子类&lt;/p&gt;
-&lt;p&gt;Writer 类常用方法&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4&quot;&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;write(String str)&lt;/td&gt;
-&lt;td&gt;写入字符串&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;6&quot;&gt;&lt;td&gt;write(String str,int off,int len)&lt;/td&gt;
-&lt;td&gt;写入字符串的某一部分&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;void close()&lt;/td&gt;
-&lt;td&gt;关闭此流，但要先刷新它&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;void flush&lt;/td&gt;
-&lt;td&gt;刷新该流的缓冲&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;使用 FileWriter 写入文本文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.FileWriter;
-import java.io.IOException;
-import java.io.Writer;
-
-public class TestWriter {
-
-    public static void main(String[] args) {
-        Writer w=null;
-        try {
-            //创建字符输出流
-            w=new FileWriter(&quot;D:\\msg.txt&quot;);
-            String msg=&quot;hello every bady 兄嘚&quot;;
-            //将字符串写入到流中
-            w.write(msg);
-            w.flush();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            if (w!=null) {
-                try {
-                    w.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;缓冲字符流&quot;&gt;缓冲字符流&lt;/h2&gt;
-&lt;p&gt;如果频繁的对字符进行读写操作，墙裂建议使用缓冲！&lt;/p&gt;
-&lt;p&gt;BufferedReader 类带有缓冲区，可以先把一批数据读到缓冲区，接下来的读操作都是从缓冲区内获取数据，避免每次都从数据源读取数据进行字符编码转换，从而提高读取操作的效率。&lt;/p&gt;
-&lt;p&gt;使用BufferedReader读取文本文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.BufferedReader;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
-import java.io.IOException;
-
-public class TestBufferedReader {
-
-    public static void main(String[] args) {
-        FileReader reader=null;
-        BufferedReader br=null;
-        try {
-            //创建字符读入流
-            reader=new FileReader(&quot;D:\\a.txt&quot;);
-            //将字符读入流包装成字符缓冲流
-            br=new BufferedReader(reader);
-            //记录每行读入的内容
-            String line=null;
-            //用于拼接保存每行读入的内容
-            StringBuffer content=new StringBuffer();
-            while ((line=br.readLine())!=null) {
-                content.append(line+&quot;\n&quot;);
-            }
-            System.out.println(&quot;所有内容：&quot;);
-            System.out.println(content);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            try {
-                if (reader!=null) {
-                    reader.close();
-                }
-                if (br!=null) {
-                    br.close();
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;BufferedReader 是 Reader 的子类，带有缓冲区，特有方法 readLine() 按行读取内容&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;BufferedWriter 类带有缓冲区，与BufferedReader的方向正好相反，BufferedWriter 是把一批数据写到缓冲区，当缓冲区满的时候，再把缓冲区的数据写到字符输出流中。避免每次都执行物理写操作，提高写操作的效率。&lt;/p&gt;
-&lt;p&gt;使用 BufferedWriter 写文件&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.BufferedWriter;
-import java.io.FileWriter;
-import java.io.IOException;
-
-public class TestBufferedWriter {
-
-    public static void main(String[] args) {
-        FileWriter writer=null;
-        BufferedWriter bw=null;
-        try {
-            writer=new FileWriter(&quot;D:\\out.txt&quot;);
-            bw=new BufferedWriter(writer);
-            bw.write(&quot;hello&quot;);
-            //内容换行
-            bw.newLine();
-            bw.write(&quot;world&quot;);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            try {
-                if (bw!=null) {
-                    bw.close();
-                }
-                if (writer!=null) {
-                    writer.close();
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;关闭流的顺序与创建流的顺序相反&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h2 id=&quot;数据流&quot;&gt;数据流&lt;/h2&gt;
-&lt;p&gt;DataInputStream 类&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;FileInputStream 的子类&lt;/li&gt;
-&lt;li&gt;与 FileInputStream 类结合使用读取二进制文件&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;DataOutputStream 类&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;FileOutputStream 的子类&lt;/li&gt;
-&lt;li&gt;与 FileOutputStream 类结合使用写二进制文件&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;使用数据流复制图片&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-
-public class TestCopy {
-
-    public static void main(String[] args) {
-        //文件输入流
-        FileInputStream fis=null;
-        //数据输入流(包装fis得到)
-        DataInputStream dis=null;
-        //文件输出流
-        FileOutputStream fos=null;
-        //数据输出流(包装fos得到)
-        DataOutputStream dos=null;
-        
-        try {
-            fis=new FileInputStream(&quot;D:\\a.jpg&quot;);
-            dis=new DataInputStream(fis);
-            fos=new FileOutputStream(&quot;F:\\b.jpg&quot;);
-            dos=new DataOutputStream(fos);
-            //缓冲数组
-            byte[] buff=new byte[1024];
-            //记录每次读取的字节个数
-            int len=0;
-            //循环读入
-            while((len=dis.read(buff))!=-1) {
-                //循环写入len个字节
-                dos.write(buff,0,len);
-            }
-            System.out.println(&quot;完成&quot;);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }finally {
-            try {
-                if (dis!=null) {
-                    dis.close();
-                }
-                if (dos!=null) {
-                    dos.close();
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Wed, 31 Oct 2018 12:09:00 +0000</pubDate>
-<dc:creator>极客大全</dc:creator>
-<og:description>File类的使用 Java程序如何访问文件？通过 java.io.File 类 使用File类需要先创建文件对象 ，创建时在构造函数中指定物理文件或目录，然后通过文件对象的方法操作文件或目录的属性。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/AIThink/p/9885564.html</dc:identifier>
-</item>
-<item>
-<title>linux每日命令(9)：cp命令 - 听风。</title>
-<link>http://www.cnblogs.com/huchong/p/9885476.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/huchong/p/9885476.html</guid>
-<description>&lt;pre&gt;
-&lt;code&gt;cp [参数] source dest&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;或&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cp [参数] source... directory&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;将源文件复制至目标文件，或将多个源文件复制至目标目录。&lt;/p&gt;
-
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;18&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-a&lt;/td&gt;
-&lt;td&gt;此选项通常在复制目录时使用，它保留链接、文件属性，并复制目录下的所有内容。其作用等于dpR参数组合。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;5&quot;&gt;&lt;td&gt;-b&lt;/td&gt;
-&lt;td&gt;--backup,删除、覆盖目的文件先备份，备份的文件或目录亦建立为符号链接，并指向源文件或目录链接的源文件或目录。假如没有加上这个参数，在复制过程中若遇到符号链接，则会直接复制源文件或目录&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-d&lt;/td&gt;
-&lt;td&gt;复制时保留链接。这里所说的链接相当于Windows系统中的快捷方式。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-f&lt;/td&gt;
-&lt;td&gt;覆盖已经存在的目标文件而不给出提示。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-i&lt;/td&gt;
-&lt;td&gt;与-f选项相反，在覆盖目标文件之前给出提示，要求用户确认是否覆盖，回答&quot;y&quot;时目标文件将被覆盖。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-n&lt;/td&gt;
-&lt;td&gt;--no-clobber,不要覆盖已存在的文件(使前面的 -i 选项失效)&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-p&lt;/td&gt;
-&lt;td&gt;--preserve ,除复制文件的内容外，还保留源文件或目录的属性，包括所有者、所属组、权限与修改时间也复制到新文件中。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-P&lt;/td&gt;
-&lt;td&gt;--parents ,保留源文件或目录的路径，此路径可以是绝对路径或相对路径，且目的目录必须已经存在&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-r&lt;/td&gt;
-&lt;td&gt;若给出的源文件是一个目录文件，此时将复制该目录下所有的子目录和文件。&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-R&lt;/td&gt;
-&lt;td&gt;--recursive , 递归处理，将指定目录下的文件及子目录一并处理&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-s&lt;/td&gt;
-&lt;td&gt;--symbolic-link， 对源文件建立符号链接，而非复制文件&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-l&lt;/td&gt;
-&lt;td&gt;对源文件生成硬链接文件。&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
-&lt;h2 id=&quot;复制单个文件到目标目录文件在目标目录中不存在&quot;&gt;1. 复制单个文件到目标目录，文件在目标目录中不存在&lt;/h2&gt;
-&lt;p&gt;命令：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cp log1 dir2&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输出：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-├── dir3
-│   ├── dir1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-hc@hc-virtual-machine:~/test$ ll log1 
--rw-r--r-- 1 hc hc 0 10月 31 19:18 log1
-hc@hc-virtual-machine:~/test$ cp log1 dir2
-hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-│   └── log1
-├── dir3
-│   ├── dir1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-hc@hc-virtual-machine:~/test$ cd dir2
-hc@hc-virtual-machine:~/test/dir2$ ll log1 
--rw-r--r-- 1 hc hc 0 10月 31 19:19 log1&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;目标文件存在时，会覆盖&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;hc@hc-virtual-machine:~/test$ ll
-总用量 16
-drwxr-xr-x  4 hc hc 4096 10月 31 19:18 ./
-drwxr-xr-x 25 hc hc 4096 10月 31 19:13 ../
-drwxr-xr-x  2 hc hc 4096 10月 31 19:19 dir2/
-drwxr-xr-x  3 hc hc 4096 10月 30 10:08 dir3/
--rw-r--r--  1 hc hc    0 10月 31 19:18 log1
-hc@hc-virtual-machine:~/test$ cp -a log1 dir2
-hc@hc-virtual-machine:~/test$ cd dir2
-hc@hc-virtual-machine:~/test/dir2$ ll
-总用量 8
-drwxr-xr-x 2 hc hc 4096 10月 31 19:19 ./
-drwxr-xr-x 4 hc hc 4096 10月 31 19:18 ../
--rw-r--r-- 1 hc hc    0 10月 31 19:18 log1&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;加上参数 -i会询问是否覆盖，-f强制覆盖&lt;br/&gt;说明：&lt;/p&gt;
-&lt;p&gt;在没有带-a参数时，两个文件的时间是不一样的。在带了-a参数时，两个文件的时间是一致的。&lt;/p&gt;
-&lt;h2 id=&quot;复制整个目录&quot;&gt;2. 复制整个目录&lt;/h2&gt;
-&lt;p&gt;命令：&lt;/p&gt;
-&lt;p&gt;复制dir3目录到dir2目录下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cp -a dir3 dir2&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;复制dir2目录到dir3目录下&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cp -t dir2 dir3&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输出：&lt;/p&gt;
-&lt;p&gt;目标目录存在时：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-│   └── log1
-├── dir3
-│   ├── dir1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-
-3 directories, 5 files
-hc@hc-virtual-machine:~/test$ cp -a dir3 dir2
-hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-│   ├── dir3
-│   │   ├── dir1
-│   │   ├── file2.txt
-│   │   ├── log2
-│   │   └── log2~
-│   └── log1
-├── dir3
-│   ├── dir1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-
-5 directories, 8 files
-hc@hc-virtual-machine:~/test$ cp -r dir2 dir3
-hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-│   ├── dir3
-│   │   ├── dir1
-│   │   ├── file2.txt
-│   │   ├── log2
-│   │   └── log2~
-│   └── log1
-├── dir3
-│   ├── dir1
-│   ├── dir2
-│   │   ├── dir3
-│   │   │   ├── dir1
-│   │   │   ├── file2.txt
-│   │   │   ├── log2
-│   │   │   └── log2~
-│   │   └── log1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-
-8 directories, 12 files&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;目标目录不存在时：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;hc@hc-virtual-machine:~/test$ ls
-dir2  dir3  log1
-hc@hc-virtual-machine:~/test$ cp -r dir2 dir4
-hc@hc-virtual-machine:~/test$ cp -a dir3 dir5
-hc@hc-virtual-machine:~/test$ ll
-总用量 24
-drwxr-xr-x  6 hc hc 4096 10月 31 19:36 ./
-drwxr-xr-x 25 hc hc 4096 10月 31 19:13 ../
-drwxr-xr-x  3 hc hc 4096 10月 31 19:30 dir2/
-drwxr-xr-x  4 hc hc 4096 10月 31 19:32 dir3/
-drwxr-xr-x  3 hc hc 4096 10月 31 19:36 dir4/
-drwxr-xr-x  4 hc hc 4096 10月 31 19:32 dir5/
--rw-r--r--  1 hc hc    0 10月 31 19:18 log1
-hc@hc-virtual-machine:~/test$ tree ../test/
-../test/
-├── dir2
-│   ├── dir3
-│   │   ├── dir1
-│   │   ├── file2.txt
-│   │   ├── log2
-│   │   └── log2~
-│   └── log1
-├── dir3
-│   ├── dir1
-│   ├── dir2
-│   │   ├── dir3
-│   │   │   ├── dir1
-│   │   │   ├── file2.txt
-│   │   │   ├── log2
-│   │   │   └── log2~
-│   │   └── log1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-├── dir4
-│   ├── dir3
-│   │   ├── dir1
-│   │   ├── file2.txt
-│   │   ├── log2
-│   │   └── log2~
-│   └── log1
-├── dir5
-│   ├── dir1
-│   ├── dir2
-│   │   ├── dir3
-│   │   │   ├── dir1
-│   │   │   ├── file2.txt
-│   │   │   ├── log2
-│   │   │   └── log2~
-│   │   └── log1
-│   ├── file2.txt
-│   ├── log2
-│   └── log2~
-└── log1
-
-16 directories, 23 files&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;说明：&lt;/p&gt;
-&lt;p&gt;注意目标目录存在与否结果是不一样的。目标目录存在时，整个源目录被复制到目标目录里面。&lt;/p&gt;
-&lt;h2 id=&quot;复制的-log.log-建立一个连结档-log_link.log&quot;&gt;3.复制的 log.log 建立一个连结档 log_link.log&lt;/h2&gt;
-&lt;p&gt;命令：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;cp -s log1 log1_link&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;输出：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;hc@hc-virtual-machine:~/test$ ls
-dir2  dir3  dir4  dir5  log1
-hc@hc-virtual-machine:~/test$ cp -s log1 log1_link
-hc@hc-virtual-machine:~/test$ ls
-dir2  dir3  dir4  dir5  log1  log1_link
-hc@hc-virtual-machine:~/test$ ll
-总用量 24
-drwxr-xr-x  6 hc hc 4096 10月 31 19:47 ./
-drwxr-xr-x 25 hc hc 4096 10月 31 19:13 ../
-drwxr-xr-x  3 hc hc 4096 10月 31 19:30 dir2/
-drwxr-xr-x  4 hc hc 4096 10月 31 19:32 dir3/
-drwxr-xr-x  3 hc hc 4096 10月 31 19:36 dir4/
-drwxr-xr-x  4 hc hc 4096 10月 31 19:32 dir5/
--rw-r--r--  1 hc hc    0 10月 31 19:18 log1
-lrwxrwxrwx  1 hc hc    4 10月 31 19:47 log1_link -&amp;gt; log1&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;说明：&lt;/p&gt;
-&lt;p&gt;那个 log1_link 是由 -s 的参数造成的，建立的是一个『快捷方式』，所以会看到在文件的最右边，会显示这个文件是『连结』到哪里去的！&lt;/p&gt;
-</description>
-<pubDate>Wed, 31 Oct 2018 11:54:00 +0000</pubDate>
-<dc:creator>听风。</dc:creator>
-<og:description>一．命令格式： cp [参数] source dest 或 cp [参数] source... directory 二．命令功能： 将源文件复制至目标文件，或将多个源文件复制至目标目录。 三. 命令参</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/huchong/p/9885476.html</dc:identifier>
-</item>
-<item>
-<title>Tigase 发送消息的流程源码分析 - jianfulove</title>
-<link>http://www.cnblogs.com/eyecool/p/9885062.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/eyecool/p/9885062.html</guid>
-<description>&lt;p&gt;XMPP 的&amp;lt;message/&amp;gt;节是使用基本的”push”方法来从一个地方到另一个地方得到消息。因为消息通常是不告知的，它们是一种”fire-and-forget”(发射后自寻目的)的机制来从一个地方到另一个地方快速获取信息&lt;br/&gt;消息节有五种不同的类型，通过 type 属性来进行区分：例如 chat 类型为 chat 的消息在两个实体间的实时对话中交换，例如两个朋友之间的即时通讯聊天。除了 type 属性外，消息节还包括一个 to 和 from 地址，并且也可以包含一个用于跟踪目的的 id  属性（我们在使用更为广泛的 IQ  节中详细的讨论 IDs）。to  地址是预期接收人的&lt;br/&gt;JabberID，from 地址是发送者的JabberID。from 地址不由发送客户端提供，而是由发送者的服务器添加邮戳，以避免地址欺骗。&lt;/p&gt;
-&lt;p&gt;在Tigase中，有两个重要的组成,一个组件,二是插件,可以去官方网去看下他的架构介绍 https://docs.tigase.net/tigase-server/7.1.4/Development_Guide/html/#writePluginCode&lt;/p&gt;
-&lt;p&gt;例如最著名的组件的一个例子是MUC或PubSub。在Tigase中，几乎所有东西实际上都是一个组件:会话管理器、s2s连接管理器、消息路由器等等,组件是根据服务器配置加载的，新的组件可以在运行时加载和激活。您可以轻松地替换组件实现，唯一要做的更改是配置条目中的类名。&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;Tigase 中定义一个最简单的消息组件,需要实现MessageReceiver或继承 extends AbstractMessageReceiver 类, MessageReceiver 的抽象类: AbstractMessageReceiver 子类 :&lt;/p&gt;
-&lt;div readability=&quot;12.5&quot;&gt;
-&lt;p&gt;一、ClientConnectionManager&lt;/p&gt;
-&lt;p&gt;二、SessionManager&lt;/p&gt;
-&lt;p&gt;三、 MessageRouter&lt;/p&gt;
-&lt;div readability=&quot;31.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; setProperties(Map&amp;lt;String, Object&amp;gt;&lt;span&gt; props){
-    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (String name : msgrcv_names) {
-        mr &lt;/span&gt;=&lt;span&gt; conf.getMsgRcvInstance(name);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (mr &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; MessageReceiver) {
-            ((MessageReceiver) mr).setParent(&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;);
-            ((MessageReceiver) mr).start();
-        }
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;1、当客户端发送的message消息到tigase服务端，每个一SOCKET连接都会被包装成IOService对象，IOService包含一系列操作socket的方法（接收发送数据等），processSocketData()接收网络数据，由tigase.net处理解析成xml对象，并将packet放到接收队列receivedPackets中再调用serviceListener.packetsReady(this)。由于ConnectionManager实现IOServiceListener接口，实现上调用的的是ConnectionManager中的packetsReady()来开始处理数据&lt;/p&gt;
-&lt;p&gt;此时的packet ：packetFrom=null，packetTo=null。&lt;/p&gt;
-
-&lt;p&gt;ClientConnectionManager.processSocketData方法中设置packet的一些属性：&lt;br/&gt;此时: packetFrom=c2s@llooper/192.168.0.33_5222_192.168.0.33_38624, packetTo=sess-man@llooper&lt;/p&gt;
-&lt;div readability=&quot;46.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-ClientConnectionManager.processSocketData(XMPPIOService&amp;lt;Object&amp;gt;&lt;span&gt;serv)
-    JID id &lt;/span&gt;= serv.getConnectionId(); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;c2s@llooper/192.168.0.33_5222_192.168.0.33_38624&lt;/span&gt;
-    p.setPacketFrom(id); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;packetFrom 设置为onnectionId&lt;/span&gt;
-    p.setPacketTo(serv.getDataReceiver()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;packetTo 设置为sess-man --&amp;gt; SessionManager &lt;/span&gt;
-    addOutPacket(p);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;将会委托给父 MessageRouter 路由&lt;/span&gt;
-&lt;span&gt;    
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;//packet 被设置上一些源信息，和目的地信息，接下来，这个数据包将会委托给父 MessageRouter 帮忙路由到 SessionManager组件中进行处理&lt;br/&gt;packet = (tigase.server.Message) from=c2s@llooper/192.168.0.33_5222_192.168.0.33_38624, to=sess-man@llooper, DATA=&amp;lt;message xmlns=&quot;jabber:client&quot; id=&quot;44grM-176&quot; type=&quot;chat&quot; to=&quot;llooper@llooper&quot;&amp;gt;&amp;lt;thread&amp;gt;SWjZv5&amp;lt;/thread&amp;gt;&amp;lt;composing xmlns=&quot;http://jabber.org/protocol/chatstates&quot;/&amp;gt;&amp;lt;/message&amp;gt;, SIZE=170, XMLNS=jabber:client, PRIORITY=NORMAL, PERMISSION=NONE, TYPE=chat&lt;/p&gt;
-
-&lt;p&gt;packet = from=c2s@llooper/192.168.0.33_5222_192.168.0.33_38624, to=sess-man@llooper, DATA=&amp;lt;message to=&quot;admin@llooper&quot; type=&quot;chat&quot; id=&quot;2jePE-253&quot; xmlns=&quot;jabber:client&quot;&amp;gt;&amp;lt;thread&amp;gt;7VKMRq&amp;lt;/thread&amp;gt;&amp;lt;composing xmlns=&quot;http://jabber.org/protocol/chatstates&quot;/&amp;gt;&amp;lt;/message&amp;gt;, SIZE=168, XMLNS=jabber:client, PRIORITY=NORMAL, PERMISSION=NONE, TYPE=chat&lt;/p&gt;
-
-&lt;p&gt;2、MessageRouter.processPacket(Packet packet)部分代码如下：&lt;/p&gt;
-
-&lt;div readability=&quot;47.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt;我们不会处理没有目标地址的数据包,只是丢弃它们并写一个日志消息&lt;/span&gt;
-&lt;span&gt;if&lt;/span&gt; (packet.getTo() == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-    log.log(Level.WARNING, &lt;/span&gt;&quot;Packet with TO attribute set to NULL: {0}&quot;&lt;span&gt;, packet);
-    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-}   
-
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;它不是一个服务发现包，我们必须找到一个处理组件
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;下面的代码块是“快速”找到一个组件if
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个包TO 组件ID,格式在以下一项:
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 1。组件名+“@”+默认域名
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 2。组件名+“@”+任何虚拟主机名
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 3。组件名+ &quot;.&quot;+默认域名
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 4。组件名+ &quot;.&quot;+任何虚拟主机名&lt;/span&gt;
-&lt;span&gt;
-ServerComponent comp &lt;/span&gt;= getLocalComponent(packet.getTo()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;SessionManager&lt;/span&gt;
-comp.processPacket(packet, results);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 3、SessionManager.processPacket(final Packet packet)处理，有要代码如下。 例如A-&amp;gt;B,这样做的目的是为了首先确定用户A有权限发送packet，然后是确定用户B有权限接收数据。如果用户B不在线，那么离线消息处理器会把packet保存到数据库当中。&lt;/p&gt;
-&lt;div readability=&quot;33.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt;XMPPResourceConnection session——用户会话保存所有用户会话数据，并提供对用户数据存储库的访问。它只允许在会话的生命周期内将信息存储在永久存储或内存中。如果在分组处理时没有联机用户会话，则此参数可以为空。&lt;/span&gt;
-XMPPResourceConnection conn =&lt;span&gt; getXMPPResourceConnection(packet);
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;现在要走SessionManager的处理函数,主要是走插件流程,插件在Tigase中也是一个重要的组成,入口就是在这里,SM plugin&lt;/span&gt;
-processPacket(packet, conn);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;   &lt;strong&gt;插入下SM plugin 流程说明 :&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;这个设计有一个惊人的结果。如果你看下面的图片，显示了两个用户之间的通信，你可以看到数据包被复制了两次才送到最终目的地: &lt;/p&gt;
-&lt;div readability=&quot;13&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1207931/201810/1207931-20181031184636289-1050337104.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;会话管理器(SessionManager)必须对数据包进行两次处理。第一次以用户A的名义将其作为传出包进行处理，第二次以用户B的名义将其作为传入包进行处理。&lt;br/&gt;这是为了确保用户A有权限发送一个包，所有的processor都应用到packet上，也为了确保用户B有权限接收packet，所有的processor都应用到packet了。例如，如果用户B是脱机的，那么有一个脱机消息processor应该将包发送到数据库，而不是用户B。&lt;/div&gt;
-
-&lt;div readability=&quot;42.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;45&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;protected&lt;/span&gt;&lt;span&gt; XMPPResourceConnection getXMPPResourceConnection(Packet p) {
-        XMPPResourceConnection conn &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-        
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;首先根据这个包的发起者,来查找他的连接资源类,找不到则找接收者的资源类&lt;/span&gt;
-        JID    from =&lt;span&gt; p.getPacketFrom();
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (from != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            conn &lt;/span&gt;=&lt;span&gt; connectionsByFrom.get(from);
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (conn != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; conn;
-            }
-        }
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这个接收者它可能是这个服务器上某个用户的消息,让我们为这个用户查找已建立的会话&lt;/span&gt;
-        JID to =&lt;span&gt; p.getStanzaTo();
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (to != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (log.isLoggable(Level.FINEST)) {
-                log.finest(&lt;/span&gt;&quot;Searching for resource connection for: &quot; +&lt;span&gt; to);
-            }
-            conn &lt;/span&gt;=&lt;span&gt; getResourceConnection(to);
-        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Hm, not sure what should I do now....
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Maybe I should treat it as message to admin....&lt;/span&gt;
-&lt;span&gt;            log.log(Level.INFO,
-                    &lt;/span&gt;&quot;Message without TO attribute set, don''t know what to do wih this: {0}&quot;&lt;span&gt;, p);
-        }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of else&lt;/span&gt;
-
-        &lt;span&gt;return&lt;/span&gt;&lt;span&gt; conn;
-    }
-    
-    
-&lt;/span&gt;&lt;span&gt;protected&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; processPacket(Packet packet, XMPPResourceConnection conn) {
-
-    ...
-    packet.setPacketTo(getComponentId()); &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;sess-man@llooper&lt;/span&gt;
-&lt;span&gt;    ...
-
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;stop) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;授权匹配的processor处理packet&lt;/span&gt;
-&lt;span&gt;        walk(packet, conn);
-        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ((conn != &lt;span&gt;null&lt;/span&gt;) &amp;amp;&amp;amp;&lt;span&gt; conn.getConnectionId().equals(packet.getPacketFrom())) {
-                handleLocalPacket(packet, conn);
-            }
-        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (NoConnectionIdException ex) {
-            ...
-        }
-    }
-    
-    ...
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;packetTo被设置为组件ID（sess-man@llooper），其值原先也是这个。&lt;br/&gt;其中walk(packet, conn)方法，匹配处理器（授权）。对于message，此处匹配到的processor是amp和message-carbons，message-carbons没有怎么处理，主要是amp在处理,packet被塞amp的队列中等待处理。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; walk(&lt;span&gt;final&lt;/span&gt; Packet packet, &lt;span&gt;final&lt;/span&gt;&lt;span&gt; XMPPResourceConnection connection) {
-
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (XMPPProcessorIfc proc_t : processors.values()) {
-            XMPPProcessorIfc processor &lt;/span&gt;=&lt;span&gt; proc_t;
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据element和xmlns，授权匹配成功的processor&lt;/span&gt;
-            Authorization    result    =&lt;span&gt; processor.canHandle(packet, connection);
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (result ==&lt;span&gt; Authorization.AUTHORIZED) {
-                ....
-            
-                ProcessingThreads pt &lt;/span&gt;=&lt;span&gt; workerThreads.get(processor.id());
-
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (pt == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                    pt &lt;/span&gt;=&lt;span&gt; workerThreads.get(defPluginsThreadsPool);
-                }
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;packet 放到(addItem)授权了的processor的队列&lt;/span&gt;
-                &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (pt.addItem(processor, packet, connection)) {
-                    packet.processedBy(processor.id());
-                } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-
-                    ...
-                }
-            } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                ...
-            }
-        }   
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;WorkerThread.run() 从队列中取出packet，由SessionManager.process(QueueItem item)给amp处理。&lt;/p&gt;
-&lt;p&gt;SessionManager.pocess(QueueItem item) 如下：&lt;/p&gt;
-&lt;div readability=&quot;26.5&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;55&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Override
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process(QueueItem item) {
-    
-    XMPPProcessorIfc processor &lt;/span&gt;=&lt;span&gt; item.getProcessor();
-
-    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;由授权的 processor 处理 packet&lt;/span&gt;
-&lt;span&gt;        processor.process(item.getPacket(), item.getConn(), naUserRepository,local_results, plugin_config.get(processor.id()));
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (item.getConn() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            setPermissions(item.getConn(), local_results);
-        }
-        addOutPackets(item.getPacket(), item.getConn(), local_results);
-    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (PacketErrorTypeException e) {
-        ...
-    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (XMPPException e) {
-        ...
-    }
-}
-
-
-&lt;span&gt;//其中processor.process（）&lt;/span&gt;&lt;/span&gt;&lt;span&gt;------&amp;gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt; MessageAmp.process()，如下：&lt;/span&gt;
-
-@Override
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process(Packet packet, XMPPResourceConnection session,
-        NonAuthUserRepository repo, Queue results, Map settings) &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; XMPPException {
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (packet.getElemName() == &quot;presence&quot;&lt;span&gt;) {
-        ...
-        
-    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        Element amp &lt;/span&gt;= packet.getElement().getChild(&quot;amp&quot;&lt;span&gt;, XMLNS);
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ((amp == &lt;span&gt;null&lt;/span&gt;) || (amp.getAttributeStaticStr(&quot;status&quot;) != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)) {
-            messageProcessor.process(packet, session, repo, results, settings);
-        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-            ...
-    }
-}
-
-&lt;span&gt;// 其中messageProcessor.process（） &lt;/span&gt;&lt;/span&gt;&lt;span&gt;--------&amp;gt;&lt;/span&gt;&lt;span&gt;&lt;span&gt; Message.process()，如下
-&lt;/span&gt;
-
-@Override
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process(Packet packet, XMPPResourceConnection session,
-        NonAuthUserRepository repo, Queue results, Map settings) &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; XMPPException {
-
-    ...
-    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-        ...
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 在比较JIDs之前，记住要去除资源部分&lt;/span&gt;
-        id = (packet.getStanzaFrom() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                &lt;/span&gt;?&lt;span&gt; packet.getStanzaFrom().getBareJID()
-                : &lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 检查这是否是来自客户端的数据包&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (session.isUserId(id)) {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 这是来自这个客户端的数据包，最简单的操作是转发到它的目的地:
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Simple clone the XML element and....
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ... putting it to results queue is enough&lt;/span&gt;
-&lt;span&gt;            results.offer(packet.copyElementOnly());
-
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-        }
-
-        
-    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (NotAuthorizedException e) {
-        ...
-    }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of try-catch&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;检查stanzaFfrom与session匹配通过后，将packet.copyElementOnly()放到results中，作后续投递，原来的packet 就丢弃了。&lt;br/&gt;此时投递的packet ：packetFrom=null，packetTo=null。&lt;/p&gt;
-&lt;p&gt;packet在SessionManager.addOutPacket(Packet packet)中判断packetFrom是否为空，为空则将其设置为ComponentId（此处为sess-man@llooper），然后调用父类（AbstractMessageReceiver.java) 的addOutPacket(packet)方法塞到out_queue 队列中。&lt;br/&gt;此时packet:：packetFrom=sess-man@llooper，packetTo=null。&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;p&gt;4、上层组件MessageRouter处理,把packet塞到in_queues. 又回到了MessageRouter.processPacket(Packet packet)处理:&lt;/p&gt;
-&lt;p&gt; &lt;br/&gt;不同的是 PacketTo为空，packet.getTo()的返回值是stanzaTo。&lt;br/&gt;getLocalComponent(packet.getTo());方法根据stanzaTo与compId、comp name、Component都匹配不到。&lt;br/&gt;此时packet会给组件SessionManager处理，Packet will be processed by: sess-man@llooper，由AbstractMessageReceiver的非阻塞性方法addPacketNB(Packet packet)加入到in_queues。&lt;/p&gt;
-
-&lt;/div&gt;
-&lt;p&gt; 5、第二次来到SessionManager.processPacket(final Packet packet)处理。不同的是在getXMPPResourceConnection(packet)方法中，&lt;br/&gt;conn = connectionsByFrom.get(from)返回值是null，所以是根据stanzaTo取获取接收方的session，返回接收方连接的Connection。&lt;/p&gt;
-&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;protected&lt;/span&gt;&lt;span&gt; XMPPResourceConnection getXMPPResourceConnection(Packet p) {
-    XMPPResourceConnection conn &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-    JID                    from &lt;/span&gt;=&lt;span&gt; p.getPacketFrom();
-
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (from != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-        conn &lt;/span&gt;=&lt;span&gt; connectionsByFrom.get(from);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (conn != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; conn;
-        }
-    }
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; It might be a message _to_ some user on this server
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; so let's look for established session for this user...&lt;/span&gt;
-    JID to =&lt;span&gt; p.getStanzaTo();
-
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (to != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-        ...
-        conn &lt;/span&gt;=&lt;span&gt; getResourceConnection(to);
-    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-
-        ...
-    }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of else&lt;/span&gt;
-
-    &lt;span&gt;return&lt;/span&gt;&lt;span&gt; conn;
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt; 6、如同步骤3,此时packet作为一个以用户B的名义将其作为传入包进行处理。&lt;/p&gt;
-&lt;p&gt;然后packetTo被设置为组件ID（sess-man@llooper)&lt;/p&gt;
-&lt;p&gt;此时packet: packetFrom = sess-man@llooper，packetTo =sess-man@llooper。&lt;/p&gt;
-&lt;p&gt;之后packet又经walk(packet, conn)方法，匹配处理器（授权），扔给amp处理。&lt;/p&gt;
-&lt;p&gt; 如同前面: 直到Message.process()，如下：&lt;/p&gt;
-&lt;div readability=&quot;29&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;68&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Override
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process(Packet packet, XMPPResourceConnection session,
-        NonAuthUserRepository repo, Queue&lt;/span&gt;&amp;lt;Packet&amp;gt; results, Map&amp;lt;String, Object&amp;gt; settings) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; XMPPException {
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; For performance reasons it is better to do the check
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; before calling logging method.&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (log.isLoggable(Level.FINEST)) {
-        log.log(Level.FINEST, &lt;/span&gt;&quot;Processing packet: {0}, for session: {1}&quot;, &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Object[] {
-                packet,
-                session });
-    }
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; You may want to skip processing completely if the user is offline.&lt;/span&gt;
-    &lt;span&gt;if&lt;/span&gt; (session == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-        processOfflineUser( packet, results );
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-    }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of if (session == null)&lt;/span&gt;
-    &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Remember to cut the resource part off before comparing JIDs&lt;/span&gt;
-        BareJID id = (packet.getStanzaTo() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                &lt;/span&gt;?&lt;span&gt; packet.getStanzaTo().getBareJID()
-                : &lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Checking if this is a packet TO the owner of the session&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (session.isUserId(id)) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (log.isLoggable(Level.FINEST)) {
-                log.log(Level.FINEST, &lt;/span&gt;&quot;Message 'to' this user, packet: {0}, for session: {1}&quot;&lt;span&gt;,
-                        &lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Object[] { packet,
-                        session });
-            }
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (packet.getStanzaFrom() != &lt;span&gt;null&lt;/span&gt; &amp;amp;&amp;amp;&lt;span&gt; session.isUserId(packet.getStanzaFrom().getBareJID())) {
-                JID connectionId &lt;/span&gt;=&lt;span&gt; session.getConnectionId();
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (connectionId.equals(packet.getPacketFrom())) {
-                    results.offer(packet.copyElementOnly());
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; this would cause message packet to be stored in offline storage and will not
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; send recipient-unavailable error but it will behave the same as a message to
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; unavailable resources from other sessions or servers&lt;/span&gt;
-                    &lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-                }
-            }
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Yes this is message to 'this' client&lt;/span&gt;
-            List&amp;lt;XMPPResourceConnection&amp;gt; conns = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;XMPPResourceConnection&amp;gt;(5&lt;span&gt;);
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This is where and how we set the address of the component
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; which should rceive the result packet for the final delivery
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to the end-user. In most cases this is a c2s or Bosh component
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; which keep the user connection.&lt;/span&gt;
-            String resource =&lt;span&gt; packet.getStanzaTo().getResource();
-
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (resource == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If the message is sent to BareJID then the message is delivered to
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; all resources&lt;/span&gt;
-&lt;span&gt;                conns.addAll(getConnectionsForMessageDelivery(session));
-            } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Otherwise only to the given resource or sent back as error.&lt;/span&gt;
-                XMPPResourceConnection con =&lt;span&gt; session.getParentSession().getResourceForResource(
-                        resource);
-
-                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (con != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                    conns.add(con);
-                }
-            }
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; MessageCarbons: message cloned to all resources? why? it should be copied only
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to resources with non negative priority!!&lt;/span&gt;
-
-            &lt;span&gt;if&lt;/span&gt; (conns.size() &amp;gt; 0&lt;span&gt;) {
-                &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (XMPPResourceConnection con : conns) {
-                    Packet result &lt;/span&gt;=&lt;span&gt; packet.copyElementOnly();
-
-                    result.setPacketTo(con.getConnectionId());
-
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; In most cases this might be skept, however if there is a
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; problem during packet delivery an error might be sent back&lt;/span&gt;
-&lt;span&gt;                    result.setPacketFrom(packet.getTo());
-
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Don't forget to add the packet to the results queue or it
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; will be lost.&lt;/span&gt;
-&lt;span&gt;                    results.offer(result);
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (log.isLoggable(Level.FINEST)) {
-                        log.log(Level.FINEST, &lt;/span&gt;&quot;Delivering message, packet: {0}, to session: {1}&quot;&lt;span&gt;,
-                                &lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Object[] { packet,
-                                con });
-                    }
-                }
-            } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; if there are no user connections we should process packet
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; the same as with missing session (i.e. should be stored if
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; has type 'chat'&lt;/span&gt;
-&lt;span&gt;                processOfflineUser( packet, results );
-            }
-
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-        }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of else
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Remember to cut the resource part off before comparing JIDs&lt;/span&gt;
-        id = (packet.getStanzaFrom() != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
-                &lt;/span&gt;?&lt;span&gt; packet.getStanzaFrom().getBareJID()
-                : &lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Checking if this is maybe packet FROM the client&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (session.isUserId(id)) {
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This is a packet FROM this client, the simplest action is
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to forward it to is't destination:
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Simple clone the XML element and....
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ... putting it to results queue is enough&lt;/span&gt;
-&lt;span&gt;            results.offer(packet.copyElementOnly());
-
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
-        }
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Can we really reach this place here?
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Yes, some packets don't even have from or to address.
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; The best example is IQ packet which is usually a request to
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; the server for some data. Such packets may not have any addresses
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; And they usually require more complex processing
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This is how you check whether this is a packet FROM the user
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; who is owner of the session:&lt;/span&gt;
-        JID jid =&lt;span&gt; packet.getFrom();
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This test is in most cases equal to checking getElemFrom()&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (session.getConnectionId().equals(jid)) {
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Do some packet specific processing here, but we are dealing
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; with messages here which normally need just forwarding&lt;/span&gt;
-            Element el_result =&lt;span&gt; packet.getElement().clone();
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If we are here it means FROM address was missing from the
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; packet, it is a place to set it here:&lt;/span&gt;
-            el_result.setAttribute(&quot;from&quot;&lt;span&gt;, session.getJID().toString());
-
-            Packet result &lt;/span&gt;=&lt;span&gt; Packet.packetInstance(el_result, session.getJID(), packet
-                    .getStanzaTo());
-
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ... putting it to results queue is enough&lt;/span&gt;
-&lt;span&gt;            results.offer(result);
-        }
-    } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (NotAuthorizedException e) {
-        log.log(Level.FINE, &lt;/span&gt;&quot;NotAuthorizedException for packet: &quot; + packet + &quot; for session: &quot; +&lt;span&gt; session, e);
-        results.offer(Authorization.NOT_AUTHORIZED.getResponseMessage(packet,
-                &lt;/span&gt;&quot;You must authorize session first.&quot;, &lt;span&gt;true&lt;/span&gt;&lt;span&gt;));
-    }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of try-catch&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;检查stanzaTo与session匹配通过后，根据session拿到接收方所有的连接（可能多端登陆），然后Packet result = packet.copyElementOnly()生成新的packet（原packet丢弃了），并将packetTo设置为接收方连接的ConnectionId（例如：c2s@llooper/192.168.0.33_5222_192.168.0.33_38624），通过addOutPacket()方法塞到out_queue队列。&lt;br/&gt;此时packet：packetFrom = sess-man@llooper，packetTo =c2s@llooper/192.168.0.33_5222_192.168.0.33_38624。&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;7、 如同前面步骤2,不同的是根据packetTo匹配到组件 c2s@llooper&lt;/p&gt;
-&lt;p&gt;8、 组件 c2s@llooper 从queue中取出packet，分发到目的地&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; processPacket(&lt;span&gt;final&lt;/span&gt;&lt;span&gt; Packet packet) {
-    ...
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (packet.isCommand() &amp;amp;&amp;amp; (packet.getCommand() !=&lt;span&gt; Command.OTHER)) {
-        ...
-    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 把packet 发送给客户端&lt;/span&gt;
-        &lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;writePacketToSocket(packet)) {
-
-            ...
-            
-        }
-    }    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; end of else&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;后续有时间会不断更新,欢迎加入QQ群 310790965 更多的交流&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 31 Oct 2018 11:15:00 +0000</pubDate>
-<dc:creator>jianfulove</dc:creator>
-<og:description>XMPP 的&lt;message/&gt;节是使用基本的”push”方法来从一个地方到另一个地方得到消息。因为消息通常是不告知的，它们是一种”fire-and-forget”(发射后自寻目的)的机制</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/eyecool/p/9885062.html</dc:identifier>
 </item>
 </channel>
 </rss>
