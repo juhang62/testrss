@@ -9,6 +9,824 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>【.NET Core项目实战-统一认证平台】第四章 网关篇-数据库存储配置（2） - 金焰的世界</title>
+<link>http://www.cnblogs.com/jackcao/p/9950305.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jackcao/p/9950305.html</guid>
+<description>&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;上篇文章我们介绍了如何扩展Ocelot网关，并实现数据库存储，然后测试了网关的路由功能，一切都是那么顺利，但是有一个问题未解决，就是如果网关配置信息发生变更时如何生效？以及我使用其他数据库存储如何快速实现？本篇就这两个问题展开讲解，用到的文档及源码将会在GitHub上开源，每篇的源代码我将用分支的方式管理，本篇使用的分支为&lt;code&gt;course2&lt;/code&gt;。&lt;br/&gt;附文档及源码下载地址：[&lt;strong&gt;https://github.com/jinyancao/CtrAuthPlatform/tree/course2&lt;/strong&gt;]&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;上一篇我们实现了网关的配置信息从数据库中提取，项目发布时可以把我们已有的网关配置都设置好并启动，但是正式项目运行时，网关配置信息随时都有可能发生变更，那如何在不影响项目使用的基础上来更新配置信息呢？这篇我将介绍2种方式来实现网关的动态更新，一是后台服务定期提取最新的网关配置信息更新网关配置，二是网关对外提供安全接口，由我们需要更新时，调用此接口进行更新，下面就这两种方式，我们来看下如何实现。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1、定时服务方式&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;网关的灵活性是设计时必须考虑的，实现定时服务的方式我们需要配置是否开启和更新周期，所以我们需要扩展配置类&lt;code&gt;AhphOcelotConfiguration&lt;/code&gt;，增加是否启用服务和更新周期2个字段。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;namespace Ctr.AhphOcelot.Configuration
+{
+    /// &amp;lt;summary&amp;gt;
+    /// 金焰的世界
+    /// 2018-11-11
+    /// 自定义配置信息
+    /// &amp;lt;/summary&amp;gt;
+    public class AhphOcelotConfiguration
+    {
+        /// &amp;lt;summary&amp;gt;
+        /// 数据库连接字符串，使用不同数据库时自行修改,默认实现了SQLSERVER
+        /// &amp;lt;/summary&amp;gt;
+        public string DbConnectionStrings { get; set; }
+
+        /// &amp;lt;summary&amp;gt;
+        /// 金焰的世界
+        /// 2018-11-12
+        /// 是否启用定时器，默认不启动
+        /// &amp;lt;/summary&amp;gt;
+        public bool EnableTimer { get; set; } = false;
+
+        /// &amp;lt;summary&amp;gt;
+        /// 金焰的世界
+        /// 2018-11.12
+        /// 定时器周期，单位（毫秒），默认30分钟自动更新一次
+        /// &amp;lt;/summary&amp;gt;
+        public int TimerDelay { get; set; } = 30*60*1000;
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;配置文件定义完成，那如何完成后台任务随着项目启动而一起启动呢？&lt;code&gt;IHostedService&lt;/code&gt;接口了解一下，我们可以通过实现这个接口，来完成我们后台任务，然后通过Ioc容器注入即可。&lt;/p&gt;
+&lt;p&gt;新建&lt;code&gt;DbConfigurationPoller&lt;/code&gt;类，实现&lt;code&gt;IHostedService&lt;/code&gt;接口，详细代码如下。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;using Microsoft.Extensions.Hosting;
+using Ocelot.Configuration.Creator;
+using Ocelot.Configuration.Repository;
+using Ocelot.Logging;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Ctr.AhphOcelot.Configuration
+{
+    /// &amp;lt;summary&amp;gt;
+    /// 金焰的世界
+    /// 2018-11-12
+    /// 数据库配置信息更新策略
+    /// &amp;lt;/summary&amp;gt;
+    public class DbConfigurationPoller : IHostedService, IDisposable
+    {
+        private readonly IOcelotLogger _logger;
+        private readonly IFileConfigurationRepository _repo;
+        private readonly AhphOcelotConfiguration _option;
+        private Timer _timer;
+        private bool _polling;
+        private readonly IInternalConfigurationRepository _internalConfigRepo;
+        private readonly IInternalConfigurationCreator _internalConfigCreator;
+        public DbConfigurationPoller(IOcelotLoggerFactory factory,
+            IFileConfigurationRepository repo,
+            IInternalConfigurationRepository internalConfigRepo,
+            IInternalConfigurationCreator internalConfigCreator, 
+            AhphOcelotConfiguration option)
+        {
+            _internalConfigRepo = internalConfigRepo;
+            _internalConfigCreator = internalConfigCreator;
+            _logger = factory.CreateLogger&amp;lt;DbConfigurationPoller&amp;gt;();
+            _repo = repo;
+            _option = option;
+        }
+
+        public void Dispose()
+        {
+            _timer?.Dispose();
+        }
+
+        public Task StartAsync(CancellationToken cancellationToken)
+        {
+            if (_option.EnableTimer)
+            {//判断是否启用自动更新
+                _logger.LogInformation($&quot;{nameof(DbConfigurationPoller)} is starting.&quot;);
+                _timer = new Timer(async x =&amp;gt;
+                {
+                    if (_polling)
+                    {
+                        return;
+                    }
+                    _polling = true;
+                    await Poll();
+                    _polling = false;
+                }, null, _option.TimerDelay, _option.TimerDelay);
+            }
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            if (_option.EnableTimer)
+            {//判断是否启用自动更新
+                _logger.LogInformation($&quot;{nameof(DbConfigurationPoller)} is stopping.&quot;);
+                _timer?.Change(Timeout.Infinite, 0);
+            }
+            return Task.CompletedTask;
+        }
+
+        private async Task Poll()
+       {
+            _logger.LogInformation(&quot;Started polling&quot;);
+
+            var fileConfig = await _repo.Get();
+
+            if (fileConfig.IsError)
+            {
+                _logger.LogWarning($&quot;error geting file config, errors are {string.Join(&quot;,&quot;, fileConfig.Errors.Select(x =&amp;gt; x.Message))}&quot;);
+                return;
+            }
+            else
+            {
+                var config = await _internalConfigCreator.Create(fileConfig.Data);
+                if (!config.IsError)
+                {
+                    _internalConfigRepo.AddOrReplace(config.Data);
+                }
+            }
+            _logger.LogInformation(&quot;Finished polling&quot;);
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;项目代码很清晰，就是项目启动时，判断配置文件是否开启定时任务，如果开启就根据启动定时任务去从数据库中提取最新的配置信息，然后更新到内部配置并生效，停止时关闭并释放定时器，然后再注册后台服务。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;//注册后端服务
+builder.Services.AddHostedService&amp;lt;DbConfigurationPoller&amp;gt;();&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;现在我们启动网关项目和测试服务项目，配置网关启用定时器，代码如下。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public void ConfigureServices(IServiceCollection services)
+{
+    services.AddOcelot().AddAhphOcelot(option=&amp;gt;
+    {
+       option.DbConnectionStrings = &quot;Server=.;Database=Ctr_AuthPlatform;User ID=sa;Password=bl123456;&quot;;
+       option.EnableTimer = true; //启用定时任务
+       option.TimerDelay = 10*000;//周期10秒
+    });
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;启动后使用网关地址访问&lt;code&gt;http://localhost:7777/ctr/values&lt;/code&gt;,可以得到正确地址。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074721233-27451443.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;然后我们在数据库执行网关路由修改命令，等10秒后再刷新页面，发现原来的路由失效，新的路由成功。&lt;/p&gt;
+&lt;pre class=&quot;mssql&quot;&gt;
+&lt;code&gt;UPDATE AhphReRoute SET UpstreamPathTemplate='/cjy/values' where ReRouteId=1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074748350-1373480812.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074756068-1119403495.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;看到这个结果是不是很激动，只要稍微改造下我们的网关项目就实现了网关配置信息的自动更新功能，剩下的就是根据我们项目后台管理界面配置好具体的网关信息即可。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2、接口更新的方式&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;对于良好的网关设计，我们应该是可以随时控制网关启用哪种配置信息，这时我们就需要把网关的更新以接口的形式对外进行暴露，然后后台管理界面在我们配置好网关相关信息后，主动发起配置更新，并记录操作日志。&lt;/p&gt;
+&lt;p&gt;我们再回顾下&lt;code&gt;Ocelot&lt;/code&gt;源码，看是否帮我们实现了这个接口，查找法&lt;code&gt;Ctrl+F&lt;/code&gt;搜索看有哪些地方注入了&lt;code&gt;IFileConfigurationRepository&lt;/code&gt;这个接口，惊喜的发现有个&lt;code&gt;FileConfigurationController&lt;/code&gt;控制器已经实现了网关配置信息预览和更新的相关方法，查看源码可以发现代码很简单，跟我们之前写的更新方式一模一样，那我们如何使用这个方法呢？&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;using System;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Ocelot.Configuration.File;
+using Ocelot.Configuration.Setter;
+
+namespace Ocelot.Configuration
+{
+    using Repository;
+
+    [Authorize]
+    [Route(&quot;configuration&quot;)]
+    public class FileConfigurationController : Controller
+    {
+        private readonly IFileConfigurationRepository _repo;
+        private readonly IFileConfigurationSetter _setter;
+        private readonly IServiceProvider _provider;
+
+        public FileConfigurationController(IFileConfigurationRepository repo, IFileConfigurationSetter setter, IServiceProvider provider)
+        {
+            _repo = repo;
+            _setter = setter;
+            _provider = provider;
+        }
+
+        [HttpGet]
+        public async Task&amp;lt;IActionResult&amp;gt; Get()
+        {
+            var response = await _repo.Get();
+
+            if(response.IsError)
+            {
+                return new BadRequestObjectResult(response.Errors);
+            }
+
+            return new OkObjectResult(response.Data);
+        }
+
+        [HttpPost]
+        public async Task&amp;lt;IActionResult&amp;gt; Post([FromBody]FileConfiguration fileConfiguration)
+        {
+            try
+            {
+                var response = await _setter.Set(fileConfiguration);
+
+                if (response.IsError)
+                {
+                    return new BadRequestObjectResult(response.Errors);
+                }
+
+                return new OkObjectResult(fileConfiguration);
+            }
+            catch(Exception e)
+            {
+                return new BadRequestObjectResult($&quot;{e.Message}:{e.StackTrace}&quot;);
+            }
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;从源码中可以发现控制器中增加了授权访问，防止非法请求来修改网关配置，Ocelot源码经过升级后，把不同的功能进行模块化，进一步增强项目的可配置性，减少冗余，管理源码被移到了&lt;a href=&quot;https://github.com/ThreeMammals/Ocelot.Administration&quot;&gt;Ocelot.Administration&lt;/a&gt;里，详细的源码也就5个文件组成，代码比较简单，就不单独讲解了，就是配置管理接口地址，并使用IdentityServcer4进行认证，正好也符合我们我们项目的技术路线，为了把网关配置接口和网关使用接口区分，我们需要配置不同的Scope进行区分，由于本篇使用的IdentityServer4会在后续篇幅有完整介绍，本篇就直接列出实现代码，不做详细的介绍。现在开始改造我们的网关代码，来集成后台管理接口，然后测试通过授权接口更改配置信息且立即生效。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public void ConfigureServices(IServiceCollection services)
+{
+    Action&amp;lt;IdentityServerAuthenticationOptions&amp;gt; options = o =&amp;gt;
+    {
+        o.Authority = &quot;http://localhost:6611&quot;; //IdentityServer地址
+        o.RequireHttpsMetadata = false;
+        o.ApiName = &quot;gateway_admin&quot;; //网关管理的名称，对应的为客户端授权的scope
+    };
+    services.AddOcelot().AddAhphOcelot(option =&amp;gt;
+    {
+        option.DbConnectionStrings = &quot;Server=.;Database=Ctr_AuthPlatform;User ID=sa;Password=bl123456;&quot;;
+        //option.EnableTimer = true;//启用定时任务
+        //option.TimerDelay = 10 * 000;//周期10秒
+    }).AddAdministration(&quot;/CtrOcelot&quot;, options);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;注意，由于&lt;code&gt;Ocelot.Administration&lt;/code&gt;扩展使用的是&lt;code&gt;OcelotMiddlewareConfigurationDelegate&lt;/code&gt;中间件配置委托，所以我们扩展中间件&lt;code&gt;AhphOcelotMiddlewareExtensions&lt;/code&gt;需要增加扩展代码来应用此委托。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;private static async Task&amp;lt;IInternalConfiguration&amp;gt; CreateConfiguration(IApplicationBuilder builder)
+{
+    //提取文件配置信息
+    var fileConfig = await builder.ApplicationServices.GetService&amp;lt;IFileConfigurationRepository&amp;gt;().Get();
+    var internalConfigCreator = builder.ApplicationServices.GetService&amp;lt;IInternalConfigurationCreator&amp;gt;();
+    var internalConfig = await internalConfigCreator.Create(fileConfig.Data);
+    //如果配置文件错误直接抛出异常
+    if (internalConfig.IsError)
+    {
+        ThrowToStopOcelotStarting(internalConfig);
+    }
+    //配置信息缓存，这块需要注意实现方式，因为后期我们需要改造下满足分布式架构,这篇不做讲解
+    var internalConfigRepo = builder.ApplicationServices.GetService&amp;lt;IInternalConfigurationRepository&amp;gt;();
+    internalConfigRepo.AddOrReplace(internalConfig.Data);
+    //获取中间件配置委托(2018-11-12新增)
+    var configurations = builder.ApplicationServices.GetServices&amp;lt;OcelotMiddlewareConfigurationDelegate&amp;gt;();
+    foreach (var configuration in configurations)
+    {
+        await configuration(builder);
+    }
+    return GetOcelotConfigAndReturn(internalConfigRepo);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;新建&lt;code&gt;IdeitityServer&lt;/code&gt;认证服务，并配置服务端口&lt;code&gt;6666&lt;/code&gt;，并添加二个测试客户端，一个设置访问scope为&lt;code&gt;gateway_admin&lt;/code&gt;，另外一个设置为其他，来分别测试认证效果。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using IdentityServer4.Models;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Ctr.AuthPlatform.TestIds4
+{
+    public class Startup
+    {
+        public Startup(IConfiguration configuration)
+        {
+            Configuration = configuration;
+        }
+
+        public IConfiguration Configuration { get; }
+
+        // This method gets called by the runtime. Use this method to add services to the container.
+        public void ConfigureServices(IServiceCollection services)
+        {
+            services.AddIdentityServer()
+                .AddDeveloperSigningCredential()
+                .AddInMemoryApiResources(Config.GetApiResources())
+                .AddInMemoryClients(Config.GetClients());
+        }
+
+        // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
+        public void Configure(IApplicationBuilder app, IHostingEnvironment env)
+        {
+            if (env.IsDevelopment())
+            {
+                app.UseDeveloperExceptionPage();
+            }
+
+            app.UseIdentityServer();
+        }
+    }
+
+    public class Config
+    {
+        // scopes define the API resources in your system
+        public static IEnumerable&amp;lt;ApiResource&amp;gt; GetApiResources()
+        {
+            return new List&amp;lt;ApiResource&amp;gt;
+            {
+                new ApiResource(&quot;api1&quot;, &quot;My API&quot;),
+                new ApiResource(&quot;gateway_admin&quot;, &quot;My admin API&quot;)
+            };
+        }
+
+        // clients want to access resources (aka scopes)
+        public static IEnumerable&amp;lt;Client&amp;gt; GetClients()
+        {
+            // client credentials client
+            return new List&amp;lt;Client&amp;gt;
+            {
+                new Client
+                {
+                    ClientId = &quot;client1&quot;,
+                    AllowedGrantTypes = GrantTypes.ClientCredentials,
+
+                    ClientSecrets =
+                    {
+                        new Secret(&quot;secret1&quot;.Sha256())
+                    },
+                    AllowedScopes = { &quot;api1&quot; }
+                },
+                new Client
+                {
+                    ClientId = &quot;client2&quot;,
+                    AllowedGrantTypes = GrantTypes.ClientCredentials,
+
+                    ClientSecrets =
+                    {
+                        new Secret(&quot;secret2&quot;.Sha256())
+                    },
+                    AllowedScopes = { &quot;gateway_admin&quot; }
+                }
+            };
+        }
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;配置好认证服务器后，我们使用&lt;code&gt;PostMan&lt;/code&gt;来测试接口调用，首先使用有权限的&lt;code&gt;client2&lt;/code&gt;客户端，获取&lt;code&gt;access_token&lt;/code&gt;,然后使用此&lt;code&gt;access_token&lt;/code&gt;访问网关配置接口。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074827035-1797190248.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074836175-339163172.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;访问&lt;code&gt;http://localhost:7777/CtrOcelot/configuration&lt;/code&gt;可以得到我们数据库配置的结果。&lt;/p&gt;
+&lt;p&gt;我们再使用POST的方式修改配置信息，使用PostMan测试如下，请求后返回状态200（成功），然后测试修改前和修改后路由地址，发现立即生效,可以分别访问&lt;code&gt;http://localhost:7777/cjy/values&lt;/code&gt;和&lt;code&gt;http://localhost:7777/cjy/values&lt;/code&gt;验证即可。然后使用&lt;code&gt;client1&lt;/code&gt;获取access_token,请求配置地址，提示401未授权，为预期结果，达到我们最终目的。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1529926/201811/1529926-20181113074851778-1848220224.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;到此，我们网关就实现了2个方式更新配置信息，大家可以根据实际项目的情况从中选择适合自己的一种方式使用即可。&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;我们实际项目应用过程中，经常会根据不同的项目类型选择不同的数据库，这时网关也要配合项目需求来适应不同数据库的切换，本节就以mysql为例讲解下我们的扩展网关怎么实现数据库的切换及应用，如果有其他数据库使用需求可以根据本节内容进行扩展。&lt;/p&gt;
+&lt;p&gt;在&lt;a href=&quot;https://www.cnblogs.com/jackcao/p/9942561.html&quot;&gt;【.NET Core项目实战-统一认证平台】第三章 网关篇-数据库存储配置信息（1）&lt;/a&gt;中介绍了网关的数据库初步设计，里面有我的设计的概念模型，现在使用mysql数据库，直接生成mysql的物理模型，然后生成数据库脚本，详细的生成方式请见上一篇，一秒搞定。是不是有点小激动，原来可以这么方便。&lt;/p&gt;
+&lt;p&gt;新建&lt;code&gt;MySqlFileConfigurationRepository&lt;/code&gt;实现&lt;code&gt;IFileConfigurationRepository&lt;/code&gt;接口，需要&lt;code&gt;NuGet&lt;/code&gt;中添加&lt;code&gt;MySql.Data.EntityFrameworkCore&lt;/code&gt;。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;using Ctr.AhphOcelot.Configuration;
+using Ctr.AhphOcelot.Model;
+using Dapper;
+using MySql.Data.MySqlClient;
+using Ocelot.Configuration.File;
+using Ocelot.Configuration.Repository;
+using Ocelot.Responses;
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Ctr.AhphOcelot.DataBase.MySql
+{
+    /// &amp;lt;summary&amp;gt;
+    /// 金焰的世界
+    /// 2018-11-12
+    /// 使用MySql来实现配置文件仓储接口
+    /// &amp;lt;/summary&amp;gt;
+    public class MySqlFileConfigurationRepository : IFileConfigurationRepository
+    {
+        private readonly AhphOcelotConfiguration _option;
+        public MySqlFileConfigurationRepository(AhphOcelotConfiguration option)
+        {
+            _option = option;
+        }
+
+        /// &amp;lt;summary&amp;gt;
+        /// 从数据库中获取配置信息
+        /// &amp;lt;/summary&amp;gt;
+        /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+        public async Task&amp;lt;Response&amp;lt;FileConfiguration&amp;gt;&amp;gt; Get()
+        {
+            #region 提取配置信息
+            var file = new FileConfiguration();
+            //提取默认启用的路由配置信息
+            string glbsql = &quot;select * from AhphGlobalConfiguration where IsDefault=1 and InfoStatus=1&quot;;
+            //提取全局配置信息
+            using (var connection = new MySqlConnection(_option.DbConnectionStrings))
+            {
+                var result = await connection.QueryFirstOrDefaultAsync&amp;lt;AhphGlobalConfiguration&amp;gt;(glbsql);
+                if (result != null)
+                {
+                    var glb = new FileGlobalConfiguration();
+                    //赋值全局信息
+                    glb.BaseUrl = result.BaseUrl;
+                    glb.DownstreamScheme = result.DownstreamScheme;
+                    glb.RequestIdKey = result.RequestIdKey;
+                    if (!String.IsNullOrEmpty(result.HttpHandlerOptions))
+                    {
+                        glb.HttpHandlerOptions = result.HttpHandlerOptions.ToObject&amp;lt;FileHttpHandlerOptions&amp;gt;();
+                    }
+                    if (!String.IsNullOrEmpty(result.LoadBalancerOptions))
+                    {
+                        glb.LoadBalancerOptions = result.LoadBalancerOptions.ToObject&amp;lt;FileLoadBalancerOptions&amp;gt;();
+                    }
+                    if (!String.IsNullOrEmpty(result.QoSOptions))
+                    {
+                        glb.QoSOptions = result.QoSOptions.ToObject&amp;lt;FileQoSOptions&amp;gt;();
+                    }
+                    if (!String.IsNullOrEmpty(result.ServiceDiscoveryProvider))
+                    {
+                        glb.ServiceDiscoveryProvider = result.ServiceDiscoveryProvider.ToObject&amp;lt;FileServiceDiscoveryProvider&amp;gt;();
+                    }
+                    file.GlobalConfiguration = glb;
+
+                    //提取所有路由信息
+                    string routesql = &quot;select T2.* from AhphConfigReRoutes T1 inner join AhphReRoute T2 on T1.ReRouteId=T2.ReRouteId where AhphId=@AhphId and InfoStatus=1&quot;;
+                    var routeresult = (await connection.QueryAsync&amp;lt;AhphReRoute&amp;gt;(routesql, new { result.AhphId }))?.AsList();
+                    if (routeresult != null &amp;amp;&amp;amp; routeresult.Count &amp;gt; 0)
+                    {
+                        var reroutelist = new List&amp;lt;FileReRoute&amp;gt;();
+                        foreach (var model in routeresult)
+                        {
+                            var m = new FileReRoute();
+                            if (!String.IsNullOrEmpty(model.AuthenticationOptions))
+                            {
+                                m.AuthenticationOptions = model.AuthenticationOptions.ToObject&amp;lt;FileAuthenticationOptions&amp;gt;();
+                            }
+                            if (!String.IsNullOrEmpty(model.CacheOptions))
+                            {
+                                m.FileCacheOptions = model.CacheOptions.ToObject&amp;lt;FileCacheOptions&amp;gt;();
+                            }
+                            if (!String.IsNullOrEmpty(model.DelegatingHandlers))
+                            {
+                                m.DelegatingHandlers = model.DelegatingHandlers.ToObject&amp;lt;List&amp;lt;string&amp;gt;&amp;gt;();
+                            }
+                            if (!String.IsNullOrEmpty(model.LoadBalancerOptions))
+                            {
+                                m.LoadBalancerOptions = model.LoadBalancerOptions.ToObject&amp;lt;FileLoadBalancerOptions&amp;gt;();
+                            }
+                            if (!String.IsNullOrEmpty(model.QoSOptions))
+                            {
+                                m.QoSOptions = model.QoSOptions.ToObject&amp;lt;FileQoSOptions&amp;gt;();
+                            }
+                            if (!String.IsNullOrEmpty(model.DownstreamHostAndPorts))
+                            {
+                                m.DownstreamHostAndPorts = model.DownstreamHostAndPorts.ToObject&amp;lt;List&amp;lt;FileHostAndPort&amp;gt;&amp;gt;();
+                            }
+                            //开始赋值
+                            m.DownstreamPathTemplate = model.DownstreamPathTemplate;
+                            m.DownstreamScheme = model.DownstreamScheme;
+                            m.Key = model.RequestIdKey;
+                            m.Priority = model.Priority ?? 0;
+                            m.RequestIdKey = model.RequestIdKey;
+                            m.ServiceName = model.ServiceName;
+                            m.UpstreamHost = model.UpstreamHost;
+                            m.UpstreamHttpMethod = model.UpstreamHttpMethod?.ToObject&amp;lt;List&amp;lt;string&amp;gt;&amp;gt;();
+                            m.UpstreamPathTemplate = model.UpstreamPathTemplate;
+                            reroutelist.Add(m);
+                        }
+                        file.ReRoutes = reroutelist;
+                    }
+                }
+                else
+                {
+                    throw new Exception(&quot;未监测到任何可用的配置信息&quot;);
+                }
+            }
+            #endregion
+            if (file.ReRoutes == null || file.ReRoutes.Count == 0)
+            {
+                return new OkResponse&amp;lt;FileConfiguration&amp;gt;(null);
+            }
+            return new OkResponse&amp;lt;FileConfiguration&amp;gt;(file);
+        }
+
+        //由于数据库存储可不实现Set接口直接返回
+        public async Task&amp;lt;Response&amp;gt; Set(FileConfiguration fileConfiguration)
+        {
+            return new OkResponse();
+        }
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;实现代码后如何扩展到我们的网关里呢？只需要在注入时增加一个扩展即可。在&lt;code&gt;ServiceCollectionExtensions&lt;/code&gt;类中增加如下代码。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;/// &amp;lt;summary&amp;gt;
+/// 扩展使用Mysql存储。
+/// &amp;lt;/summary&amp;gt;
+/// &amp;lt;param name=&quot;builder&quot;&amp;gt;&amp;lt;/param&amp;gt;
+/// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
+public static IOcelotBuilder UseMySql(this IOcelotBuilder builder)
+{
+    builder.Services.AddSingleton&amp;lt;IFileConfigurationRepository, MySqlFileConfigurationRepository&amp;gt;();
+    return builder;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后修改网关注入代码。&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public void ConfigureServices(IServiceCollection services)
+{
+    Action&amp;lt;IdentityServerAuthenticationOptions&amp;gt; options = o =&amp;gt;
+    {
+        o.Authority = &quot;http://localhost:6611&quot;; //IdentityServer地址
+        o.RequireHttpsMetadata = false;
+        o.ApiName = &quot;gateway_admin&quot;; //网关管理的名称，对应的为客户端授权的scope
+    };
+    services.AddOcelot().AddAhphOcelot(option =&amp;gt;
+                                       {
+                                           option.DbConnectionStrings = &quot;Server=localhost;Database=Ctr_AuthPlatform;User ID=root;Password=bl123456;&quot;;
+                                           //option.EnableTimer = true;//启用定时任务
+                                           //option.TimerDelay = 10 * 000;//周期10秒
+                                       })
+        .UseMySql()
+        .AddAdministration(&quot;/CtrOcelot&quot;, options);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;最后把mysql数据库插入sqlserver一样的路由测试信息，然后启动测试，可以得到我们预期的结果。为了方便大家测试，附mysql插入测试数据脚本如下。&lt;/p&gt;
+&lt;pre class=&quot;mysql&quot;&gt;
+&lt;code&gt;#插入全局测试信息
+insert into AhphGlobalConfiguration(GatewayName,RequestIdKey,IsDefault,InfoStatus)
+values('测试网关','test_gateway',1,1);
+
+#插入路由分类测试信息
+insert into AhphReRoutesItem(ItemName,InfoStatus) values('测试分类',1);
+
+#插入路由测试信息 
+insert into AhphReRoute values(1,1,'/ctr/values','[ &quot;GET&quot; ]','','http','/api/Values','[{&quot;Host&quot;: &quot;localhost&quot;,&quot;Port&quot;: 9000 }]','','','','','','','',0,1);
+
+#插入网关关联表
+insert into AhphConfigReRoutes values(1,1,1);
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果想扩展其他数据库实现，直接参照此源码即可。&lt;/p&gt;
+
+&lt;p&gt;本篇我们介绍了2种动态更新配置文件的方法，实现访问不同，各有利弊，正式使用时可以就实际情况选择即可，都能达到我们的预期目标，也介绍了Ocelot扩展组件的使用和IdentityServer4的基础入门信息。然后又扩展了我们mysql数据库的存储方式，增加到了我们网关的扩展里，随时可以根据项目实际情况进行切换。&lt;/p&gt;
+&lt;p&gt;网关的存储篇已经全部介绍完毕，有兴趣的同学可以在此基础上继续拓展其他需求，下一篇我们将介绍使用redis来重写Ocelot里的所有缓存，为我们后续的网关应用打下基础。&lt;/p&gt;
+</description>
+<pubDate>Mon, 12 Nov 2018 23:49:00 +0000</pubDate>
+<dc:creator>金焰的世界</dc:creator>
+<og:description></og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jackcao/p/9950305.html</dc:identifier>
+</item>
+<item>
+<title>Font Awesome矢量版，十六进制版，WPF字体使用 - MSDNER</title>
+<link>http://www.cnblogs.com/bruceday/p/9950031.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/bruceday/p/9950031.html</guid>
+<description>&lt;p&gt;我之前在博客中介绍过&lt;a href=&quot;http://nopapp.com/Blog/Article/Font-Awesome-Hex&quot;&gt;几个矢量图库网站&lt;/a&gt;，在WPF程序中，一般接触到的矢量图标资源有XAML、SVG、字体这三种格式。XAML是标准格式就不说了，SVG并不是直接支持的，不过微软提供了&lt;a href=&quot;http://nopapp.com/Blog/Article/Font-Awesome-Hex&quot;&gt;Expression Design&lt;/a&gt;可以非常方便我们将其转换为XAML格式的资源。而对于字体，虽然WPF是直接支持的，但由于字体图标其特殊性，要将其显示为图标还是需要费点劲的。本文这里就以&lt;a href=&quot;http://nopapp.com/Blog/Article/Font-Awesome-Hex&quot;&gt;Font-Awesome&lt;/a&gt;为例，介绍一下如何在WPF中使用字体图标。&lt;/p&gt;&lt;div readability=&quot;225.90833728091&quot;&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use 500px&quot;&gt; fa-500px &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf26e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use address-book&quot;&gt; fa-address-book &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2b9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use address-book-o&quot;&gt; fa-address-book-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2ba;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use address-card&quot;&gt; fa-address-card &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2bb;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use address-card-o&quot;&gt; fa-address-card-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2bc;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use adjust&quot;&gt; fa-adjust &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf042;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use adn&quot;&gt; fa-adn &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf170;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use align-center&quot;&gt; fa-align-center &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf037;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use align-justify&quot;&gt; fa-align-justify &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf039;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use align-left&quot;&gt; fa-align-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf036;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use align-right&quot;&gt; fa-align-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf038;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use amazon&quot;&gt; fa-amazon &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf270;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use ambulance&quot;&gt; fa-ambulance &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0f9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use american-sign-language-interpreting&quot;&gt; fa-american-sign-language-interpreting &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2a3;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use anchor&quot;&gt; fa-anchor &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf13d;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use android&quot;&gt; fa-android &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf17b;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angellist&quot;&gt; fa-angellist &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf209;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-double-down&quot;&gt; fa-angle-double-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf103;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-double-left&quot;&gt; fa-angle-double-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf100;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-double-right&quot;&gt; fa-angle-double-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf101;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-double-up&quot;&gt; fa-angle-double-up &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf102;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-down&quot;&gt; fa-angle-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf107;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-left&quot;&gt; fa-angle-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf104;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-right&quot;&gt; fa-angle-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf105;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use angle-up&quot;&gt; fa-angle-up &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf106;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use apple&quot;&gt; fa-apple &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf179;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use archive&quot;&gt; fa-archive &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf187;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use area-chart&quot;&gt; fa-area-chart &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1fe;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-down&quot;&gt; fa-arrow-circle-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0ab;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-left&quot;&gt; fa-arrow-circle-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0a8;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-o-down&quot;&gt; fa-arrow-circle-o-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf01a;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.0&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-o-left&quot;&gt; fa-arrow-circle-o-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf190;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.0&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-o-right&quot;&gt; fa-arrow-circle-o-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf18e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-o-up&quot;&gt; fa-arrow-circle-o-up &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf01b;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-right&quot;&gt; fa-arrow-circle-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0a9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-circle-up&quot;&gt; fa-arrow-circle-up &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0aa;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-down&quot;&gt; fa-arrow-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf063;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-left&quot;&gt; fa-arrow-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf060;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-right&quot;&gt; fa-arrow-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf061;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrow-up&quot;&gt; fa-arrow-up &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf062;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrows&quot;&gt; fa-arrows &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf047;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrows-alt&quot;&gt; fa-arrows-alt &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0b2;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrows-h&quot;&gt; fa-arrows-h &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf07e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use arrows-v&quot;&gt; fa-arrows-v &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf07d;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use asl-interpreting&quot;&gt; fa-asl-interpreting &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2a3;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use assistive-listening-systems&quot;&gt; fa-assistive-listening-systems&lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2a2;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use asterisk&quot;&gt; fa-asterisk &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf069;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use at&quot;&gt; fa-at &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1fa;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use audio-description&quot;&gt; fa-audio-description &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf29e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use automobile&quot;&gt; fa-automobile &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1b9;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use backward&quot;&gt; fa-backward &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf04a;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use balance-scale&quot;&gt; fa-balance-scale &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf24e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use ban&quot;&gt; fa-ban &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf05e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bandcamp&quot;&gt; fa-bandcamp &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2d5;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bank&quot;&gt; fa-bank &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf19c;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bar-chart&quot;&gt; fa-bar-chart &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf080;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bar-chart-o&quot;&gt; fa-bar-chart-o &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf080;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use barcode&quot;&gt; fa-barcode &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf02a;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bars&quot;&gt; fa-bars &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0c9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bath&quot;&gt; fa-bath &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2cd;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.7&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bathtub&quot;&gt; fa-bathtub &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2cd;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery&quot;&gt; fa-battery &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf240;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-0&quot;&gt; fa-battery-0 &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf244;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-1&quot;&gt; fa-battery-1 &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf243;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-2&quot;&gt; fa-battery-2 &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf242;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-3&quot;&gt; fa-battery-3 &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf241;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-4&quot;&gt; fa-battery-4 &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf240;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-empty&quot;&gt; fa-battery-empty &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf244;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-full&quot;&gt; fa-battery-full &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf240;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-half&quot;&gt; fa-battery-half &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf242;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-quarter&quot;&gt; fa-battery-quarter &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf243;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use battery-three-quarters&quot;&gt; fa-battery-three-quarters &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf241;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.3&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bed&quot;&gt; fa-bed &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf236;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use beer&quot;&gt; fa-beer &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0fc;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use behance&quot;&gt; fa-behance &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1b4;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use behance-square&quot;&gt; fa-behance-square &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1b5;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bell&quot;&gt; fa-bell &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0f3;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bell-o&quot;&gt; fa-bell-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0a2;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bell-slash&quot;&gt; fa-bell-slash &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1f6;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bell-slash-o&quot;&gt; fa-bell-slash-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1f7;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bicycle&quot;&gt; fa-bicycle &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf206;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use binoculars&quot;&gt; fa-binoculars &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1e5;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use birthday-cake&quot;&gt; fa-birthday-cake &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1fd;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bitbucket&quot;&gt; fa-bitbucket &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf171;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bitbucket-square&quot;&gt; fa-bitbucket-square &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf172;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bitcoin&quot;&gt; fa-bitcoin &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf15a;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use black-tie&quot;&gt; fa-black-tie &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf27e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use blind&quot;&gt; fa-blind &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf29d;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.5&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bluetooth&quot;&gt; fa-bluetooth &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf293;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.5&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bluetooth-b&quot;&gt; fa-bluetooth-b &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf294;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bold&quot;&gt; fa-bold &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf032;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bolt&quot;&gt; fa-bolt &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0e7;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bomb&quot;&gt; fa-bomb &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1e2;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use book&quot;&gt; fa-book &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf02d;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bookmark&quot;&gt; fa-bookmark &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf02e;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bookmark-o&quot;&gt; fa-bookmark-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf097;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.6&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use braille&quot;&gt; fa-braille &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf2a1;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use briefcase&quot;&gt; fa-briefcase &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0b1;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use btc&quot;&gt; fa-btc &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf15a;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bug&quot;&gt; fa-bug &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf188;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use building&quot;&gt; fa-building &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1ad;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use building-o&quot;&gt; fa-building-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0f7;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bullhorn&quot;&gt; fa-bullhorn &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0a1;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bullseye&quot;&gt; fa-bullseye &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf140;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use bus&quot;&gt; fa-bus &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf207;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.3&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use buysellads&quot;&gt; fa-buysellads &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf20d;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use cab&quot;&gt; fa-cab &lt;span class=&quot;text-muted&quot;&gt;(alias) &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1ba;]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.2&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calculator&quot;&gt; fa-calculator &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1ec;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar&quot;&gt; fa-calendar &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf073;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar-check-o&quot;&gt; fa-calendar-check-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf274;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar-minus-o&quot;&gt; fa-calendar-minus-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf272;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar-o&quot;&gt; fa-calendar-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf133;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar-plus-o&quot;&gt; fa-calendar-plus-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf271;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.4&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use calendar-times-o&quot;&gt; fa-calendar-times-o &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf273;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use camera&quot;&gt; fa-camera &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf030;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use camera-retro&quot;&gt; fa-camera-retro &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf083;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.1&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use car&quot;&gt; fa-car &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf1b9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use caret-down&quot;&gt; fa-caret-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0d7;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use caret-left&quot;&gt; fa-caret-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0d9;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use caret-right&quot;&gt; fa-caret-right &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf0da;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use caret-square-o-down&quot;&gt; fa-caret-square-o-down &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf150;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small class=&quot;text-muted pull-right&quot;&gt;4.0&lt;/small&gt;&lt;span class=&quot;fa fa-fw&quot; title=&quot;Copy to use caret-square-o-left&quot;&gt; fa-caret-square-o-left &lt;span class=&quot;text-muted&quot;&gt;[&amp;amp;#xf191;]&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;/div&gt;</description>
+<pubDate>Mon, 12 Nov 2018 16:24:00 +0000</pubDate>
+<dc:creator>MSDNER</dc:creator>
+<og:description>我之前在博客中介绍过几个矢量图库网站，在WPF程序中，一般接触到的矢量图标资源有XAML、SVG、字体这三种格式。XAML是标准格式就不说了，SVG并不是直接支持的，不过微软提供了Expression</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/bruceday/p/9950031.html</dc:identifier>
+</item>
+<item>
+<title>面试题-如何判断一个对象是不是数组类型 - Peer1029</title>
+<link>http://www.cnblogs.com/peerless1029/p/9950005.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/peerless1029/p/9950005.html</guid>
+<description>&lt;p&gt;在前端面试中，我们经常会被问道，如何判断一个对象是不是数组类型，下面就这一点展开详细的描述，并总结一下共有几种方法。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1.我们首先回顾一下typeof操作符的用法&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181112230035730-1009733923.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;操作符可以用来检测给定变量的数据类型，返回的值有以下几种：undefined，boolean，string，number，object，function&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2.使用typeof来判断&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181112230341938-1482084195.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;我们惊喜的发现：除了方法会返回function值之外，[]和{}都是返回的object值，所以无法通过typeof来区分对象还是数组，这种方法不可用。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;3.根据构造函数来判断&lt;br/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;instanceof操作符可以来表示实例是否属于某个构造函数创建的。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181112231600242-756106940.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从上图来看，obj1是构造函数Array的实例没问题，obj4也是构造函数的实例类型，显然obj4应该是对象数据类型，为什么会产生这种情况，obj4.__proto__=obj1，obj4改变了它的原型指向，草图如下：&lt;/p&gt;
+
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181112232818671-1658492047.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;因为改变了obj4的原型指向导致使用instanceof字符判断出obj4也为数组类型了，所以此方法也不可取。&lt;/p&gt;
+&lt;p&gt;3.&lt;strong&gt;使用原型对象判断&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181112233355993-1144779359.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;发现结果和使用instanceof字符一样，所以还是无法区[]是数组类型&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;4.根据对象的class属性来判断&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181113000348503-1302976269.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;class：每个对象的内部属性，记录创建对象时使用的类型名，一旦创建，无法修改。&lt;/p&gt;
+&lt;p&gt;问题：数组类型等内置类型，重写了toString方法，直接调用数组对象的方法，不在返回class&lt;/p&gt;
+&lt;p&gt;解决：使用call替换this为指定对象调用Object原型上的toString方法即可。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;5.Array.isArray直接判断&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1103967/201811/1103967-20181113000316303-1718022525.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;center&quot; readability=&quot;12.886627906977&quot;&gt;
+&lt;p&gt;Array.isArray() 用于确定传递的值是否是一个 Array。如果对象是 Array，则为true; 否则为false.&lt;/p&gt;
+&lt;p&gt;综上所述，判断一个对象是不是数组类型最可靠的方法是这两种: Object. prototype. toString. call(obj)===[ object Array]和Array. isArray(obj)。&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;参考资料：&lt;/p&gt;
+&lt;p&gt;《JavaScript高级程序设计》  &lt;a href=&quot;https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Array/isArray&quot; target=&quot;_blank&quot;&gt;MDN&lt;/a&gt;&lt;/p&gt;
+
+&lt;/div&gt;
+</description>
+<pubDate>Mon, 12 Nov 2018 16:07:00 +0000</pubDate>
+<dc:creator>Peer1029</dc:creator>
+<og:description>在前端面试中，我们经常会被问道，如何判断一个对象是不是数组类型，下面就这一点展开详细的描述，并总结一下共有几种方法。 1.我们首先回顾一下typeof操作符的用法 操作符可以用来检测给定变量的数据类型</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/peerless1029/p/9950005.html</dc:identifier>
+</item>
+<item>
+<title>HBase数据持久化之HRegion.flushcache即CF持久化 - letsfly</title>
+<link>http://www.cnblogs.com/letsfly/p/9949999.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/letsfly/p/9949999.html</guid>
+<description>&lt;p&gt;　　我们从HRegion.flushcache开始分析。由于这个过程还是比较复杂的，因此，在这一节，我们不会分析的太过详细，只是单单的介绍一下其大体流程，待大家有了整体的把握之后，我们将在下一节详细介绍其持久化的具体流程。&lt;/p&gt;
+&lt;p&gt;　　为了尽可能严谨的描述整个流程，小编在讲解过程中会贴比较多的图来描述。&lt;/p&gt;
+&lt;p&gt;　　好了，闲话不说，下面我们进入正题：&lt;/p&gt;
+&lt;div readability=&quot;9&quot;&gt;　　首先，让我们来到今天的入口方法HRegion.flushcache：下图的代码不少，但是，并没有我们今天要介绍的重点。此图只是用来表示我们今天要讲的方法。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235335904-796040259.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/38F3F90A13C84231AD9B8FD6578C10C1&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　其实，重点的入口方法是下图的框选方法internalFlushcache。由该方法名，我们就可以猜到该方法应该就是我们要找的方法。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235405120-1074097988.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/FEF78AF282A242C18C5D7E965F3167C8&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;　　接着，让我们追踪到该方法内部，看到其调用了下图所示的两个方法。如下图所框选的两个方法。他们都是我们今天要介绍的重量级方法。&lt;/p&gt;
+&lt;p&gt;　　第一个方法主要实现的是内存快照的创建。(为简化描述，以后用方法一描述该方法)&lt;/p&gt;
+&lt;div readability=&quot;8&quot;&gt;　　第二个方法主要实现了将内存中的数据flush到磁盘上。（同理，用方法二描述该方法）&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235432939-1168025926.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/D3CF71943B2643F5AB145C6306F5CE82&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　下面，我们来到第一个方法，也就是HRegion.internalPrepareFlushCache。这个方法的内容很多，但是与我们今天流程相关并不是很多，如下图所示的代码：&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235454923-1395177616.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/3371A95559D2451FB991C948DA564156&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　这里，我们简单看一下WALUtil.writeFlushMarker，并不做深入讲解，因为后面的内容还很多，详情让我们放到下一节。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235516788-368576861.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/891D6281DEFE44A5A5606D8B0EB01222&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;10&quot;&gt;　　接着，我们来到StoreFlusherImpl.prepare。下图所框选的方法比较重要，因为这是方法一的核心。它为当前的memstore创建了快照，并且调用了resetActive方法，重置了memstore中的active成员变量。大家可能不太清楚我为什么要强调这里的active成员变量。那么我们跳过这张图。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235539715-451442318.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/303B7D5D65F042C9B3745DF5D3D02359&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;10&quot;&gt;　　来到DefaultMemStore.snapshot，看一下我特地为大家标注的。首先，根据当前的active创建ImmutableSegment，然后将刚刚创建的ImmutableSegment赋给成员变量snapshot，最后，调用resetActive重置了当前的active为MutableSegment。这里不是很难，就不详细介绍了，大家有兴趣可以追查一下源码。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235607232-1558402179.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/272FBD9E65FB475CA658AABEF0B58C96&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;10&quot;&gt;　　接下来，让我们来到今天的另一个重量级方法HRegion.internalFlushCacheAndCommit，由于该方法比较长，内容比较多，这里我们仅介绍第一张图，也就是下图。如下图所示，我们框选了两个比较重要的变量prepareResult.storeFlushCtxs、prepareResult.committedFiles。大家可能会对他们有点陌生。没有关系，让我们在下面插一张图稍稍回顾一下&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235639500-728640795.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/13E20F74482D4C49B577F417E11A71A3&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;9&quot;&gt;　　看了下图，你可能就恍然大悟了，这正是方法一为方法二调用做的必要准备。到这里，大家应该能够理解我这里为什么要将他们二者称之为两个重量级方法了。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235709983-731942372.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/88A86F0DE66F48098FA6D19DBBBB1072&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;7&quot;&gt;　　接着，让我们继续往下走，来到HStore.StoreFlusherImpl.flushCache方法。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235732262-38783077.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/BEA7252F254E4EC38742E87CBB60170A&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;7&quot;&gt;　　继续来到上图所示方法的具体调用，这里就实现了对快照的flush。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235752804-1558064310.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/1DE83F86D77A4061B8AA7EF1A6A23BC5&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;9&quot;&gt;　　接着，我们来到今天所介绍的方法中最为复杂的方法。在下图，我框选的内容比较多，大家不要担心，我仅介绍其中与我们这一节紧密相关的后三个方法。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235825447-1327570994.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/79DA5F11880E4E0C94FB67BABB452FC1&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　首先，我们来到HStore.createWriterInTmp方法。在这个方法中，获取了familyTempDir路径。该路径是regionDir/.tmp/family.getNameAsString()。然后构建了StoreFileWriter。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235856621-961256911.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/AF92C68324CF4EA9B89F3D7BF75CCF4C&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　对于StoreFileWriter的构造方法是比较重要的，特别是其writer的构建，我在下图特别作了标示。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235917342-1793327568.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/42D7E602E5D444D794B9B89FEB4C089C&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;由于上图所示的方法比较重要，在这里，我再附一张图来说明上图所示的writer类型，这关乎后面两个方法的具体调用。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235939355-52890145.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/066A3D0D6232428FB6264E234370F31D&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;9&quot;&gt;　　接着，我们来到StoreFlusher.performFlush。你可能会对我在下图标注的sink比较懵逼。但是仔细想一想，你可能就猜到了，这里的sink正是上面我们重点描述的HFileWriterImpl。也就是说下面调用的sink.append正是HFileWriterImpl.append。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181112235959559-465413730.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/23ECAF862C994D879A5EB05DE2B3BB70&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　下图所示正是HFileWriterImpl.append。这里我们就不详细叙述了，留待下一节具体分析。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000022684-836711880.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/1716216117D647BC88A8E0AABED4DF8F&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　接下来，就是真正的持久化方法：finalizeWriter。显然，在这里调用了writer.close。这里的writer类型是StoreFileWriter。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000047983-1363838288.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/1FA6D528BFFD48D6B04FA88A6ECCE345&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;　　继续往下走，来到StoreFileWriter.close。而这里的writer正是我们刚刚再三强调的HFileWriterImpl。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000110673-184131966.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/992E26C0BA7A4B2F9DF65129875D1016&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;7&quot;&gt;　　在HFileWriterImpl.close方法中，将相关信息写入到输出流。&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000135823-2139498987.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/5592AF23630840F0AAA31B3BB6C97CFE&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;　　在最后的finishClose方法中，也正如后面的图所示，最后调用了outputStream.close，完成了输出流的关闭。也就是说HStore中存储的CF信息flush到磁盘上。&lt;/p&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/F78E23E4E10F4B0BAE48CCB68F1C8489&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000217750-1741497485.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;div&gt;&lt;img src=&quot;http://note.youdao.com/src/DE5409CB28B247A58BE629B5C56AB59C&quot; alt=&quot;&quot; data-media-type=&quot;image&quot;/&gt;&lt;/div&gt;
+&lt;div readability=&quot;8&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1365945/201811/1365945-20181113000229456-1269220677.png&quot; alt=&quot;&quot;/&gt;　　这一节描述的信息量还是很大的，还是希望大家耐心阅读。在后面的博文中，小编将做更为详细的描述。&lt;/div&gt;
+&lt;p&gt;　　如果大家感觉不错,希望点一下下面的推荐。你的肯定是小编最大的动力。如果有疑问,也可以发送邮件至15935152719@163.com。&lt;/p&gt;
+</description>
+<pubDate>Mon, 12 Nov 2018 16:04:00 +0000</pubDate>
+<dc:creator>letsfly</dc:creator>
+<og:description>我们从HRegion.flushcache开始分析。由于这个过程还是比较复杂的，因此，在这一节，我们不会分析的太过详细，只是单单的介绍一下其大体流程，待大家有了整体的把握之后，我们将在下一节详细介绍其</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/letsfly/p/9949999.html</dc:identifier>
+</item>
+<item>
 <title>数据溢出 - 随性者也</title>
 <link>http://www.cnblogs.com/zhugaopeng/p/9949890.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/zhugaopeng/p/9949890.html</guid>
@@ -670,1069 +1488,6 @@ public async Task&amp;lt;Customer&amp;gt; AddCustomerAsync(Customer customer)
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/jackson0714/p/Architecture2.html</dc:identifier>
-</item>
-<item>
-<title>Vue实现移动端页面切换效果 - wenr</title>
-<link>http://www.cnblogs.com/wenruo/p/9948348.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wenruo/p/9948348.html</guid>
-<description>&lt;p&gt;找了好多博客实现效果都……emmm……&lt;/p&gt;
-
-&lt;p&gt;应用Vue自带的过渡 《 &lt;a href=&quot;https://cn.vuejs.org/v2/guide/transitions.html&quot; target=&quot;_blank&quot;&gt;进入/离开 &amp;amp; 列表过渡&lt;/a&gt; 》和 嵌套路由 和 fixed定位实现&lt;/p&gt;
-&lt;p&gt;其实还是挺简单的。&lt;/p&gt;
-&lt;p&gt;在子页面把整个页面做绝对定位，覆盖整个屏幕，子父页面将 &lt;span class=&quot;cnblogs_code&quot;&gt;router-view&lt;/span&gt; 用 &lt;span class=&quot;cnblogs_code&quot;&gt;transition&lt;/span&gt; 套起来，并加上过渡动画就可以啦。&lt;/p&gt;
-&lt;p&gt;代码：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;46&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;!&lt;/span&gt;&lt;span&gt;DOCTYPE html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;html &lt;/span&gt;&lt;span&gt;lang&lt;/span&gt;&lt;span&gt;=&quot;en&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;charset&lt;/span&gt;&lt;span&gt;=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;viewport&quot;&lt;/span&gt;&lt;span&gt; content&lt;/span&gt;&lt;span&gt;=&quot;width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;Document&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-    * &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; padding&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; margin&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    html, body, #app &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; width&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    .one &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; yellow&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    .two &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; tomato&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; bottom&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; left&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; right&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    .three &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; #ffe69f&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; bottom&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; left&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; right&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    .v-enter-active, .v-leave-active &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transition&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; all 0.3s&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-    .v-enter, .v-leave-to &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transform&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; translateX(100%)&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;app&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;one&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-link &lt;/span&gt;&lt;span&gt;to&lt;/span&gt;&lt;span&gt;=&quot;/foo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;下一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-link&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue/dist/vue.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue-router/dist/vue-router.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-    const Foo &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; {
-      template: `
-        &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div class&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;whole-page two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;link to&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/foo/bar&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;下一层&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-link&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;link to&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;返回&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-link&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;第二层&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;h1&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-view&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;transition&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;div&amp;gt;&lt;/span&gt;
-&lt;span&gt;      `
-    }
-    const Bar &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; {
-      template: `
-        &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div class&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;whole-page three&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;link to&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/foo&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;返回&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-link&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;第三层&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;h1&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-view&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;transition&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;div&amp;gt;&lt;/span&gt;
-&lt;span&gt;      `
-    }
-    const routes &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; [ 
-      { path: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;/foo&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, component: Foo, children: [ { path: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;bar&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, component: Bar } ] }
-    ]
-    const router &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; VueRouter({ routes })
-    const app &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Vue({ router }).$mount(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;#app&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-  &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;效果：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/670878/201811/670878-20181112190901826-1613579721.gif&quot; alt=&quot;&quot; width=&quot;276&quot; height=&quot;457&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;有一个问题需要注意一下，&lt;/p&gt;
-&lt;p&gt;我们知道，在应用transform属性的时候，fixed定位会变成absolute。&lt;/p&gt;
-&lt;p&gt;这里，页面转换的时候，就变成了相对translation定位。所以如果子页面中有绝对定位的话，移动的过程中页面会变形。&lt;/p&gt;
-&lt;p&gt;简单举个栗子，&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;!&lt;/span&gt;&lt;span&gt;DOCTYPE html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;html &lt;/span&gt;&lt;span&gt;lang&lt;/span&gt;&lt;span&gt;=&quot;en&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;charset&lt;/span&gt;&lt;span&gt;=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;viewport&quot;&lt;/span&gt;&lt;span&gt; content&lt;/span&gt;&lt;span&gt;=&quot;width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;Document&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-* &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; padding&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; margin&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-html, body, #app &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; width&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-#app &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; padding-top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 50px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.one &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; yellow&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.two &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; tomato&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; bottom&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; left&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; right&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;.v-enter-active, .v-leave-active &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transition&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; all 0.3s&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.v-enter, .v-leave-to &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transform&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; translateX(100%)&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-header &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 50px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; #000&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; width&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; #fff&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; line-height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 50px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; text-align&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; center&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.two header &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 50px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; #666&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;app&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;header&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;我是一个标题&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;header&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;one&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-link &lt;/span&gt;&lt;span&gt;to&lt;/span&gt;&lt;span&gt;=&quot;/foo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;下一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-link&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue/dist/vue.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue-router/dist/vue-router.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-    const Foo &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; {
-      template: `
-        &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div class&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;whole-page two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;link to&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;返回&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-link&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;header&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;我也是一个标题&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;header&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;第二层&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;h1&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-view&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;transition&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;div&amp;gt;&lt;/span&gt;
-&lt;span&gt;      `
-    }
-    const routes &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; [ 
-      { path: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;/foo&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, component: Foo }
-    ]
-    const router &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; VueRouter({ routes })
-    const app &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Vue({ router }).$mount(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;#app&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-  &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;看下效果：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/670878/201811/670878-20181112200609960-1079017495.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;OKOK，反正就是这种bug嘛。&lt;/p&gt;
-&lt;p&gt;解决办法就是，就是，尽量让页面fixed定位都是0 0 0 0，然后偏移用padding实现。&lt;/p&gt;
-&lt;p&gt;大概吧……反正我是这么解决的……&lt;/p&gt;
-&lt;p&gt;比如上面那个可以把CSS改成这样解决问题。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;* &lt;/span&gt;{&lt;span&gt; padding&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;;&lt;span&gt; margin&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;; }&lt;span&gt;
-html, body, #app &lt;/span&gt;{&lt;span&gt; width&lt;/span&gt;:&lt;span&gt; 100%&lt;/span&gt;;&lt;span&gt; height&lt;/span&gt;:&lt;span&gt; 100%&lt;/span&gt;; }&lt;span&gt;
-#app &lt;/span&gt;{&lt;span&gt; padding-top&lt;/span&gt;:&lt;span&gt; 50px&lt;/span&gt;; }&lt;span&gt;
-.one &lt;/span&gt;{&lt;span&gt; height&lt;/span&gt;:&lt;span&gt; 100%&lt;/span&gt;;&lt;span&gt; background-color&lt;/span&gt;:&lt;span&gt; yellow&lt;/span&gt;;}&lt;span&gt;
-.two &lt;/span&gt;{&lt;span&gt; background-color&lt;/span&gt;:&lt;span&gt; tomato&lt;/span&gt;;&lt;span&gt; position&lt;/span&gt;:&lt;span&gt; fixed&lt;/span&gt;;&lt;span&gt; top&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;;&lt;span&gt; padding-top&lt;/span&gt;:&lt;span&gt; 100px&lt;/span&gt;;&lt;span&gt; bottom&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;;&lt;span&gt; left&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;;&lt;span&gt; right&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;; }&lt;span&gt;.v-enter-active, .v-leave-active &lt;/span&gt;{&lt;span&gt; transition&lt;/span&gt;:&lt;span&gt; all 0.3s&lt;/span&gt;; }&lt;span&gt;
-.v-enter, .v-leave-to &lt;/span&gt;{&lt;span&gt; transform&lt;/span&gt;:&lt;span&gt; translateX(100%)&lt;/span&gt;; }&lt;span&gt;
-header &lt;/span&gt;{&lt;span&gt; height&lt;/span&gt;:&lt;span&gt; 50px&lt;/span&gt;;&lt;span&gt; background-color&lt;/span&gt;:&lt;span&gt; #000&lt;/span&gt;;&lt;span&gt; width&lt;/span&gt;:&lt;span&gt; 100%&lt;/span&gt;;&lt;span&gt; position&lt;/span&gt;:&lt;span&gt; fixed&lt;/span&gt;;&lt;span&gt; top&lt;/span&gt;:&lt;span&gt; 0&lt;/span&gt;;&lt;span&gt; color&lt;/span&gt;:&lt;span&gt; #fff&lt;/span&gt;;&lt;span&gt; line-height&lt;/span&gt;:&lt;span&gt; 50px&lt;/span&gt;;&lt;span&gt; text-align&lt;/span&gt;:&lt;span&gt; center&lt;/span&gt;;&lt;span&gt; z-index&lt;/span&gt;:&lt;span&gt; 100&lt;/span&gt;; }&lt;span&gt;
-.two header &lt;/span&gt;{&lt;span&gt; top&lt;/span&gt;:&lt;span&gt; 50px&lt;/span&gt;;&lt;span&gt; background-color&lt;/span&gt;:&lt;span&gt; #666&lt;/span&gt;; }
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;嗯嗯 还有一个问题，还有个滑动穿透的问题，（真开心! 这么多问题！&lt;/p&gt;
-&lt;p&gt;我再举个栗子，&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;!&lt;/span&gt;&lt;span&gt;DOCTYPE html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;html &lt;/span&gt;&lt;span&gt;lang&lt;/span&gt;&lt;span&gt;=&quot;en&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;charset&lt;/span&gt;&lt;span&gt;=&quot;UTF-8&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;meta &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;viewport&quot;&lt;/span&gt;&lt;span&gt; content&lt;/span&gt;&lt;span&gt;=&quot;width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;Document&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;title&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-* &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; padding&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; margin&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-html, body, #app &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; width&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.one &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; min-height&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 100%&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; yellow&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.two &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; tomato&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; bottom&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; left&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; right&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.three &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; background-color&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; #ffe69f&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; position&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; fixed&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; top&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 50px&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; bottom&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; left&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt;&lt;span&gt; right&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; 0&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.v-enter-active, .v-leave-active &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transition&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; all 0.3s&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;&lt;span&gt;
-.v-enter, .v-leave-to &lt;/span&gt;&lt;span&gt;{&lt;/span&gt;&lt;span&gt; transform&lt;/span&gt;&lt;span&gt;:&lt;/span&gt;&lt;span&gt; translateX(100%)&lt;/span&gt;&lt;span&gt;;&lt;/span&gt; &lt;span&gt;}&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;style&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;head&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;app&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt;=&quot;one&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-link &lt;/span&gt;&lt;span&gt;to&lt;/span&gt;&lt;span&gt;=&quot;/foo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;下一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-link&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;p&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;第一层&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;router-view&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;div&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue/dist/vue.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script &lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;=&quot;https://unpkg.com/vue-router/dist/vue-router.js&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-    const Foo &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; {
-      template: `
-        &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;div class&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;whole-page two&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;link to&lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;返回&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-link&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;h1&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;第二层&lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;h1&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;transition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;router&lt;/span&gt;&lt;span&gt;-&lt;/span&gt;&lt;span&gt;view&lt;/span&gt;&lt;span&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;router-view&amp;gt;&lt;/span&gt;
-          &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;transition&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;div&amp;gt;&lt;/span&gt;
-&lt;span&gt;      `
-    }
-    const routes &lt;/span&gt;&lt;span&gt;=&lt;/span&gt;&lt;span&gt; [ 
-      { path: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;/foo&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, component: Foo }
-    ]
-    const router &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; VueRouter({ routes })
-    const app &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Vue({ router }).$mount(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;#app&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-  &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;script&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;body&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;html&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;看效果，第二页的高度明明就是视窗的高度，但是它有一个滚动条，实际上那是第一个页面的滚动条。&lt;/p&gt;
-&lt;p&gt;网上找了好多方法，一一试了，全部不生效。（当然很有可能是我的方法不对。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/670878/201811/670878-20181112202831130-1231254409.gif&quot; alt=&quot;&quot; width=&quot;293&quot; height=&quot;485&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;最后没办法只有找最笨的方法啦，就是通过  &lt;span class=&quot;cnblogs_code&quot;&gt;v-if&lt;/span&gt;  把父页面不显示就好了。&lt;/p&gt;
-&lt;p&gt;当然不能直接不显示，因为动画还没结束父元素就空白了呀！setTimeout 就好了……&lt;/p&gt;
-&lt;p&gt;具体代码就不写了，这个应该很容易理解。&lt;/p&gt;
-
-&lt;p&gt;还有什么问题，等我想起来在补充。或者还有什么没注意到的问题，欢迎路过的大佬们提出呀，反正我也解决不了。&lt;/p&gt;
-
-</description>
-<pubDate>Mon, 12 Nov 2018 12:44:00 +0000</pubDate>
-<dc:creator>wenr</dc:creator>
-<og:description>找了好多博客实现效果都……emmm…… 应用Vue自带的过渡 《 进入/离开 &amp; 列表过渡 》和 嵌套路由 和 fixed定位实现 其实还是挺简单的。 在子页面把整个页面做</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wenruo/p/9948348.html</dc:identifier>
-</item>
-<item>
-<title>一个applicationContext 加载错误导致的阻塞解决小结 - 等你归去来</title>
-<link>http://www.cnblogs.com/yougewe/p/9948909.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/yougewe/p/9948909.html</guid>
-<description>&lt;p&gt;　　问题为对接一个sso的验证模块，正确的对接姿势为，接入一个 filter, 然后接入一个 SsoListener 。&lt;/p&gt;
-&lt;p&gt;　　然而在接入之后，却导致了应用无法正常启动，或者说看起来很奇怪，来看下都遇到什么样的问题，以及是如何处理的？&lt;/p&gt;
-&lt;p&gt;还是 web.xml, 原本是这样的: （很简洁！）&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;?&lt;/span&gt;&lt;span&gt;xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot; &lt;/span&gt;&lt;span&gt;?&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;web-app &lt;/span&gt;&lt;span&gt;xmlns&lt;/span&gt;&lt;span&gt;=&quot;http://java.sun.com/xml/ns/javaee&quot;&lt;/span&gt;&lt;span&gt; xmlns:xsi&lt;/span&gt;&lt;span&gt;=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;&lt;/span&gt;&lt;span&gt;
-         xsi:schemaLocation&lt;/span&gt;&lt;span&gt;=&quot;http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_3_0.xsd&quot;&lt;/span&gt;&lt;span&gt;
-         version&lt;/span&gt;&lt;span&gt;=&quot;3.0&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;display-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;xx-test&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;display-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;encodingFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.springframework.web.filter.CharacterEncodingFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;encoding&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;UTF-8&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;forceEncoding&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;true&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;encodingFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/*&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;servlet&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;servlet-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;spring&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;servlet-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;servlet-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;org.springframework.web.servlet.DispatcherServlet&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;servlet-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;contextConfigLocation&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-      &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;classpath:spring/spring-servlet.xml&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;init-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;load-on-startup&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;1&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;load-on-startup&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;servlet&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;servlet-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;servlet-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;spring&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;servlet-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;servlet-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;web-app&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;而需要添加的 filter 如下:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;SessionFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;com.xxx.session.RedisSessionFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;SessionFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/*&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;listener&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;listener-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;com.xx.session.SSOHttpSessionListener&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;listener-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;listener&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;SSOFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;com.xxx.auth.SSOFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-class&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;SSOFilter&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;/*&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;url-pattern&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;filter-mapping&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;context-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;configFileLocation&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-name&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;abc&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;param-value&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;context-param&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-  
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　另外再加几个必要的配置文件扫描！对接完成！不费事！&lt;br/&gt;　　然后，我坑哧坑哧把代码copy过来，准备 commit 搞定收工！&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;　　结果，不出所料，server 起不来了。也不完全是启不来了，就只是启起来之后，啥也没有了。&lt;/p&gt;
-&lt;p&gt;　　sso 中也没啥东西，就是拦截下 header 中的值，判定如果没有登录就的话，就直接返回到 sso 的登录页去了。&lt;/p&gt;
-&lt;p&gt;　　那么，到底是哪里的问题呢？思而不得后，自然就开启了飞行模式了！&lt;/p&gt;
-
-&lt;p&gt;下面，开启debug模式！&lt;/p&gt;
-&lt;p&gt;　　本想直接 debug spring 的，结果，很明显，失败了。压根就没有进入 spring 的 ClassPathXmlApplicationContext 中，得出一个结论，spring 没有被正确的打开！&lt;/p&gt;
-&lt;p&gt;　　好吧，那让我们退回一步，既然 servlet 启不来，那么，可能就是 filter 有问题了。&lt;/p&gt;
-&lt;p&gt;　　不过，请稍等，filter 不是在有请求进来的时候，才会起作用吗？没道理在初始化的时候就把应用给搞死了啊！（不过其实这是有可能的）&lt;/p&gt;
-&lt;p&gt;　　那么，到底问题出在了哪里？&lt;/p&gt;
-&lt;p&gt;简单扫略下代码，不多，还有一个 listener 没有被引起注意，去看看吧。&lt;/p&gt;
-&lt;p&gt;先了解下，web.xml 中的 listener 作用: &lt;/p&gt;
-&lt;p&gt;　　listener 即 监听器，其实也是 tomcat 的一个加载节点。加载顺序与它们在 web.xml 文件中的先后顺序无关。即不会因为 filter 写在 listener 的前面而会先加载 filter。&lt;/p&gt;
-&lt;p&gt;　　其加载顺序为: listener -&amp;gt; filter -&amp;gt; servlet&lt;/p&gt;
-&lt;p&gt;　　接下来，就知道， listener 先加载，既然没有到 servlet, 也排除了 filter, 那就 debug listener 呗！&lt;/p&gt;
-&lt;p&gt;　　果然，debug进入无误！单步后，发现应用在某此被中断，线程找不到了，有点懵。（其实只是因为线程中被调用了线程切换而已）&lt;/p&gt;
-&lt;p&gt;　　我想着，可能是某处发生了异常，而此处又没有被 try-catch, 所以也是很伤心。要是能临时打 try-catch 就好了。 &lt;/p&gt;
-&lt;p&gt;其实 idea 中 是可以对没有捕获的异常进行收集的，即开启当发生异常时就捕获的功能就可以了。&lt;/p&gt;
-&lt;p&gt;　　然而，这大部分情况下捕获的异常，仅仅正常的 loadClass() 异常，这在类加载模型中，是正常抛出的异常。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 如: java.net.URLClassLoader.findClass() 抛出的异常&lt;/span&gt;
-    &lt;span&gt;protected&lt;/span&gt; Class&amp;lt;?&amp;gt; findClass(&lt;span&gt;final&lt;/span&gt;&lt;span&gt; String name)
-        &lt;/span&gt;&lt;span&gt;throws&lt;/span&gt;&lt;span&gt; ClassNotFoundException
-    {
-        &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; Class&amp;lt;?&amp;gt;&lt;span&gt; result;
-        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-            result &lt;/span&gt;=&lt;span&gt; AccessController.doPrivileged(
-                &lt;/span&gt;&lt;span&gt;new&lt;/span&gt; PrivilegedExceptionAction&amp;lt;Class&amp;lt;?&amp;gt;&amp;gt;&lt;span&gt;() {
-                    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Class&amp;lt;?&amp;gt; run() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; ClassNotFoundException {
-                        String path &lt;/span&gt;= name.replace('.', '/').concat(&quot;.class&quot;&lt;span&gt;);
-                        Resource res &lt;/span&gt;= ucp.getResource(path, &lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
-                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (res != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; defineClass(name, res);
-                            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (IOException e) {
-                                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ClassNotFoundException(name, e);
-                            }
-                        } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-                        }
-                    }
-                }, acc);
-        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (java.security.PrivilegedActionException pae) {
-            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt;&lt;span&gt; (ClassNotFoundException) pae.getException();
-        }
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (result == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 此处抛出的异常可以被 idea 捕获&lt;/span&gt;
-            &lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ClassNotFoundException(name);
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　由于这么多无效的异常，导致我反复换了n个姿势，总算到达正确的位置。&lt;br/&gt;　　然而当跟踪到具体的一行时，还是发生了错误。&lt;/p&gt;
-&lt;p&gt;既然用单步调试无法找到错误，那么是不是在我没有单步的地方，出了问题？&lt;/p&gt;
-&lt;p&gt;对了，就是 静态方法块！这个地方，是在首次调用该类的任意方法时，进行初始化的！也许这是我们的方向。&lt;/p&gt;
-&lt;p&gt;最后，跟踪到了一个静态块中，发现这里被中断了！&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;static&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 原罪在这里&lt;/span&gt;
-        CAS_EDIS_CLIENT_TEMPLATE = CasSpringContextUtils.getBean(&quot;casRedisClientTemplate&quot;, CasRedisClientTemplate.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　这一句看起来是向 spring 的 bean工厂请求一个实例，为什么能被卡死呢？&lt;br/&gt;只有再深入一点，才能了解其情况:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &amp;lt;T&amp;gt; T getBean(String name, Class&amp;lt;T&amp;gt;&lt;span&gt; beanType) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; getApplicationContext().getBean(name, beanType);
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这句看起来更像是 spring 的bean获取，不应该有问题啊！不过接下来一句会让我们明白一切:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; ApplicationContext getApplicationContext() {
-        &lt;/span&gt;&lt;span&gt;synchronized&lt;/span&gt; (CasSpringContextUtils.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;while&lt;/span&gt; (applicationContext == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 没错,就是这里了, 这里设置了死锁，线程交出，等待1分钟超时，继续循环&lt;/span&gt;
-                    CasSpringContextUtils.&lt;span&gt;class&lt;/span&gt;.wait(60000&lt;span&gt;);
-                } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException ex) {
-                }
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; applicationContext;
-        }
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　很明显，这里已经导致了某种意义上的死锁。因为 web.xml 在加载到此处时，使用的是一个 main 线程，而加载到此处时，却被该处判断阻断。&lt;/p&gt;
-&lt;p&gt;那么我们可能想， applicationContext 是一个 sping 管理的类，那么只要他被加载后，不可以了吗？就像下面一样:&lt;/p&gt;
-&lt;p&gt;　　没错，spring 在加载到此类时，会调用一个 setApplicationContext, 此时 applicationContext 就不会null了。然后想像还是太美，原因如上:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; setApplicationContext(ApplicationContext applicationContext) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; BeansException {
-        &lt;/span&gt;&lt;span&gt;synchronized&lt;/span&gt; (CasSpringContextUtils.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;) {
-            CasSpringContextUtils.applicationContext &lt;/span&gt;=&lt;span&gt; applicationContext;
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 梦想总是很美好，当加载完成后，通知 wait()&lt;/span&gt;
-            CasSpringContextUtils.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;.notifyAll();
-        }
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　ok, 截止这里，我们已经找到了问题的根源。是一个被引入的jar的优雅方式阻止了你的前进。&lt;/p&gt;
-&lt;p&gt;很明显，你是不可能去改动这段代码的，那么你要做的，就是想办法绕过它。&lt;/p&gt;
-&lt;p&gt;　　即：在执行 getApplicationContext() 之前，把 applicationContext 处理好！&lt;/p&gt;
-&lt;p&gt;如何优先加载 spring 上下文？配置一个 context-param, 再加一个 ContextLoaderListener, 即可:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-  &amp;lt;!-- 提前加载spring --&amp;gt;
-  &amp;lt;context-param&amp;gt;
-    &amp;lt;param-name&amp;gt;contextConfigLocation&amp;lt;/param-name&amp;gt;
-    &amp;lt;param-value&amp;gt;classpath:spring/applicationContext.xml&amp;lt;/param-value&amp;gt;
-  &amp;lt;/context-param&amp;gt;
-  &amp;lt;listener&amp;gt;
-    &amp;lt;listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;org.springframework.web.context.ContextLoaderListener&amp;lt;/listener-&lt;span&gt;class&lt;/span&gt;&amp;gt;
-  &amp;lt;/listener&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;在 ContextLoaderListener 中，会优先加载 contextInitialized(); 从而初始化整个 spring 的生命周期！&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * Initialize the root web application context.
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; contextInitialized(ServletContextEvent event) {
-        initWebApplicationContext(event.getServletContext());
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　也就是说，只要把这个配置放到新增的 filter 之前，即可实现正常情况下的加载！&lt;/p&gt;
-&lt;p&gt;　　验证结果，果然如此！&lt;/p&gt;
-&lt;p&gt;最后，附上一段 tomcat 加载 context 的鲁棒代码，以供参考:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;&lt;img id=&quot;code_img_closed_61d79de6-d021-4c31-8785-d9f66284eadb&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_61d79de6-d021-4c31-8785-d9f66284eadb&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_61d79de6-d021-4c31-8785-d9f66284eadb&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;69&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * Configure the set of instantiated application event listeners
-     * for this Context.
-     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;&lt;span&gt; &amp;lt;code&amp;gt;true&amp;lt;/code&amp;gt; if all listeners wre
-     * initialized successfully, or &amp;lt;code&amp;gt;false&amp;lt;/code&amp;gt; otherwise.
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; listenerStart() {
-
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (log.isDebugEnabled())
-            log.debug(&lt;/span&gt;&quot;Configuring application event listeners&quot;&lt;span&gt;);
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Instantiate the required listeners&lt;/span&gt;
-        String listeners[] =&lt;span&gt; findApplicationListeners();
-        Object results[] &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Object[listeners.length];
-        &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt; ok = &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = 0; i &amp;lt; results.length; i++&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (getLogger().isDebugEnabled())
-                getLogger().debug(&lt;/span&gt;&quot; Configuring event listener class '&quot; +&lt;span&gt;
-                    listeners[i] &lt;/span&gt;+ &quot;'&quot;&lt;span&gt;);
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                String listener &lt;/span&gt;=&lt;span&gt; listeners[i];
-                results[i] &lt;/span&gt;=&lt;span&gt; getInstanceManager().newInstance(listener);
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
-                t &lt;/span&gt;=&lt;span&gt; ExceptionUtils.unwrapInvocationTargetException(t);
-                ExceptionUtils.handleThrowable(t);
-                getLogger().error(sm.getString(
-                        &lt;/span&gt;&quot;standardContext.applicationListener&quot;&lt;span&gt;, listeners[i]), t);
-                ok &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;ok) {
-            getLogger().error(sm.getString(&lt;/span&gt;&quot;standardContext.applicationSkipped&quot;&lt;span&gt;));
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-        }
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Sort listeners in two arrays&lt;/span&gt;
-        ArrayList&amp;lt;Object&amp;gt; eventListeners = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;&amp;gt;&lt;span&gt;();
-        ArrayList&lt;/span&gt;&amp;lt;Object&amp;gt; lifecycleListeners = &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;&amp;gt;&lt;span&gt;();
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = 0; i &amp;lt; results.length; i++&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ((results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletContextAttributeListener)
-                &lt;/span&gt;|| (results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletRequestAttributeListener)
-                &lt;/span&gt;|| (results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletRequestListener)
-                &lt;/span&gt;|| (results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; HttpSessionIdListener)
-                &lt;/span&gt;|| (results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; HttpSessionAttributeListener)) {
-                eventListeners.add(results[i]);
-            }
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ((results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletContextListener)
-                &lt;/span&gt;|| (results[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; HttpSessionListener)) {
-                lifecycleListeners.add(results[i]);
-            }
-        }
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Listener instances may have been added directly to this Context by
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ServletContextInitializers and other code via the pluggability APIs.
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Put them these listeners after the ones defined in web.xml and/or
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; annotations then overwrite the list of instances with the new, full
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; list.&lt;/span&gt;
-        &lt;span&gt;for&lt;/span&gt;&lt;span&gt; (Object eventListener: getApplicationEventListeners()) {
-            eventListeners.add(eventListener);
-        }
-        setApplicationEventListeners(eventListeners.toArray());
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (Object lifecycleListener: getApplicationLifecycleListeners()) {
-            lifecycleListeners.add(lifecycleListener);
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (lifecycleListener &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletContextListener) {
-                noPluggabilityListeners.add(lifecycleListener);
-            }
-        }
-        setApplicationLifecycleListeners(lifecycleListeners.toArray());
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Send application start events&lt;/span&gt;
-
-        &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (getLogger().isDebugEnabled())
-            getLogger().debug(&lt;/span&gt;&quot;Sending application start events&quot;&lt;span&gt;);
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Ensure context is not null&lt;/span&gt;
-&lt;span&gt;        getServletContext();
-        context.setNewServletContextListenerAllowed(&lt;/span&gt;&lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
-
-        Object instances[] &lt;/span&gt;=&lt;span&gt; getApplicationLifecycleListeners();
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instances == &lt;span&gt;null&lt;/span&gt; || instances.length == 0&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; ok;
-        }
-
-        ServletContextEvent event &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServletContextEvent(getServletContext());
-        ServletContextEvent tldEvent &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (noPluggabilityListeners.size() &amp;gt; 0&lt;span&gt;) {
-            noPluggabilityServletContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; NoPluggabilityServletContext(getServletContext());
-            tldEvent &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServletContextEvent(noPluggabilityServletContext);
-        }
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = 0; i &amp;lt; instances.length; i++&lt;span&gt;) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!(instances[i] &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; ServletContextListener))
-                &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
-            ServletContextListener listener &lt;/span&gt;=&lt;span&gt;
-                (ServletContextListener) instances[i];
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                fireContainerEvent(&lt;/span&gt;&quot;beforeContextInitialized&quot;&lt;span&gt;, listener);
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 调用 listener.contextInitialized() 触发 listener&lt;/span&gt;
-                &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (noPluggabilityListeners.contains(listener)) {
-                    listener.contextInitialized(tldEvent);
-                } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                    listener.contextInitialized(event);
-                }
-                fireContainerEvent(&lt;/span&gt;&quot;afterContextInitialized&quot;&lt;span&gt;, listener);
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
-                ExceptionUtils.handleThrowable(t);
-                fireContainerEvent(&lt;/span&gt;&quot;afterContextInitialized&quot;&lt;span&gt;, listener);
-                getLogger().error
-                    (sm.getString(&lt;/span&gt;&quot;standardContext.listenerStart&quot;&lt;span&gt;,
-                                  instances[i].getClass().getName()), t);
-                ok &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-            }
-        }
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; (ok);
-
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Mon, 12 Nov 2018 12:41:00 +0000</pubDate>
-<dc:creator>等你归去来</dc:creator>
-<og:description>问题为对接一个sso的验证模块，正确的对接姿势为，接入一个 filter, 然后接入一个 SsoListener 。 然而在接入之后，却导致了应用无法正常启动，或者说看起来很奇怪，来看下都遇到什么样的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/yougewe/p/9948909.html</dc:identifier>
-</item>
-<item>
-<title>使用CompletableFuture优化你的代码执行效率 - 醉眼识朦胧</title>
-<link>http://www.cnblogs.com/fingerboy/p/9948736.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/fingerboy/p/9948736.html</guid>
-<description>&lt;p&gt;　　这篇文章详细讲解java8中CompletableFuture的特性,方法以及实例.&lt;/p&gt;
-&lt;p&gt;　　在java8以前,我们使用java的多线程编程,一般是通过Runnable中的run方法来完成,这种方式,有个很明显的缺点,就是,没有返回值,这时候,大家可能会去尝试使用Callable中的call方法,然后用Future返回结果,如下:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
-        ExecutorService executor &lt;/span&gt;=&lt;span&gt; Executors.newSingleThreadExecutor();
-        Future&lt;/span&gt;&amp;lt;String&amp;gt; stringFuture = executor.submit(&lt;span&gt;new&lt;/span&gt; Callable&amp;lt;String&amp;gt;&lt;span&gt;() {
-            @Override
-            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; String call() &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
-                Thread.sleep(&lt;/span&gt;2000&lt;span&gt;);
-                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;async thread&quot;&lt;span&gt;;
-            }
-        });
-        Thread.sleep(&lt;/span&gt;1000&lt;span&gt;);
-        System.out.println(&lt;/span&gt;&quot;main thread&quot;&lt;span&gt;);
-        System.out.println(stringFuture.get());
-
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　通过观察控制台,我们发现先打印 main thread ,一秒后打印 async thread,似乎能满足我们的需求,但仔细想我们发现一个问题,当调用future的get()方法时,当前主线程是堵塞的,这好像并不是我们想看到的,另一种获取返回结果的方式是先轮询,可以调用isDone,等完成再获取,但这也不能让我们满意.&lt;/p&gt;
-&lt;p&gt;　　不管怎么看,这种用法看起来并不优雅,起码从视觉上就有些丑陋,而且某些场景无法使用,比如说,&lt;/p&gt;
-&lt;p&gt;　　1.很多个异步线程执行时间可能不一致,我的主线程业务不能一直等着,这时候我可能会想要只等最快的线程执行完或者最重要的那个任务执行完,亦或者我只等1秒钟,至于没返回结果的线程我就用默认值代替.&lt;/p&gt;
-&lt;p&gt;　　2.我两个异步任务之间执行独立,但是第二个依赖第一个的执行结果.&lt;/p&gt;
-&lt;p&gt;　　java8的CompletableFuture,就在这混乱且不完美的多线程江湖中闪亮登场了.CompletableFuture让Future的功能和使用场景得到极大的完善和扩展,提供了函数式编程能力,使代码更加美观优雅,而且可以通过回调的方式计算处理结果,对异常处理也有了更好的处理手段.&lt;/p&gt;
-&lt;p&gt;　　CompletableFuture源码中有四个静态方法用来执行异步任务:&lt;/p&gt;
-&lt;h2&gt;创建任务&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt; &lt;strong&gt;supplyAsync&lt;/strong&gt;(Supplier&amp;lt;U&amp;gt;&lt;span&gt; supplier){..}
-
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt; &lt;strong&gt;supplyAsync&lt;/strong&gt;(Supplier&amp;lt;U&amp;gt;&lt;span&gt; supplier,Executor executor){..}
-
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; CompletableFuture&amp;lt;Void&amp;gt;&lt;span&gt;&lt;strong&gt; runAsync&lt;/strong&gt;(Runnable runnable){..}
-
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; CompletableFuture&amp;lt;Void&amp;gt;&lt;span&gt;&lt;strong&gt; runAsync&lt;/strong&gt;(Runnable runnable,
-Executor executor){..} &lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　如果有多线程的基础知识,我们很容易看出,run开头的两个方法,用于执行没有返回值的任务,因为它的入参是Runnable对象,而supply开头的方法显然是执行有返回值的任务了,至于方法的入参,如果没有传入Executor对象将会使用ForkJoinPool.commonPool() 作为它的线程池执行异步代码.在实际使用中,一般我们使用自己创建的线程池对象来作为参数传入使用,这样速度会快些.&lt;/p&gt;
-&lt;p&gt;　　执行异步任务的方式也很简单,只需要使用上述方法就可以了:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; future =&lt;span&gt; CompletableFuture.supplyAsync(() &lt;/span&gt;-&amp;gt; {
-　　　　&lt;span&gt;//&lt;/span&gt;&lt;span&gt;....执行任务&lt;/span&gt;
-　　　　&lt;span&gt;return&lt;/span&gt; &quot;hello&quot;;}, executor)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　接下来看一下获取执行结果的几个方法.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;V get();
-V get(&lt;/span&gt;&lt;span&gt;long&lt;/span&gt; timeout,Timeout unit);&lt;br/&gt;T getNow(T defaultValue);&lt;br/&gt;T join();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上面两个方法是Future中的实现方式,get()会堵塞当前的线程,这就造成了一个问题,如果执行线程迟迟没有返回数据,get()会一直等待下去,因此,第二个get()方法可以设置等待的时间.&lt;/p&gt;
-&lt;p&gt; 　　getNow()方法比较有意思,表示当有了返回结果时会返回结果,如果异步线程抛了异常会返回自己设置的默认值.&lt;/p&gt;
-&lt;p&gt;接下来以一些场景的实例来介绍一下CompletableFuture中其他一些常用的方法.&lt;/p&gt;
-&lt;h2&gt;thenAccept()&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt; &lt;strong&gt;thenAccept&lt;/strong&gt;(Consumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T&amp;gt;&lt;span&gt; action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt; &lt;strong&gt;thenAcceptAsync&lt;/strong&gt;(Consumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T&amp;gt;&lt;span&gt; action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt; &lt;strong&gt;thenAcceptAsync&lt;/strong&gt;(Consumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T&amp;gt; action,Executor executor);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:当前任务正常完成以后执行,当前任务的执行结果可以作为下一任务的输入参数,无返回值.&lt;/p&gt;
-&lt;p&gt;　　场景:执行任务A,同时异步执行任务B,待任务B正常返回之后,用B的返回值执行任务C,任务C无返回值&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt; &quot;任务A&quot;&lt;span&gt;);
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB = CompletableFuture.supplyAsync(() -&amp;gt; &quot;任务B&quot;&lt;span&gt;);
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureC = futureB.thenApply(b -&amp;gt;&lt;span&gt; {
-      System.out.println(&lt;/span&gt;&quot;执行任务C.&quot;&lt;span&gt;);
-      System.out.println(&lt;/span&gt;&quot;参数:&quot; +&lt;span&gt; b);//参数:任务B
-      &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;a&quot;&lt;span&gt;;
-});&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;thenRun(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt;&lt;span&gt; thenRun(Runnable action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt;&lt;span&gt; thenRunAsync(Runnable action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;Void&amp;gt; thenRunAsync(Runnable action,Executor executor);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:对不关心上一步的计算结果，执行下一个操作&lt;/p&gt;
-&lt;p&gt;　　场景:执行任务A,任务A执行完以后,执行任务B,任务B不接受任务A的返回值(不管A有没有返回值),也无返回值&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt; &quot;任务A&quot;&lt;span&gt;);
-futureA.thenRun(() &lt;/span&gt;-&amp;gt; System.out.println(&quot;执行任务B&quot;));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;thenApply(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     &lt;strong&gt;thenApply&lt;/strong&gt;(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; U&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     &lt;strong&gt;thenApplyAsync&lt;/strong&gt;(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; U&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     &lt;strong&gt;thenApplyAsync&lt;/strong&gt;(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; U&amp;gt; fn, Executor executor)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:当前任务正常完成以后执行，当前任务的执行的结果会作为下一任务的输入参数,有返回值&lt;/p&gt;
-&lt;p&gt;　　场景:多个任务串联执行,下一个任务的执行依赖上一个任务的结果,每个任务都有输入和输出&lt;/p&gt;
-&lt;p&gt;　　实例1:异步执行任务A,当任务A完成时使用A的返回结果resultA作为入参进行任务B的处理,可实现任意多个任务的串联执行&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt; &quot;hello&quot;&lt;span&gt;);
-
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB = futureA.thenApply(s-&amp;gt;s + &quot; world&quot;&lt;span&gt;);
-
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; future3 =&lt;span&gt; futureB.thenApply(String::toUpperCase);
-
-System.out.println(future3.join());&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上面的代码,我们当然可以先调用future.join()先得到任务A的返回值,然后再拿返回值做入参去执行任务B,而thenApply的存在就在于帮我简化了这一步,我们不必因为等待一个计算完成而一直阻塞着调用线程，而是告诉CompletableFuture你啥时候执行完就啥时候进行下一步. 就把多个任务串联起来了.&lt;/p&gt;
-&lt;h2&gt;thenCombine(..)  &lt;strong&gt;thenAcceptBoth(..)  runAfterBoth(..)&lt;/strong&gt;&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;48&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &amp;lt;U,V&amp;gt; CompletableFuture&amp;lt;V&amp;gt;     thenCombine(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; U&amp;gt; other, BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;super&lt;/span&gt; U,? &lt;span&gt;extends&lt;/span&gt; V&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U,V&amp;gt; CompletableFuture&amp;lt;V&amp;gt;     thenCombineAsync(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; U&amp;gt; other, BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;super&lt;/span&gt; U,? &lt;span&gt;extends&lt;/span&gt; V&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U,V&amp;gt; CompletableFuture&amp;lt;V&amp;gt;     thenCombineAsync(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; U&amp;gt; other, BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;super&lt;/span&gt; U,? &lt;span&gt;extends&lt;/span&gt; V&amp;gt; fn, Executor executor)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:结合两个CompletionStage的结果，进行转化后返回&lt;/p&gt;
-&lt;p&gt;　　场景:需要根据商品id查询商品的当前价格,分两步,查询商品的原始价格和折扣,这两个查询相互独立,当都查出来的时候用原始价格乘折扣,算出当前价格. 使用方法:thenCombine(..)&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
- CompletableFuture&amp;lt;Double&amp;gt; futurePrice = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; 100d);
- CompletableFuture&lt;/span&gt;&amp;lt;Double&amp;gt; futureDiscount = CompletableFuture.supplyAsync(() -&amp;gt; 0.8&lt;span&gt;);
- CompletableFuture&lt;/span&gt;&amp;lt;Double&amp;gt; futureResult = futurePrice.thenCombine(futureDiscount, (price, discount) -&amp;gt; price *&lt;span&gt; discount);
- System.out.println(&lt;/span&gt;&quot;最终价格为:&quot; + futureResult.join()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;最终价格为:80.0&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　thenCombine(..)是结合两个任务的返回值进行转化后再返回,那如果不需要返回呢,那就需要&lt;strong&gt;thenAcceptBoth&lt;/strong&gt;(..),同理,如果连两个任务的返回值也不关心呢,那就需要runAfterBoth了,如果理解了上面三个方法,thenApply,thenAccept,thenRun,这里就不需要单独再提这两个方法了,只在这里提一下.&lt;/p&gt;
-&lt;h2&gt;thenCompose(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     thenCompose(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; CompletionStage&amp;lt;U&amp;gt;&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     thenComposeAsync(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; CompletionStage&amp;lt;U&amp;gt;&amp;gt;&lt;span&gt; fn)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletableFuture&amp;lt;U&amp;gt;     thenComposeAsync(Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T,? &lt;span&gt;extends&lt;/span&gt; CompletionStage&amp;lt;U&amp;gt;&amp;gt; fn, Executor executor)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:这个方法接收的输入是当前的CompletableFuture的计算值，返回结果将是一个新的CompletableFuture&lt;/p&gt;
-&lt;p&gt;　　这个方法和thenApply非常像,都是接受上一个任务的结果作为入参,执行自己的操作,然后返回.那具体有什么区别呢?&lt;/p&gt;
-&lt;p&gt;　　&lt;strong&gt;thenApply():它的功能相当于将CompletableFuture&amp;lt;T&amp;gt;转换成CompletableFuture&amp;lt;U&amp;gt;,改变的是同一个&lt;/strong&gt;CompletableFuture中的泛型类型&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;　　thenCompose():用来连接两个CompletableFuture，返回值是一个新的CompletableFuture&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt; &quot;hello&quot;&lt;span&gt;);
-
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB = futureA.thenCompose(s -&amp;gt; CompletableFuture.supplyAsync(() -&amp;gt; s + &quot;world&quot;&lt;span&gt;));
-
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; future3 = futureB.thenCompose(s -&amp;gt;&lt;span&gt; CompletableFuture.supplyAsync(s::toUpperCase));
-
-System.out.println(future3.join());&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　这段代码实现的和上面thenApply一样的效果,在实际使用中,我并没有很清楚两个在使用上的区别,如果有大佬,跪求告知.&lt;/p&gt;
-&lt;h2&gt;applyToEither(..)  acceptEither(..)  runAfterEither(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; applyToEither(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; T&amp;gt; other,Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, U&amp;gt;&lt;span&gt; fn);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; applyToEitherAsync(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; T&amp;gt; other,Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, U&amp;gt;&lt;span&gt; fn);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; applyToEitherAsync(CompletionStage&amp;lt;? &lt;span&gt;extends&lt;/span&gt; T&amp;gt; other,Function&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, U&amp;gt; fn,Executor executor);
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　功能:执行两个CompletionStage的结果,那个先执行完了,就是用哪个的返回值进行下一步操作&lt;br/&gt;　　场景:假设查询商品a,有两种方式,A和B,但是A和B的执行速度不一样,我们希望哪个先返回就用那个的返回值.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;1000&lt;span&gt;);
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;通过方式A获取商品a&quot;&lt;span&gt;;
-        });
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;2000&lt;span&gt;);
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;通过方式B获取商品a&quot;&lt;span&gt;;
-        });
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureC = futureA.applyToEither(futureB, product -&amp;gt; &quot;结果:&quot; +&lt;span&gt; product);&lt;br/&gt;System.out.println(futureC.join()); //结果:通过方式A获取商品a&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　同样的道理,applyToEither的兄弟方法还有acceptEither(),runAfterEither(),我想不需要我解释你也知道该怎么用了.&lt;/p&gt;
-&lt;hr/&gt;&lt;h2&gt; exceptionally(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;T&amp;gt; exceptionally(Function&amp;lt;Throwable, ? &lt;span&gt;extends&lt;/span&gt; T&amp;gt; fn);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:当运行出现异常时,调用该方法可进行一些补偿操作,如设置默认值.&lt;/p&gt;
-&lt;p&gt;　　场景:异步执行任务A获取结果,如果任务A执行过程中抛出异常,则使用默认值100返回.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
- CompletableFuture&amp;lt;String&amp;gt; futureA =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + (100 / 0&lt;span&gt;))
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;futureA result:&quot; +&lt;span&gt; s)
-                .exceptionally(e &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    System.out.println(e.getMessage()); &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;java.lang.ArithmeticException: / by zero&lt;/span&gt;
-                    &lt;span&gt;return&lt;/span&gt; &quot;futureA result: 100&quot;&lt;span&gt;;
-                });
-CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + 50&lt;span&gt;)
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;futureB result:&quot; +&lt;span&gt; s)
-                .exceptionally(e &lt;/span&gt;-&amp;gt; &quot;futureB result: 100&quot;&lt;span&gt;);
-System.out.println(futureA.join());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureA result: 100&lt;/span&gt;
-System.out.println(futureB.join());&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureB result:执行结果:50&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　上面代码展示了正常流程和出现异常的情况,可以理解成catch,根据返回值可以体会下.&lt;/p&gt;
-&lt;hr/&gt;&lt;h2&gt; whenComplete(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;T&amp;gt; whenComplete(BiConsumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, ? &lt;span&gt;super&lt;/span&gt; Throwable&amp;gt;&lt;span&gt; action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;T&amp;gt; whenCompleteAsync(BiConsumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, ? &lt;span&gt;super&lt;/span&gt; Throwable&amp;gt;&lt;span&gt; action);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; CompletionStage&amp;lt;T&amp;gt; whenCompleteAsync(BiConsumer&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, ? &lt;span&gt;super&lt;/span&gt; Throwable&amp;gt; action,Executor executor);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:当CompletableFuture的计算结果完成，或者抛出异常的时候，都可以进入whenComplete方法执行,举个栗子&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + (100 / 0&lt;span&gt;))
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;apply result:&quot; +&lt;span&gt; s)
-                .whenComplete((s, e) &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (s != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                        System.out.println(s);&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-&lt;span&gt;                    }
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (e == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                        System.out.println(s);&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-                    } &lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                        System.out.println(e.getMessage());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;java.lang.ArithmeticException: / by zero&lt;/span&gt;
-&lt;span&gt;                    }
-                })
-                .exceptionally(e &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    System.out.println(&quot;ex&quot;+e.getMessage()); &lt;/span&gt;&lt;span&gt;//ex:&lt;/span&gt;java.lang.ArithmeticException: / by zero
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;span&gt;　　　　　　　　　　　 &lt;/span&gt; &lt;span&gt;return&lt;/span&gt; &quot;futureA result: 100&quot;&lt;span&gt;; }); &lt;br/&gt;System.out.println(futureA.join());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureA result: 100&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　根据控制台,我们可以看出执行流程是这样,supplyAsync-&amp;gt;whenComplete-&amp;gt;exceptionally,可以看出并没有进入thenApply执行,原因也显而易见,在supplyAsync中出现了异常,thenApply只有当正常返回时才会去执行.而whenComplete不管是否正常执行,还要注意一点,whenComplete是没有返回值的.&lt;/p&gt;
-&lt;p&gt;　　上面代码我们使用了函数式的编程风格并且先调用whenComplete再调用exceptionally,如果我们先调用exceptionally,再调用whenComplete会发生什么呢,我们看一下:&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-CompletableFuture&amp;lt;String&amp;gt; futureA =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + (100 / 0&lt;span&gt;))
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;apply result:&quot; +&lt;span&gt; s)
-                .exceptionally(e &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    System.out.println(&lt;/span&gt;&quot;ex:&quot;+e.getMessage()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;ex:java.lang.ArithmeticException: / by zero&lt;/span&gt;
-                    &lt;span&gt;return&lt;/span&gt; &quot;futureA result: 100&quot;&lt;span&gt;;
-                })
-                .whenComplete((s, e) &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (e == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                        System.out.println(s);&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureA result: 100&lt;/span&gt;
-                    } &lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                        System.out.println(e.getMessage());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-&lt;span&gt;                    }
-                })
-                ;
-System.out.println(futureA.join());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureA result: 100&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　代码先执行了exceptionally后执行whenComplete,可以发现,由于在exceptionally中对异常进行了处理,并返回了默认值,whenComplete中接收到的结果是一个正常的结果,被exceptionally美化过的结果,这一点需要留意一下.&lt;/p&gt;
-&lt;h2&gt;handle(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; handle(BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, Throwable, ? &lt;span&gt;extends&lt;/span&gt; U&amp;gt;&lt;span&gt; fn);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; handleAsync(BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, Throwable, ? &lt;span&gt;extends&lt;/span&gt; U&amp;gt;&lt;span&gt; fn);
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &amp;lt;U&amp;gt; CompletionStage&amp;lt;U&amp;gt; handleAsync(BiFunction&amp;lt;? &lt;span&gt;super&lt;/span&gt; T, Throwable, ? &lt;span&gt;extends&lt;/span&gt; U&amp;gt; fn,Executor executor);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　功能:当CompletableFuture的计算结果完成，或者抛出异常的时候，可以通过handle方法对结果进行处理&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
- CompletableFuture&amp;lt;String&amp;gt; futureA =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + (100 / 0&lt;span&gt;))
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;apply result:&quot; +&lt;span&gt; s)
-                .exceptionally(e &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    System.out.println(&lt;/span&gt;&quot;ex:&quot; + e.getMessage()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;java.lang.ArithmeticException: / by zero&lt;/span&gt;
-                    &lt;span&gt;return&lt;/span&gt; &quot;futureA result: 100&quot;&lt;span&gt;;
-                })
-                .handle((s, e) &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (e == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                        System.out.println(s);&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;futureA result: 100&lt;/span&gt;
-                    } &lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                        System.out.println(e.getMessage());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-&lt;span&gt;                    }
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;handle result:&quot; + (s == &lt;span&gt;null&lt;/span&gt; ? &quot;500&quot;&lt;span&gt; : s);
-                });
-System.out.println(futureA.join());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;handle result:futureA result: 100&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　通过控制台,我们可以看出,最后打印的是handle result:futureA result: 100,执行exceptionally后对异常进行了&quot;美化&quot;,返回了默认值,那么handle得到的就是一个正常的返回,我们再试下,先调用handle再调用exceptionally的情况.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
- CompletableFuture&amp;lt;String&amp;gt; futureA =&lt;span&gt; CompletableFuture.
-                supplyAsync(() &lt;/span&gt;-&amp;gt; &quot;执行结果:&quot; + (100 / 0&lt;span&gt;))
-                .thenApply(s &lt;/span&gt;-&amp;gt; &quot;apply result:&quot; +&lt;span&gt; s)
-                .handle((s, e) &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (e == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
-                        System.out.println(s);&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-                    } &lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-                        System.out.println(e.getMessage());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;java.lang.ArithmeticException: / by zero&lt;/span&gt;
-&lt;span&gt;                    }
-                    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;handle result:&quot; + (s == &lt;span&gt;null&lt;/span&gt; ? &quot;500&quot;&lt;span&gt; : s);
-                })
-                .exceptionally(e &lt;/span&gt;-&amp;gt;&lt;span&gt; {
-                    System.out.println(&lt;/span&gt;&quot;ex:&quot; + e.getMessage()); &lt;span&gt;//&lt;/span&gt;&lt;span&gt;未执行&lt;/span&gt;
-                    &lt;span&gt;return&lt;/span&gt; &quot;futureA result: 100&quot;&lt;span&gt;;
-                });
-System.out.println(futureA.join());&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;handle result:500&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　根据控制台输出,可以看到先执行handle,打印了异常信息,并对接过设置了默认值500,exceptionally并没有执行,因为它得到的是handle返回给它的值,由此我们大概推测handle和whenComplete的区别&lt;/p&gt;
-&lt;p&gt;　　　1.都是对结果进行处理,handle有返回值,whenComplete没有返回值&lt;/p&gt;
-&lt;p&gt;　　　2.由于1的存在,使得handle多了一个特性,可在handle里实现exceptionally的功能&lt;/p&gt;
-&lt;h2&gt;allOf(..)  anyOf(..)&lt;/h2&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; CompletableFuture&amp;lt;Void&amp;gt;  &lt;strong&gt;allOf&lt;/strong&gt;(CompletableFuture&amp;lt;?&amp;gt;&lt;span&gt;... cfs)
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; CompletableFuture&amp;lt;Object&amp;gt;  &lt;strong&gt;anyOf&lt;/strong&gt;(CompletableFuture&amp;lt;?&amp;gt;... cfs)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　allOf:当所有的&lt;code&gt;CompletableFuture&lt;/code&gt;都执行完后执行计算&lt;/p&gt;
-&lt;p&gt;　　anyOf:最快的那个CompletableFuture执行完之后执行计算&lt;/p&gt;
-&lt;p&gt;　　场景二:查询一个商品详情,需要分别去查商品信息,卖家信息,库存信息,订单信息等,这些查询相互独立,在不同的服务上,假设每个查询都需要一到两秒钟,要求总体查询时间小于2秒.&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
-
-        ExecutorService executorService &lt;/span&gt;= Executors.newFixedThreadPool(4&lt;span&gt;);
-
-        &lt;/span&gt;&lt;span&gt;long&lt;/span&gt; start =&lt;span&gt; System.currentTimeMillis();
-        CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureA = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;1000 + RandomUtils.nextInt(1000&lt;span&gt;));
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;商品详情&quot;&lt;span&gt;;
-        },executorService);
-
-        CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureB = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;1000 + RandomUtils.nextInt(1000&lt;span&gt;));
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;卖家信息&quot;&lt;span&gt;;
-        },executorService);
-
-        CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureC = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;1000 + RandomUtils.nextInt(1000&lt;span&gt;));
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;库存信息&quot;&lt;span&gt;;
-        },executorService);
-
-        CompletableFuture&lt;/span&gt;&amp;lt;String&amp;gt; futureD = CompletableFuture.supplyAsync(() -&amp;gt;&lt;span&gt; {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-                Thread.sleep(&lt;/span&gt;1000 + RandomUtils.nextInt(1000&lt;span&gt;));
-            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (InterruptedException e) {
-                e.printStackTrace();
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &quot;订单信息&quot;&lt;span&gt;;
-        },executorService);
-
-        CompletableFuture&lt;/span&gt;&amp;lt;Void&amp;gt; allFuture =&lt;span&gt; CompletableFuture.allOf(futureA, futureB, futureC, futureD);
-        allFuture.join();
-
-        System.out.println(futureA.join() &lt;/span&gt;+ futureB.join() + futureC.join() +&lt;span&gt; futureD.join());
-        System.out.println(&lt;/span&gt;&quot;总耗时:&quot; + (System.currentTimeMillis() -&lt;span&gt; start));
-    }&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;参考资料:&lt;/p&gt;
-&lt;p&gt;　　&lt;a href=&quot;https://colobu.com/2016/02/29/Java-CompletableFuture/#Either&quot; target=&quot;_blank&quot;&gt;https://colobu.com/2016/02/29/Java-CompletableFuture/#Either&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;　　&lt;a href=&quot;https://blog.csdn.net/qq_36597450/article/details/81232051&quot; target=&quot;_blank&quot;&gt;https://blog.csdn.net/qq_36597450/article/details/81232051&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Mon, 12 Nov 2018 12:16:00 +0000</pubDate>
-<dc:creator>醉眼识朦胧</dc:creator>
-<og:description>这篇文章详细讲解java8中CompletableFuture的特性,方法以及实例. 在java8以前,我们使用java的多线程编程,一般是通过Runnable中的run方法来完成,这种方式,有个很明</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/fingerboy/p/9948736.html</dc:identifier>
-</item>
-<item>
-<title>“代码变更覆盖率”在后端测试中的实践 - zni.feng</title>
-<link>http://www.cnblogs.com/znicy/p/9948607.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/znicy/p/9948607.html</guid>
-<description>&lt;p&gt;最近一直对测试覆盖率方面的内容比较感兴趣，虽然很多项目都早已经用上了Jacoco来实现测试覆盖率的统计，但是很少看到实际项目中基于覆盖率统计来指导测试的实践。这篇文章是我近期基于代码变更风险（CR）平台 （http://cr.qa.netease.com/）对猛犸大数据系统的后台调度组件Azakban的一个小版本的测试实践。&lt;/p&gt;
-&lt;div readability=&quot;29.5&quot;&gt;
-&lt;p&gt;个人认为，代码覆盖率应该是对一个版本测试情况的一个重要考量。不能说代码覆盖率高，就是没有风险。但是，相反，我觉得如果代码覆盖率很低，那就是客观地存在较大风险，说明我们测试的充分度不够。CR平台，其实是基于jacoco覆盖率统计的结果之上，将提测版本与基准版本（通常是上一个线上稳定版本）的代码库进行比对，统计出一个版本提测后开发变更代码的覆盖情况。另外，借助了其他开源工具（ckjm、javancss等）展示了代码中类之间的相互调用关系以及复杂度信息等等。&lt;/p&gt;
-
-&lt;p&gt;下面是我在猛犸4.8.5版本中，借助CR平台对Azkaban相关需求的测试实践：&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;例子一：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;1. 看需求和JIRA&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;div readability=&quot;40&quot;&gt;
-&lt;p&gt;开发写的需求：&lt;/p&gt;
-&lt;p&gt;“ 补数据优化，增强顺序性，优化实例生成数量：原来有的逻辑是Trigger每个一分钟触发一次，然后产生一个补数据实例到分发队列，分发队列每次分发前，先检查有没有正在运行的实例，如果没有就随机选择一个实例分发下去执行。如果有，重新放回队列。这个逻辑存在的问题是，会产生大量的实例在分发队列，耗费内存和CPU时间。现在做的优化是：Trigger每次触发前，先检查分发队列以及已经分发下去的实例里边是否有相关的补数据实例。如果有，则跳过这次触发。另外可以通过&lt;strong&gt;&lt;em&gt;az.backfill.concurrent.num&lt;/em&gt;&lt;/strong&gt; 指定补数据实例产生的并发度（范围1~100，缺失默认值 1）。”&lt;/p&gt;
-&lt;p&gt;看着可能有点晕，我稍微将它简化一下就是：&lt;/p&gt;
-&lt;p&gt;a. 补数据调度，原本可能会产生大量并发执行的实例，现在限制并发实例数只能是1。即：前一次实例执行完成后，后一次调度实例才会生成。&lt;/p&gt;
-&lt;p&gt;b. 提供参数， az.backfill.concurrent.num来控制允许的并发实例数量，该参数的范围是1-100。&lt;/p&gt;
-&lt;p&gt;至于JIRA，我这边就不重复添图了，大致跟需求内容差不多。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2. 查看Gitlab：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;开发提交gitlab代码时与jira做了关联，点击链接可以直接跳转到gitlab：&lt;/p&gt;
-&lt;p&gt;可以看到该jira影响的类有两个，分别是：GlobleAttribute.java （只添加了一行常量定义）和 TriggerManager.java&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;3. 查看CR：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;开始测试该功能前，先看一眼CR的覆盖情况（CR之前执行过自动化测试用例和其他手工测试用例）：&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153219f46db854-5345-441a-8def-1349d7de9025.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以看到，在表格里没有出现GlobleAttribute.java（不知是否是因为该类只添加了一行常量定义，改动太小的缘故），而TriggerManager.java类的改动部分覆盖率为63.6%。点进去再仔细看下新修改的行的覆盖情况：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/2018062815323440caebc7-8d2b-4bbf-934a-70710b90f397.png&quot; alt=&quot;&quot;/&gt; &lt;/div&gt;
-&lt;p&gt;可以看到“新修改”的未覆盖部分（红色）主要是因为 if (t.getContext().containsKey(GlobleAttribute.AZ_BACKFILL_INSTANCES_NUM))判断没有命中，因为该需求引入了新的参数az.backfill.concurrent.num 指定补数据实例产生的并发度 。而该参数我们还并没有设置过。&lt;/p&gt;
-&lt;p&gt;此外，下面的未覆盖部分， &lt;strong&gt;if &lt;/strong&gt;判断的后半段 flow.getScheduleType().equals(ScheduleType.BACKFILL)未命中的原因是因为我们还并没有执行过补数据的调度。&lt;/p&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;4. 执行手工测试&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;对一个作业流设置补数据调度100次，指定补数据实例产生的并发度为5（设置参数az.backfill.concurrent.num 的值为5），验证补数据调度按照既定场景正确执行。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;5. 测试结果&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;查数据库显示，补数据调度按照顺序执行， 但是实例个数始终为1。&lt;/p&gt;
-&lt;p&gt;显然，该需求的基本功能生效了（从以前的并发实例数不受限，现在实例个数为1），但是并发度参数并没有生效。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;6. 结果分析排查&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;重新执行覆盖率统计，再来看一眼CR平台的新的结果：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153249fd93661b-f32c-43c7-88d0-d5c834b11b6d.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;可以看到，覆盖率有一定的提升。但是为什么并发参数设置没有生效呢？ 来看一眼服务器上的执行日志，拉到日志的最后，看到有一条频繁打印的日志：“backfill trigger 3959, .......”：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153300422bee5f-42b4-428c-bcef-df20d8d86ca6.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;再对照一下CR平台上变更的代码：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/201806281533151bfd173f-39ed-40ed-8ecd-49253bda0d72.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;可以看到，下面这部分“新修改”的代码应该打印的日志还处于“未覆盖”的状态。往上看，发现红框中圈出的代码段里打印的日志刚好就是服务器上后台的日志。看一眼判断条件： &lt;strong&gt;“&lt;/strong&gt;判断该作业流是否已经有执行实例正在执行中，且该正在执行中的作业流实例的开始时间距离现在不到10分钟 &lt;strong&gt;”&lt;/strong&gt; 。&lt;/p&gt;
-&lt;p&gt;这样就初步解释了 目前阶段为什么我们没看到“新修改”日志打印，以及实例没有生成的直接原因。即： 被之前的判断条件错误拦截了。&lt;/p&gt;
-&lt;p&gt;等待10分钟，我们继续查看数据库的结果，发现并发的实例数仍为1。 再看一眼CR的覆盖情况：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153342e341f581-6510-4399-acb1-4a2569a4d5ec.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以看到，刚才未覆盖的这段日志打印，在10分钟过去后被执行了。为了确认该数据的准确性，再看一眼日志，这次我们直接搜索“Reach az.backfill.instances.num ......”这条日志：&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153355a94c90af-f7e7-4a9b-9166-c2a8b4f3e87a.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以看到，日志确实出现了变化。也就是说，服务器执行的代码进入了判断： “到达了补数据实例个数的上限 isReachBackfillInstanceNum(t)” 。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;然而，我们设置的上限明明是5，为什么却显示已经达到上限，而数据库里的实际并发数还是1呢？&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;再看一眼，变更代码中未覆盖的变更行：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/2018062815340985c42f40-33fa-434a-9344-d14d87c0db87.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以发现，在isReachBackfillInstanceNum(t)方法中，刚好找到了我们想要的内容：默认的补数据实例个数backfillInstancesNum为1，当调度t的上下文信息context中包含参数GlobalAttribute.AZ_BACKFILL_INSTANCES_NUM时，就用该对应的值赋值给backfillInstancesNum。且会对该范围进行1-100的判断。&lt;/p&gt;
-&lt;p&gt;而这段代码正好没有被执行。&lt;/p&gt;
-&lt;p&gt;再次进入源码查看，发现了个惊人的事情：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/201806281534237c208467-97bf-4cd4-845f-8d22fec93df0.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;div readability=&quot;13&quot;&gt;
-&lt;p&gt;这个AZ_BACKFILL_INSTANCES_NUM参数的实际key值，应该是az.backfill. instances.num，而开发兄弟在需求和jira中写的都是“az.backfill. concurrent.num”。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;此时，我的心情是复杂的。此处需要省略1000字。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;如你所知，后续修改参数key后，重新测试，成功测试通过。通过后的覆盖率统计情况：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153440b0695382-0070-48fe-bac4-8ad88bbfee64.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-
-&lt;p&gt;唯一没有覆盖的行，是因为设置的并发参数的值是5，在该1-100范围内，所以没有进入该判断。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;例子二：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;div readability=&quot;31&quot;&gt;
-&lt;p&gt;篇幅有限，再来简单介绍另外个利用CR平台完善测试的例子。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;需求：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;将执行节点的流实例并发数量的值写进db，在节点服务启动时，优先从db中读取加载进内存。如果db中不包含，再从配置文件读取。&lt;/p&gt;
-&lt;p&gt;简单测试后， 看下CR平台的覆盖情况：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/20180628153455e21487a9-bf87-43c6-8d54-d1fc297c1ab9.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以看到，对于基本的正常功能，我们还是覆盖到了。 但是仍有大部分语句没有覆盖，而这部分未覆盖的内容其实就是查询数据库时发生异常情况。&lt;/p&gt;
-&lt;p&gt;知道未覆盖的原因，就好办了，我们只要制造数据库查询异常就可以模拟该场景。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;测试方式：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;执行数据库语句alter table executors drop column threads_num; 将mysql中executor表的threads_num字段给删掉。然后重新启动executor。并确保executor可以正常工作。&lt;/p&gt;
-&lt;p&gt;再次执行覆盖率统计，查看CR平台的结果：&lt;/p&gt;
-
-&lt;div&gt;&lt;img src=&quot;https://nos.netease.com/cloud-website-bucket/201806281535092740fd70-e21d-4447-9daf-c9297f14a704.png&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-&lt;p&gt;可以看到，这下“新修改”的代码全部覆盖了。可以妥妥地在jira上标上这功能测试通过。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;总结&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;最近看了一些业界的测试方法，发现基于覆盖率统计的白盒测试的热度正在逐渐提升，包括腾讯、去哪儿等一些公司都有基于覆盖率统计指导测试的不少实践。包括分析代码增量覆盖率，分析每条用例对覆盖率的贡献来精简测试用例集、剔除无效用例，基于执行覆盖统计将每条用例与代码模块相对应等等。所幸，我们也有CR平台，基于CR平台，我们后续可以做的事情应该还有很多。&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Mon, 12 Nov 2018 11:42:00 +0000</pubDate>
-<dc:creator>zni.feng</dc:creator>
-<og:description>以前写的一篇旧文章，今天偶然发现被刊登在网易云6月份的博客上（https://sq.163yun.com/blog/article/170691322392797184），mark下。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/znicy/p/9948607.html</dc:identifier>
 </item>
 </channel>
 </rss>
