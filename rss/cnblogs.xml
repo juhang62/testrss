@@ -9,6 +9,662 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Spring Framework框架解析（1）- 从图书馆示例来看xml文件的加载过程 - knock_小新</title>
+<link>http://www.cnblogs.com/konck/p/9961121.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/konck/p/9961121.html</guid>
+<description>&lt;h2 id=&quot;引言&quot;&gt;引言&lt;/h2&gt;
+&lt;p&gt;这个系列是我阅读Spring源码后的一个总结，会从Spring Framework框架的整体结构进行分析，不会先入为主的讲解IOC或者AOP的原理，如果读者有使用Spring的经验再好不过。鉴于每个人对源码阅读角度的不同，如果文中存在理解有误的地方希望读者能够及时提出，共同进步。文章所分析的源码基于5.0.8版本，但使用老版本理解起来问题也不大，因为在框架整体架构上变化并不多。&lt;/p&gt;
+&lt;p&gt;如果你使用Spring的时间足够长，相信在最初的开发过程中你一定使用过xml文件来加载各中bean。虽然现在基本都会通过配置文件类或者注解来进行加载，但使用xml也有它的优点，这种方式对代码的侵入性最小，而且配置第三方bean也比较方便。这篇文章通过一个图书馆的例子来讲解xml最原始的加载过程，将加载过程中涉及到的各个模块比做图书馆的各个元素，希望能加深你对Spring框架的理解。&lt;/p&gt;
+&lt;p&gt;图书馆和Spring有许多相似的地方，将图书馆比做bean工厂，从图书馆借书相当于getBean的过程，将图书馆买的书放入图书馆的过程可以类比注册bean(registerBeanDefinition)的过程，而生产图书的过程又可以类比实例化BeanDefinition的过程，是不是很相似？这里我会使用下面一段比较原始的代码来分步讲解这一过程。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;ClassPathResource resource = new ClassPathResource(&quot;applicationContext.xml&quot;);
+DefaultListableBeanFactory factory = new DefaultListableBeanFactory();
+XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(factory); 
+reader.loadBeanDefinitions(resource);
+Object beanObject = factory.getBean(&quot;beanName&quot;);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;classpathresource与resource&quot;&gt;ClassPathResource与Resource&lt;/h2&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;ClassPathResource resource = new ClassPathResource(&quot;applicationContext.xml&quot;);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这一行代码比较简单，它通过一个xml文件初始化了一个Resource，相当于对xml文件做了一个包装，方便以后将xml文件转换为BeanDefinition。可以将这一过程想象成现在的图书还是一堆木头，而将这些木头搅拌成木浆只是为了后面更方便的获取制作图书的原料而已。&lt;/p&gt;
+&lt;p&gt;从源码角度来说ClassPathResource继承自Resource接口，是Spring中对资源的抽象，所有需要使用的资源在Spring中都被抽象为Resource，它提供了一系列操作资源的方法，比如获取资源的名称，资源是否存在等等。Resource接口又继承了InputStreamSource接口，在InputStreamSource中，提供了一个核心方法，这个方法将资源转换成InputStream方便后期操作。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public interface InputStreamSource {
+    InputStream getInputStream() throws IOException;
+}
+
+public interface Resource extends InputStreamSource {
+    boolean exists();
+
+    URL getURL() throws IOException;
+
+    String getFilename();
+
+    ......
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;beanfactorybeandefinition与defaultlistablebeanfactory&quot;&gt;BeanFactory、BeanDefinition与DefaultListableBeanFactory&lt;/h2&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;DefaultListableBeanFactory factory = new DefaultListableBeanFactory();&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;DefaultListableBeanFactory就比较重要了，它是一个Bean工厂，相当于图书馆，所有的书都在DefaultListableBeanFactory中，而借书，买书的过程都需要通过DefaultListableBeanFactory来操作。&lt;/p&gt;
+&lt;p&gt;DefaultListableBeanFactory首先是BeanFactory接口的一个实现，BeanFactory定义了通过名称和类型获取Bean的一系列方法。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public interface BeanFactory {
+    Object getBean(String name) throws BeansException;
+
+    &amp;lt;T&amp;gt; T getBean(Class&amp;lt;T&amp;gt; requiredType) throws BeansException;
+
+    boolean containsBean(String name);
+
+    ......
+}
+
+public class DefaultListableBeanFactory extends AbstractAutowireCapableBeanFactory
+        implements ConfigurableListableBeanFactory, BeanDefinitionRegistry, Serializable{}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;其次从DefaultListableBeanFactory的定义还可以看到，它在继承BeanFactory接口的基础上，还实现了BeanDefinitionRegistry接口。BeanDefinitionRegistry的核心功能是对Bean的注册，注册是干嘛呢？通过图书馆来对比，BeanFactory的getBean相当于从图书馆借书，那么这些书是哪来的呢？就是通过BeanDefinitionRegistry的registerBeanDefinition方法，它相当于把书放入图书馆，而DefaultListableBeanFactory就相当于图书馆本身了。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public interface BeanDefinitionRegistry extends AliasRegistry {
+    void registerBeanDefinition(String beanName, BeanDefinition beanDefinition);
+
+    void removeBeanDefinition(String beanName) throws NoSuchBeanDefinitionException;
+
+    BeanDefinition getBeanDefinition(String beanName) throws NoSuchBeanDefinitionException;
+
+    ......
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在BeanDefinitionRegistry的定义中还有涉及到一个关键接口：BeanDefinition，上面说BeanDefinitionRegistry相当于把书放入图书馆，那么具体图书在图书馆中怎么表示呢？这就是BeanDefinition。BeanDefinition是Bean在Spring中的抽象，也就是说每一个Bean在Spring中都对应一个BeanDefinition，它提供了与Bean相对应的属性，并提供了操作Bean的方法。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public interface BeanDefinition extends AttributeAccessor, BeanMetadataElement {
+    void setBeanClassName(@Nullable String beanClassName);
+
+    String getBeanClassName();
+
+    void setScope(@Nullable String scope);
+
+    String getScope();
+
+    ......
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;beandefinitionreaderbeandefinitiondocumentreader与xmlbeandefinitionreader&quot;&gt;BeanDefinitionReader、BeanDefinitionDocumentReader与XmlBeanDefinitionReader&lt;/h2&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(factory); 
+reader.loadBeanDefinitions(resource);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;还是通过图书馆来类比：图书馆是（DefaultListableBeanFactory），把书（BeanDefinition）放入图书馆的能力对应（BeanDefinitionRegistry），从图书馆拿编号后的书的能力对应（BeanFactory），书的原材料对应（ClassPathResource），现在就缺把书的原材料（ClassPathResource）变成一本本书（BeanDefinition），并将它放入图书馆中了。那么谁来将原材料（ClassPathResource）变成书（BeanDefinition）并放入到图书馆（DefaultListableBeanFactory）中呢？这就是XmlBeanDefinitionReader的工作了。这一过程可以通过以下源码来分析：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public class XmlBeanDefinitionReader extends AbstractBeanDefinitionReader{}
+public abstract class AbstractBeanDefinitionReader implements EnvironmentCapable, BeanDefinitionReader{}
+
+public XmlBeanDefinitionReader(BeanDefinitionRegistry registry) {
+    super(registry);
+}
+
+protected AbstractBeanDefinitionReader(BeanDefinitionRegistry registry) {
+    ......
+    this.registry = registry;
+    ......
+}
+
+public interface BeanDefinitionReader {
+    BeanDefinitionRegistry getRegistry();
+
+    ResourceLoader getResourceLoader();
+
+    int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException;
+    ......
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;首先XmlBeanDefinitionReader实现了BeanDefinitionReader接口，BeanDefinitionReader定义了一个关键方法loadBeanDefinitions(Resource resource)，这个方法将resource装载到BeanDefinitionRegistry中，BeanDefinitionRegistry通过XmlBeanDefinitionReader的构造方法传入。具体loadBeanDefinitions又是怎么做的呢？再来继续查看源代码：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public int loadBeanDefinitions(EncodedResource encodedResource) throws BeanDefinitionStoreException {
+    ......
+        //通过InputStreamSource接口的定义的getInputStream方法获取InputStream
+        InputStream inputStream = encodedResource.getResource().getInputStream();
+        try {
+            //将InputStream包装成InputSource
+            InputSource inputSource = new InputSource(inputStream);
+            if (encodedResource.getEncoding() != null) {
+                inputSource.setEncoding(encodedResource.getEncoding());
+            }
+            //将Source装载到BeanDefinitionRegistry中
+            return doLoadBeanDefinitions(inputSource, encodedResource.getResource());
+        }
+        finally {
+            inputStream.close();
+        }
+    ......
+}
+
+protected int doLoadBeanDefinitions(InputSource inputSource, Resource resource)
+        throws BeanDefinitionStoreException {
+    ......
+    try {
+        //将Source包装成Document
+        Document doc = doLoadDocument(inputSource, resource);
+        //将Document装载到BeanDefinitionRegistry中
+        return registerBeanDefinitions(doc, resource);
+    }
+    ......
+}
+
+public int registerBeanDefinitions(Document doc, Resource resource) throws BeanDefinitionStoreException {
+    //这里创建了一个DefaultBeanDefinitionDocumentReader
+    BeanDefinitionDocumentReader documentReader = createBeanDefinitionDocumentReader();
+    int countBefore = getRegistry().getBeanDefinitionCount();
+
+    //调用DefaultBeanDefinitionDocumentReader的registerBeanDefinitions方法将将Document装载到BeanDefinitionRegistry中
+    documentReader.registerBeanDefinitions(doc, createReaderContext(resource));
+    return getRegistry().getBeanDefinitionCount() - countBefore;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;首先将Resource转换为EncodedResource，然后通过getInputStream获取InputStream，调用doLoadBeanDefinitions方法来装载资源，在doLoadBeanDefinitions方法中，首先将Resource包装成Document方便操作元素节点，然后把解析并装载Document的功能委托了给BeanDefinitionDocumentReader，这里使用了一个默认的DefaultBeanDefinitionDocumentReader实现。那么可以想象DefaultBeanDefinitionDocumentReader中做了两件事：将Document解析为BeanDefinitions，然后将BeanDefinitions装载到BeanDefinitionRegistry中。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public void registerBeanDefinitions(Document doc, XmlReaderContext readerContext) {
+    this.readerContext = readerContext;
+    logger.debug(&quot;Loading bean definitions&quot;);
+    //从Document中获取到Element
+    Element root = doc.getDocumentElement();
+
+    //具体的解析过程
+    doRegisterBeanDefinitions(root);
+}
+
+protected void doRegisterBeanDefinitions(Element root) {
+    ......
+    //前置解析，默认为空，可以重写
+    preProcessXml(root);
+    //具体的解析xml并注入到过程
+    parseBeanDefinitions(root, this.delegate);
+    //后置解析，默认为空，可以重写
+    postProcessXml(root);
+    ......
+}
+
+protected void parseBeanDefinitions(Element root, BeanDefinitionParserDelegate delegate) {
+    ......
+    parseDefaultElement(ele, delegate);
+    ......
+}
+
+private void parseDefaultElement(Element ele, BeanDefinitionParserDelegate delegate) {
+    //解析&quot;import&quot;节点
+    if (delegate.nodeNameEquals(ele, IMPORT_ELEMENT)) {
+        importBeanDefinitionResource(ele);
+    }
+    //解析&quot;alias&quot;节点
+    else if (delegate.nodeNameEquals(ele, ALIAS_ELEMENT)) {
+        processAliasRegistration(ele);
+    }
+    //解析&quot;bean&quot;节点
+    else if (delegate.nodeNameEquals(ele, BEAN_ELEMENT)) {
+        processBeanDefinition(ele, delegate);
+    }
+    //解析&quot;beans&quot;节点
+    else if (delegate.nodeNameEquals(ele, NESTED_BEANS_ELEMENT)) {
+        // recurse
+        doRegisterBeanDefinitions(ele);
+    }
+}
+
+protected void processBeanDefinition(Element ele, BeanDefinitionParserDelegate delegate) {
+    //将元素包装成BeanDefinitionHolder，方便操作BeanDefinition
+    BeanDefinitionHolder bdHolder = delegate.parseBeanDefinitionElement(ele);
+    if (bdHolder != null) {
+        bdHolder = delegate.decorateBeanDefinitionIfRequired(ele, bdHolder);
+        try {
+            //具体的注入方法
+            BeanDefinitionReaderUtils.registerBeanDefinition(bdHolder, getReaderContext().getRegistry());
+        }
+        ......
+    }
+}
+
+public static void registerBeanDefinition(
+        BeanDefinitionHolder definitionHolder, BeanDefinitionRegistry registry)
+        throws BeanDefinitionStoreException {
+    ......
+    //通过BeanDefinitionRegistry将元素注入到DefaultListableBeanFactory中
+    registry.registerBeanDefinition(beanName, definitionHolder.getBeanDefinition());
+    ......
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;跟之前猜测的一样，首先通过parseBeanDefinitions方法将所有的xml节点分步解析，之后将解析后的节点包装成BeanDefinitionHolder对象，最后通过BeanDefinitionRegistry的registerBeanDefinition方法将元素注入到BeanDefinitionRegistry中。&lt;/p&gt;
+&lt;p&gt;整个解析到注入过程非常复杂，我只列出了核心步骤，从中可以看到XmlBeanDefinitionReader是怎么一步步将xml中的Bean节点变为BeanDefinition并放入到DefaultListableBeanFactory中的。还是用图书馆来类比：首先将原材料（ClassPathResource）变成纸张（Document），然后将纸张（Document）通过书籍制造工厂（BeanDefinitionDocumentReader）组装成一本本书籍（BeanDefinition），然后书籍制造工厂（BeanDefinitionDocumentReader）将一本本书籍（BeanDefinition）送到图书馆（DefaultListableBeanFactory），而XmlBeanDefinitionReader就扮演了这一整个过程的组合功能。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;至此，整个图书馆功能就齐全了，原材料可以造书，书可以放入图书馆，并且你也可以很方便的从图书馆借书。可以说Spring设计理念也在这一过程中得到体现，它将Bean的解析，Bean的定义，Bean的生产以及Bean的获取每一步都单独抽离开来，互不干扰，最后通过DefaultListableBeanFactory将它们整合到一起供用户使用。怎么说呢，这一过程回过头来并没有什么神奇的地方，但能清晰的将每个功能都抽象出来本身就需要非常好的抽象设计能力，而对这一过程的反复阅读与分析，一定能让你在设计抽象能力上有一定的提升。&lt;/p&gt;
+&lt;p&gt;看完后你觉得这一过程类比是否恰当呢？如果你有更贴近生活的例子，不妨留言一起探讨，共同进步。说完DefaultListableBeanFactory，在下一篇文章中将会讲讲ApplicationContext接口，并对它的部分实现类做一个简单分析。&lt;/p&gt;
+&lt;p&gt;参考资料：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;《Spring揭秘》&lt;/li&gt;
+&lt;li&gt;《Spring源码深度解析》&lt;/li&gt;
+&lt;/ul&gt;</description>
+<pubDate>Wed, 14 Nov 2018 23:17:00 +0000</pubDate>
+<dc:creator>knock_小新</dc:creator>
+<og:description>引言 这个系列是我阅读Spring源码后的一个总结，会从Spring Framework框架的整体结构进行分析，不会先入为主的讲解IOC或者AOP的原理，如果读者有使用Spring的经验再好不过。鉴于</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/konck/p/9961121.html</dc:identifier>
+</item>
+<item>
+<title>Linux 桌面玩家指南：13. 使用 Git 及其 和 Eclipse 的集成 - 京山游侠</title>
+<link>http://www.cnblogs.com/youxia/p/LinuxDesktop013.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/youxia/p/LinuxDesktop013.html</guid>
+<description>&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;&lt;strong&gt;特别说明：&lt;/strong&gt;要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用&lt;code&gt;$&lt;/code&gt;标记数学公式的开始和结束。如果某条评论中出现了两个&lt;code&gt;$&lt;/code&gt;，MathJax 会将两个&lt;code&gt;$&lt;/code&gt;之间的内容按照数学公式进行排版，从而导致评论区格式混乱。如果大家的评论中用到了&lt;code&gt;$&lt;/code&gt;，但是又不是为了使用数学公式，就请使用&lt;code&gt;\$&lt;/code&gt;转义一下，谢谢。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;想从头阅读该系列吗？下面是传送门：&lt;/p&gt;
+&lt;h2 id=&quot;参考资料&quot;&gt;参考资料&lt;/h2&gt;
+&lt;p&gt;我是通过阅读《Pro Git》这本书学习 Git 的，我读的时候还是第一版的英文版，现在已经出第二版了，而且英文版和中文版都有。英文第二版的地址是 &lt;a href=&quot;https://git-scm.com/book/en/v2&quot; class=&quot;uri&quot;&gt;https://git-scm.com/book/en/v2&lt;/a&gt;，中文第二版的地址是&lt;a href=&quot;https://git-scm.com/book/zh/v2&quot; class=&quot;uri&quot;&gt;https://git-scm.com/book/zh/v2&lt;/a&gt;。想看第一版的话把地址中的&lt;code&gt;v2&lt;/code&gt;改成&lt;code&gt;v1&lt;/code&gt;就可以了。如果哪天突然链接打不开了，也别着急，记住《Pro Git》这个招牌，使用搜索引擎很快就能找到它。&lt;/p&gt;
+&lt;h2 id=&quot;git-是什么&quot;&gt;Git 是什么&lt;/h2&gt;
+&lt;p&gt;Git 是一个版本控制系统，它可以保存工作文件的所有修订版本。有了它你就可以将某个文件回溯到之前的状态，甚至将整个项目都回退到过去某个时间点的状态，你可以比较文件的变化细节，查出最后是谁修改了哪个地方，从而找出导致怪异问题出现的原因，又是谁在何时报告了某个功能缺陷等等。使用版本控制系统通常还意味着，就算你乱来一气把整个项目中的文件改的改删的删，你也照样可以轻松恢复到原先的样子。但额外增加的工作量却微乎其微。&lt;/p&gt;
+&lt;p&gt;Git 的特点：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Git是分布式的版本控制系统，它没有中心服务器的概念（虽然实际开发中可以建一个中心服务器），每一台开发机器上都保存完整的历史记录；但是它有本地代码仓库和远程代码仓库的概念（不然怎么多人协作？），而且可以追踪多个远程仓库。&lt;/li&gt;
+&lt;li&gt;Git 在没有网的情况下也可以工作。Git在本地磁盘上保存有项目的完整历史，Git 中的绝大多数操作都只需要访问本地文件和资源，一般不需要来自网络上其它计算机的信息。所以 Git 能够非常快地建立分支和合并分支，并具有强大的跟踪分支和切换分支的能力。大部分操作看起来瞬间完成。有网的时候，再向远程仓库 push 一下就行了。&lt;/li&gt;
+&lt;li&gt;Git 一般只添加数据。你执行的 Git 操作，几乎只往 Git 数据库中增加数据。 很难让 Git 执行任何不可逆操作，或者让它以任何方式清除数据。一旦你提交数据到 Git 中，就难以再丢失数据，特别是如果你定期的推送数据库到其它仓库的话。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;下面是我简化了的 Git 使用小结，图片都来源于《Pro Git》第一版。&lt;/p&gt;
+&lt;p&gt;每一个项目都应该有一个工作目录（Working directory），我们可以自己建一个目录，然后把这个目录里面的代码用 Git 管理起来（使用&lt;code&gt;git init&lt;/code&gt;命令和&lt;code&gt;git add&lt;/code&gt;命令），也可以通过&lt;code&gt;git clone&lt;/code&gt;命令从别的地方克隆一个项目过来自动生成一个工作目录。在工作目录中的文件就是当前编辑和修改的文件，如果是新建立的目录或新克隆来的目录，工作目录中的文件就是该项目最新的状态。Git 是在本地保存有所有的历史记录和分支记录的，这些内容都在工作目录的&lt;code&gt;.git&lt;/code&gt;目录中，称之为本地仓库（local repository）。当切换分支或查看以前的历史版本时，工作目录中的文件自动改变（这才是重点，工作无需切换目录，目录中的文件会自动切换）。工作目录中的文件有三种状态：已修改（modified）、已暂存（staged）、已提交（committed）。修改后的文件可以先加入暂存区域，一次工作结束后一起提交。&lt;/p&gt;
+&lt;p&gt;Git是分布式的，没有中心服务器的概念，但实际工作中仍然可以把代码仓库放到一台大家都可以访问的服务器上，做实际的中心服务器使用（仅在小团队时使用此工作流程，原因后面详述）。在本地机器上工作完后，使用&lt;code&gt;git push&lt;/code&gt;命令把仓库推送到服务器上，换一个地方换一台机器后，只需要&lt;code&gt;git clone&lt;/code&gt;一下，又可以获得所有的代码（包含所有的历史记录及分支）继续工作。服务器故障也没问题，因为每一个工作的机器上都保存有完整的代码仓库，所以从不用担心代码丢失。没有网络也没有关系，在本地机器上照样可以提交（&lt;code&gt;git commit&lt;/code&gt;），因为整个仓库就在自己的机器上，当有网络时，&lt;code&gt;git push&lt;/code&gt;一下就可以了。&lt;/p&gt;
+&lt;p&gt;Git有远程仓库（remote repository）的概念，而且可以管理很多个远程仓库，远程仓库可以是服务器，也可以是别人的个人计算机（但一般没有人这么用），每一个远程仓库都有一个简短的名字和一个地址，最开始用&lt;code&gt;git clone&lt;/code&gt;克隆代码的那个远程仓库别名往往默认为 origin，自己添加的远程仓库可以随意指定别名，当然所有的远程仓库都可以随意修改别名。可以从远程仓库获取代码（&lt;code&gt;git fetch&lt;/code&gt;命令或&lt;code&gt;git pull&lt;/code&gt;命令），也可以把自己的代码推送到远程仓库（&lt;code&gt;git push&lt;/code&gt;命令，需要写权限）。&lt;/p&gt;
+&lt;p&gt;既然 Git 即可以随便从远程仓库获取代码，又可以把自己的代码推送到远程仓库，那么当多人协作时，岂不会乱套吗？解决这个问题的，就是 Git 的必杀之技——创建分支及分支合并。&lt;/p&gt;
+&lt;p&gt;首先，随着一次次的提交，在本地代码库中形成一个主分支，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930204910531-113702076.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;有时为了开发新特性，随时可以开一个新分支，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930204934610-1246833284.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;新分支和主分支之间可以随意切换，随着分支的发展，形式如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205011235-941718527.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;主分支也可以向前发展，如下：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205030235-273157597.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最终，当新分支代码很稳定以后，可以将其合并到主分支，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205053828-906117986.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;而能够防止多人协作时出现混乱的关键就在于，当从远程仓库 clone 代码库到本地或 fetch 代码库到本地时，远程分支的标记并不等于本地分支的标记。从远程 clone 一个代码库到本地后，其 master 分支有两个标记，一个标记为 origin/master 表示远程库中的 master 分支，一个标记为 master，表示本地的 master 分支。如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205246797-1037597449.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以想象，由于别人的工作，远程仓库中的 master 分支肯定会向前继续移动，但是在下次联网之前，该 origin/master 标记不会移动。而本地的 master 标记继续向前移动。&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205319313-2034782602.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;直到下次联网，使用&lt;code&gt;git fetch&lt;/code&gt;命令将远程仓库的内容取回本地，origin/master 标记才会改变位置，这时，看起来就像是两个分支，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201609/16576-20160930205406703-1430558200.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最后，将 origin/master 分支合并到 master 分支中（使用&lt;code&gt;git merge&lt;/code&gt;命令），本地代码库又一次变成了一个单一的 master 分支，继续向前开发，并可以将它 push 到远程仓库，供别人使用。&lt;/p&gt;
+&lt;p&gt;Git冲突的处理完全靠人工完成。（从逻辑上讲，机器也不可能完美处理冲突。）比如一个小型团队一起工作，他们可以设置一个服务器用于保存远程 Git 仓库，然后每个人工作之前先从该远程仓库 fetch 代码，接着工作，工作完成后，先在本地提交，最后 push 到远程仓库。但是当一个人 push 的时候，已经有人在他之前 push 了，如果他们工作在同一个分支，就会出现冲突。解决冲突的办法就是先把别人 push 的内容再次 fetch 下来，合并分支，然后再 push。&lt;/p&gt;
+&lt;p&gt;通过前面对git原理的了解，可以分析得出使用Git时有以下几种工作流程：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;一个人单干，不需要考虑冲突，随时可以开分支、合并分支和切换分支，随时可以本地提交。如果为了防止代码丢失，可以开一个服务器，每次工作完成就 push 到服务器上；&lt;/li&gt;
+&lt;li&gt;小型团队合作，如前所述，开一个服务器保存代码仓库，然后所有的人把该服务器当成远程仓库，工作之前先 fetch，工作之后再 push。如果有冲突，则先 fetch，合并分支解决冲突后再 push。如果团队人数太多，每个人都向该服务器 push，那冲突该是有多少？有可能一个开发者第一次向服务器 push 的时候，有人在他之前已经 push 过了，他只好先 fetch，手工合并解决冲突，可等他再次 push 的时候，发现又有人再他之前已经 push 了，于是他只好再做一次解决冲突的流程，可是如果在他工作的时候，又有人 push 了呢？这也是之前讲的该工作流程只适合小型开发团队的原因。&lt;br/&gt;以上流程经过适当修改也可以供大型团队使用，那就是将团队分组，每个组的成员共用一个服务器当远程仓库，组长合并了该组的工作成果后，再push到另一个服务器当总的远程仓库，这样就可以大大减少冲突的数量，减少工作量。&lt;/li&gt;
+&lt;li&gt;开源项目的合作，在这种情况下，每个人都把自己的仓库暴露在互联网上。开源项目的组织者或负责人将所有人的仓库设为远程仓库，并把有意义的工作合并到主分支，然后发布官方的 Git 仓库。每个开发者从官方仓库 fetch 代码后，完成自己的工作，然后再把它 push 到互联网上自己的仓库，等着项目负责人将自己的工作整合到官方仓库中。如果项目负责人不干了，改人了，只要还有人继续开发，该项目就可以继续下去。碰到团队比较大的情况，也可以进行分组。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;Git 服务器的建设也相当简单，因为 Git 支持以 SSH、HTTP 等协议传输数据，如果需要对服务器有写权限，就开通 SSH 服务吧，设一个账户供所有人访问 Git 仓库即可。如果只需要读权限，使用任何一个 HTTP 服务器均可。关于 Git 服务器的建设，请自行参考官方文档。如果是个人的、开源的项目，可以使用 Github 网站提供的服务，直接存储在互联网上。（Github 私人仓库是要收钱的。）&lt;/p&gt;
+&lt;h2 id=&quot;在-eclipse-中使用-git&quot;&gt;在 Eclipse 中使用 Git&lt;/h2&gt;
+&lt;p&gt;得益于 Eclipse 中的 EGit 插件，在 Eclipse 中使用 Git 非常简单。任何一个项目，都可以使用快捷菜单中的 &quot;Team&quot; -&amp;gt; &quot;Share Project&quot; 将文件交给版本控制软件管理，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093117160-1764911049.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;现在最流行的版本控制软件当然是非 Git 莫属了。Eclipse 会提示我们创建一个 Git 仓库（Repository）。Eclipse 中的项目（Project）是一个比较小的概念，它不能等同于 Git 中的工作目录（Working Directory），Git 中也没有项目的概念，但是在 Git 的工作目录中管理多个文件夹是没有什么问题的，而 Eclipse 中的项目就是一个文件夹，所以，在 Git 的一个工作目录中管理多个 Project 是没有问题的。因此，只有 Eclipse 的工作区（Workspace）才等同于 Git 中的工作目录（Working Directory）。而 Git 的仓库（Repository）一般是放在 Git 工作目录中的一个&lt;code&gt;.git&lt;/code&gt;目录，考虑到 Eclipse 的工作区（Workspace）中本来就已经包含了很多元数据，再在里面创建一个&lt;code&gt;.git&lt;/code&gt;目录，并且在里面存放 Git 的数据容易引起混乱，因此最好是把 Git 的工作目录和仓库创建在 Eclipse 的 Workspace 之外。幸好，Eclipse 支持这样的功能。如下图，点击 &quot;Create&quot; 按钮，创建一个 Git 仓库，这里输入的路径&lt;code&gt;/home/youxia/git/samples&lt;/code&gt;其实是一个工作目录：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093151082-855613349.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从下图可以看出，工作目录为&lt;code&gt;/home/youxia/git/samples&lt;/code&gt;，Git 的仓库为&lt;code&gt;/home/youxia/git/samples/.git&lt;/code&gt;，原本在 Workspace 中的项目 JavaIODemo 被自动移到了&lt;code&gt;/home/youxia/git/samples&lt;/code&gt;目录中：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093237598-593709678.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以使用 Navigator 视图查看项目中所有的文件，没有被 Git 跟踪的文件其图标中显示一个小问号。可以使用 &quot;Ignore&quot; 菜单项让 Git 忽略对某些文件的跟踪，比如源代码编译后产生的类文件，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093308489-1686050053.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;使用 &quot;Add to Index&quot; 菜单项让 Git 对那些需要进行版本控制的文件进行跟踪，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093334192-1764259302.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;进行提交，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093405098-1583158135.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;提交时需输入 Commit Message，并指定 Author 和 Committer，可以查看此次提交涉及哪些文件。如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093432426-1620797410.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;已提交的文件其图标又会发生变化，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093525223-943380217.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;再来看一下在一个仓库中管理多个项目。再创建两个项目，JaasDemo 和 SecurityDemo，点击菜单项 &quot;Share Project&quot;，在弹出的对话框中，不再选择创建仓库，而是选择现有的仓库，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093553004-1863682620.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;操作完成后，这三个项目都被同一个 Git 仓库所管理。再有更多的项目都可以添加到这个仓库中。我在 Github 中注册了一个账号，youxia 这个用户名已经被占用了，所以我只能用 youxia-cn，cn 代表中国，其实这个账号挺好记的。然后，我又创建了一个 samples 仓库，用来存放我博客中写的源代码。以后大家需要参看我的源代码的时候，只需要访问 &lt;a href=&quot;https://github.com/youxia-cn/samples&quot; class=&quot;uri&quot;&gt;https://github.com/youxia-cn/samples&lt;/a&gt; 就可以了。&lt;/p&gt;
+&lt;p&gt;最后，把我本地的仓库推送（Push）到 Github 中，如下三图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093637223-1342454593.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093649989-2046710344.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005093718676-180381290.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;clonepull-和-fetch&quot;&gt;Clone、Pull 和 Fetch&lt;/h2&gt;
+&lt;p&gt;从远程仓库中获取数据的方法有多种。如果是第一次获取远程仓库，可以使用&lt;code&gt;git clone&lt;/code&gt;命令。在 Eclipse 中，需要使用 &quot;File&quot; -&amp;gt; &quot;Import&quot; 功能。下面换一台电脑，这台电脑安装的是 Ubuntu 系统，启动 Eclipse，点击菜单 &quot;File&quot; -&amp;gt; &quot;Import&quot;，获取刚才存放在 Github 中的项目，在弹出的对话框中输入正确的 URL 后，一路 Next，如下动图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005110317645-1588320691.gif&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以使用 &quot;Show in History&quot; 和 &quot;Show in Repositories View&quot; 查看仓库的详细信息，如下两图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005110446129-1607607273.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005110456942-8941209.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从远程仓库获取数据还可以使用&lt;code&gt;git pull&lt;/code&gt;命令，其对应的 GUI 操作界面如下：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005110543645-2009691334.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以看到，它会让你选择是将远程仓库中的分支 Merge 到本地的当前分支还是将本地的当前分支 Rebase 到远程仓库中的分支。使用 Pull 功能时，分支的 Merge 和 Rebase 是自动进行的，所以如果没有准备好的话，不要轻易使用。&lt;/p&gt;
+&lt;p&gt;安全的做法是使用&lt;code&gt;git fetch&lt;/code&gt;命令从远程仓库获取数据。Fetch 过来的分支不会自动合并，你可以切换到这些分支进行查看，然后手工进行合并。其操作界面如下：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005111020957-1852763213.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;checkoutresetmerge-和-rebase&quot;&gt;Checkout、Reset、Merge 和 Rebase&lt;/h2&gt;
+&lt;p&gt;前面介绍过，随着 Git 一次次的提交，会形成一个主分支，除此之外，还可以创建新的分支。通过&lt;code&gt;git branch&lt;/code&gt;命令创建新分支，通过&lt;code&gt;git checkout&lt;/code&gt;命令切换分支。在 Git 中，有一个&lt;code&gt;HEAD&lt;/code&gt;指针总是指向当前正在工作的分支，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005211747707-1751742101.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果切换分支，&lt;code&gt;HEAD&lt;/code&gt;指针也会随着移动，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005211905973-453077713.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;同时，还可以使用&lt;code&gt;git reset&lt;/code&gt;命令改变&lt;code&gt;HEAD&lt;/code&gt;指针的指向，以达到撤销操作的目的。随意改变&lt;code&gt;HEAD&lt;/code&gt;指针的指向是危险的，特别是使用&lt;code&gt;git reset&lt;/code&gt;命令的&lt;code&gt;--hard&lt;/code&gt;选项的话，它会使我们的部分工作丢失。在《Pro Git》的第二版中专门有一节“重置揭秘”对该命令及其涉及的原理进行了论述。在 GUI 中使用 Reset 也是非常简单的，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005213046707-1931786081.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;而分支的合并又有两种方式，Merge 和 Rebase。Merge 比较简单，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005213258551-210983764.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在图中有两个分支 origin 和 mywork，origin 做了提交 C3 和 C4，mywork 做了提交 C5 和 C6。如果将这两个分支合并的话，就会产生提交 C7，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005213459301-1823665727.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;但是如果使用 Rebase 就不一样了，如果把 mywork 分支 Rebase 到 origin 上，就相当于把 C5 和 C6 中针对 C2 所做的修改在 C4 上重演一次，产生了 C5' 和 C6' 两次提交，而原有的 C5 和 C6 会被丢弃，如下图：&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/16576/201610/16576-20161005213709176-53203650.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;所以，Reset 和 Rebase 都是比较危险的命令，有引起数据丢失的风险。但是在 Git 中，只要是曾经 Commit 过的数据，都是可以找回来的，可以参考《Pro Git》中“维护与数据恢复”这一节（第一版位于第 9 章，第二版位于第 10 章）。另外，《Pro Git》提到，对于已经公开发布到远程仓库中的代码，不要使用 Rebase，否则会引起版本库的混乱。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;GUI 界面的使用没有什么困难的，难的是理解 Git 中的概念，比如 Push、Pull、Clone、Fetch、Checkout、Reset、Merge、Rebase 什么的。学习 Git 最好的办法，当然是认真阅读《Pro Git》这本宝典。除了使用 GUI，最好也能多敲一下命令行，这样对 Git 会有更加深入的了解。&lt;/p&gt;
+&lt;h2 id=&quot;求打赏&quot;&gt;求打赏&lt;/h2&gt;
+&lt;p&gt;我对这次写的这个系列要求是非常高的：首先内容要有意义、够充实，信息量要足够丰富；其次是每一个知识点要讲透彻，不能模棱两可含糊不清；最后是包含丰富的截图，让那些不想装 Linux 系统的朋友们也可以领略到 Linux 桌面的风采。如果我的努力得到大家的认可，可以扫下面的二维码打赏一下：&lt;br/&gt;&lt;img src=&quot;https://images2018.cnblogs.com/blog/16576/201808/16576-20180831154735325-1276475036.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;版权申明&quot;&gt;版权申明&lt;/h2&gt;
+&lt;p&gt;该随笔由京山游侠在2018年11月15日发布于博客园，引用请注明出处，转载或出版请联系博主。QQ邮箱：1841079@qq.com&lt;/p&gt;
+</description>
+<pubDate>Wed, 14 Nov 2018 23:05:00 +0000</pubDate>
+<dc:creator>京山游侠</dc:creator>
+<og:description>特别说明： 要在我的随笔后写评论的小伙伴们请注意了，我的博客开启了 MathJax 数学公式支持，MathJax 使用 标记数学公式的开始和结束。如果某条评论中出现了两个 ，MathJax 会将两个</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/youxia/p/LinuxDesktop013.html</dc:identifier>
+</item>
+<item>
+<title>python包导入细节 - 骏马金龙</title>
+<link>http://www.cnblogs.com/f-ck-need-u/p/9961372.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/f-ck-need-u/p/9961372.html</guid>
+<description>&lt;h2 id=&quot;包导入格式&quot;&gt;包导入格式&lt;/h2&gt;
+&lt;p&gt;导入模块时除了使用模块名进行导入，还可以使用目录名进行导入。例如，在sys.path路径下，有一个dir1/dir2/mod.py模块，那么在任意位置处都可以使用下面这种方式导入这个模块。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;import dir1.dir2.mod
+from dir1.dir2.mod import XXX&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;一个实际一点的示例，设置PYTHONPATH环境变量为&lt;code&gt;d:\pypath&lt;/code&gt;，然后在此目录下创建以上目录和mod.py文件：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;set PYTHONPATH=&quot;D:\pypath&quot;
+mkdir d:\pypath\dir1\dir2
+echo print(&quot;mod.py&quot;) &amp;gt;d:\pypath\dir1\dir2\mod.py
+echo x=3 &amp;gt;&amp;gt;d:\pypath\dir1\dir2\mod.py
+
+# 进入交互式python
+&amp;gt;&amp;gt;&amp;gt; import dir1.dir2.mod
+mod.py
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2.mod.x
+3&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注1：在python3.3版本及更高版本是可以导入成功的，但是在python3.3之前的版本将失败，因为缺少&lt;code&gt;__init__.py&lt;/code&gt;文件，稍后会解释该文件&lt;br/&gt;注2：顶级目录dir1必须位于sys.path列出的路径搜索列表下&lt;/p&gt;
+&lt;p&gt;如果输出dir1和dir2，将会看到它们的是模块对象，且是&lt;strong&gt;名称空间&lt;/strong&gt;。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; import dir1.dir2.mod
+mod.py
+
+&amp;gt;&amp;gt;&amp;gt; dir1
+&amp;lt;module 'dir1' (namespace)&amp;gt;
+
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2
+&amp;lt;module 'dir1.dir2' (namespace)&amp;gt;
+
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2.mod
+&amp;lt;module 'dir1.dir2.mod' from 'd:\\pypath\\dir1\\dir2\\mod.py'&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这种&lt;code&gt;模块+名称空间&lt;/code&gt;的形式就是包(严格地说是包的一种形式)，也就是说dir1是包，dir2也是包，这种方式是包的导入形式。包主要用来组织它里面的模块。&lt;/p&gt;
+&lt;p&gt;从上面的结果也可以看出，&lt;strong&gt;包也是模块，所以能使用模块的地方就能使用包&lt;/strong&gt;。例如下面的代码，可以像导入模块一样直接导入包dir2，包和模块的区别在于它们的组织形式不一样，模块可能位于包内，仅此而已。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;import dir1.dir2
+from dir1 import dir2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;另外，导入dir1.dir2.mod时，它声明的模块变量名为dir1，而不是dir1.dir2.mod，但是导入的对象却包含了3个模块：dir1、dir1.dir2以及dir1.dir2.mod。如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; dir()
+['__annotations__', '__builtins__', '__doc__', '__loader__', '__name__', '__package__', '__spec__', 'dir1']
+
+&amp;gt;&amp;gt;&amp;gt; for key in sys.modules:
+...     if key.startswith(&quot;dir1&quot;):
+...             print(key,&quot;:&quot;,sys.modules[key])
+...
+dir1 : &amp;lt;module 'dir1' (namespace)&amp;gt;
+dir1.dir2 : &amp;lt;module 'dir1.dir2' (namespace)&amp;gt;
+dir1.dir2.mod : &amp;lt;module 'dir1.dir2.mod' from 'd:\\pypath\\dir1\\dir2\\mod.py'&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;init__.py文件&quot;&gt;__init__.py文件&lt;/h2&gt;
+&lt;p&gt;上面的dir1和dir1.dir2目前是空包，或者说是空模块(再一次强调，包就是模块)。但并不意味着它们对应的模块对象是空的，因为模块是对象，只要是对象就会有属性。例如，dir1包有如下属性：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; dir(dir1)
+['__doc__', '__loader__', '__name__', '__package__', '__path__', '__spec__', 'dir2']&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;之所以称为空包，是因为它们现在仅提供了包的组织功能，而且它们是目录，而不像py文件一样，是实实在在的可以编写模块代码的地方。换句话说，包现在是目录文件，而不是真正的模块文件。&lt;/p&gt;
+&lt;p&gt;为了让包&quot;真正的&quot;成为模块，需要在每个包所代表的目录下加入一个&lt;code&gt;__init__.py&lt;/code&gt;文件，它表示让这个目录格式的模块(也就是包)像py文件一样可以写模块代码，只不过这些模块代码是写入&lt;code&gt;__init__.py&lt;/code&gt;中的。当然，模块文件中允许没有任何内容，所以&lt;code&gt;__init__.py&lt;/code&gt;文件也可以是空文件，它仅表示让包成为真正的模块文件。&lt;/p&gt;
+&lt;p&gt;每次导入包的时候，如果有&lt;code&gt;__init__.py&lt;/code&gt;文件，将&lt;strong&gt;会自动执行这个文件中的代码，就像模块文件一样，事实上它就是让目录代表的包变成模块的，甚至可以说它就是包所对应的模块文件&lt;/strong&gt;(见下面示例)，所以也可以认为&lt;code&gt;__init__.py&lt;/code&gt;是包的初始化文件。在python3.3之前，这个文件必须存在，否则就会报错，因为它不认为目录是有效的模块。&lt;/p&gt;
+&lt;p&gt;现在，在dir1和dir2下分别创建空文件&lt;code&gt;__init__.py&lt;/code&gt;：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;type nul&amp;gt;d:\pypath\dir1\__init__.py
+type nul&amp;gt;d:\pypath\dir1\dir2\__init__.py&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;现在目录的层次格式如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;λ tree /f d:\pypath
+D:\PYPATH
+└─dir1
+    │  __init__.py
+    └─dir2
+            mod.py
+            __init__.py&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;再去执行导入操作，并输出包dir1和dir2。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; import dir1.dir2.mod
+mod.py
+
+&amp;gt;&amp;gt;&amp;gt; dir1
+&amp;lt;module 'dir1' from 'd:\\pypath\\dir1\\__init__.py'&amp;gt;
+
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2
+&amp;lt;module 'dir1.dir2' from 'd:\\pypath\\dir1\\dir2\\__init__.py'&amp;gt;
+
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2.mod
+&amp;lt;module 'dir1.dir2.mod' from 'd:\\pypath\\dir1\\dir2\\mod.py'&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;从输出结果中不难看出，包dir1和dir1.dir2是模块，且它们的模块文件是各自目录下的&lt;code&gt;__init__.py&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;实际上，&lt;strong&gt;包分为两种：名称空间模块、普通模块&lt;/strong&gt;。名称空间包是没有&lt;code&gt;__init__.py&lt;/code&gt;文件的，普通包是有&lt;code&gt;__init__.py&lt;/code&gt;文件的。无论是哪种，它都是模块。&lt;/p&gt;
+
+&lt;h3 id=&quot;init__.py写什么内容&quot;&gt;__init__.py写什么内容&lt;/h3&gt;
+&lt;p&gt;既然包是模块，而&lt;code&gt;__init__.py&lt;/code&gt;文件是包的模块文件，这个文件中应该写入什么代码？答案是可以写入任何代码，我们只需把它当作一个模块对待就可以。不过，包既然是用来组织模块的，真正的功能性属性应该尽量写入到它所组织的模块文件中(也就是示例中的mod.py)。&lt;/p&gt;
+&lt;p&gt;但有一项&lt;code&gt;__all__&lt;/code&gt;是应该在&lt;code&gt;__init__.py&lt;/code&gt;文件中定义的，它是一个列表，用来控制&lt;code&gt;from package import *&lt;/code&gt;使用&lt;code&gt;*&lt;/code&gt;导入哪些模块文件。这里的&lt;code&gt;*&lt;/code&gt;并非像想象中那样会导入包中的所有模块文件，而是只导出&lt;code&gt;__all__&lt;/code&gt;列表中指定的模块文件。&lt;/p&gt;
+&lt;p&gt;例如，在dir1.dir2包下有mod1.py、mod2.py、mod3.py和mod4.py，如果在&lt;code&gt;dir2/__init__.py&lt;/code&gt;文件中写入：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;__all__ = [&quot;mod1&quot;, &quot;mod2&quot;, &quot;mod3&quot;]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;则执行：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from dir1.dir2 import *&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;不会导入mod4，而是只导入mod1-mod3。&lt;/p&gt;
+&lt;p&gt;如果不设置&lt;code&gt;__all__&lt;/code&gt;，则&lt;code&gt;from dir1.dir2 import *&lt;/code&gt;不会导入该包下的任何模块，但会导入dir1和dir1.dir2。&lt;/p&gt;
+
+&lt;h2 id=&quot;path__属性&quot;&gt;__path__属性&lt;/h2&gt;
+&lt;p&gt;严格地说，只有当某个模块设置了&lt;code&gt;__path__&lt;/code&gt;属性时，才算是包，否则只算是模块。这是包的绝对严格定义。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;__path__&lt;/code&gt;属性是一个路径列表(可迭代对象即可，但通常用列表)，和&lt;code&gt;sys.path&lt;/code&gt;类似，该列表中定义了该包的初始化模块文件&lt;code&gt;__init__.py&lt;/code&gt;的路径。&lt;/p&gt;
+&lt;p&gt;只要导入的是一个包(无论是名称空间包还是普通包)，首先就会设置该属性，默认导入目录时该属性会初始化当前目录，然后去该属性列出的路径下搜索&lt;code&gt;__init__.py&lt;/code&gt;文件对包进行初始化。默认情况下由于&lt;code&gt;__init__.py&lt;/code&gt;文件后执行，在此文件中可以继续定义或修改&lt;code&gt;__path__&lt;/code&gt;属性，使得python会去找其它路径下的&lt;code&gt;__init__.py&lt;/code&gt;对模块进行初始化。&lt;/p&gt;
+&lt;p&gt;以下是默认初始化后的&lt;code&gt;__path__&lt;/code&gt;值：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; import dir1.dir2
+&amp;gt;&amp;gt;&amp;gt; dir1.dir2.__path__
+['d:\\pypath\\dir1\\dir2']
+
+&amp;gt;&amp;gt;&amp;gt; import dir1.dir3
+&amp;gt;&amp;gt;&amp;gt; dir1.dir3
+&amp;lt;module 'dir1.dir3' (namespace)&amp;gt;
+&amp;gt;&amp;gt;&amp;gt; dir1.dir3.__path__
+_NamespacePath(['d:\\pypath\\dir1\\dir3'])&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;一般来说，几乎不会设置&lt;code&gt;__path__&lt;/code&gt;属性。&lt;/p&gt;
+
+&lt;h2 id=&quot;导入示例&quot;&gt;导入示例&lt;/h2&gt;
+&lt;p&gt;import和from导入时有多种语法可用，这两个语句的导入方式和导入普通模块的方式是一样的：import导入时需要使用前缀名称去引用，from导入时是赋值到当前程序的同名全局变量中。如果不了解，请看前一篇文章：&lt;a href=&quot;https://www.cnblogs.com/f-ck-need-u/p/9955485.html&quot;&gt;python模块导入细节&lt;/a&gt;。&lt;/p&gt;
+&lt;p&gt;假设现在有如下目录结构，且d:\pypath位于sys.path列表中：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;$ tree -f d:\pypath
+d:\pypath
+└── dir1
+    ├── __init__.py
+    └── dir2
+        ├── __init__.py
+        └── mod.py&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;只导入包：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;import dir1             # 导入包dir1
+import dir1.dir2        # 导入包dir1.dir2
+from dir1 import dir2   # 导入包dir1.dir2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;导入某个模块：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;import dir1.dir2.mod
+from dir1.dir2 import mod&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果&lt;code&gt;dir2/__init__.py&lt;/code&gt;中设置了&lt;code&gt;__all__&lt;/code&gt;，则下面的导入语句会导入已设置的模块：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from dir1.dir2 import *&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意，只支持上面这种&lt;code&gt;from...import *&lt;/code&gt;语法，不支持&lt;code&gt;import *&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;导入模块中的属性，比如变量x：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from dir1.dir2.mod import x&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;相对路径导入&quot;&gt;相对路径导入&lt;/h2&gt;
+&lt;p&gt;注：如果允许，不要使用相对路径导入，很容易出错，特别是对新手而言。使用绝对路径导入，并将包放在sys.path的某个路径下就可以。&lt;/p&gt;
+&lt;p&gt;假设现在有如下目录结构：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;$ tree -f d:\pypath
+d:\pypath
+└── dir1
+    ├── __init__.py
+    ├── dir4
+    │   ├── __init__.py
+    │   ├── c2.py
+    │   └── c1.py
+    ├── dir3
+    │   ├── __init__.py
+    │   ├── b3.py
+    │   ├── b2.py
+    │   └── b1.py
+    └── dir2
+        ├── __init__.py
+        ├── a4.py
+        ├── a3.py
+        ├── a2.py
+        └── a1.py&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在dir1.dir2.a1模块文件中想要导入dir1.dir3.b2模块，可以在a1.py中使用下面两种方式导入：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;import dir1.dir3.b2
+from dir1.dir2. import b2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面的导入方式是使用绝对路径进行导入的，只要使用绝对路径，都是从sys.path开始搜索的。例如，上面是从sys.path下搜索dir1，再依次搜索dir1.dir3.b2。&lt;/p&gt;
+&lt;p&gt;python还支持包的相对路径的导入，只要使用&lt;code&gt;.&lt;/code&gt;或&lt;code&gt;..&lt;/code&gt;即可，就像操作系统上的相对路径一样。使用相对路径导入时不会搜索sys.path。&lt;/p&gt;
+&lt;p&gt;相对路径导入方式只有&lt;code&gt;from...import&lt;/code&gt;支持，&lt;code&gt;import&lt;/code&gt;语句不支持，且只有使用&lt;code&gt;.&lt;/code&gt;或&lt;code&gt;..&lt;/code&gt;的才算是相对路径，&lt;strong&gt;否则就是绝对路径，就会从sys.path下搜索&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;例如，在a1.py中导入dir1.dir3.b2：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from ..dir3 import b2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意，必须不能直接&lt;code&gt;python a1.py&lt;/code&gt;执行这个文件，这样会报错：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;    from ..dir3 import b2
+ValueError: attempted relative import beyond top-level package&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;报错原因稍后解释。现在在交互式模式下导入，或者使用&lt;code&gt;python -m dir1.dir2.a1&lt;/code&gt;的方式执行。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt;&amp;gt;&amp;gt; import dir1.dir2.a1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;以下几个示例都如此测试。&lt;/p&gt;
+&lt;p&gt;在a1.py中导入包dir3：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from .. import dir3&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在a1.py中导入dir1.dir2.a2，也就是同目录下的a2.py：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from . import a2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;导入模块的属性，如变量x：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from ..dir3.b2 import x
+from .a2 import x&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h3 id=&quot;相对路径导入陷阱&quot;&gt;相对路径导入陷阱&lt;/h3&gt;
+&lt;p&gt;前面说过一个相对路径导入时的错误：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;    from ..dir3 import b2
+ValueError: attempted relative import beyond top-level package&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;dir3明明在dir1下，在路径相对上，dir3确实是a1.py的&lt;code&gt;../dir3&lt;/code&gt;，但执行&lt;code&gt;python a1.py&lt;/code&gt;为什么会报错？&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from ..dir3 import b2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这是因为文件系统路径并不真的代表包的相对路径，当在dir1/a1.py中使用&lt;code&gt;..dir3&lt;/code&gt;，python并不知道包dir1的存在，因为没有将它导入，没有声明为模块变量，同样，也不知道dir2的存在，仅仅只是根据语句直到了dir3的存在。但因为使用了相对路径，不会搜索sys.path，所以它的相对路径边界只在本文件。所以，下面的导入也是错误的：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from . import a2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;实际上，更标准的解释是，当py文件作为可执行程序文件执行时，它所在的模块名为&lt;code&gt;__main__&lt;/code&gt;，即&lt;code&gt;__name__&lt;/code&gt;为&lt;code&gt;__main__&lt;/code&gt;，但它并非一个包，而是一个模块文件，对它来说没有任何相对路径可言。&lt;/p&gt;
+&lt;p&gt;解决方法是显式导入它们的父包，让python记录它的存在，只有这样才能使用&lt;code&gt;..&lt;/code&gt;：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;python -m dir1.dir2.a2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;还有几个常见的相对路径导入错误:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from .a3 import x&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;错误：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;ModuleNotFoundError: No module named '__main__.a3'; '__main__' is not a package&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;原因是一样的，py文件作为可执行程序文件执行时，它所在的模块名为&lt;code&gt;__main__&lt;/code&gt;，它并非一个包。&lt;/p&gt;
+&lt;p&gt;最后，建议在条件允许的情况下，使用绝对路径导入，而不是相对路径。&lt;/p&gt;
+
+&lt;h2 id=&quot;使用别名导入&quot;&gt;使用别名导入&lt;/h2&gt;
+&lt;p&gt;通过包的导入方式也支持别名。例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;from dir1.dir2.a2 import x as xx
+print(xx)
+
+import dir1.dir2.a2 as a2
+print(a2.x)
+
+from dir1.dir2 import a2 as a22
+print(a22.x)&lt;/code&gt;
+&lt;/pre&gt;</description>
+<pubDate>Wed, 14 Nov 2018 17:29:00 +0000</pubDate>
+<dc:creator>骏马金龙</dc:creator>
+<og:description>包导入格式 导入模块时除了使用模块名进行导入，还可以使用目录名进行导入。例如，在sys.path路径下，有一个dir1/dir2/mod.py模块，那么在任意位置处都可以使用下面这种方式导入这个模块。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/f-ck-need-u/p/9961372.html</dc:identifier>
+</item>
+<item>
+<title>[UWP]使用Popup构建UWP Picker - HHChaos</title>
+<link>http://www.cnblogs.com/hhchaos/p/9961249.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/hhchaos/p/9961249.html</guid>
+<description>&lt;p&gt;在上一篇博文《&lt;a href=&quot;https://www.cnblogs.com/hhchaos/p/9925745.html&quot;&gt;[UWP]不那么好用的ContentDialog&lt;/a&gt;》中我们讲到了ContentDialog在复杂场景下使用的几个令人头疼的弊端。那么，就让我们在这篇博文里开始愉快的造轮子之旅吧！&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;首先要向大家说明：这篇博文主要还是写的构建Picker时的思考过程，如果不感兴趣的，可以直接略过这篇，阅读下一篇《&lt;a href=&quot;https://www.cnblogs.com/hhchaos/p/9961258.html&quot;&gt;[UWP]如何使用Picker实现一个简单的ColorPicker弹窗&lt;/a&gt;》。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;首先针对上篇文章中讲到的ContentDialog的几个缺点，先来梳理一下我们对新的弹窗层组件的需求：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;能实现正常Dialog的弹出关闭流程（必须的，不然怎么来替代ContentDialog？）；&lt;/li&gt;
+&lt;li&gt;可以支持同时弹出多层弹窗（解决ContentDialog的弊病）；&lt;/li&gt;
+&lt;li&gt;适用于MVVM框架，提供给ViewModel层调用接口（越简单越友好越好，松耦合）；&lt;/li&gt;
+&lt;li&gt;友好的返回值（方便调用方直接获取想要的结果）；&lt;/li&gt;
+&lt;li&gt;要实现ContentDialog类似的可定制化能力（弹出位置，自定义UI,动画等）。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;下面的文章里，为了方便描述，我把实现上诉功能的新弹窗层组件称之为Picker（类似于UWP文件选择器的叫法）。&lt;/p&gt;
+&lt;p&gt;简化一下需求，我们的Picker主要有三个功能规划：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Picker的调用呈现方式为弹出一个类似于ContentDialog的弹窗，但是可以多层级的调用（即多层弹窗）；&lt;/li&gt;
+&lt;li&gt;Picker的业务逻辑实现层遵循共同的调用约束（即实现Picker定义的相关接口），基于此约束实现的MVVM页均可实现Picker的调用方式；&lt;/li&gt;
+&lt;li&gt;实现Picker约束的相关类本身实现独立的Pick功能（即调用后返回特定类型值）。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;我们简单的类比下，上面对Picker的功能规划其实有点类似于Windows系统中的文件查看逻辑。&lt;/p&gt;
+&lt;p&gt;在Windows系统中，可以处理某类格式文件（例如.mp4文件）的程序可以向系统申明支持该格式，当系统需要处理这类文件时（例如双击打开.mp4文件），将会调用这个程序（或者询问用户使用哪一个支持该类文件的程序）来处理该文件。&lt;/p&gt;
+&lt;p&gt;有了明确的功能规划，我们就可以来思考如何实现了。&lt;/p&gt;
+&lt;h4 id=&quot;如何实现picker的界面层呈现&quot;&gt;如何实现Picker的界面层呈现&lt;/h4&gt;
+&lt;p&gt;我们已经说过了，ContentDialog的内部实现其实是依赖Popup，因此我们同样可以用Popup来承载Picker的界面显示。&lt;/p&gt;
+&lt;p&gt;Popup本身是一个非常基础的组件（UWP中另外一个常用的组件Flyout也是基于Popup实现的），它在UWP应用的可视化树中是处于最顶层的（PopupRoot），且呈现在应用最前面（可以理解为具有最大值的ZIndex）。基于Popup我们可以实现很多不依赖程序主界面的UI功能，并且不受ContentDialog只能同时显示一个的限制。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1239018/201811/1239018-20181115001333567-552058678.png&quot; alt=&quot;可视化树&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这样的话就非常简单了，我们可以构建一个ObjectPicker类，它提供类似ContentDialog类中ShowAsync的方法，调用此方法时创建一个新的Popup，然后将我们要显示的界面元素作为其Child添加到界面上（实际上，结合MVVM框架逻辑，我们使用Frame装载目标页面），在用户完成Pick操作后关闭Popup,并且返回操作结果。&lt;/p&gt;
+&lt;p&gt;呈现过程的核心，三句代码足以：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;    var popup = new Popup();
+    //ToDo 装载Picker界面
+    popup.IsOpen = true;
+    //ToDo 处理Pick交互操作
+    popup.IsOpen = false;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;当然，涉及到具体实现时，由于我们要考虑到界面呈现的UI交互、位置及动画，实际代码会更多一点。&lt;/p&gt;
+&lt;p&gt;ObjectPicker类只负责呈现目标页面，它不负责处理任何的业务逻辑。&lt;/p&gt;
+&lt;h4 id=&quot;如何实现picker的业务逻辑&quot;&gt;如何实现Picker的业务逻辑&lt;/h4&gt;
+&lt;p&gt;在我们的规划中，Picker的实际业务逻辑是在Picker页面的逻辑层代码，即ViewModel层中实现的。这样的话，什么时候Picker可以关闭是由其ViewModel决定的。为了使ViewModel的处理结果可以通知到Picker，我们需要让实现Picker功能的ViewModel遵循一个共同的约束。&lt;/p&gt;
+&lt;p&gt;我们定义这样一个泛型接口：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;public interface IObjectPicker&amp;lt;T&amp;gt;
+{
+    event EventHandler&amp;lt;ObjectPickedEventArgs&amp;lt;T&amp;gt;&amp;gt; ObjectPicked;
+    event EventHandler Canceled;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;其中T代表这个ViewModel支持的Pick对象类型，当用户完成Pick操作时触发ObjectPicked事件，用户取消Pick操作时触发Canceled事件，ObjectPicker类将在Show的时候注册这两个事件来接受ViewModel的处理结果。&lt;/p&gt;
+&lt;h4 id=&quot;如何优雅的调用picker&quot;&gt;如何优雅的调用Picker&lt;/h4&gt;
+&lt;p&gt;当我们实现了一个Picker以后，如何来调用它呢？使用最简单的方法，直接在需要调用Picker的地方new一个ObjectPicker，然后调用ShowAsync来获取返回值？&lt;/p&gt;
+&lt;p&gt;这看起来没什么问题，但是实际应用中，我们的Picker可能有很多个（文字输入框，颜色选取器等）。我们希望有一个类似于Windows系统注册表的服务，它提供：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;不同类型的Picker注册接口及管理；&lt;/li&gt;
+&lt;li&gt;提供简单友好的Picker调用接口，并且返回Pick结果。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;这样的话，我们可以简单的实现一个ObjectPickerService，通过它，我们的调用逻辑会非常的简单：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;var pickRet = await pickerService.PickSingleObjectAsync&amp;lt;Color&amp;gt;(typeof(TestColorPickerViewModel).FullName);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这个例子可以在我的开源项目HHChaosToolkit中的Picker部分看到（&lt;a href=&quot;https://github.com/HHChaos/HHChaosToolkit&quot;&gt;GitHub链接点这里&lt;/a&gt;），同时也是我的下篇博文的主要内容。&lt;/p&gt;
+&lt;p&gt;这篇文章到这里就结束了，主要还是讲如何构建Picker组件的思考过程，以及我基于对MVVM结构的理解，如何来梳理Picker的架构。下一篇文章我将结合例子介绍一下Picker的实例实现及其调用流程。&lt;/p&gt;
+&lt;p&gt;写这篇博文着实有些难产，如果有什么地方写的不够好，或者难以理解，欢迎大家指正！谢谢阅读！&lt;/p&gt;
+</description>
+<pubDate>Wed, 14 Nov 2018 16:16:00 +0000</pubDate>
+<dc:creator>HHChaos</dc:creator>
+<og:description>在上一篇博文《</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/hhchaos/p/9961249.html</dc:identifier>
+</item>
+<item>
 <title>salesforce lightning零基础学习(八) Aura Js 浅谈一: Component篇 - zero.zhang</title>
 <link>http://www.cnblogs.com/zero-zyq/p/9892767.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/zero-zyq/p/9892767.html</guid>
@@ -99,270 +755,6 @@ testButtonHandler : &lt;span&gt;function&lt;/span&gt;&lt;span&gt;(component,even
 <dc:identifier>http://www.cnblogs.com/zero-zyq/p/9892767.html</dc:identifier>
 </item>
 <item>
-<title>muduo网络库学习笔记(四) 通过eventfd实现的事件通知机制 - 艾露米婭娜</title>
-<link>http://www.cnblogs.com/ailumiyana/p/9961125.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/ailumiyana/p/9961125.html</guid>
-<description>&lt;p class=&quot;toc&quot;&gt;目录&lt;/p&gt;
-
-&lt;hr/&gt;&lt;p&gt;上篇文章为EventLoop添加了一个定时器Fd,为EventLoop增加了3个接口：runAfter()、runAt()、runEvery()、这三个接口用于处理定时任务和周期任务. 底层通过封装TimerFd实现。&lt;/p&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;    TimerId runAt(const TimeStamp&amp;amp; time, const NetCallBacks::TimerCallBack&amp;amp; cb);
-    TimerId runAfter(double delay, const NetCallBacks::TimerCallBack&amp;amp; cb);
-    TimerId runEvery(double interval, const NetCallBacks::TimerCallBack&amp;amp; cb);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;今天为EventLoop添加另一个Fd：EventFd, 用于实现线程间的事件通知机制.本文会先介绍eventfd的使用，然后给出muduo中EventLoop对eventfd的封装.&lt;/p&gt;
-&lt;h2 id=&quot;eventfd的使用&quot;&gt;eventfd的使用&lt;/h2&gt;
-&lt;h3 id=&quot;eventfd系统函数&quot;&gt;eventfd系统函数&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;eventfd  - 事件通知文件描述符&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;#include &amp;lt;sys/eventfd.h&amp;gt;&lt;br/&gt;int eventfd（unsigned int initval ，int flags ）;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;创建一个能被用户应用程序用于时间等待唤醒机制的eventfd对象.&lt;br/&gt;&lt;code&gt;initval&lt;/code&gt; :&lt;br/&gt;eventfd（）创建一个可用作事件的“eventfd对象”用户空间应用程序和内核等待/通知机制通知用户空间应用程序的事件。该对象包含一个由内核维护的无符号64位整型（uint64_t）计数器。此计数器的初始值通过initval指定。一般设0.&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;flags&lt;/code&gt; ：&lt;br/&gt;以下标志中按位OR运算以更改eventfd()的行为，(文件中常用的这两个flags肯定都懂意思吧，就不翻译了,第三个信号量的不管它.)：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;   EFD_CLOEXEC (since Linux 2.6.27)
-          Set the close-on-exec (FD_CLOEXEC) flag on the new file
-          descriptor.  See the description of the O_CLOEXEC flag in
-          open(2) for reasons why this may be useful.
-
-   EFD_NONBLOCK (since Linux 2.6.27)
-          Set the O_NONBLOCK file status flag on the new open file
-          description.  Using this flag saves extra calls to fcntl(2) to
-          achieve the same result.
-
-   EFD_SEMAPHORE (since Linux 2.6.30)
-          Provide semaphore-like semantics for reads from the new file
-          descriptor.  See below.&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;read（2）&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;成功读取返回一个8byte的整数。read（2）如果提供的缓冲区的大小小于8个字节返回错误EINVAL&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;write (2）&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;将缓冲区写入的8字节整形值加到内核计数器上。可以写入的最大值&lt;br/&gt;是计数器中是最大的无符号64位值减1（即0xfffffffffffffffe）。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;返回值：&lt;/p&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;On success, eventfd() returns a new eventfd file descriptor. On error, -1 is returned and errno is set to indicate the error.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;使用示例&quot;&gt;使用示例&lt;/h3&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;#include &amp;lt;iostream&amp;gt;
-#include &amp;lt;assert.h&amp;gt;
-#include &amp;lt;poll.h&amp;gt;
-#include &amp;lt;signal.h&amp;gt;
-#include &amp;lt;sys/eventfd.h&amp;gt;
-#include &amp;lt;unistd.h&amp;gt;
-#include &amp;lt;string.h&amp;gt;
-#include &amp;lt;thread&amp;gt;
-
-static int s_efd = 0;
-
-int createEventfd()
-{
-  int evtfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-
-  std::cout &amp;lt;&amp;lt; &quot;createEventfd() fd : &quot; &amp;lt;&amp;lt; evtfd &amp;lt;&amp;lt; std::endl;
-
-  if (evtfd &amp;lt; 0)
-  {
-    std::cout &amp;lt;&amp;lt; &quot;Failed in eventfd\n&quot;;
-    abort();
-  }
-
-  return evtfd;
-}
-
-void testThread()
-{
-  int timeout = 0;
-  while(timeout &amp;lt; 3) {
-    sleep(1);
-    timeout++;
-  }
-
-  uint64_t one = 1;
-  ssize_t n = write(s_efd, &amp;amp;one, sizeof one);
-  if(n != sizeof one)
-  {
-    std::cout &amp;lt;&amp;lt; &quot; writes &quot; &amp;lt;&amp;lt; n &amp;lt;&amp;lt; &quot; bytes instead of 8\n&quot;;
-  }
-}
-
-int main()
-{
-  s_efd = createEventfd();
-
-  fd_set rdset;
-  FD_ZERO(&amp;amp;rdset);
-  FD_SET(s_efd, &amp;amp;rdset);
-
-  struct timeval timeout;
-  timeout.tv_sec = 1;
-  timeout.tv_usec = 0;
-
-  std::thread t(testThread);
-
-  while(1)
-  {
-    if(select(s_efd + 1, &amp;amp;rdset, NULL, NULL, &amp;amp;timeout) == 0)
-    {
-      std::cout &amp;lt;&amp;lt; &quot;timeout\n&quot;;
-      timeout.tv_sec = 1;
-      timeout.tv_usec = 0;
-      FD_SET(s_efd, &amp;amp;rdset);
-        continue;
-    }
-
-    uint64_t one = 0;
-
-    ssize_t n = read(s_efd, &amp;amp;one, sizeof one);
-    if(n != sizeof one)
-    {
-      std::cout &amp;lt;&amp;lt; &quot; read &quot; &amp;lt;&amp;lt; n &amp;lt;&amp;lt; &quot; bytes instead of 8\n&quot;;
-    }
-
-    std::cout &amp;lt;&amp;lt; &quot; wakeup ！\n&quot;;
-
-    break;
-  }
-
-  t.join();
-  close(s_efd);
-
-  return 0;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;./test.out
-createEventfd() fd : 3
-timeout
-timeout
-timeout
- wakeup ！&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;eventfd 单纯的使用文件描述符实现的线程间的通知机制，可以很好的融入select、poll、epoll的I/O复用机制中.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h2 id=&quot;eventloop对eventfd的封装&quot;&gt;EventLoop对eventfd的封装&lt;/h2&gt;
-&lt;p&gt;所增加的接口及成员:&lt;/p&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;    typedef std::function&amp;lt;void()&amp;gt; Functor;
-    void runInLoop(const Functor&amp;amp; cb);
-    void wakeup(); //是写m_wakeupFd 通知poll 处理读事件.
-    void queueInLoop(const Functor&amp;amp; cb);
-private:
-    //used to waked up
-    void handleRead();
-    void doPendingFunctors();
-    
-    int m_wakeupFd;
-    std::unique_ptr&amp;lt;Channel&amp;gt; p_wakeupChannel;
-    mutable MutexLock m_mutex;
-    bool m_callingPendingFunctors; /* atomic */
-    std::vector&amp;lt;Functor&amp;gt; m_pendingFunctors; // @GuardedBy mutex_&lt;/code&gt;
-&lt;/pre&gt;
-&lt;hr/&gt;&lt;h3 id=&quot;工作时序&quot;&gt;工作时序&lt;/h3&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;(runInLoop() -&amp;gt; quueInLoop())/queueInLoop() -&amp;gt; wakeup() -&amp;gt; poll() -&amp;gt; handleRead() -&amp;gt; doPendingFunctors()&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;runinloop&quot;&gt;&lt;code&gt;runInLoop()&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;如果用户在当前IO线程调用这个函数， 回调会同步进行； 如果用户在其他线程调用runInLoop()，cb会被加入队列， IO线程会被唤醒来调用这个Functor.&lt;/p&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;void EventLoop::runInLoop(const Functor&amp;amp;  cb)
-{
-  if(isInloopThread())
-    cb();
-  else
-    queueInLoop(cb);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;hr/&gt;&lt;h3 id=&quot;queueinloop&quot;&gt;&lt;code&gt;queueInLoop()&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;会将回调添加到容器，同时通过wakeup()唤醒poll()调用容器内的回调.&lt;/p&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;void EventLoop::queueInLoop(const Functor&amp;amp; cb)
-{
-  LOG_TRACE &amp;lt;&amp;lt; &quot;EventLoop::queueInLoop()&quot;;
-  {
-    MutexLockGuard lock(m_mutex);
-    m_pendingFunctors.push_back(std::move(cb));
-  }
-
-  if(!isInloopThread())
-  {
-    wakeup();
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;内部实现，&lt;/p&gt;
-&lt;h3 id=&quot;wakeup&quot;&gt;&lt;code&gt;wakeup()&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;写已注册到poll的eventfd 通知poll 处理读事件.&lt;/p&gt;
-&lt;pre class=&quot;c&quot;&gt;
-&lt;code&gt;//  m_wakeupFd(createEventfd()),
-//  p_wakeupChannel(new Channel(this, m_wakeupFd)),
-void EventLoop::wakeup()
-{
-  uint64_t one = 1;
-  ssize_t n = sockets::write(m_wakeupFd, &amp;amp;one, sizeof one);
-  if(n != sizeof one)
-  {
-    LOG_ERROR &amp;lt;&amp;lt; &quot;EventLoop::wakeup() writes &quot; &amp;lt;&amp;lt; n &amp;lt;&amp;lt; &quot; bytes instead of 8&quot;;
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;handleread&quot;&gt;&lt;code&gt;handleRead()&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;poll回调读事件,处理eventfd.&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void EventLoop::handleRead() //handle wakeup Fd
-{
-  LOG_TRACE &amp;lt;&amp;lt; &quot;EventLoop::handleRead() handle wakeup Fd&quot;;
-  uint64_t one = 1;
-  ssize_t n = sockets::read(m_wakeupFd, &amp;amp;one, sizeof one);
-  if(n != sizeof one)
-  {
-    LOG_ERROR &amp;lt;&amp;lt; &quot;EventLoop::handleRead() reads &quot; &amp;lt;&amp;lt; n &amp;lt;&amp;lt; &quot;bytes instead of 8&quot;;
-  }
-  doPendingFunctors();
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;dopendingfunctors&quot;&gt;&lt;code&gt;doPendingFunctors()&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;处理挂起的事件.&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void EventLoop::doPendingFunctors()
-{
-  LOG_TRACE &amp;lt;&amp;lt; &quot;EventLoop::doPendingFunctors()&quot;;
-  std::vector&amp;lt;Functor&amp;gt; functors;
-  m_callingPendingFunctors = true;
-
-  {
-    MutexLockGuard lock(m_mutex);
-    functors.swap(m_pendingFunctors);
-  }
-
-  for(size_t i = 0; i &amp;lt; functors.size(); ++i)
-  {
-    functors[i]();
-  }
-
-  m_callingPendingFunctors = false;
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;本文主要介绍了muduo中EventLoop通过 通过封装一层eventfd实现的runInLoop()函数，使得其他线程想往EventLoop所在的I/O线程注册任务成为可能.&lt;/p&gt;
-&lt;p&gt;下篇文章会写Connector和Acceptor，链接器和监听器 实现第一条链接。&lt;/p&gt;
-</description>
-<pubDate>Wed, 14 Nov 2018 15:31:00 +0000</pubDate>
-<dc:creator>艾露米婭娜</dc:creator>
-<og:description>muduo网络库学习笔记(四) 通过eventfd实现的事件通知机制 [TOC] 上篇文章为EventLoop添加了一个定时器Fd,为EventLoop增加了3个接口：runAfter()、runAt</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/ailumiyana/p/9961125.html</dc:identifier>
-</item>
-<item>
 <title>如何通过 Scrapyd + ScrapydWeb 简单高效地部署和监控分布式爬虫项目 - my8100</title>
 <link>http://www.cnblogs.com/my8100/p/scrapydweb.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/my8100/p/scrapydweb.html</guid>
@@ -414,7 +806,7 @@ SCRAPYD_SERVERS =&lt;span&gt; [
 &lt;ul&gt;&lt;li&gt;支持指定若干台 Scrapyd server 部署项目&lt;/li&gt;
 &lt;li&gt;通过配置  &lt;span class=&quot;cnblogs_code&quot;&gt;SCRAPY_PROJECTS_DIR&lt;/span&gt;  指定 Scrapy 项目开发目录，&lt;em&gt;ScrapydWeb&lt;/em&gt; 将自动列出该路径下的所有项目，自动打包和部署指定项目&lt;/li&gt;
 &lt;/ul&gt;&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/892328/201811/892328-20181114231243157-50215385.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;如果 &lt;em&gt;ScrapydWeb&lt;/em&gt; 并非运行于当前开发主机，除了支持上传常规的 egg 文件，也可以将单个项目文件夹添加到 zip/tar/tar.gz 压缩文件后直接上传即可&lt;/li&gt;
+&lt;ul&gt;&lt;li&gt;如果 &lt;em&gt;ScrapydWeb&lt;/em&gt; 并非运行于当前开发主机，除了支持上传常规的 egg 文件，也可以将整个项目文件夹添加到 zip/tar/tar.gz 压缩文件后直接上传即可&lt;/li&gt;
 &lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/892328/201811/892328-20181114231322068-56497660.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
 
 &lt;h2 class=&quot;heading&quot; data-id=&quot;heading-4&quot;&gt;运行爬虫&lt;/h2&gt;
@@ -513,251 +905,6 @@ repset:PRIMARY&amp;gt; rs.status()
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/chou1214/p/9961094.html</dc:identifier>
-</item>
-<item>
-<title>分布式电商项目（04）--商品列表查询及分页 - Cryptonym</title>
-<link>http://www.cnblogs.com/Cryptonym/p/9961059.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Cryptonym/p/9961059.html</guid>
-<description>&lt;h3&gt;&lt;strong&gt;&lt;em&gt;前言：前面写了后天管理系统工程搭建以及框架的整合测试，今天写一下商品列表的分页查询&lt;/em&gt;&lt;/strong&gt;&lt;/h3&gt;
-
-&lt;p&gt;前台使用easyui的分页工具，后台则使用mybatis分页插件pagehelper&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1464660/201811/1464660-20181114222350641-905453133.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;如上图所示，打开后台首页，点击查询商品，按下F12,可以看到easyui的分页界面会向controller发送两个数据page:1,rows:30&lt;/p&gt;
-&lt;p&gt;controller通过service层以及dao层查询到数据之后也需要将数据封装成easyui需要的格式，而easyui需要的数据格式如下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;{
-    total:&quot;2&quot;,
-    rows:[
-            {&quot;id&quot;:&quot;1&quot;,&quot;name&quot;:&quot;username1&quot;},
-            {&quot;id&quot;:&quot;2&quot;,&quot;name&quot;:&quot;username2&quot;}
-         ]
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;对应现在的场景就是将数据封装成total:商品总数，rows:商品信息列表的格式&lt;/p&gt;
-
-&lt;h2&gt;2.1 封装通用的分页工具类&lt;/h2&gt;
-&lt;p&gt;由于分页在后面肯定还会用到，现在在common工程下写一个easyui分页的工具类，具体的代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; EUDataGridResult {
-
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;long&lt;/span&gt;&lt;span&gt; total;
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; List&amp;lt;?&amp;gt;&lt;span&gt; rows;
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;long&lt;/span&gt;&lt;span&gt; getTotal() {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; total;
-    }
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; setTotal(&lt;span&gt;long&lt;/span&gt;&lt;span&gt; total) {
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.total =&lt;span&gt; total;
-    }
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; List&amp;lt;?&amp;gt;&lt;span&gt; getRows() {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; rows;
-    }
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; setRows(List&amp;lt;?&amp;gt;&lt;span&gt; rows) {
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.rows =&lt;span&gt; rows;
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;2.2 编写接口及其实现类&lt;/h2&gt;
-&lt;p&gt;在service工程下编写service类及其实现类&lt;/p&gt;
-&lt;p&gt;ItemService的代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; ItemService {
-
-    EUDataGridResult getItemList(Integer page, Integer rows);
-   
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;ItemServiceImpl的代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;@Service
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; ItemServiceImpl &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; ItemService {
-
-    @Autowired
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; TbItemMapper itemMapper;
-
-    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * 商品列表查询
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; page
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; rows
-     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
-     &lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; EUDataGridResult getItemList(Integer page, Integer rows) {
-        TbItemExample example &lt;/span&gt;=  &lt;span&gt;new&lt;/span&gt;&lt;span&gt; TbItemExample();
-        PageHelper.startPage(page,rows);
-        List&lt;/span&gt;&amp;lt;TbItem&amp;gt; list =&lt;span&gt; itemMapper.selectByExample(example);
-        EUDataGridResult result &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; EUDataGridResult();
-        result.setRows(list);
-        PageInfo&lt;/span&gt;&amp;lt;TbItem&amp;gt; info = &lt;span&gt;new&lt;/span&gt; PageInfo&amp;lt;&amp;gt;&lt;span&gt;(list);
-        result.setTotal(info.getTotal());
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
-    }
-
-   
-
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;2.3 编写Controller&lt;/h2&gt;
-&lt;p&gt;ItemController的代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.taotao.controller;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.fasterxml.jackson.databind.annotation.JsonPOJOBuilder;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.taotao.pojo.EUDataGridResult;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.taotao.pojo.TaotaoResult;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.taotao.pojo.TbItem;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; com.taotao.service.ItemService;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.beans.factory.annotation.Autowired;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; org.springframework.stereotype.Controller;
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt; org.springframework.web.bind.annotation.*&lt;span&gt;;
-
-&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.util.List;
-
-@Controller
-&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ItemController {
-
-    @Autowired
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; ItemService itemService;
-
-
-    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * 商品列表查询
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; page
-     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; rows
-     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
-     &lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-    @RequestMapping(&lt;/span&gt;&quot;/item/list&quot;&lt;span&gt;)
-    @ResponseBody
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; EUDataGridResult getItemList(Integer page, Integer rows ){
-        EUDataGridResult result &lt;/span&gt;=&lt;span&gt; itemService.getItemList(page, rows);
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; result;
-    }
-
-
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;此处要注意，RequestMapping中的值一定要与jsp页面中的请求的值是一致的&lt;/p&gt;
-
-&lt;p&gt;运行项目，点击查询商品可以查询出商品列表即为成功，即出现如下图所示的界面：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1464660/201811/1464660-20181114230510732-781033125.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;4 相关文件&lt;/h2&gt;
-&lt;p&gt;下面提供一些相关的资源下载，包括后台管理系统的静态资源，博主使用的本地仓库等&lt;/p&gt;
-&lt;p&gt;链接：https://pan.baidu.com/s/1mWDQznk0N5um_YMB7Greiw&lt;/p&gt;
-&lt;p&gt;提取码：1gh3&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 14 Nov 2018 15:16:00 +0000</pubDate>
-<dc:creator>Cryptonym</dc:creator>
-<og:description>前言：前面写了后天管理系统工程搭建以及框架的整合测试，今天写一下商品列表的分页查询 1 需求分析 前台使用easyui的分页工具，后台则使用mybatis分页插件pagehelper 如上图所示，打开</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Cryptonym/p/9961059.html</dc:identifier>
-</item>
-<item>
-<title>CentOS 7 安装并配置 MySQL 5.6 - 蜗牛丨</title>
-<link>http://www.cnblogs.com/alan-lin/p/9950389.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/alan-lin/p/9950389.html</guid>
-<description>&lt;p&gt;Linux使用MySQL Yum存储库上安装MySQL 5.6，适用于Oracle Linux，Red Hat Enterprise Linux和CentOS系统。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;一、全新安装MySQL&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;1、添加MySQL Yum存储库&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;将MySQL Yum存储库添加到系统的存储库列表中。&lt;/span&gt;&lt;span&gt;这是一次性操作，可以通过安装MySQL提供的RPM来执行。&lt;/span&gt;&lt;span&gt;跟着这些步骤：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;1.1、到&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;MySQL官网下载MySQL Yum存储库（&lt;a class=&quot;ulink&quot; href=&quot;https://dev.mysql.com/downloads/repo/yum/&quot; target=&quot;_top&quot;&gt;https://dev.mysql.com/downloads/repo/yum/&lt;/a&gt;）。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114111524243-258043390.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;1.2、选择并下载适用于您的平台的发行包。将下载完成的 rpm 包上传到CentOS的机器上&lt;/p&gt;
-&lt;p&gt;1.3、进入到 rpm 包所在的目录，&lt;span&gt;&lt;span&gt;使用以下命令安装下载的发行包，替换 &lt;/span&gt;&lt;/span&gt;&lt;em class=&quot;replaceable&quot;&gt;&lt;code&gt;platform-and-version-specific-package-name&lt;/code&gt;&lt;/em&gt;&lt;span&gt;&lt;span&gt; 为下载的RPM包的名称：&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token prompt&quot;&gt;&lt;span class=&quot;token command&quot;&gt;sudo yum localinstall &lt;em class=&quot;replaceable&quot;&gt;platform-and-version-specific-package-name&lt;/em&gt;&lt;span class=&quot;token punctuation&quot;&gt;.rpm&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;对于CentOS 6 系统，命令为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;sudo yum localinstall mysql57-community-release-el6-&lt;span class=&quot;token punctuation&quot;&gt;&lt;em class=&quot;replaceable&quot;&gt;&lt;span class=&quot;token punctuation&quot;&gt;{version-number&lt;span class=&quot;token punctuation&quot;&gt;}&lt;/span&gt;&lt;/span&gt;&lt;/em&gt;&lt;span class=&quot;token punctuation&quot;&gt;&lt;span class=&quot;token punctuation&quot;&gt;.noarch&lt;span class=&quot;token punctuation&quot;&gt;.rpm&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;对于CentOS 7 系统，命令为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;sudo yum localinstall mysql57-community-release-el7-&lt;span class=&quot;token punctuation&quot;&gt;&lt;em class=&quot;replaceable&quot;&gt;&lt;span class=&quot;token punctuation&quot;&gt;{version-number&lt;span class=&quot;token punctuation&quot;&gt;}&lt;/span&gt;&lt;/span&gt;&lt;/em&gt;&lt;span class=&quot;token punctuation&quot;&gt;&lt;span class=&quot;token punctuation&quot;&gt;.noarch&lt;span class=&quot;token punctuation&quot;&gt;.rpm&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;安装命令将MySQL Yum存储库添加到系统的存储库列表中，可以通过以下命令检查是否已成功添加MySQL Yum存储库：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;yum repolist enabled | grep &lt;span class=&quot;token atrule&quot;&gt;&quot;mysql.*-community.*&quot;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;2、选择发布版本&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;使用MySQL Yum存储库时，默认情况下会选择安装最新的GA系列（当前为MySQL 8.0）。如果这是您想要的，您可以跳到下一步，安装MySQL。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;在MySQL Yum存储库中，MySQL社区服务器的不同发行版托管在不同的子存储库中。&lt;/span&gt;&lt;span&gt;默认情况下启用最新GA系列（当前为MySQL 8.0）的子存储库，默认情况下禁用所有其他系列（例如，MySQL 5.6系列）的子存储库。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;使下面命令查看MySQL Yum存储库中的所有子存储库，并查看启用或禁用了哪些子存储库：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;yum repolist all | grep mysql&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;如果从最新的GA系列安装最新版本，无需进行配置。如果从旧的GA系列安装旧版MySQL，请先禁用新的GA系列并启用旧的GA系列子存储库。通过以下命令禁用8.0、5.7系列启用5.6系列：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;sudo yum-config-manager &lt;span class=&quot;token property&quot;&gt;--disable mysql80-community&lt;br/&gt;&lt;span class=&quot;token command&quot;&gt;sudo yum-config-manager &lt;span class=&quot;token property&quot;&gt;--&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;token command&quot;&gt;disable &lt;/span&gt;&lt;span class=&quot;token command&quot;&gt;&lt;span class=&quot;token property&quot;&gt;&lt;span class=&quot;token command&quot;&gt;&lt;span class=&quot;token property&quot;&gt;mysql57-community&lt;br/&gt;&lt;span class=&quot;token command&quot;&gt;sudo yum-config-manager &lt;span class=&quot;token property&quot;&gt;--enable mysql56-community&lt;/span&gt;&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;再使用 &lt;span class=&quot;token command&quot;&gt;yum repolist all | grep mysql &lt;span&gt;命令查看子存储库情况&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;token command&quot;&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114114336794-1289607967.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;3、安装MySQL&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;通过以下命令安装MySQL：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;token command&quot;&gt;sudo yum install mysql-community-server&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; &lt;span&gt;&lt;span&gt;这将安装MySQL server（&lt;/span&gt;&lt;/span&gt;&lt;code class=&quot;filename&quot;&gt;mysql-community-server&lt;/code&gt;&lt;span&gt;&lt;span&gt;）的包以及运行服务器所需组件的包，包括client（&lt;/span&gt;&lt;/span&gt;&lt;code class=&quot;filename&quot;&gt;mysql-community-client&lt;/code&gt;&lt;span&gt;&lt;span&gt;）的&lt;/span&gt;&lt;span&gt;包，客户&lt;/span&gt;&lt;span&gt;端和服务器的常见错误消息和字符集（&lt;/span&gt;&lt;/span&gt;&lt;code class=&quot;filename&quot;&gt;mysql-community-common&lt;/code&gt;&lt;span&gt;&lt;span&gt;）以及共享客户端库（&lt;/span&gt;&lt;/span&gt;&lt;code class=&quot;filename&quot;&gt;mysql-community-libs&lt;/code&gt;&lt;span&gt;&lt;span&gt;） 。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;4、启动MySQL服务器&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;通过以下命令安装MySQL：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-service mysqld start
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;start 启动，stop 停止，restart 重启&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;5、本地连接MySQL服务器&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;通过以下命令安装MySQL：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-mysql -u root -p
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;出现 &lt;span&gt;Enter passwore: &lt;span&gt;，输入密码。由于刚安装，没有设置密码，直接回车 Enter 进入 &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114122301079-1322715150.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;输入 &lt;span&gt;show databases &lt;span&gt;命令查看默认安装数据库&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114122625236-1611035749.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;6、设置root密码&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;依次通过以下命令修改root用户名密码：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-mysql&amp;gt;use mysql; 
-mysql&amp;gt;update user set password=password('your password') where user='root'; &lt;br/&gt;mysql&amp;gt;flush privileges;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;your password&lt;/span&gt; 为你要修改的密码&lt;span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114145312788-1944040075.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;输入 &lt;span&gt;quit&lt;/span&gt; 命令退出当前登录，用新的密码重新登录mysql&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;7、设置远程登录&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;mysql默认只能本机登录，通过以下命令，设置允许远程登录：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-mysql&amp;gt;GRANT ALL PRIVILEGES ON *.* TO 'your username'@'%' IDENTIFIED BY 'your password' WITH GRANT OPTION;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;your username 和 your password 改成 mysql 数据库的用户和密码&lt;/p&gt;
-&lt;p&gt;到此，在 CentOS 7上安装 MySQL 5.6 完成，CentOS 6 也是类似操作。&lt;/p&gt;
-&lt;p&gt;mysql 默认3306，确保 3306 端口是通的，在要远程的电脑上安装一个mysql管理工具（sqlyog或navicat），通过 CentOS 系统的IP、端口，mysql的用户名、密码 远程连接数据库，管理数据库。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114152625181-526012423.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1145599/201811/1145599-20181114152837374-1920368863.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;远程连接成功。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 14 Nov 2018 15:05:00 +0000</pubDate>
-<dc:creator>蜗牛丨</dc:creator>
-<og:description>Linux使用MySQL Yum存储库上安装MySQL 5.6，适用于Oracle Linux，Red Hat Enterprise Linux和CentOS系统。 一、全新安装MySQL 1、添加M</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/alan-lin/p/9950389.html</dc:identifier>
 </item>
 <item>
 <title>Linux Ubuntu系统之PPP拨号经验分享 - 文刚技术博客</title>
@@ -1358,208 +1505,6 @@ namespace Ocelot.Cache
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/jackcao/p/9960788.html</dc:identifier>
-</item>
-<item>
-<title>Iterator和for...of - noobakong</title>
-<link>http://www.cnblogs.com/noobakong/p/9960685.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/noobakong/p/9960685.html</guid>
-<description>&lt;h2 id=&quot;什么是iterator&quot;&gt;什么是Iterator&lt;/h2&gt;
-&lt;p&gt;ES6中的Map 和 Set ，再加上之前的数组和对象，这样就有了四种数据集合，用户可以组合使用它们，定义自己的数据结构。这时，我们就需要一个统一的机制，来处理这几种不同的和数据结构。&lt;/p&gt;
-&lt;p&gt;Iterator 遍历器就是这样一种机制，它是一种接口，为各种不同的数据结构提供统一的访问机制。&lt;/p&gt;
-&lt;p&gt;其作用有下：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;为各种数据结构提供统一简便的访问接口&lt;/li&gt;
-&lt;li&gt;使得数据结构成员能够按照某种次序排列&lt;/li&gt;
-&lt;li&gt;为es6中新的遍历方法 for...of 服务&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;iterator的遍历过程&quot;&gt;Iterator的遍历过程&lt;/h2&gt;
-&lt;ul readability=&quot;2&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;创建一个指针对象，指向当前数据结构的起始位置。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;遍历器的本质，就是一个指针对象&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;第一次调用指针对象的&lt;code&gt;next&lt;/code&gt;方法，可以将指针指向数据结构的第一个成员&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;第二次调用指针对象的&lt;code&gt;next&lt;/code&gt;方法，指针就指向数据结构的第二个成员&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;如上不停的调用&lt;code&gt;next&lt;/code&gt; 方法，直到它指向数据结构的结束位置&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;学到这里突然想到了链表，哈哈哈 ~ ~&lt;/em&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;每一次调用&lt;code&gt;next&lt;/code&gt;方法，都会返回数据结构的当前成员的信息&lt;/strong&gt;。具体来说，就是返回一个包含&lt;code&gt;value&lt;/code&gt;和&lt;code&gt;done&lt;/code&gt;两个属性的对象。其中，&lt;code&gt;value&lt;/code&gt;属性是当前成员的值，&lt;code&gt;done&lt;/code&gt;属性是一个布尔值，表示遍历是否结束。&lt;/p&gt;
-&lt;h2 id=&quot;手写一个-iterator接口&quot;&gt;手写一个 Iterator接口&lt;/h2&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt; const arr = [1, 2, 3]
-    function iterator(arr) {
-      let index = 0
-      return {
-        next: function () {
-          return index &amp;lt; arr.length ? 
-          {
-            value: arr[index++], 
-            done: false
-          } : 
-          {
-            value: undefined,
-            done: true
-          }
-        }
-      }
-    }
-    const it = iterator(arr)
-    console.log(it.next())
-    console.log(it.next())
-    console.log(it.next())
-    console.log(it.next())&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;执行结果如下图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog-1257919906.cos.ap-guangzhou.myqcloud.com/image/notes/es6/iterator1.png&quot; alt=&quot;iterator&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;symbol.iterator属性&quot;&gt;Symbol.iterator属性&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;凡是具有Symbol.iterator属性的数据结构都自带具有Iterator 接口&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;strong&gt;原生具备 Iterator 接口的数据结构如下：&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Array&lt;/li&gt;
-&lt;li&gt;Map&lt;/li&gt;
-&lt;li&gt;Set&lt;/li&gt;
-&lt;li&gt;String&lt;/li&gt;
-&lt;li&gt;TypedArray&lt;/li&gt;
-&lt;li&gt;函数的 arguments 对象&lt;/li&gt;
-&lt;li&gt;NodeList 对象&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;拿数组为例：&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;let arr = ['a', 'b', 'c'];
-let iter = arr[Symbol.iterator]();
-
-iter.next() // { value: 'a', done: false }
-iter.next() // { value: 'b', done: false }
-iter.next() // { value: 'c', done: false }
-iter.next() // { value: undefined, done: true }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog-1257919906.cos.ap-guangzhou.myqcloud.com/image/notes/es6/iterator1.png&quot; alt=&quot;iterator&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;给对象添加symbol.iterator属性&quot;&gt;给对象添加Symbol.iterator属性&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;另外一些数据结构没有（比如对象）&lt;/strong&gt;:&lt;/p&gt;
-&lt;p&gt;使用for of作用于对象时：&lt;/p&gt;
-&lt;p&gt;// Uncaught TypeError: obj is not iterable&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;const obj = {}
-console.log(obj[Symbol.iterator]) // undefined&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;凡是具有Symbol.iterator属性的数据结构都可以被for...of 循环调用，我们可以手动的给对象添加&lt;code&gt;Symbol.iterator&lt;/code&gt; 属性&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;一个对象如果要具备可被&lt;code&gt;for...of&lt;/code&gt;循环调用的 Iterator 接口，就必须在&lt;code&gt;Symbol.iterator&lt;/code&gt;的属性上部署遍历器生成方法（原型链上的对象具有该方法也可）。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;下面是通过遍历器实现指针结构的例子:&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;function Obj(value) {
-    this.value = value
-    this.next = null
-}
-
-Obj.prototype[Symbol.iterator] = function() {
-    var iterator = {next: next}
-    var current = this
-
-    function next() {
-        if (current) {
-            var value = current.value
-            current = current.next
-            return {
-                value: value,
-                done: false
-            }
-        } else {
-            return {done: true}
-        }
-    }
-    return iterator
-}
-var one = new Obj(1);
-var two = new Obj(2);
-var three = new Obj(3);
-
-one.next = two;
-two.next = three;
-
-for (var i of one) {
-    console.log(i); // 1, 2, 3
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;简单一点，我们可以这样实现：&lt;/strong&gt;&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;var obj = {
-    a: 1,
-    b: 2,
-    'me': 'akong',
-    'lover': 'xwr'
-}
-
-obj[Symbol.iterator] = function () {
-    let keys = Object.keys(obj)
-    let len = keys.length
-    let n = 0
-
-    return {
-        next: function() {
-            if (n &amp;lt; len) {
-                return {
-                    value: keys[n++],
-                    done: false
-                }
-            } else {
-                return {
-                    done: true
-                }
-            }
-        }
-    }
-}
-
-for (var attr of obj) {
-    console.log(attr)
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这样我们就可以遍历obj对象啦~！&lt;/p&gt;
-&lt;h2 id=&quot;调用-iterator-接口的场合&quot;&gt;调用 Iterator 接口的场合&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;（1）解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;对数组和 Set 结构进行解构赋值时，会默认调用&lt;code&gt;Symbol.iterator&lt;/code&gt;方法。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;let set = new Set().add('a').add('b').add('c');
-
-let [x,y] = set;
-// x='a'; y='b'
-
-let [first, ...rest] = set;
-// first='a'; rest=['b','c'];&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;（2）扩展运算符&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;扩展运算符（...）也会调用默认的 Iterator 接口。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;// 例一
-var str = 'hello';
-[...str] //  ['h','e','l','l','o']
-
-// 例二
-let arr = ['b', 'c'];
-['a', ...arr, 'd']
-// ['a', 'b', 'c', 'd']&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;（3）其他场合&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;由于数组的遍历会调用遍历器接口，所以任何接受数组作为参数的场合，其实都调用了遍历器接口。下面是一些例子。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;for...of&lt;/li&gt;
-&lt;li&gt;Array.from()&lt;/li&gt;
-&lt;li&gt;Map(), Set(), WeakMap(), WeakSet()（比如&lt;code&gt;new Map([['a',1],['b',2]])&lt;/code&gt;）&lt;/li&gt;
-&lt;li&gt;Promise.all()&lt;/li&gt;
-&lt;li&gt;Promise.race()&lt;/li&gt;
-&lt;li&gt;yield*&lt;/li&gt;
-&lt;/ul&gt;</description>
-<pubDate>Wed, 14 Nov 2018 14:00:00 +0000</pubDate>
-<dc:creator>noobakong</dc:creator>
-<og:description>Iterator和for...of 什么是Iterator ES6中的Map 和 Set ，再加上之前的数组和对象，这样就有了四种数据集合，用户可以组合使用它们，定义自己的数据结构。这时，我们就需要一</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/noobakong/p/9960685.html</dc:identifier>
 </item>
 </channel>
 </rss>
