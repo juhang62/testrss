@@ -9,6 +9,376 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Go基础系列：互斥锁Mutex和读写锁RWMutex用法详述 - 骏马金龙</title>
+<link>http://www.cnblogs.com/f-ck-need-u/p/9998729.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/f-ck-need-u/p/9998729.html</guid>
+<description>&lt;h2 id=&quot;sync.mutex&quot;&gt;sync.Mutex&lt;/h2&gt;
+&lt;p&gt;Go中使用sync.Mutex类型实现mutex(排他锁、互斥锁)。在源代码的sync/mutex.go文件中，有如下定义：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;// A Mutex is a mutual exclusion lock.
+// The zero value for a Mutex is an unlocked mutex.
+//
+// A Mutex must not be copied after first use.
+type Mutex struct {
+    state int32
+    sema uint32
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这没有任何非凡的地方。&lt;strong&gt;和mutex相关的所有事情都是通过sync.Mutex类型的两个方法sync.Lock()和sync.Unlock()函数来完成的，前者用于获取sync.Mutex锁，后者用于释放sync.Mutex锁&lt;/strong&gt;。sync.Mutex一旦被锁住，其它的Lock()操作就无法再获取它的锁，只有通过Unlock()释放锁之后才能通过Lock()继续获取锁。&lt;/p&gt;
+&lt;p&gt;也就是说，&lt;strong&gt;已有的锁会导致其它申请Lock()操作的goroutine被阻塞，且只有在Unlock()的时候才会解除阻塞&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;另外需要注意，&lt;strong&gt;sync.Mutex不区分读写锁，只有Lock()与Lock()之间才会导致阻塞的情况&lt;/strong&gt;，如果在一个地方Lock()，在另一个地方不Lock()而是直接修改或访问共享数据，这对于sync.Mutex类型来说是允许的，因为mutex不会和goroutine进行关联。如果想要区分读、写锁，可以使用sync.RWMutex类型，见后文。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;在Lock()和Unlock()之间的代码段称为资源的临界区(critical section)，在这一区间内的代码是严格被Lock()保护的，是线程安全的，任何一个时间点都只能有一个goroutine执行这段区间的代码&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;以下是使用sync.Mutex的一个示例，稍后是非常详细的分析过程。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;package main
+
+import (
+    &quot;fmt&quot;
+    &quot;sync&quot;
+    &quot;time&quot;
+)
+
+// 共享变量
+var (
+    m  sync.Mutex
+    v1 int
+)
+
+// 修改共享变量
+// 在Lock()和Unlock()之间的代码部分是临界区
+func change(i int) {
+    m.Lock()
+    time.Sleep(time.Second)
+    v1 = v1 + 1
+    if v1%10 == 0 {
+        v1 = v1 - 10*i
+    }
+    m.Unlock()
+}
+
+// 访问共享变量
+// 在Lock()和Unlock()之间的代码部分是是临界区
+func read() int {
+    m.Lock()
+    a := v1
+    m.Unlock()
+    return a
+}
+
+func main() {
+    var numGR = 21
+    var wg sync.WaitGroup
+
+    fmt.Printf(&quot;%d&quot;, read())
+
+    // 循环创建numGR个goroutine
+    // 每个goroutine都执行change()、read()
+    // 每个change()和read()都会持有锁
+    for i := 0; i &amp;lt; numGR; i++ {
+        wg.Add(1)
+        go func(i int) {
+            defer wg.Done()
+            change(i)
+            fmt.Printf(&quot; -&amp;gt; %d&quot;, read())
+        }(i)
+    }
+
+    wg.Wait()
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;第一次执行结果：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;0 -&amp;gt; 1 -&amp;gt; 2 -&amp;gt; 3 -&amp;gt; 4 -&amp;gt; 5 -&amp;gt; 6 -&amp;gt; 7 -&amp;gt; 8 -&amp;gt; 9 -&amp;gt; -100 -&amp;gt; -99
+-&amp;gt; -98 -&amp;gt; -97 -&amp;gt; -96 -&amp;gt; -95 -&amp;gt; -94 -&amp;gt; -93 -&amp;gt; -92 -&amp;gt; -91 -&amp;gt; -260 -&amp;gt; -259&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;第二次执行结果：注意其中的-74和-72之间跨了一个数&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;0 -&amp;gt; 1 -&amp;gt; 2 -&amp;gt; 3 -&amp;gt; 4 -&amp;gt; 5 -&amp;gt; 6 -&amp;gt; 7 -&amp;gt; 8 -&amp;gt; 9 -&amp;gt; -80 -&amp;gt; -79 
+-&amp;gt; -78 -&amp;gt; -77 -&amp;gt; -76 -&amp;gt; -75 -&amp;gt; -74 -&amp;gt; -72 -&amp;gt; -71 -&amp;gt; -230 -&amp;gt; -229 -&amp;gt; -229&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面的示例中，change()、read()都会申请锁，并在准备执行完函数时释放锁，它们如何修改数据、访问数据本文不多做解释。需要详细解释的是main()中的for循环部分。&lt;/p&gt;
+&lt;p&gt;在for循环中，会不断激活新的goroutine(共21个)执行匿名函数，在每个匿名函数中都会执行change()和read()，意味着每个goroutine都会申请两次锁、释放两次锁，且for循环中没有任何Sleep延迟，这21个goroutine几乎是一瞬间同时激活的。&lt;/p&gt;
+&lt;p&gt;但由于change()和read()中都申请锁，对于这21个goroutine将要分别执行的42个critical section，Lock()保证了在某一时间点只有其中一个goroutine能访问其中一个critical section。当释放了一个critical section，&lt;strong&gt;其它的Lock()将争夺互斥锁，也就是所谓的竞争现象(race condition)&lt;/strong&gt;。因为竞争的存在，&lt;strong&gt;这42个critical section被访问的顺序是随机的&lt;/strong&gt;，完全无法保证哪个critical section先被访问。&lt;/p&gt;
+&lt;p&gt;对于前9个被调度到的goroutine，无论是哪个goroutine取得这9个change(i)中的critical section，都只是对共享变量v1做加1运算，但当第10个goroutine被调度时，由于v1加1之后得到10，它满足if条件，会执行&lt;code&gt;v1 = v1 - i*10&lt;/code&gt;，但这个i可能是任意0到numGR之间的值(因为无法保证并发的goroutine的调度顺序)，这使得v1的值从第10个goroutine开始出现随机性。但从第10到第19个goroutine被调度的过程中，也只是对共享变量v1做加1运算，这些值是可以根据第10个数推断出来的，到第20个goroutine，又再次随机。依此类推。&lt;/p&gt;
+&lt;p&gt;此外，&lt;strong&gt;每个goroutine中的read()也都会参与锁竞争，所以并不能保证每次change(i)之后会随之执行到read()&lt;/strong&gt;，可能goroutine 1的change()执行完后，会跳转到goroutine 3的change()上，这样一来，goroutine 1的read()就无法读取到goroutine 1所修改的v1值，而是访问到其它goroutine中修改后的值。所以，前面的第二次执行结果中出现了一次数据跨越。只不过执行完change()后立即执行read()的几率比较大，所以多数时候输出的数据都是连续的。&lt;/p&gt;
+&lt;p&gt;总而言之，&lt;strong&gt;Mutex保证了每个critical section安全，某一时间点只有一个goroutine访问到这部分，但也因此而出现了随机性&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;如果Lock()后忘记了Unlock()，将会永久阻塞而出现死锁。如果&lt;/p&gt;
+
+&lt;h3 id=&quot;适合sync.mutex的数据类型&quot;&gt;适合sync.Mutex的数据类型&lt;/h3&gt;
+&lt;p&gt;其实，对于内置类型的共享变量来说，使用sync.Mutex和Lock()、Unlock()来保护也是不合理的，因为它们自身不包含Mutex属性。真正合理的共享变量是那些包含Mutex属性的struct类型。例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;type mytype struct {
+    m   sync.Mutex
+    var int
+}
+
+x := new(mytype)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这时只要想保护var变量，就先x.m.Lock()，操作完var后，再x.m.Unlock()。这样就能保证x中的var字段变量一定是被保护的。&lt;/p&gt;
+
+&lt;h2 id=&quot;sync.rwmutex&quot;&gt;sync.RWMutex&lt;/h2&gt;
+&lt;p&gt;Go中使用sync.RWMutex类型实现读写互斥锁rwmutex。在源代码的sync/rwmutex.go文件中，有如下定义：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;// A RWMutex is a reader/writer mutual exclusion lock.
+// The lock can be held by an arbitrary number of readers or a single writer.
+// The zero value for a RWMutex is an unlocked mutex.
+//
+// A RWMutex must not be copied after first use.
+//
+// If a goroutine holds a RWMutex for reading and another goroutine might
+// call Lock, no goroutine should expect to be able to acquire a read lock
+// until the initial read lock is released. In particular, this prohibits
+// recursive read locking. This is to ensure that the lock eventually becomes
+// available; a blocked Lock call excludes new readers from acquiring the
+// lock.
+type RWMutex struct {
+    w           Mutex  // held if there are pending writers
+    writerSem   uint32 // 写锁需要等待读锁释放的信号量
+    readerSem   uint32 // 读锁需要等待写锁释放的信号量
+    readerCount int32  // 读锁后面挂起了多少个写锁申请
+    readerWait  int32  // 已释放了多少个读锁
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面的注释和源代码说明了几点：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;RWMutex是基于Mutex的，在Mutex的基础之上增加了读、写的信号量，并使用了类似引用计数的读锁数量&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;读锁与读锁兼容，读锁与写锁互斥，写锁与写锁互斥，只有在锁释放后才可以继续申请互斥的锁&lt;/strong&gt;：
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;可以同时申请多个读锁&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;有读锁时申请写锁将阻塞，有写锁时申请读锁将阻塞&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;只要有写锁，后续申请读锁和写锁都将阻塞&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;此类型有几个锁和解锁的方法：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;func (rw *RWMutex) Lock()
+func (rw *RWMutex) RLock()
+func (rw *RWMutex) RLocker() Locker
+func (rw *RWMutex) RUnlock()
+func (rw *RWMutex) Unlock()&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;其中：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;Lock()和Unlock()用于申请和释放写锁&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;RLock()和RUnlock()用于申请和释放读锁&lt;/strong&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;一次RUnlock()操作只是对读锁数量减1，即减少一次读锁的引用计数&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;如果不存在写锁，则Unlock()引发panic，如果不存在读锁，则RUnlock()引发panic&lt;/strong&gt;&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;RLocker()用于返回一个实现了Lock()和Unlock()方法的Locker接口&lt;/strong&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;此外，无论是Mutex还是RWMutex都不会和goroutine进行关联，这意味着它们的锁申请行为可以在一个goroutine中操作，释放锁行为可以在另一个goroutine中操作。&lt;/p&gt;
+&lt;p&gt;由于RLock()和Lock()都能保证数据不被其它goroutine修改，所以在RLock()与RUnlock()之间的，以及Lock()与Unlock()之间的代码区都是critical section。&lt;/p&gt;
+&lt;p&gt;以下是一个示例，此示例中同时使用了Mutex和RWMutex，RWMutex用于读、写，Mutex只用于读。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;package main
+
+import (
+    &quot;fmt&quot;
+    &quot;os&quot;
+    &quot;sync&quot;
+    &quot;time&quot;
+)
+
+var Password = secret{password: &quot;myPassword&quot;}
+
+type secret struct {
+    RWM      sync.RWMutex
+    M        sync.Mutex
+    password string
+}
+
+// 通过rwmutex写
+func Change(c *secret, pass string) {
+    c.RWM.Lock()
+    fmt.Println(&quot;Change with rwmutex lock&quot;)
+    time.Sleep(3 * time.Second)
+    c.password = pass
+    c.RWM.Unlock()
+}
+
+// 通过rwmutex读
+func rwMutexShow(c *secret) string {
+    c.RWM.RLock()
+    fmt.Println(&quot;show with rwmutex&quot;,time.Now().Second())
+    time.Sleep(1 * time.Second)
+    defer c.RWM.RUnlock()
+    return c.password
+}
+
+// 通过mutex读，和rwMutexShow的唯一区别在于锁的方式不同
+func mutexShow(c *secret) string {
+    c.M.Lock()
+    fmt.Println(&quot;show with mutex:&quot;,time.Now().Second())
+    time.Sleep(1 * time.Second)
+    defer c.M.Unlock()
+    return c.password
+}
+
+func main() {
+    // 定义一个稍后用于覆盖(重写)的函数
+    var show = func(c *secret) string { return &quot;&quot; }
+
+    // 通过变量赋值的方式，选择并重写showFunc函数
+    if len(os.Args) != 2 {
+        fmt.Println(&quot;Using sync.RWMutex!&quot;,time.Now().Second())
+        show = rwMutexShow
+    } else {
+        fmt.Println(&quot;Using sync.Mutex!&quot;,time.Now().Second())
+        show = mutexShow
+    }
+    
+    var wg sync.WaitGroup
+
+    // 激活5个goroutine，每个goroutine都查看
+    // 根据选择的函数不同，showFunc()加锁的方式不同
+    for i := 0; i &amp;lt; 5; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            fmt.Println(&quot;Go Pass:&quot;, show(&amp;amp;Password),time.Now().Second())
+        }()
+    }
+    
+    // 激活一个申请写锁的goroutine
+    go func() {
+        wg.Add(1)
+        defer wg.Done()
+        Change(&amp;amp;Password, &quot;123456&quot;)
+    }()
+    // 阻塞，直到所有wg.Done
+    wg.Wait()
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Change()函数申请写锁，并睡眠3秒后修改数据，然后释放写锁。&lt;/p&gt;
+&lt;p&gt;rwMutexShow()函数申请读锁，并睡眠一秒后取得数据，并释放读锁。注意，rwMutexShow()中的print和return是相隔一秒钟的。&lt;/p&gt;
+&lt;p&gt;mutexShow()函数申请Mutex锁，和RWMutex互不相干。和rwMutexShow()唯一不同之处在于申请的锁不同。&lt;/p&gt;
+&lt;p&gt;main()中，先根据命令行参数数量决定运行哪一个show()。之所以能根据函数变量来赋值，是因为先定义了一个show()函数，它的函数签名和rwMutexShow()、mutexShow()的签名相同，所以可以相互赋值。&lt;/p&gt;
+&lt;p&gt;for循环中激活了5个goroutine并发运行，for瞬间激活5个goroutine后，继续执行main()代码会激活另一个用于申请写锁的goroutine。这6个goroutine的执行顺序是随机的。&lt;/p&gt;
+&lt;p&gt;如果show选中的函数是rwMutexShow()，则5个goroutine要申请的RLock()锁和写锁是冲突的，但5个RLock()是兼容的。所以，只要某个时间点调度到了写锁的goroutine，剩下的读锁goroutine都会从那时开始阻塞3秒。&lt;/p&gt;
+&lt;p&gt;除此之外，还有一个不严格准确，但在时间持续长短的理论上来说能保证的一个规律：当修改数据结束后，各个剩下的goroutine都申请读锁，因为申请后立即print输出，然后睡眠1秒，但1秒时间足够所有剩下的goroutine申请完读锁，使得&lt;code&gt;show with rwmutex&lt;/code&gt;输出是连在一起，输出的&lt;code&gt;Go Pass: 123456&lt;/code&gt;又是连在一起的。&lt;/p&gt;
+&lt;p&gt;某次结果如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Using sync.RWMutex! 58
+show with rwmutex 58
+Change with rwmutex lock
+Go Pass: myPassword 59
+show with rwmutex 2
+show with rwmutex 2
+show with rwmutex 2
+show with rwmutex 2
+Go Pass: 123456 3
+Go Pass: 123456 3
+Go Pass: 123456 3
+Go Pass: 123456 3&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果show选中的函数是mutexShow()，则读数据和写数据互不冲突，但读和读是冲突的(因为Mutex的Lock()是互斥的)。&lt;/p&gt;
+&lt;p&gt;某次结果如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Using sync.Mutex! 30
+Change with rwmutex lock
+show with mutex: 30
+Go Pass: myPassword 31
+show with mutex: 31
+Go Pass: myPassword 32
+show with mutex: 32
+Go Pass: 123456 33
+show with mutex: 33
+show with mutex: 34
+Go Pass: 123456 34
+Go Pass: 123456 35&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;用mutex还是用rwmutex&quot;&gt;用Mutex还是用RWMutex&lt;/h2&gt;
+&lt;p&gt;Mutex和RWMutex都不关联goroutine，但RWMutex显然更适用于读多写少的场景。仅针对读的性能来说，RWMutex要高于Mutex，因为rwmutex的多个读可以并存。&lt;/p&gt;
+</description>
+<pubDate>Wed, 21 Nov 2018 15:58:00 +0000</pubDate>
+<dc:creator>骏马金龙</dc:creator>
+<og:description>sync.Mutex Go中使用sync.Mutex类型实现mutex(排他锁、互斥锁)。在源代码的sync/mutex.go文件中，有如下定义： 这没有任何非凡的地方。 和mutex相关的所有事情都</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/f-ck-need-u/p/9998729.html</dc:identifier>
+</item>
+<item>
+<title>绘制矩形 - Myuniverse</title>
+<link>http://www.cnblogs.com/MyUniverse/p/9998723.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/MyUniverse/p/9998723.html</guid>
+<description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;&lt;br/&gt;&amp;lt;html&amp;gt;&lt;br/&gt;　　&amp;lt;head&amp;gt;&lt;br/&gt;　　　　&amp;lt;meta charset=&quot;UTF-8&quot;&amp;gt;&lt;br/&gt;　　　　&amp;lt;title&amp;gt;绘制矩形&amp;lt;/title&amp;gt;&lt;br/&gt;　　&amp;lt;/head&amp;gt;&lt;br/&gt;　　&amp;lt;body&amp;gt;&lt;br/&gt;　　　　&amp;lt;canvas id=&quot;drawing&quot; height=&quot;500&quot; width=&quot;500&quot;&amp;gt;A drawing of something.&amp;lt;/canvas&amp;gt;&lt;br/&gt;　　　　&amp;lt;script type=&quot;text/javascript&quot;&amp;gt;&lt;br/&gt;　　　　var drawing = document.getElementById(&quot;drawing&quot;)&lt;br/&gt;　　　　if(drawing.getContext)&lt;br/&gt;　　　　{&lt;br/&gt;　　　　　　var context = drawing.getContext(&quot;2d&quot;)&lt;/p&gt;&lt;p&gt;　　　　　　context.strokeStyle.lineCap = &quot;square&quot;&lt;br/&gt;　　　　　　&lt;span&gt;//绘制红色矩形&lt;/span&gt;&lt;br/&gt;　　　　　　context.fillStyle = &quot;#ff0000&quot;;&lt;br/&gt;　　　　　　context.strokeStyle = &quot;black&quot;&lt;br/&gt;　　　　　　context.fillRect(10,10,60,60);&lt;br/&gt;　　　　　　context.strokeRect(10,10,60,60);&lt;/p&gt;&lt;p&gt;　　　　　&lt;span&gt;　//绘制半透明的蓝色矩形&lt;/span&gt;&lt;br/&gt;　　　　　　context.strokeStyle = &quot;red&quot;&lt;br/&gt;　　　　　　context.fillStyle = &quot;rgba(0,0,255,0.5)&quot;;&lt;br/&gt;　　　　　　context.fillRect(30,30,50,50);&lt;br/&gt;　　　　　　context.strokeRect(30,30,50,50);&lt;/p&gt;&lt;p&gt;　　　　　　&lt;span&gt;//context.fiilRect的第一个和第二个参数代表着以画布的上面为x坐标，左边为y坐标的x,y坐标的值&lt;/span&gt;&lt;/p&gt;&lt;p&gt;　　　　　　context.clearRect(40,40,20,20)&lt;br/&gt;　　　　　　&lt;span&gt;//第一个和第二个参数表示的是坐标，第三个和第四个表示的是长宽的大小&lt;/span&gt;&lt;/p&gt;&lt;p&gt;　　　　　　// context.beginPath();&lt;br/&gt;　　　　　　context.lineWidth = 10;&lt;span&gt;//线条的宽度&lt;/span&gt;&lt;br/&gt;　　　　　　context.lineCap = &quot;round&quot;;&lt;span&gt;//线条在最后面的位置&lt;/span&gt;&lt;br/&gt;　　　　　　context.moveTo(90,60);&lt;span&gt;//表示线条的末端的位置&lt;/span&gt;&lt;br/&gt;　　　　　　context.lineTo(200,20);&lt;span&gt;//表示线条前端的位置&lt;/span&gt;&lt;br/&gt;　　　　　　context.stroke();&lt;span&gt;//表示画图&lt;/span&gt;&lt;/p&gt;&lt;p&gt;　　　　　　}&lt;br/&gt;　　　&amp;lt;/script&amp;gt;&lt;br/&gt;　　&amp;lt;/body&amp;gt;&lt;br/&gt;&amp;lt;/html&amp;gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 21 Nov 2018 15:56:00 +0000</pubDate>
+<dc:creator>Myuniverse</dc:creator>
+<og:description>&lt;!DOCTYPE html&gt;&lt;html&gt; &lt;head&gt; &lt;meta charset=&quot;UTF-8&quot;&gt; &lt;title&gt;绘</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/MyUniverse/p/9998723.html</dc:identifier>
+</item>
+<item>
+<title>【ABP框架系列学习】介绍篇(1) - 大龄Giser</title>
+<link>http://www.cnblogs.com/OlderGiser/p/9998692.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/OlderGiser/p/9998692.html</guid>
+<description>&lt;p id=&quot;main-toc&quot;&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;该系列博文主要在【&lt;a href=&quot;https://aspnetboilerplate.com/Pages/Documents&quot; data-cke-saved-href=&quot;https://aspnetboilerplate.com/Pages/Documents&quot;&gt;官方文档&lt;/a&gt;】及【】ABP框架理论研究系列博文的基础上进行总结的，或许大家会质问，别人都已经翻译过了，这不是多此一举吗？原因如下：&lt;/p&gt;
+&lt;p&gt;1.【&lt;a href=&quot;http://www.cnblogs.com/farb/p/ABPTheory.html&quot; data-cke-saved-href=&quot;http://www.cnblogs.com/farb/p/ABPTheory.html&quot;&gt;tkbSimplest&lt;/a&gt;】的相关博文由于撰写得比较早的，在参照官方文档学习的过程中，发现部分知识未能及时同步(当前V4.0.2版本)，如【EntityHistory】、【Multi-Lingual Engities】章节未涉及、【Caching】章节没有Entity Caching等内容。&lt;/p&gt;
+&lt;p&gt;2.进一步深入学习ABP的理论知识。&lt;/p&gt;
+&lt;p&gt;3.借此机会提高英文文档的阅读能力，故根据官方当前最新的版本，并在前人的基础上，自己也感受一下英文帮助文档的魅力。&lt;/p&gt;
+&lt;p&gt;好了，下面开始进入正题。&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;ABP&lt;/strong&gt;是ASP.NET Boilerplate的简称，从英文字面上理解它是一个关于ASP.NET的模板，在&lt;a href=&quot;https://github.com/aspnetboilerplate/aspnetboilerplate&quot; data-cke-saved-href=&quot;https://github.com/aspnetboilerplate/aspnetboilerplate&quot;&gt;github&lt;/a&gt;上已经有5.7k的star(截止2018年11月21日)。官方的解释：ABP是一个&lt;strong&gt;开源&lt;/strong&gt;且文档友好的&lt;strong&gt;应用程序框架&lt;/strong&gt;。ABP不仅仅是一个框架，它还提供了一个&lt;strong&gt;最徍实践&lt;/strong&gt;的基于&lt;strong&gt;领域驱动设计(DDD)&lt;/strong&gt;的体系结构模型。&lt;/p&gt;
+&lt;p&gt;ABP与最新的&lt;strong&gt;ASP.NET CORE&lt;/strong&gt;和&lt;strong&gt;EF CORE&lt;/strong&gt;版本保持同步，同样也支持ASP.NET MVC 5.x和EF6.x。&lt;/p&gt;
+
+&lt;p&gt; 让我们研究一个简单的类，看看ABP具有哪些优点：&lt;/p&gt;
+
+&lt;p&gt;这里我们看到一个Application Service(应用服务)方法。在DDD中，应用服务直接用于表现层(UI)执行应用程序的用例。那么在UI层中就可以通过javascript ajax的方式调用&lt;strong&gt;UpdateTask&lt;/strong&gt;方法。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;strong&gt;通过上述事例，让我们来看看ABP的一些优点：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;依赖注入（Dependency Injection）：&lt;/strong&gt;&lt;/span&gt;ABP使用并提供了传统的DI基础设施。上述TaskAppService类是一个应用服务(继承自ApplicationService)，所以它按照惯例以短暂(每次请求创建一次)的形式自动注册到DI容器中。同样的，也可以简单地注入其他依赖(如事例中的IRepository&amp;lt;Task&amp;gt;)。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;TaskAppService类继承自ApplicationService，IApplicaitonServcie又继承自ITransientDependency接口，在ABP框架中已经将ITransientDependency接口注入到DI容器中，所有继承自ITransientDependency接口的类或接口都会默认注入。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;仓储(Repository)：&lt;/strong&gt;&lt;/span&gt;ABP可以为每一个实体创建一个默认的仓储(如事例中的IRepository&amp;lt;Task&amp;gt;)。默认的仓储提供了很多有用的方法，如事例中的FirstOrDefault方法。当然，也可以根据需求扩展默认的仓储。仓储抽象了DBMS和ORMs，并简化了数据访问逻辑。&lt;/p&gt;
+&lt;p&gt;                              &lt;span class=&quot;cke_widget_wrapper cke_widget_inline cke_widget_image cke_image_nocaption cke_widget_selected&quot; data-cke-widget-wrapper=&quot;1&quot; data-cke-filter=&quot;off&quot; data-cke-display-name=&quot;图像&quot; data-cke-widget-id=&quot;11&quot;&gt;&lt;img class=&quot;has cke_widget_element&quot; src=&quot;https://img-blog.csdnimg.cn/2018112112374863.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2x5bmNoZWU=,size_16,color_FFFFFF,t_70&quot; alt=&quot;&quot; width=&quot;588&quot; height=&quot;924&quot; data-cke-saved-src=&quot;https://img-blog.csdnimg.cn/2018112112374863.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2x5bmNoZWU=,size_16,color_FFFFFF,t_70&quot; data-cke-widget-data=&quot;{&amp;amp;quot;hasCaption&amp;amp;quot;:false,&amp;amp;quot;src&amp;amp;quot;:&amp;amp;quot;https://img-blog.csdnimg.cn/2018112112374863.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2x5bmNoZWU=,size_16,color_FFFFFF,t_70&amp;amp;quot;,&amp;amp;quot;alt&amp;amp;quot;:&amp;amp;quot;&amp;amp;quot;,&amp;amp;quot;width&amp;amp;quot;:&amp;amp;quot;588&amp;amp;quot;,&amp;amp;quot;height&amp;amp;quot;:&amp;amp;quot;924&amp;amp;quot;,&amp;amp;quot;lock&amp;amp;quot;:true,&amp;amp;quot;align&amp;amp;quot;:&amp;amp;quot;none&amp;amp;quot;,&amp;amp;quot;classes&amp;amp;quot;:{&amp;amp;quot;has&amp;amp;quot;:1}}&quot; data-cke-widget-upcasted=&quot;1&quot; data-cke-widget-keep-attr=&quot;0&quot; data-widget=&quot;image&quot;/&gt;&lt;span class=&quot;cke_reset cke_widget_drag_handler_container&quot;&gt;&lt;img class=&quot;cke_reset cke_widget_drag_handler&quot; title=&quot;点击并拖拽以移动&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAPABAP///wAAACH5BAEKAAAALAAAAAABAAEAAAICRAEAOw==&quot; alt=&quot;&quot; width=&quot;15&quot; height=&quot;15&quot; data-cke-widget-drag-handler=&quot;1&quot;/&gt;&lt;span class=&quot;cke_image_resizer&quot; title=&quot;点击并拖拽以改变尺寸&quot;&gt;​&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;授权(Authorization)：&lt;/strong&gt;&lt;/span&gt;ABP可以通过声明的方式检查权限。如果当前用户没有【update task】的权限或没有登录，则会阻止访问UpdateTask方法。ABP不仅提供了声明属性的方式授权，而且还可以通过其它的方式。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;AbpAuthorizeAttribute类实现了Attribute，可在类或方法上通过【AbpAuthorize】声明。&lt;/p&gt;
+
+&lt;p&gt; 通过AuthorizationProvider类中的SetPermissions方法进行自定义授权。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;验证(Validation)：&lt;/strong&gt;&lt;/span&gt;ABP自动检查输入是否为null。它也基于标准数据注释特性和自定义验证规则验证所有的输入属性。如果请求无效，它会在客户端抛出适合的验证异常。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;ABP框架中主要通过拦截器ValidationInterceptor(AOP实现方式之一，)实现验证，该拦截器在ValidationInterceptorRegistrar的Initialize方法中调用。&lt;/p&gt;
+
+&lt;p&gt;自定义Customvalidator类&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;审计日志(Audit Logging)：&lt;/strong&gt;&lt;/span&gt;基于约定和配置，用户、浏览器、IP地址、调用服务、方法、参数、调用时间、执行时长以及其它信息会为每一个请求自动保存。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;ABP框架中主要通过拦截器AuditingInterceptor(AOP实现方式之一，)实现审计日志，该拦截器在AuditingInterceptorRegistrar的Initialize方法中调用。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;工作单元(Unit Of Work)：&lt;/strong&gt;&lt;/span&gt;在ABP中，应用服务方法默认视为一个工作单元。它会自动创建一个连接并在方法的开始位置开启事务。如果方法成功完成并没有异常，事务会提交并释放连接。即使这个方法使用不同的仓储或方法，它们都是原子的(事务的)。当事务提交时，实体的所有改变都会自动保存。如上述事例所示，甚至不需要调用_repository.Update(task)方法。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;ABP框架中主要通过拦截器UnitOfWorkInterceptor(AOP实现方式之一，)实现工作单元，该拦截器在UnitOfWorkRegistrar的Initialize方法中调用。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;异常处理(Exception)：&lt;/strong&gt;&lt;/span&gt;在使用了ABP框架的Web应用程序中，我们几乎不用手动处理异常。默认情况下，所有的异常都会自动处理。如果发生异常，ABP会自动记录并给客户端返回合适的结果。例如：对于一个ajax请求，返回一个json对象给客户端，表明发生了错误。但会对客户端隐藏实际的异常，除非像上述事例那样使用UserFriendlyException方法抛出。它也理解和处理客户端的错误，并向客户端显示合适的信息。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;UserFriendlyException抛出异常方法。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;日志(Logging)：&lt;/strong&gt;&lt;/span&gt;由上述事例可见，可以通过在基类定义的Logger对象来写日志。ABP默认使用了Log4Net，但它是可更改和可配置的。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;Log4NetLoggerFactory类。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;本地化(Localization)：&lt;/strong&gt;&lt;/span&gt;注意，在上述事例中使用了L(&quot;XXX&quot;)方法处理抛出的异常。因此，它会基于当前用户的文化自动实现本地化。详细见后续本地化章节。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;......&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;自动映射(Auto Mapping)：&lt;/strong&gt;&lt;/span&gt;在上述事例最后一行代码，使用了ABP的MapTo扩展方法将输入对象的属性映射到实体属性。ABP使用AutoMapper第三方库执行映射。根据命名惯例可以很容易的将属性从一个对象映射到另一个对象。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;AutoMapExtensions类中的MapTo()方法。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;动态API层(Dynamic API Layer)：&lt;/strong&gt;&lt;/span&gt;在上述事例中，TaskAppService实际上是一个简单的类。通常必须编写一个Web API Controller包装器给js客户端暴露方法，而ABP会在运行时自动完成。通过这种方式，可以在客户端直接使用应用服务方法。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;......&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;动态javascript ajax代理(Dynamic JavaScript AJAX Proxy)：&lt;/strong&gt;&lt;/span&gt;ABP创建动态代理方法，从而使得调用应用服务方法就像调用客户端的js方法一样简单。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;部分源码分析：&lt;/strong&gt;&lt;/span&gt;......&lt;/p&gt;
+
+
+&lt;p&gt;通过上述简单的类可以看到ABP的优点。完成所有这些任务通常需要花费大量的时间，但是ABP框架会自动处理。&lt;/p&gt;
+&lt;p&gt;除了这个上述简单的事例外，ABP还提供了一个健壮的基础设施和开发模型，如模块化、多租户、缓存、后台工作、数据过滤、设置管理、领域事件、单元&amp;amp;集成测试等等，那么你可以专注于业务代码，而不需要重复做这些工作&lt;span&gt;&lt;strong&gt;(DRY)&lt;/strong&gt;&lt;/span&gt;。&lt;/p&gt;
+</description>
+<pubDate>Wed, 21 Nov 2018 15:46:00 +0000</pubDate>
+<dc:creator>大龄Giser</dc:creator>
+<og:description>0.引言 该系列博文主要在【官方文档】及【tkbSimplest】ABP框架理论研究系列博文的基础上进行总结的，或许大家会质问，别人都已经翻译过了，这不是多此一举吗？原因如下： 1.【tkbSimpl</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/OlderGiser/p/9998692.html</dc:identifier>
+</item>
+<item>
 <title>Netty Bootstrap（图解）|秒懂 - 疯狂创客圈</title>
 <link>http://www.cnblogs.com/crazymakercircle/p/9998643.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/crazymakercircle/p/9998643.html</guid>
@@ -796,304 +1166,6 @@ export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/yilezhu/p/9998021.html</dc:identifier>
-</item>
-<item>
-<title>Docker &amp; ASP.NET Core (2)：定制Docker镜像 - solenovex</title>
-<link>http://www.cnblogs.com/cgzl/p/9997124.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/cgzl/p/9997124.html</guid>
-<description>&lt;p&gt;在Docker的世界里，我们可以通过一个叫Dockerfile的文件来创建Docker镜像，随后可以运行容器。&lt;/p&gt;
-&lt;p&gt;Dockerfile就是一个文本文件，里面写着一些指令。通过Docker Client，并使用docker build这个命令，docker build命令会读取该文件里面的指令，生成一层文件系统，然后就生产出了一个docker的镜像。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121190503078-1708760710.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Dockerfile的文件名就是Dockerfile，当然了也可以叫别的名，但是通常就叫Dockerfile。&lt;/p&gt;
-&lt;p&gt;Dockerfile里面包含着各种指令，这些指令会创建一个中间层镜像，这个中间层镜像可以被缓存，这样的话以后构建的时候速度就很快了。&lt;/p&gt;
-
-&lt;p&gt;Dockerfile的主要指令：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;FROM。通常情况下，你要创建的镜像是基于另外一个镜像的，这就需要使用FROM，当然也可以完全从头创建。&lt;/li&gt;
-&lt;li&gt;MAINTAINER。该镜像的维护人。&lt;/li&gt;
-&lt;li&gt;RUN。这里可以定义一些需要运行的命令。例如npm install，dotnet restore等等。&lt;/li&gt;
-&lt;li&gt;COPY。开发的时候，可以把源码放在Volumes里。而在生产环境下，经常需要把源码复制到容器里面，使用COPY就可以做到这点。&lt;/li&gt;
-&lt;li&gt;ENTRYPOINT。它可以定义容器的入口，把容器配置成像exe一样的运行文件。通常是一些例如dotnet 命令，node命令等等。&lt;/li&gt;
-&lt;li&gt;CMD。设置容器运行的默认命令和参数。当容器运行的时候，这个可以在命令行被覆盖。&lt;/li&gt;
-&lt;li&gt;WORKDIR。设定容器运行的工作目录。&lt;/li&gt;
-&lt;li&gt;EXPOSE。暴露端口。&lt;/li&gt;
-&lt;li&gt;ENV。设定环境变量。&lt;/li&gt;
-&lt;li&gt;VOLUME。定义Volume，并控制如何在宿主中进行存储。&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;下面是官网的一个Dockerfile的例子：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121191845773-1855968420.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;FROM python:27.-slim，说明该镜像要基于python:2.7-slim这个镜像构建。这将会是一层。&lt;/p&gt;
-&lt;p&gt;COPY . /app，是指在构建镜像的时候，从当前目录把源码复制到/app目录下。这又是一层。&lt;/p&gt;
-&lt;p&gt;RUN xxx，是指在WORKDIR（/app）下执行pip install xxx这行命令。&lt;/p&gt;
-&lt;p&gt;EXPOSE 80，是指把容器的80端口暴露给外界。&lt;/p&gt;
-&lt;p&gt;ENV，定义了环境变量。&lt;/p&gt;
-&lt;p&gt;CMD [&quot;python&quot;, &quot;app.py&quot;]，里定义了容器运行的默认命令和参数。&lt;/p&gt;
-
-
-&lt;p&gt;在Docker hub里找到aspnetcore：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121193829759-80312437.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;里面第一个microsoft/aspnetcore 只有运行时，所以只能dotnet run，适用于生产环境。&lt;/p&gt;
-&lt;p&gt;第二个microsoft/aspnetcore-build里有完整的dotnet sdk，可以执行dotnet restore, dotnet build, dotnet run等等。&lt;/p&gt;
-
-&lt;p&gt;使用VSCode打开我上篇文章建立的ASP.NET Core项目（或者新建一个也可以）：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194327242-1951127834.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;然后我们这样来创建Dockerfile，首先点击Extensions，搜索docker：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194445103-1240462074.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以找到一个Docker扩展，是由微软开发的。安装它即可。&lt;/p&gt;
-
-&lt;p&gt;安装完后，点击Docker按个图标：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194619630-1203081838.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;就可以看到本机上的Docker镜像，容器，注册信息等等。&lt;/p&gt;
-
-&lt;p&gt;然后按Ctrl+Shift+P，然后输入docker：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194742213-1650954.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以看到有很多可用的命令。&lt;/p&gt;
-&lt;p&gt;选择Add Docker Files to Workspace，然后选择ASP.NET Core：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194853613-638868801.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;然后选择操作系统，这里我选Linux：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121194943098-622206989.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;然后填写内部的端口，我这个项目是5001：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121195029246-603060848.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;然后按回车，就会生成Dockerfile，同时还有一个.dockerignore文件：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121195119559-745853650.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;（在编辑Dockerfile文件的时候还有智能提示的）。&lt;/p&gt;
-&lt;p&gt;看一下这个文件：&lt;/p&gt;
-&lt;p&gt;FROM microsoft/dotnet:2.1-aspnetcore-runtime AS base，就是把前面的镜像起了一个别名，叫做base。&lt;/p&gt;
-&lt;p&gt;WORKDIR /app，工作目录是 /app。&lt;/p&gt;
-&lt;p&gt;端口5001。&lt;/p&gt;
-&lt;p&gt;下面几句类似，然后：&lt;/p&gt;
-&lt;p&gt;COPY [&quot;VolumeSample.csproj&quot;, &quot;./&quot;]，就是把VolumeSample.csproj复制到当前工作的目录。&lt;/p&gt;
-&lt;p&gt;RUN dotnet restore &quot;./VolumeSample.csproj&quot;，执行dotnet restore。&lt;/p&gt;
-&lt;p&gt;COPY . .，然后把所有的源码也复制到当前的工作目录。&lt;/p&gt;
-&lt;p&gt;WORKDIR &quot;/src/.&quot;，切换工作目录到/src。&lt;/p&gt;
-&lt;p&gt;RUN dotnet build &quot;VolumeSample.csproj&quot; -c Release -o /app，再执行dotnet build命令，并把结果放在/app目录下。&lt;/p&gt;
-
-&lt;p&gt;后边几句也是类似：&lt;/p&gt;
-&lt;p&gt;COPY --from=publish /app .，是指从publish目录复制，具体是从publish/app目录复制，到当前的工作目录。&lt;/p&gt;
-&lt;div readability=&quot;41.899632802938&quot;&gt;
-&lt;p&gt;ENTRYPOINT [&quot;dotnet&quot;, &quot;VolumeSample.dll&quot;]，就是运行该镜像会执行的命令dotnet VolumeSample.dll。&lt;/p&gt;
-
-&lt;p&gt;（一个项目里可以有多个Dockerfile，例如区分开发和生产环境，但是文件名最好使用dockerfile后缀，因为这样在VSCode里有智能提示）。&lt;/p&gt;
-
-
-&lt;p&gt;其实上面使用VSCode生成的Dockerfile并不是我需要的，我需要的Dockerfile还是按照官方文档来吧：&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/aspnet/aspnet-docker/blob/master/README.aspnetcore-build.md&quot; target=&quot;_blank&quot;&gt;https://github.com/aspnet/aspnet-docker/blob/master/README.aspnetcore-build.md&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;最后是这样的：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121203557520-973599185.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;也是多个Stage的。&lt;/p&gt;
-
-&lt;p&gt;然后执行这个命令来构建镜像：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;docker build -t solenovex/aspnetcore .&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;使用docker build，-t表示tag，然后是用户名和要起的镜像名，镜像名后边可以跟着具体的tag，例如solenovex/aspnetcore:1.0，如果不加的话就是latest。最后一个.表示当前这个含有Dockerfile目录是我要进行构建的内容。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;执行的时候会遇到.net sdk版本不匹配的问题，也就是microsoft/aspnetcore-build这个镜像的.net sdk版本有点低。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121203924273-1614535074.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;所以，我只好改为使用microsoft/dotnet:2.1-sdk这个镜像了：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121203959115-364740148.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;再次执行：&lt;strong&gt;docker build -t solenovex/aspnetcore .&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;这个构建的过程还是挺快的，过程大概如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121204141535-1963642947.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;成功了。&lt;/p&gt;
-
-&lt;p&gt;然后从VSCode的docker扩展里就可以看到我刚刚创建的镜像：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121202037529-122370967.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;然后在Powershell里面创建/运行一个容器：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121204225056-1511132757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;执行docker ps -a：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121204258606-1647758063.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以看到该容器运行后就马上退出了，查看一下日志看看原因：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121204328905-1515386642.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;错误信息是：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/986268/201811/986268-20181121213407690-757779588.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;其实这个错误信息感觉并不明确。&lt;/p&gt;
-
-&lt;p&gt;具体怎么解决这个错误，且听下回分解。。&lt;/p&gt;
-
-
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 21 Nov 2018 13:36:00 +0000</pubDate>
-<dc:creator>solenovex</dc:creator>
-<og:description>Dockerfile 在Docker的世界里，我们可以通过一个叫Dockerfile的文件来创建Docker镜像，随后可以运行容器。 Dockerfile就是一个文本文件，里面写着一些指令。通过Doc</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/cgzl/p/9997124.html</dc:identifier>
-</item>
-<item>
-<title>操作系统：一个老汉的无声告白 - 了不起的厂长</title>
-<link>http://www.cnblogs.com/enochzzg/p/9997978.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/enochzzg/p/9997978.html</guid>
-<description>&lt;p&gt;老夫生于上世纪五十年代，作为八零后的大叔，九零后的老伯，同时也是你们动辄就要重装的操作系统，我的学名是“计算机管理控制程序”，英译“operating system”，小老弟们常喊我“OS”。虽说是老弟，目的却都不怎么单纯，大部分人只想玩我，剩下一小撮人却钟爱探索我的身体，他们沉迷于当下，但真正愿意了解我过去的所剩无几。今儿个趁机会给你们介绍一下我的过去。&lt;/p&gt;
-
-&lt;h3 id=&quot;2899-1542638334018&quot;&gt;&lt;strong&gt;人工操作&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;在我幼年时期，虽然跟我打交道的绝大部分都是精英程序员，但做的事还是很基础的，想执行一段程序必须先把代码写到卡片上，塞到我身体里，打开开关，等我对数据进行计算，计算完毕后再把卡片卸下来，这才把控制权交给下一个人，这就叫做“人工操作方式”。但是很明显，我的处理能力是有目共睹的，本来几秒钟就能处理完的作业，偏偏人工操作就等了几分钟，不仅我心急，后面排队的人也很容易跟他干架，可如果把浪费的时间用来处理其它作业，效率一定会蹭蹭的往上涨。&lt;/p&gt;
-
-&lt;h3 id=&quot;2811-1542639378385&quot;&gt;&lt;strong&gt;单道批处理系统&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;为了解决等待人工操作的问题，绝顶聪明的我想到了一个好方法，首先准备一个磁带作为存储设备，程序员将作业聚在一起塞给我，然后我成批的将作业读入磁带，这时候程序员们就可以走开做别的事了。showtime！接下来只需依次将作业装入内存，计算数据并输出结果即可。因我引以为傲的处理能力自然而然的就省下了等待人工操作的时间。&lt;/p&gt;
-
-&lt;p&gt;虽然有了批量处理的能力，但还是有很大的缺陷，因为我一次只能执行一个作业，所以作业执行时是独占我所有资源的。这意味着当我进行I/O时，我的CPU是无事可做的，非常浪费资源，如果让空闲的CPU去处理其它作业，理论上就能做到同时处理两个作业了。&lt;/p&gt;
-
-&lt;h3 id=&quot;1228-1542641417698&quot;&gt;&lt;strong&gt;多道批处理系统&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;说干就干，接下来我进行了一些改造，目的就是“谁闲给谁活干”——当一个作业在使用CPU时，另一个作业可以进行I/O，反之亦然。这样不仅实现了多个作业的同时处理，还提高了老夫的资源利用率和吞吐能力。与此同时，我不再严格按照顺序装载作业，而是由我的作业调度程序负责分配作业的装载，并由进程调度程序分配CPU，这样权责分明，更有利于日后调度策略的优化和调整。&lt;/p&gt;
-
-&lt;p&gt;现在的作业已经不同以往，不再独占全机，但它们却面临着共享CPU、内存、设备等问题。有共享就会有资源归属权的冲突，既然可预见到冲突就得提前预防，怎么预防呢？这就需要有专门的模块来管理规避由共享产生的冲突问题，比如CPU管理、内存管理、设备管理等，这些模块是我的灵魂，也是以后主要围绕的发展方向。&lt;/p&gt;
-
-&lt;p&gt;虽然比起单道时期的我性能得到极大提升，但人嘛毕竟是不知足的，机器也一样。我的平均周转时间还有很大的改善空间，周转时间呢，是指从作业提交给系统到执行完毕所花费的时间，而平均周转时间是指“所有作业的时间总和与作业总数的比值”，平均周转时间越小意味着性能越高。减少该时间最有效的方式就是调整调度策略，让所有作业尽可能快的执行完毕，调度策略相对复杂，以后的章节再给大家讲解。除平均周转时间外，与用户交互能力的提升也是我的重中之重，现在的我只能同时与一个程序员进行交流，但这是远远不够的，要和人类长期打交道，他们的满意度才是我迈向成功的最高准则。&lt;/p&gt;
-
-&lt;h3 id=&quot;76kbsl1542690453164&quot;&gt;&lt;strong&gt;分时操作系统&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;为解决人类强烈的交互欲望，努力修炼的我终于练就了一套绝世武功——时间片轮转法。这是一套极强的掌法，用户可以通过若干个终端连接到我这里，我按一定时间间隔轮流的为各个终端服务，由于我极快的处理速度，用户完全无法感知我做了什么手脚，以至于他们认为我只为他们本人服务，而现在每天打游戏的你仍然在走着我的套路/滑稽，正所谓“天下武功唯快不破”，而这种戏弄你们的感觉让我奇爽无比。&lt;/p&gt;
-
-&lt;h3 id=&quot;39pxsq1542761000619&quot;&gt;&lt;strong&gt;实时操作系统&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;如果说分时的我一定要有缺陷的话，那么在某些场景下公平的分时就是我的缺陷。刚才讲到分时是用时间片轮转法轮流的为每个用户服务，虽能诓得了小白，但在高精尖领域不太适用，比如航空航天、海底探测，丝毫的处理延迟可能会导致无法挽回的后果，想要解决延迟，时间片就不能过于均衡，优先级高的要先执行，但总执行优先级高的又会导致低权重的一直得不到执行，或是两个同样高优先级的作业因互抢资源发生死锁，听起来很复杂吧，但这就是调度策略的艺术之处。不过我一时半会也解释不清楚，要不就先到这里吧，我要关机了，以下是我为你们整理的思维导图，拜拜。&lt;/p&gt;
-&lt;div&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1471773/201811/1471773-20181121212558040-868949722.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Wed, 21 Nov 2018 13:29:00 +0000</pubDate>
-<dc:creator>了不起的厂长</dc:creator>
-<og:description>老夫生于上世纪五十年代，作为八零后的大叔，九零后的老伯，同时也是你们动辄就要重装的操作系统，我的学名是“计算机管理控制程序”，英译“operating system”，小老弟们常喊我“OS”。虽说是老</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/enochzzg/p/9997978.html</dc:identifier>
-</item>
-<item>
-<title>数据库（三） - Eurekaa</title>
-<link>http://www.cnblogs.com/zuanzuan/p/9997948.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zuanzuan/p/9997948.html</guid>
-<description>&lt;p&gt;本篇博客主要内容为表之间的关系、多表关联、复制表；查询如单表查询、多表关联查询&lt;/p&gt;
-
-&lt;h2 id=&quot;为什么要分表&quot;&gt;为什么要分表？&lt;/h2&gt;
-&lt;p&gt;假如现在有两种数据，一种是部门数据一种是员工数据，如果两中数据放在同一张表中则会造成：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;数据重复&lt;/li&gt;
-&lt;li&gt;结构混乱&lt;/li&gt;
-&lt;li&gt;扩展维护性差&lt;/li&gt;
-&lt;li&gt;需要分表&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;所以需要把表中会造成混乱的数据分出来，分成两张表。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table dept(id int primary key auto_increment,name char(20),job char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table emp(id int primary key auto_increment,name char(20),gender char,age int,salary float,d_id int);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;什么时候需要分表？&lt;/p&gt;
-&lt;p&gt;当出现大量重复数据时，当一条记录中的数据不属于同一类时需要分表。&lt;/p&gt;
-&lt;p&gt;分表之后产生的问题，员工表可以存储一个不存在的部门编号，这样的数据是不完整的无效数据，必须找到一种方法可以在物理层面建立关联关系。&lt;/p&gt;
-&lt;p&gt;以上建表语句可以建立逻辑上的关联关系，这有建表的人才明白其中的关系，而 mysql 并不知道关系，所以需要通过外键来进行约束，说明这两张表的关联关系。&lt;/p&gt;
-&lt;h2 id=&quot;外键的使用&quot;&gt;外键的使用&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table 表名(字段名 类型(长度),foreign key(外键的字段名) references 要关联表名(主键名));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;使用外键时必须分清主从关系，也就是要分清先键那张表，因为在使用外键关联表时，需要知道对方表的表名，所以要关联的表应该是主表，应该先建主表，这样才能关联起来。&lt;/p&gt;
-&lt;h3 id=&quot;外键的第一个约束&quot;&gt;外键的第一个约束&lt;/h3&gt;
-&lt;p&gt;先键主表，再建从表&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table dept(id int primary key auto_increment,name char(20),job char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table emp(id int primary key auto_increment,name char(20),d_id int,foreign key(d_id) references dept(id));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;外键的第二个约束&quot;&gt;外键的第二个约束&lt;/h3&gt;
-&lt;p&gt;数据先插入主表，再插入从表数据&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; insert into dept values(1,'hr','招聘');&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; insert into emp values(1,'张无忌',1);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;外键的第三个约束&quot;&gt;外键的第三个约束&lt;/h3&gt;
-&lt;p&gt;删除数据时先删从表，再删主表&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; delete from emp where name = '张无忌';&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; delete from dept where id = 1;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;外键的第四个约束&quot;&gt;外键的第四个约束&lt;/h3&gt;
-&lt;p&gt;从表更新外键时必须保证外键是存在的。&lt;/p&gt;
-&lt;h3 id=&quot;外键的第五个约束&quot;&gt;外键的第五个约束&lt;/h3&gt;
-&lt;p&gt;更新主表的 id 时，要么先删除从表关联的数据，或者把关联数据关联到其他的主表 id。&lt;/p&gt;
-&lt;p&gt;有了这几种约束后，可以保证数据的完整性。相应的受到外键约束，主表的删除和更新操作受到限制，很多情况下，删除主表某个数据需要至少两条sql 语句，会很麻烦。&lt;/p&gt;
-&lt;h3 id=&quot;外键的第六个约束&quot;&gt;外键的第六个约束&lt;/h3&gt;
-&lt;p&gt;删除主表时，要先删除从表。&lt;/p&gt;
-&lt;h3 id=&quot;级联操作&quot;&gt;级联操作&lt;/h3&gt;
-&lt;h4 id=&quot;删除级联&quot;&gt;删除级联&lt;/h4&gt;
-&lt;p&gt;当主表删除时，从表相关联的记录同步删除&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table emp(id int primary key auto_increment,name char(20),d_id int,foreign key(d_id) references dept(id) on delete cascade);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;更新级联&quot;&gt;更新级联&lt;/h4&gt;
-&lt;p&gt;当主表 id 时，从表相关联的记录通步更新&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table emp(id int primary key auto_increment,name char(20),d_id int,foreign key(d_id) references dept(id) on update cascade);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;级联方向只能是主表级联从表，可以在操作主表时自动操作从表。（单箱操作，主表变化是级联操作从表，从表的变化不会影响主表）&lt;/p&gt;
-&lt;h2 id=&quot;一对一关系&quot;&gt;一对一关系&lt;/h2&gt;
-&lt;p&gt;一对一的关系只需要加一个外键来关联即可，但是需要给外键加上唯一约束。有主从关系的都需要先建主表。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create customer(c_id int primary key auto_increment,name char(20),phonenum char(11),addr char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create student(s_id int primary key auto_increment,name char(20),class char(11),number char(20),housenum char(20),c_id int unique,foreign key(c_id) references customer(c_id)); &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;一对一的另一种使用场景，当一个表的字段太多，而常用的字段不多时，可以采取垂直分表的方式来提高效率，比如个人信息有身份证、性别、年龄、地址等，可以拆分为基础信息和细节信息；也有另一种提升效率的方式，水平分表，当一个表中的数据记录太多时，效率会降低，可以采取水平分表，字段完全相同。&lt;/p&gt;
-&lt;h2 id=&quot;多对多关系&quot;&gt;多对多关系&lt;/h2&gt;
-&lt;p&gt;假如有两张表，一张表存的是老师，另一张表存的是学生。因为一个老师可以教多个学生，一个学生也可以有多个老师，所以这是双向多对一的关系，也就是多对多的关系。那么应该怎么存储数据呢？&lt;/p&gt;
-&lt;p&gt;可以通过增加一个中间表来存储两张表的关系，然后其他两张表分别用一个字段作为外键来关联中间表。（只要是多对多关系都是靠中间表来存储两张表之间的关系）除了中间表，另外两张都是主表，具体先建哪种主表没有先后顺序。多对多关系至少需要三张表。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table stu(id int primary key auto_increment,name char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table tea(id int primary key auto_increment,name char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table tsr(id int primary key auto_increment，t_id int,s_id int,foreign key(t_id) references tea(id),foreign key(s_id) references stu(id));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为老师和学生都是主表，关系表是从表，所以需要先插入老师和学生的数据，接着插入中间表的数据。&lt;/p&gt;
-&lt;p&gt;多对多关系表中因为已经有了 id 为主键，所以可以重复存入相同的学生和老师关系数据，可以通过联合主键改变。&lt;/p&gt;
-&lt;h2 id=&quot;多对一关系&quot;&gt;多对一关系&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table dept(id int primary key auto_increment,name char(20),job char(20));&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table emp(id int primary key auto_increment,name char(20),d_id int,foreign key(d_id) references dept(id));&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table 新表名 select * from 被复制的表名;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;注意不会复制主键和约束条件，数据结构都可以复制。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; create table 新表名 select * from 源表名 where 1 = 2;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;当where 后面条件不成立时，只会复制表结构。&lt;/p&gt;
-&lt;h2 id=&quot;蠕虫复制&quot;&gt;蠕虫复制&lt;/h2&gt;
-&lt;p&gt;自我复制。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; insert into 表名 select * from 表名;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如果有主键&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;mysql&amp;gt; insert into 表名(其他字段) select 其他字段 from 表名;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;在日常开发中，如果对性能要求很高，不应该使用外键&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;效率降低&lt;/li&gt;
-&lt;li&gt;耦合 关系多起来会造成管理麻烦&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;这时候关系只是逻辑关系很有可能产生错误数据。&lt;/p&gt;
-</description>
-<pubDate>Wed, 21 Nov 2018 13:24:00 +0000</pubDate>
-<dc:creator>Eurekaa</dc:creator>
-<og:description>前言 本篇博客主要内容为表之间的关系、多表关联、复制表；查询如单表查询、多表关联查询 表之间关系 为什么要分表？ 假如现在有两种数据，一种是部门数据一种是员工数据，如果两中数据放在同一张表中则会造成：</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zuanzuan/p/9997948.html</dc:identifier>
 </item>
 </channel>
 </rss>
