@@ -9,410 +9,666 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>Every 7.8μs your computer’s memory has a hiccup</title>
+<link>https://blog.cloudflare.com/every-7-8us-your-computers-memory-has-a-hiccup/</link>
+<guid isPermaLink="true" >https://blog.cloudflare.com/every-7-8us-your-computers-memory-has-a-hiccup/</guid>
+<description>&lt;p&gt;&lt;img src=&quot;https://blog.cloudflare.com/content/images/2018/11/640px-2013_Transcend_TS512MLK72V6N--straightened-.jpg&quot; alt=&quot;640px-2013_Transcend_TS512MLK72V6N--straightened-&quot;/&gt;&lt;br/&gt;&lt;small&gt;Modern DDR3 SDRAM. Source: &lt;a href=&quot;https://en.wikipedia.org/wiki/DDR3_SDRAM#/media/File:2013_Transcend_TS512MLK72V6N-(straightened).jpg&quot;&gt;BY-SA/4.0 by Kjerish&lt;/a&gt;&lt;/small&gt;&lt;/p&gt;
+&lt;p&gt;During my recent visit to &lt;a href=&quot;http://www.computerhistory.org/&quot;&gt;the Computer History Museum&lt;/a&gt; in Mountain View, I found myself staring at some ancient &lt;a href=&quot;https://en.wikipedia.org/wiki/Magnetic-core_memory&quot;&gt;magnetic core memory&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.cloudflare.com/content/images/2018/11/240px-KL_CoreMemory.jpg&quot; alt=&quot;240px-KL_CoreMemory&quot;/&gt;&lt;br/&gt;&lt;small&gt;Source: &lt;a href=&quot;https://en.wikipedia.org/wiki/File:KL_CoreMemory.jpg&quot;&gt;BY-SA/3.0 by Konstantin Lanzet&lt;/a&gt;&lt;/small&gt;&lt;/p&gt;
+&lt;p&gt;I promptly concluded I had absolutely no idea on how these things could ever work. I wondered if the rings rotate (they don't), and why each ring has three wires woven through it (and I still don’t understand exactly how these work). More importantly, I realized I have very little understanding on how the modern computer memory - dynamic RAM - works!&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.cloudflare.com/content/images/2018/11/cpumemory.8.png&quot; alt=&quot;cpumemory.8&quot;/&gt;&lt;br/&gt;&lt;small&gt;Source: &lt;a href=&quot;https://lwn.net/Articles/250967/&quot;&gt;Ulrich Drepper's series about memory&lt;/a&gt;&lt;/small&gt;&lt;/p&gt;
+&lt;p&gt;I was particularly interested in one of the consequences of how dynamic RAM works. You see, each bit of data is stored by the charge (or lack of it) on a tiny capacitor within the RAM chip. But these capacitors gradually lose their charge over time. To avoid losing the stored data, they must regularly get refreshed to restore the charge (if present) to its original level. This &lt;a href=&quot;https://en.wikipedia.org/wiki/Memory_refresh&quot;&gt;refresh process&lt;/a&gt; involves reading the value of every bit and then writing it back. During this &quot;refresh&quot; time, the memory is busy and it can't perform normal operations like loading or storing bits.&lt;/p&gt;
+&lt;p&gt;This has bothered me for quite some time and I wondered... is it possible to notice the refresh delay in software?&lt;/p&gt;
+&lt;h2 id=&quot;dynamicramrefreshprimer&quot;&gt;Dynamic RAM refresh primer&lt;/h2&gt;
+&lt;p&gt;Each DIMM module is composed of &quot;cells&quot; and &quot;rows&quot;, &quot;columns&quot;, &quot;sides&quot; and/or &quot;ranks&quot;. This presentation from &lt;a href=&quot;https://pubweb.eng.utah.edu/~cs7810/pres/11-7810-12.pdf&quot;&gt;the University of Utah explains the nomenclature&lt;/a&gt;. You can check the configuration of memory in your computer with &lt;code&gt;decode-dimms&lt;/code&gt; command. Here's an example:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;$ decode-dimms
+Size                                       4096 MB
+Banks x Rows x Columns x Bits              8 x 15 x 10 x 64
+Ranks                                      2
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;For today we don't need to get into the whole DDR DIMM layout, we just need to understand a single memory cell, storing one bit of information. Specifically we are only interested in how the refresh process is performed.&lt;/p&gt;
+&lt;p&gt;Let's review two sources:&lt;/p&gt;
+&lt;p&gt;Each bit stored in dynamic memory must be refreshed, typically every 64ms (called Static Refresh). This is a rather costly operation. To avoid one major stall every 64ms, this process is divided into 8192 smaller refresh operations. In each operation, the computer’s memory controller sends refresh commands to the DRAM chips. After receiving the instruction a chip will refresh 1/8192 of its cells. Doing the math - 64ms / 8192 = 7812.5 ns or 7.81 μs. This means:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;A refresh command is issued every 7812.5 ns. This is called tREFI.&lt;/li&gt;
+&lt;li&gt;It takes some time for the chip to perform the refresh and recover so it can perform normal read and write operations again. This time, called tRFC is either 75ns or 120ns (as per the mentioned Micron datasheet).&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;When the memory is hot (&amp;gt;85C) the memory retention time drops and the static refresh time halves to 32ms, and tREFI falls to 3906.25 ns.&lt;/p&gt;
+&lt;p&gt;A typical memory chip is busy with refreshes for a significant fraction of its running time - between 0.4% to 5%. Furthermore, memory chips are responsible for a nontrivial share of typical computer's power draw, and large chunk of that power is spent on performing the refreshes.&lt;/p&gt;
+&lt;p&gt;For the duration of the refresh action, the whole memory chip is blocked. This means each and every bit in memory is blocked for more than 75ns every 7812ns. Let's measure this.&lt;/p&gt;
+&lt;h2 id=&quot;preparinganexperiment&quot;&gt;Preparing an experiment&lt;/h2&gt;
+&lt;p&gt;To measure operations with nanosecond granularity we must write a tight loop, perhaps in C. It looks like this:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;    for (i = 0; i &amp;lt; ...; i++) {
+        __m128i x;
+        // Perform data load. MOVNTDQA is here only for kicks,
+        // for writeback memory it makes zero difference, the
+        // caches are still polluted.
+        asm volatile(&quot;movntdqa (%1), %0&quot; :  &quot;=x&quot; (x) : &quot;a&quot; (one_global_var));
+
+
+        // Lie to compiler to prevent optimizing this code. Claim that 'x' is referred to.
+      asm volatile(&quot;&quot; : : &quot;x&quot; ( x ));
+
+              // Flush the value from CPU caches, to force memory fetch next time.
+        _mm_clflush(one_global_var);
+
+             // Measure and record time
+       clock_gettime(CLOCK_MONOTONIC, &amp;amp;ts);
+    }
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/cloudflare/cloudflare-blog/blob/master/2018-11-memory-refresh/measure-dram.c&quot;&gt;Full code is available on Github&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The code is really straightforward. Perform a memory read. Flush data from CPU caches. Measure time.&lt;/p&gt;
+&lt;p&gt;I'm attempting to use MOVNTDQA to perform the data load, but this is not important. In fact, &lt;a href=&quot;https://stackoverflow.com/questions/37070/what-is-the-meaning-of-non-temporal-memory-accesses-in-x86&quot;&gt;current hardware ignores the non-temporary load hint on writeback memory&lt;/a&gt;. In practice any memory load instruction would do.&lt;/p&gt;
+&lt;p&gt;On my computer it generates data like this:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;# timestamp, loop duration
+3101895733,     134
+3101895865,     132
+3101896002,     137
+3101896134,     132
+3101896268,     134
+3101896403,     135
+3101896762,     359
+3101896901,     139
+3101897038,     137
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Typically I get ~140ns per loop, periodically the loop duration jumps to ~360ns. Sometimes I get odd readings longer than 3200ns.&lt;/p&gt;
+&lt;p&gt;Unfortunately, the data turns out to be very noisy. It's very hard to see if there is a noticeable delay related to the refresh cycles.&lt;/p&gt;
+&lt;h2 id=&quot;fastfouriertransform&quot;&gt;Fast Fourier Transform&lt;/h2&gt;
+&lt;p&gt;At some point it clicked. Since we want to find a fixed-interval event, we can feed the data into the FFT (fast fourier transform) algorithm, which deciphers the underlying frequencies.&lt;/p&gt;
+&lt;p&gt;I'm not the first one to think about this - Mark Seaborn of Rowhammer fame &lt;a href=&quot;https://github.com/google/rowhammer-test/blob/master/refresh_timing/refresh_timing.cc&quot;&gt;implemented this very technique&lt;/a&gt; back in 2015. Even after peeking at Mark's code, getting FFT to work turned out to be harder than I anticipated. But finally I got all the pieces together.&lt;/p&gt;
+&lt;p&gt;First we need to prepare the data. FFT requires input data to be sampled with a constant sampling interval. We also want to crop the data to reduce noise. By trial and error I found the best results are when data is preprocessed:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Small (smaller than average * 1.8) values of loop iterations are cut out, ignored, and replaced with readings of &quot;0&quot;. We really don't want to feed the noise into the algorithm.&lt;/li&gt;
+&lt;li&gt;All the remaining readings are replaced with &quot;1&quot;, since we really don't care about the amplitude of the delay caused by some noise.&lt;/li&gt;
+&lt;li&gt;I settled on sampling interval of 100ns, but any number up to &lt;a href=&quot;https://en.wikipedia.org/wiki/Nyquist%E2%80%93Shannon_sampling_theorem&quot;&gt;a Nyquist value (double expected frequency) also work fine&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;The data needs to be sampled with fixed timings before feeding to FFT. All reasonable sampling methods work ok, I ended up doing basic linear interpolation.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;The algorithm is roughly:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;UNIT=100ns
+A = [(timestamp, loop_duration),...] 
+p = 1
+for curr_ts in frange(fist_ts, last_ts, UNIT):
+    while not(A[p-1].timestamp &amp;lt;= curr_ts &amp;lt; A[p].timestamp):
+        p += 1
+    v1 = 1 if avg*1.8 &amp;lt;= A[p-1].duration &amp;lt;= avg*4 else 0
+    v2 = 1 if avg*1.8 &amp;lt;= A[p].duration &amp;lt;= avg*4 else 0
+    v = estimate_linear(v1, v2, A[p-1].timestamp, curr_ts, A[p].timestamp)
+    B.append( v )
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Which on my data produces fairly boring vector like this:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0,
+ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+ 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...]
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The vector is pretty long though, typically about ~200k data points. With data prepared like this, we are ready to feed it into FFT!&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;C = numpy.fft.fft(B)
+C = numpy.abs(C)
+F = numpy.fft.fftfreq(len(B)) * (1000000000/UNIT)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Pretty simple, right? This produces two vectors:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;C contains complex numbers of the frequency components. We are not interested in complex numbers and we can flatten them out by calling &lt;code&gt;abs()&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;F contains labels to what frequency bin lies in which place in vector C. We need to normalize it to Hz - by multiplying it by the input vector sampling frequency.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;The result can be charted:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.cloudflare.com/content/images/2018/11/fft1a.png&quot; alt=&quot;fft1a&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;X axis is unit-less since we normalized the delay times. Even though, it clearly shows spikes at some fixed frequency intervals. Let's zoom in:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://blog.cloudflare.com/content/images/2018/11/fft2a.png&quot; alt=&quot;fft2a&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;We can clearly see first three spikes. After a bit of wishy-washy arithmetic, involving filtering the reading at least 10 times the size of average, we can extract the underlying frequencies:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;127850.0
+127900.0
+127950.0
+255700.0
+255750.0
+255800.0
+255850.0
+255900.0
+255950.0
+383600.0
+383650.0
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Doing the math: 1000000000 (ns/s) / 127900 (Hz) = 7818.6 ns&lt;/p&gt;
+&lt;p&gt;Hurray! The first frequency spike is indeed what we were looking for, and indeed does correlate with the refresh times.&lt;/p&gt;
+&lt;p&gt;The other spikes at 256kHz, 384kHz, 512kHz and so on, are multiplies of our base frequency of 128kHz called harmonics. These are a side effect of &lt;a href=&quot;https://en.wikipedia.org/wiki/Square_wave&quot;&gt;performing FFT on something like a square wave&lt;/a&gt; and totally expected.&lt;/p&gt;
+&lt;p&gt;For easier experimentation, we &lt;a href=&quot;https://github.com/cloudflare/cloudflare-blog/tree/master/2018-11-memory-refresh&quot;&gt;prepared a command line version of this tool&lt;/a&gt;. You can run the code yourself. Here is a sample run on my server:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;~/2018-11-memory-refresh$ make
+gcc -msse4.1 -ggdb -O3 -Wall -Wextra measure-dram.c -o measure-dram
+objdump -dx measure-dram | egrep 'movntdqa' -A 2 -B 2
+ a29:    0f 1f 80 00 00 00 00     nopl   0x0(%rax)
+ a30:    4c 89 e0                 mov    %r12,%rax
+ a33:    66 0f 38 2a 00           movntdqa (%rax),%xmm0
+ a38:    41 0f ae 3c 24           clflush (%r12)
+ a3d:    0f ae f0                 mfence
+./measure-dram | python3 ./analyze-dram.py
+[*] Verifying ASLR: main=0x555555554890 stack=0x7fffffefe2ec
+[ ] Fun fact. I did 40663553 clock_gettime()'s per second
+[*] Measuring MOVNTDQA + CLFLUSH time. Running 131072 iterations.
+[*] Writing out data
+[*] Input data: min=117 avg=176 med=167 max=8172 items=131072
+[*] Cutoff range 212-inf
+[ ] 127849 items below cutoff, 0 items above cutoff, 3223 items non-zero
+[*] Running FFT
+[*] Top frequency above 2kHz below 250kHz has magnitude of 7716
+[+] Top frequency spikes above 2kHZ are at:
+127906Hz    7716
+255813Hz    7947
+383720Hz    7460
+511626Hz    7141
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;I must admit the code is not perfectly stable. In case of trouble, consider disabling Turbo Boost, CPU frequency scaling and tuning for performance.&lt;/p&gt;
+&lt;h2 id=&quot;finale&quot;&gt;Finale&lt;/h2&gt;
+&lt;p&gt;There are two major takeaways from this work.&lt;/p&gt;
+&lt;p&gt;We've seen that the low level data is pretty hard to analyze and seem to be pretty noisy. Instead of trying to figure something out with naked eye, we can always employ good old FFT. Some wishful thinking is needed when preparing the data.&lt;/p&gt;
+&lt;p&gt;Most importantly, we showed it's often possible to measure subtle hardware behaviours from a simple userspace process. This kind of thinking led to the discovery of &lt;a href=&quot;https://googleprojectzero.blogspot.com/2015/03/exploiting-dram-rowhammer-bug-to-gain.html&quot;&gt;the original Rowhammer&lt;/a&gt; vulnerability, was used in Meltdown/Spectre attacks and showed again in &lt;a href=&quot;https://arstechnica.com/information-technology/2018/11/potentially-disastrous-rowhammer-bitflips-can-bypass-ecc-protections/&quot;&gt;recent ECC-defeating reincarnation of Rowhammer&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;There is so much more to be said. We barely scratched the surface of the inner workings of the memory subsystem. I recommend further reading:&lt;/p&gt;
+&lt;p&gt;Finally, here is a good reading about the old magnetic core memory:&lt;/p&gt;
+</description>
+<pubDate>Fri, 23 Nov 2018 15:49:17 +0000</pubDate>
+<dc:creator>jgrahamc</dc:creator>
+<og:type>article</og:type>
+<og:title>Every 7.8μs your computer’s memory has a hiccup</og:title>
+<og:description> I was particularly interested in one of the consequences of how dynamic RAM works. You see, each bit of data is stored by the charge (or lack of it) on a tiny capacitor within the RAM chip. But these capacitors gradually lose their charge over time.</og:description>
+<og:url>https://blog.cloudflare.com/every-7-8us-your-computers-memory-has-a-hiccup/</og:url>
+<og:image>https://blog.cloudflare.com/content/images/2018/11/640px-2013_Transcend_TS512MLK72V6N--straightened--1.jpg</og:image>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.cloudflare.com/every-7-8us-your-computers-memory-has-a-hiccup/</dc:identifier>
+</item>
+<item>
+<title>Some notes about HTTP/3</title>
+<link>https://blog.erratasec.com/2018/11/some-notes-about-http3.html</link>
+<guid isPermaLink="true" >https://blog.erratasec.com/2018/11/some-notes-about-http3.html</guid>
+<description>HTTP/3 is going to be standardized. As an old protocol guy, I thought I'd write up some comments.&lt;p&gt;Google (pbuh) has both the most popular web browser (Chrome) and the two most popular websites (#1 Google.com #2 Youtube.com). Therefore, they are in control of future web protocol development. Their first upgrade they called SPDY (pronounced &quot;speedy&quot;), which was eventually standardized as the second version of HTTP, or HTTP/2. Their second upgrade they called QUIC (pronounced &quot;quick&quot;), which is being standardized as HTTP/3.&lt;br/&gt;&lt;/p&gt;&lt;p&gt;SPDY (HTTP/2) is already supported by the major web browser (Chrome, Firefox, Edge, Safari) and major web servers (Apache, Nginx, IIS, CloudFlare). Many of the most popular websites support it (even non-Google ones), though you are unlikely to ever see it on the wire (sniffing with Wireshark or tcpdump), because it's always encrypted with SSL. While the standard allows for HTTP/2 to run raw over TCP, all the implementations only use it over SSL.&lt;/p&gt;&lt;p&gt;There is a good lesson here about &lt;strong&gt;standards&lt;/strong&gt;. Outside the Internet, standards are often &lt;em&gt;de jure&lt;/em&gt;, run by government, driven by getting all major stakeholders in a room and hashing it out, then using rules to force people to adopt it. On the Internet, people implement things first, and then if others like it, they'll start using it, too. Standards are often &lt;em&gt;de facto&lt;/em&gt;, with RFCs being written for what is already working well on the Internet, documenting what people are already using. SPDY was adopted by browsers/servers not because it was standardized, but because the major players simply started adding it. The same is happening with QUIC: the fact that it's being standardized as HTTP/3 is a reflection that it's already being used, rather than some milestone that now that it's standardized that people can start using it.&lt;/p&gt;&lt;p&gt;QUIC is really more of a new version of TCP (TCP/2???) than a new version of HTTP (HTTP/3). It doesn't really change what HTTP/2 does so much as change how the transport works. Therefore, my comments below are focused on transport issues rather than HTTP issues.&lt;/p&gt;&lt;p&gt;The major headline feature is faster connection setup and &lt;strong&gt;latency&lt;/strong&gt;. TCP requires a number of packets being sent back-and-forth before the connection is established. SSL again requires a number of packets sent back-and-forth before encryption is established. If there is a lot of network delay, such as when people use satellite Internet with half-second ping times, it can take quite a long time for a connection to be established. By reducing round-trips, connections get setup faster, so that when you click on a link, the linked resource pops up immediately&lt;/p&gt;&lt;p&gt;The next headline feature is &lt;strong&gt;bandwidth&lt;/strong&gt;. There is always a bandwidth limitation between source and destination of a network connection, which is almost always due to congestion. Both sides need to discover this speed so that they can send packets at just the right rate. Sending packets too fast, so that they'll get dropped, causes even more congestion for others without improving transfer rate. Sending packets too slowly means unoptimal use of the network.&lt;/p&gt;&lt;p&gt;How HTTP traditionally does this is bad. Using a single TCP connection didn't work for HTTP because interactions with websites require multiple things to be transferred simultaneously, so browsers opened multiple connections to the web server (&lt;a href=&quot;https://twitter.com/tunetheweb/status/1064422216262213633&quot;&gt;typically 6&lt;/a&gt;). However, this breaks the bandwidth estimation, because each of your TCP connections is trying to do it independently as if the other connections don't exist. SPDY addressed this by its &lt;strong&gt;multiplexing&lt;/strong&gt; feature that combined multiple interactions between browser/server with a single bandwidth calculation.&lt;/p&gt;&lt;p&gt;QUIC extends this multiplexing, making it even easier to handle multiple interactions between the browser/server, without any one interaction blocking another, but with a common bandwidth estimation. This will make interactions smoother from a user's perspective, while at the same time reduce congestion that routers experience.&lt;/p&gt;&lt;p&gt;Now let's talk &lt;strong&gt;user-mode stacks&lt;/strong&gt;. The problem with TCP, especially on the server, is that TCP connections are handled by the operating system &lt;em&gt;kernel&lt;/em&gt;, while the service itself runs in &lt;em&gt;usermode&lt;/em&gt;. Moving things across the kernel/usermode boundary causes performance issues. Tracking a large number of TCP connections causes scalability issues. Some people have tried putting the services into the kernel, to avoid the transitions, which is a bad because it destabilizes the operating system. My own solution, with the BlackICE IPS and masscan, was to use a &lt;em&gt;usermode driver&lt;/em&gt; for the hardware, getting packets from the network chip directly to the usermode process, bypassing the kernel (see PoC||GTFO #15), using my own custom TCP stack. This has become popular in recent years with the &lt;em&gt;DPDK&lt;/em&gt; kit.&lt;/p&gt;&lt;p&gt;But moving from TCP to UDP can get you much the same performance without usermode drivers. Instead of calling the well-known &lt;em&gt;recv()&lt;/em&gt; function to receive a single packet at a time, you can call &lt;em&gt;recvmmsg()&lt;/em&gt; to receive a bunch of UDP packets at once. It's still a kernel/usermode transition, but one amortized across a hundred packets received at once, rather a transition per packet.&lt;/p&gt;&lt;p&gt;In my own tests, you are limited to about 500,000 UDP packets/second using the typical &lt;em&gt;recv()&lt;/em&gt; function, but with &lt;em&gt;recvmmsg()&lt;/em&gt; and some other optimizations (multicore using RSS), you can get to 5,000,000 UDP packets/second on a low-end quad-core server. Since this scales well per core, moving to the beefy servers with 64 cores should improve things even further.&lt;/p&gt;&lt;p&gt;BTW, &quot;RSS&quot; is a feature of network hardware that splits incoming packets into multiple receive queues. The biggest problem with multi-core scalability is whenever two CPU cores need to read/modify the same thing at the same time, so sharing the same UDP queue of packets becomes the biggest bottleneck. Therefore, first Intel and then other Ethernet vendors added RSS giving each core it's own non-shared packet queue. Linux and then other operating systems upgraded UDP to support multiple file descriptors for a single socket (SO_REUSEPORT) to handle the multiple queues. Now QUIC uses those advances allowing each core to manage it's own stream of UDP packets without the scalability problems of sharing things with other CPU cores. I mention this because I personally had discussions with Intel hardware engineers about having multiple packet queues back in 2000. It's a common problem and an obvious solution, and it's been fun watching it progress over the last two decades until it appears on the top end as HTTP/3. Without RSS in the network hardware, it's unlikely QUIC would become a standard.&lt;/p&gt;&lt;p&gt;Another cool solution in QUIC is &lt;strong&gt;mobile&lt;/strong&gt; support. As you move around with your notebook computer to different WiFI networks, or move around with your mobile phone, your IP address can change. The operating system and protocols don't gracefully close the old connections and open new ones. With QUIC, however, the identifier for a connection is not the traditional concept of a &quot;socket&quot; (the source/destination port/address protocol combination), but a 64-bit identifier assigned to the connection.&lt;/p&gt;&lt;p&gt;This means that as you move around, you can continue with a constant stream uninterrupted from YouTube even as your IP address changes, or continue with a video phone call without it being dropped. Internet engineers have been struggling with &quot;mobile IP&quot; for decades, trying to come up with a workable solution. They've focused on the end-to-end principle of somehow keeping a constant IP address as you moved around, which isn't a practical solution. It's fun to see QUIC/HTTP/3 finally solve this, with a working solution in the real world.&lt;/p&gt;&lt;p&gt;How can use use this new transport? For decades, the standard for network programing has been the &lt;strong&gt;transport layer API&lt;/strong&gt; known as &quot;sockets&quot;. That where you call functions like &lt;em&gt;recv()&lt;/em&gt; to receive packets in your code. With QUIC/HTTP/3, we no longer have an operating-system transport-layer API. Instead, it's a higher layer feature that you use in something like the &lt;em&gt;go&lt;/em&gt; programming language, or using Lua in the OpenResty nginx web server.&lt;/p&gt;&lt;p&gt;I mention this because one of the things that's missing from your education about the OSI Model is that it originally envisioned everyone writing to application layer (7) APIs instead of transport layer (4) APIs. There was supposed to be things like &lt;em&gt;application service elements&lt;/em&gt; that would handling things like file transfer and messaging in a standard way for different applications. I think people are increasingly moving to that model, especially driven by Google with &lt;em&gt;go&lt;/em&gt;, &lt;em&gt;QUIC&lt;/em&gt;, &lt;em&gt;protobufs&lt;/em&gt;, and so on.&lt;/p&gt;&lt;p&gt;I mention this because of the contrast between Google and Microsoft. Microsoft owns a popular operating system, so it's innovations are driven by what it can do within that operating system. Google's innovations are driven by what it can put on top of the operating system. Then there is Facebook and Amazon themselves which must innovate on top of (or outside of) the stack that Google provides them. The top 5 corporations in the world are, in order, Apple-Google-Microsoft-Amazon-Facebook, so where each one drives innovation is important.&lt;/p&gt;&lt;p&gt;&lt;strong&gt;Conclusion&lt;/strong&gt;&lt;/p&gt;&lt;p&gt;When TCP was created in the 1970s, it was sublime. It handled things, like congestion, vastly better than competing protocols. For all that people claim IPv4 didn't anticipate things like having more than 4-billion addresses, it anticipated the modern Internet vastly better than competing designs throughout the 70s and 80s. The upgrade from IPv4 to IPv6 largely maintains what makes IP great. The upgrade from TCP to QUIC is similarly based on what makes TCP great, but extending it to modern needs. It's actually surprising TCP has lasted this long, and this well, without an upgrade.&lt;/p&gt;</description>
+<pubDate>Fri, 23 Nov 2018 15:44:55 +0000</pubDate>
+<dc:creator>BerislavLopac</dc:creator>
+<og:url>https://blog.erratasec.com/2018/11/some-notes-about-http3.html</og:url>
+<og:title>Some notes about HTTP/3</og:title>
+<og:description>HTTP/3 is going to be standardized. As an old protocol guy, I thought I'd write up some comments. Google (pbuh) has both the most popular ...</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.erratasec.com/2018/11/some-notes-about-http3.html</dc:identifier>
+</item>
+<item>
+<title>The Resistance Is Real – Why Side Projects Are So Hard</title>
+<link>http://davemart.in/resistance/</link>
+<guid isPermaLink="true" >http://davemart.in/resistance/</guid>
+<description>&lt;p&gt;Today marks 12 full months that I’ve been working on a side project called &lt;a href=&quot;https://tryhowdy.com/&quot;&gt;Howdy&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://tryhowdy.com/&quot;&gt;&lt;img src=&quot;https://i1.wp.com/davemart.in/wp-content/uploads/2018/11/howdy.png&quot; alt=&quot;Howdy Homepage&quot; data-recalc-dims=&quot;1&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;In that time I’ve:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Re-written the code base 4 times (Laravel, Vanilla JS, React, then back to Vanilla JS).&lt;/li&gt;
+&lt;li&gt;Started working with a partner, then broke it off.&lt;/li&gt;
+&lt;li&gt;Seriously considered stopping and working on other side projects at least half a dozen times.&lt;/li&gt;
+&lt;li&gt;Taken 2 month-long sabbaticals where I didn’t work on the project at all.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;I’m happy with the tech stack that I have now and the project is probably 90% complete, but I’m finding it &lt;strong&gt;extremely&lt;/strong&gt; hard to finish.&lt;/p&gt;
+&lt;h3&gt;The resistance&lt;/h3&gt;
+&lt;p&gt;In &lt;a href=&quot;https://www.amazon.com/War-Art-Through-Creative-Battles/dp/1936891026/&quot;&gt;The War of Art&lt;/a&gt; and &lt;a href=&quot;https://www.amazon.com/Turning-Pro-Inner-Power-Create/dp/1936891034/&quot;&gt;Turning Pro&lt;/a&gt;, Steven Pressfield talks about “The Resistance” that keeps us from doing our work.&lt;/p&gt;
+&lt;p&gt;If you’re a maker and you’ve yet to read these two books, do yourself a favor and buy them today.&lt;/p&gt;
+&lt;h3&gt;It get’s worse the closer you are to completion&lt;/h3&gt;
+&lt;p&gt;Pressfield says:&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;The danger is greatest when the finish line is in sight. At this point, Resistance knows that we’re about to beat it. It hits the panic button. It marshals one last assault and slams us with everything it’s got.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;My brain is literally trying to convince me to quit and to start working on “this other exciting new project”.&lt;/p&gt;
+&lt;p&gt;The ever so quiet whispers in my head are saying:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;A year! Why haven’t you shipped yet? What a failure. Save your dignity. Just call it a wraps.&lt;/li&gt;
+&lt;li&gt;This is boring. Just shelve this project and move on to something fun &amp;amp; exciting.&lt;/li&gt;
+&lt;li&gt;No one will actually use this.&lt;/li&gt;
+&lt;li&gt;Will designers really find this useful?&lt;/li&gt;
+&lt;li&gt;What if you launch and no one finds it valuable?&lt;/li&gt;
+&lt;li&gt;This niche isn’t big enough. You should change the target to developers? Marketers? Sales?&lt;/li&gt;
+&lt;li&gt;Stay safe. Make it as generic of an offering as possible. That way anyone can use it.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;And even though I know that these are &lt;strong&gt;all&lt;/strong&gt; fabricated to get me to stop, the temptation to actually stop is legit.&lt;/p&gt;
+&lt;p&gt;I am &lt;strong&gt;very&lt;/strong&gt; tempted to stop.&lt;/p&gt;
+&lt;h3&gt;It get’s worse the more important it is to us&lt;/h3&gt;
+&lt;p&gt;Pressfield says:&lt;/p&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;The more important a call or action is to our soul’s evolution, the more Resistance we’ll feel towards pursuing it.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;As tempting as it is to call it quits, I honestly think my heart will break if I don’t finish this project. I can think back to so many moments where I still had optimism, hope, and excitement for this project. Where did all of that excitement go? Where is the hope now? How can I get it back?&lt;/p&gt;
+&lt;h3&gt;Side projects are bloody hard&lt;/h3&gt;
+&lt;p&gt;Massive props to anyone who is able to launch a side project and stick with it for a year or more.&lt;/p&gt;
+&lt;p&gt;Optimism, hope, and excitement be damned…&lt;/p&gt;
+&lt;p&gt;I’m not giving up on this one.&lt;/p&gt;
+&lt;p&gt;The resistance is real, but so is my aspiration to have dogged determination!&lt;/p&gt;
+&lt;p&gt;I will launch this project. 🤘&lt;/p&gt;
+&lt;p&gt;Wish me luck.&lt;/p&gt;
+&lt;div class=&quot;sharedaddy sd-sharing-enabled&quot;&gt;
+&lt;div class=&quot;robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing&quot;&gt;
+&lt;h3 class=&quot;sd-title&quot;&gt;Share this:&lt;/h3&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded&quot; id=&quot;like-post-wrapper-38552148-392-5bf894d91b508&quot; data-src=&quot;https://widgets.wp.com/likes/#blog_id=38552148&amp;amp;post_id=392&amp;amp;origin=davemart.in&amp;amp;obj_id=38552148-392-5bf894d91b508&quot; data-name=&quot;like-post-frame-38552148-392-5bf894d91b508&quot;&gt;
+&lt;h3 class=&quot;sd-title&quot;&gt;Like this:&lt;/h3&gt;
+&lt;p&gt;&lt;span class=&quot;button&quot;&gt;&lt;span&gt;Like&lt;/span&gt;&lt;/span&gt; &lt;span class=&quot;loading&quot;&gt;Loading...&lt;/span&gt;&lt;/p&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Fri, 23 Nov 2018 13:12:08 +0000</pubDate>
+<dc:creator>startlaunch</dc:creator>
+<og:type>article</og:type>
+<og:title>The Resistance is Real</og:title>
+<og:url>http://davemart.in/resistance/</og:url>
+<og:description>Today marks 12 full months that I’ve been working on a side project called Howdy. In that time I’ve: Re-written the code base 4 times (Laravel, Vanilla JS, React, then back to Vanilla J…</og:description>
+<og:image>https://s0.wp.com/i/blank.jpg</og:image>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://davemart.in/resistance/</dc:identifier>
+</item>
+<item>
 <title>China blacklists millions from booking flights as &amp;#039;social credit&amp;#039; introduced</title>
 <link>https://www.independent.co.uk/news/world/asia/china-social-credit-system-flight-booking-blacklisted-beijing-points-a8646316.html</link>
 <guid isPermaLink="true" >https://www.independent.co.uk/news/world/asia/china-social-credit-system-flight-booking-blacklisted-beijing-points-a8646316.html</guid>
-<description>&lt;p dir=&quot;ltr&quot;&gt;Millions of Chinese nationals have been blocked from booking flights or trains as Beijing seeks to implement its controversial “social credit” system, which allows the government to closely monitor and judge each of its 1.3 billion citizens based on their behaviour and activity.&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;&lt;span&gt;The system, to be rolled out by 2020, aims to make it “&lt;/span&gt;difficult to move” for those deemed “untrustworthy”, according to a &lt;a href=&quot;http://zhengce.beijing.gov.cn/library/192/33/50/438650/1571810/index.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-http://zhengce.beijing.gov.cn/library/192/33/50/438650/1571810/index.html&quot; data-vars-event-id=&quot;c6&quot;&gt;detailed plan&lt;/a&gt; published by the government this week.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;It will be used to reward or punish people and organisations for “trustworthiness” across a range of measures.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;A key part of the plan not only involves blacklisting people with low social credibility scores, but also “publicly disclosing the records of enterprises and individuals’ untrustworthiness on a regular basis”.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The plan stated: “We will improve the credit blacklist system, publicly disclose the records of enterprises and individuals’ untrustworthiness on a regular basis, and form a pattern of distrust and punishment.”&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;For those deemed untrustworthy, “everywhere is limited, and it is difficult to move, so that those who violate the law and lose the trust will pay a heavy price”.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The credit system is already being rolled out in some areas and in recent months the Chinese state has blocked millions of people from booking flights and high-speed trains.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;According to the state-run news outlet &lt;a href=&quot;http://www.globaltimes.cn/content/1103262.shtml&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-http://www.globaltimes.cn/content/1103262.shtml&quot; data-vars-event-id=&quot;c6&quot;&gt;&lt;em&gt;Global Times&lt;/em&gt;&lt;/a&gt;, as of May this year, the government had blocked 11.14 million people from flights and 4.25 million from taking high-speed train trips.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The state has also begun to clamp down on luxury options: 3 million people are barred from getting business class train tickets, according to &lt;a href=&quot;https://www.channelnewsasia.com/news/asia/china-bad-social-credit-barred-from-buying-train-plane-tickets-10050390&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://www.channelnewsasia.com/news/asia/china-bad-social-credit-barred-from-buying-train-plane-tickets-10050390&quot; data-vars-event-id=&quot;c6&quot;&gt;&lt;em&gt;Channel News Asia&lt;/em&gt;&lt;/a&gt;.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The aim, according to Hou Yunchun, former deputy director of the development research centre of the State Council, is to make “discredited people become bankrupt”, he said earlier this year.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The eastern state of Hangzou, southwest of &lt;a href=&quot;https://www.independent.co.uk/topic/Shanghai&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-/topic/Shanghai&quot; data-vars-event-id=&quot;c6&quot;&gt;Shanghai&lt;/a&gt;, is one area where a social credit system is already in place.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;People are awarded credit points for activities such as undertaking volunteer work and giving blood donations while those who violate traffic laws and charge “under-the-table” fees are punished.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;Other infractions &lt;a href=&quot;https://foreignpolicy.com/2018/04/03/life-inside-chinas-social-credit-laboratory/&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://foreignpolicy.com/2018/04/03/life-inside-chinas-social-credit-laboratory/&quot; data-vars-event-id=&quot;c6&quot;&gt;reportedly include&lt;/a&gt; smoking in non-smoking zones, buying too many video games and posting fake news online.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;Punishments are not clearly detailed in the government plan, but beyond making travel difficult, are also believed to include slowing internet speeds, reducing access to good schools for individuals or their children, banning people from certain jobs, preventing booking at certain hotels and losing the right to own pets.&lt;/span&gt;&lt;/p&gt;&lt;div readability=&quot;626&quot;&gt;
+<description>&lt;p dir=&quot;ltr&quot;&gt;Millions of Chinese nationals have been blocked from booking flights or trains as Beijing seeks to implement its controversial “social credit” system, which allows the government to closely monitor and judge each of its 1.3 billion citizens based on their behaviour and activity.&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;&lt;span&gt;The system, to be rolled out by 2020, aims to make it “&lt;/span&gt;difficult to move” for those deemed “untrustworthy”, according to a &lt;a href=&quot;http://zhengce.beijing.gov.cn/library/192/33/50/438650/1571810/index.html&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-http://zhengce.beijing.gov.cn/library/192/33/50/438650/1571810/index.html&quot; data-vars-event-id=&quot;c6&quot;&gt;detailed plan&lt;/a&gt; published by the government this week.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;It will be used to reward or punish people and organisations for “trustworthiness” across a range of measures.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;A key part of the plan not only involves blacklisting people with low social credibility scores, but also “publicly disclosing the records of enterprises and individuals’ untrustworthiness on a regular basis”.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The plan stated: “We will improve the credit blacklist system, publicly disclose the records of enterprises and individuals’ untrustworthiness on a regular basis, and form a pattern of distrust and punishment.”&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;For those deemed untrustworthy, “everywhere is limited, and it is difficult to move, so that those who violate the law and lose the trust will pay a heavy price”.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The credit system is already being rolled out in some areas and in recent months the Chinese state has blocked millions of people from booking flights and high-speed trains.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;According to the state-run news outlet &lt;a href=&quot;http://www.globaltimes.cn/content/1103262.shtml&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-http://www.globaltimes.cn/content/1103262.shtml&quot; data-vars-event-id=&quot;c6&quot;&gt;&lt;em&gt;Global Times&lt;/em&gt;&lt;/a&gt;, as of May this year, the government had blocked 11.14 million people from flights and 4.25 million from taking high-speed train trips.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The state has also begun to clamp down on luxury options: 3 million people are barred from getting business class train tickets, according to &lt;a href=&quot;https://www.channelnewsasia.com/news/asia/china-bad-social-credit-barred-from-buying-train-plane-tickets-10050390&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://www.channelnewsasia.com/news/asia/china-bad-social-credit-barred-from-buying-train-plane-tickets-10050390&quot; data-vars-event-id=&quot;c6&quot;&gt;&lt;em&gt;Channel News Asia&lt;/em&gt;&lt;/a&gt;.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The aim, according to Hou Yunchun, former deputy director of the development research centre of the State Council, is to make “discredited people become bankrupt”, he said earlier this year.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The eastern state of Hangzou, southwest of &lt;a href=&quot;https://www.independent.co.uk/topic/Shanghai&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-/topic/Shanghai&quot; data-vars-event-id=&quot;c6&quot;&gt;Shanghai&lt;/a&gt;, is one area where a social credit system is already in place.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;People are awarded credit points for activities such as undertaking volunteer work and giving blood donations while those who violate traffic laws and charge “under-the-table” fees are punished.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;Other infractions &lt;a href=&quot;https://foreignpolicy.com/2018/04/03/life-inside-chinas-social-credit-laboratory/&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://foreignpolicy.com/2018/04/03/life-inside-chinas-social-credit-laboratory/&quot; data-vars-event-id=&quot;c6&quot;&gt;reportedly include&lt;/a&gt; smoking in non-smoking zones, buying too many video games and posting fake news online.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;Punishments are not clearly detailed in the government plan, but beyond making travel difficult, are also believed to include slowing internet speeds, reducing access to good schools for individuals or their children, banning people from certain jobs, preventing booking at certain hotels and losing the right to own pets.&lt;/span&gt;&lt;/p&gt;&lt;div readability=&quot;632&quot;&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;1/50&lt;/span&gt; 22 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;1/50&lt;/span&gt; 23 November 2018&lt;/h2&gt;
+&lt;p&gt;Elias Lopez, a three-year-old Honduran migrant, plays in between the shields of a line of Mexican riot police, when the group he was part of tried to cross the Chaparral border crossing in Tijuana, Mexico. Elias Lopez is part of a group of Central American migrants that marched peacefully to the border crossing to demand better conditions and push to enter the US&lt;/p&gt;
+&lt;p&gt;AP&lt;/p&gt;
+
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;2/50&lt;/span&gt; 22 November 2018&lt;/h2&gt;
 &lt;p&gt;Lebanese army soldiers march during a parade to mark the 75th anniversary of Lebanon's Independence Day, in Beirut, commemorating the liberation from the French Mandate on 22 November 1943&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;2/50&lt;/span&gt; 21 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;3/50&lt;/span&gt; 21 November 2018&lt;/h2&gt;
 &lt;p&gt;Indian Muslim devotees wave flags as they parade atop vehicles along a street during Eid-Milad-Un-Nabi celebrations in Varanasi in the Indian state of Uttar Pradesh&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;3/50&lt;/span&gt; 20 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;4/50&lt;/span&gt; 20 November 2018&lt;/h2&gt;
 &lt;p&gt;At least 50 people were killed and dozens more injured when a suicide bomber targeted a group of Muslim religious scholars in Kabul, officials in Afghanistan say. Hundreds of clerics had gathered to mark the birthday of the Prophet Mohammed at a large wedding hall in the capital before the blast happened, interior ministry spokesman Najib Danish said. Wahi Majroh, of Afghanistan’s public health ministry, said a further 83 people had been wounded by the bomber. “The victims of the attack unfortunately are all religious scholars who gathered to commemorate the birthday of Prophet Muhammad,” said Basir Mujahid, spokesman for the Kabul police chief&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;4/50&lt;/span&gt; 19 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;5/50&lt;/span&gt; 19 November 2018&lt;/h2&gt;
 &lt;p&gt;A view of the Fuego volcano eruption at sunrise, seen from El Rodeo, Escuintla, Guatemala. More than 2,000 people were evacuated from several villages due to the strong eruption, located 50 kilometers west of the Guatemalan capital&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;5/50&lt;/span&gt; 18 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;6/50&lt;/span&gt; 18 November 2018&lt;/h2&gt;
 &lt;p&gt;French President Emmanuel Macron is applauded after speaking before the Bundestag (lower house of parliament) as the German parliament commemorates victims of wars and dictatorships in Berlin. The leaders of France and Germany jointly remember the victims of European wars, presenting also a united front in countering global turmoil stoked by US President Donald Trump&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;6/50&lt;/span&gt; 17 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;7/50&lt;/span&gt; 17 November 2018&lt;/h2&gt;
 &lt;p&gt;People wearing yellow vests, a symbol of a French drivers' nationwide protest against higher fuel prices, block the Paris-Brussels motorway in Haulchin, France&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;7/50&lt;/span&gt; 16 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;8/50&lt;/span&gt; 16 November 2018&lt;/h2&gt;
 &lt;p&gt;People hold banners of Jamal Khashoggi during a symbolic funeral prayer for the Saudi journalist, killed and dismembered in the Saudi consulate in Istanbul in October, at the courtyard of Fatih mosque in Istanbul. Turkey has more evidence contradicting the Saudi version of the murder of journalist Jamal Khashoggi including a second audio recording, revealing that the murder had been premeditated, a Turkish newspaper reported on November 16, a contradiction to the statement of the Saudi prosecutor who said that five Saudi officials faced the death penalty on charges of killing Khashoggi but exonerated the country's powerful Crown Prince of involvement in the murder&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;8/50&lt;/span&gt; 15 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;9/50&lt;/span&gt; 15 November 2018&lt;/h2&gt;
 &lt;p&gt;Alexei Navalny leaves the European Court of Human Rights today. The court has ruled that Russia's repeated arrests of Navalny were politically motivated&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;9/50&lt;/span&gt; 14 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;10/50&lt;/span&gt; 14 November 2018&lt;/h2&gt;
 &lt;p&gt;A crew member escorts a migrant child out of a plane transporting a group of 51 migrants from Niger, entitled to international protection, after its landing at the Mario De Bernardi military airport in Pratica di Mare, south of Rome&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;10/50&lt;/span&gt; 13 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;11/50&lt;/span&gt; 13 November 2018&lt;/h2&gt;
 &lt;p&gt;Palestinians gather in front of damaged buildings in Gaza City following Israeli air strikes targeting the area overnight. Israel's aircraft struck Gaza on November 12, killing three Palestinians and wounding nine after a barrage of rocket fire into its territory from the enclave. The flare-up came after a deadly Israeli special forces operation in the Gaza Strip, at the weekend, that left Hamas vowing revenge&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;11/50&lt;/span&gt; 12 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;12/50&lt;/span&gt; 12 November 2018&lt;/h2&gt;
 &lt;p&gt;Floral tributes outside Melbourne's Pellegrini's Cafe for Sisto Malaspina, after he was stabbed to death last Friday in an attack police have called an act of terrorism, in Australia&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;12/50&lt;/span&gt; 11 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;13/50&lt;/span&gt; 11 November 2018&lt;/h2&gt;
 &lt;p&gt;Heads of states and world leaders attend ceremonies at the Arc de Triomphe in Paris. Over 60 heads of state and government were taking part in a solemn ceremony at the Tomb of the Unknown Soldier, the mute and powerful symbol of sacrifice to the millions who died from 1914-18&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;13/50&lt;/span&gt; 10 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;14/50&lt;/span&gt; 10 November 2018&lt;/h2&gt;
 &lt;p&gt;Firefighters push down a wall while battling against a burning apartment complex in Paradise, north of Sacramento, California. A rapidly spreading, late-season wildfire in northern California has burned 20,000 acres of land and prompted authorities to issue evacuation orders for thousands of people. As many as 1000 homes, a hospital, a Safeway store and scores of other structures have burned in the area as the Camp fire tore through the region&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;14/50&lt;/span&gt; 9 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;15/50&lt;/span&gt; 9 November 2018&lt;/h2&gt;
 &lt;p&gt;A Fly Jamaica plane en route to Toronto crash lands at an airport in Guyana following a technical problem. At least six passengers were injured&lt;/p&gt;
 &lt;p&gt;Cheddi Jagan International Airport&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;15/50&lt;/span&gt; 8 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;16/50&lt;/span&gt; 8 November 2018&lt;/h2&gt;
 &lt;p&gt;An FBI agent talks to a potential witness as they stand near the scene Thursday in Thousand Oaks, California. where a gunman opened fire Wednesday inside a country dance bar crowded with hundreds of people on &quot;college night,&quot; wounding 11 people including a deputy who rushed to the scene. Ventura County sheriff's spokesman says gunman is dead inside the bar.&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;16/50&lt;/span&gt; 7 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;17/50&lt;/span&gt; 7 November 2018&lt;/h2&gt;
 &lt;p&gt;Democratic congressional candidate Ilhan Omar is celebrates with her husband's mother after she won a congress place during the US midterm elections. In doing do she became the first-joint Muslim woman to be elected into congress alongside Rashida Tlaib&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;17/50&lt;/span&gt; 6 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;18/50&lt;/span&gt; 6 November 2018&lt;/h2&gt;
 &lt;p&gt;Voters cast their ballots at the Tuttle Park Recreation Center polling location in Columbus, Ohio. Across the US, voters headed to the polls in one of the most high-profile midterm elections in years&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;18/50&lt;/span&gt; 5 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;19/50&lt;/span&gt; 5 November 2018&lt;/h2&gt;
 &lt;p&gt;Members of the group Your Vote Matters encourage people to vote before an event hosted by US Senator Claire McCaskill as she campaigns for the US Senate in Saint Louis, Missour. McCaskill, a Democrat, faces a challenge from Republican Missouri Attorney General Josh Hawley in the November general election&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;19/50&lt;/span&gt; 4 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;20/50&lt;/span&gt; 4 November 2018&lt;/h2&gt;
 &lt;p&gt;Police officers and rescuers work at the site of where a truck ploughed into cars at a toll booth in Lanzhou in China's northwestern Gansu province. The out-of-control truck crashed into a 31-car lineup and killed 15 people, with 44 injured&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;20/50&lt;/span&gt; 3 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;21/50&lt;/span&gt; 3 November 2018&lt;/h2&gt;
 &lt;p&gt;Simone Biles on the podium with her gold medal from the floor exercise at the gymnastics world championships. She became the most decorated female gymnast in world's history, as well as, becoming the first American to win a medal in every event at the competition&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;21/50&lt;/span&gt; 2 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;22/50&lt;/span&gt; 2 November 2018&lt;/h2&gt;
 &lt;p&gt;A Salvadorean migrant with a girl walks next to Guatemalan policemen as they approach the Guatemala-Mexico international border bridge in Ciudad Tecun Uman. Accoring to the Salvadorean General Migration Directorate, over 1,700 Salvadoreans left the country in two caravans and entered Guatemala Wednesday, in an attempt to reach the US&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;22/50&lt;/span&gt; 1 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;23/50&lt;/span&gt; 1 November 2018&lt;/h2&gt;
 &lt;p&gt;Google employees hold signs outside 14th street park after walking out as part of a global protest over claims of sexual harassment, gender inequality and systemic racism at the tech giant&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;23/50&lt;/span&gt; 31 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;24/50&lt;/span&gt; 31 October 2018&lt;/h2&gt;
 &lt;p&gt;The &quot;Statue of Unity&quot; portraying Sardar Vallabhbhai Patel, one of the founding fathers of India, during its inauguration in Kevadia, in the western state of Gujarat, India&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;24/50&lt;/span&gt; 30 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;25/50&lt;/span&gt; 30 October 2018&lt;/h2&gt;
 &lt;p&gt;A scavenger collects recyclable materials along the breakwater amid strong waves as weather patterns from Typhoon Yutu affect Manila Bay. Fierce winds sheared off roofs and snapped trees in half, after thousands were evacuated ahead of the powerful storm's arrival&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;25/50&lt;/span&gt; 29 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;26/50&lt;/span&gt; 29 October 2018&lt;/h2&gt;
 &lt;p&gt;Rescue team members collecting the remains of the crashed plane at Tanjung Priok Harbour, Indonesia. A Lion Air flight JT-610 lost contact with air traffic controllers soon after takeoff then crashed into the sea. The flight was en route to Pangkal Pinang, and reportedly had 189 people onboard&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;26/50&lt;/span&gt; 28 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;27/50&lt;/span&gt; 28 October 2018&lt;/h2&gt;
 &lt;p&gt;A supporter of Workers' Party presidential candidate Fernando Haddad embraces a fellow weeping supporter, after learning that rival Jair Bolsonaro was declared the winner in the Brazil presidential runoff election. Addressing supporters in Sao Paulo, Haddad did not concede or even mention Bolsonaro by name. Instead, his speech was a promise to resist&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;27/50&lt;/span&gt; 27 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;28/50&lt;/span&gt; 27 October 2018&lt;/h2&gt;
 &lt;p&gt;First responders surround the Tree of Life Synagogue in Pittsburgh, where a shooter opened fire, wounding three police officers and killing eleven&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;28/50&lt;/span&gt; 26 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;29/50&lt;/span&gt; 26 October 2018&lt;/h2&gt;
 &lt;p&gt;Broward County Sheriff's office have released a photo of Cesar Sayoc, the suspect who was arrested in connection with the pipe bombs that have been sent to several high profile Democrats and critics of President Trump over the course of this week&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;29/50&lt;/span&gt; 25 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;30/50&lt;/span&gt; 25 October 2018&lt;/h2&gt;
 &lt;p&gt;East Island in Hawaii has been swallowed by the sea following Hurricane Walaka&lt;/p&gt;
 &lt;p&gt;US Fish and Wildlife Service&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;30/50&lt;/span&gt; 24 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;31/50&lt;/span&gt; 24 October 2018&lt;/h2&gt;
 &lt;p&gt;Police officers stand outside the home of former President Bill Clinton and former Secretary of State Hillary Clinton after a &quot;functional explosive device&quot; was attemptedly delivered to the couple&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;31/50&lt;/span&gt; 23 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;32/50&lt;/span&gt; 23 October 2018&lt;/h2&gt;
 &lt;p&gt;Turkey's President Erdogan today accused Saudi Arabia of plotting the 'savage' murder of journalist Jamal Khashoggi&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;32/50&lt;/span&gt; 22 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;33/50&lt;/span&gt; 22 October 2018&lt;/h2&gt;
 &lt;p&gt;Australia's Prime Minister Scott Morrison (C) delivers a national apology to child sex abuse victims in the House of Representatives in Parliament House in Canberra on October 22, 2018. - Morrison on October 22 issued an emotive apology to children who suffered sexual abuse, saying the state had failed to protect them from &quot;evil dark&quot; crimes committed over decades&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;33/50&lt;/span&gt; 21 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;34/50&lt;/span&gt; 21 October 2018&lt;/h2&gt;
 &lt;p&gt;A derailed train in Yian, eastern Taiwan. At least 17 people died after the derailment&lt;/p&gt;
 &lt;p&gt;CNA/AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;34/50&lt;/span&gt; 20 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;35/50&lt;/span&gt; 20 October 2018&lt;/h2&gt;
 &lt;p&gt;US President Donald Trump waves as he boards Marine One after a &quot;Make America Great&quot; rally in Mesa, Arizona on October 19, 2018. - US President Donald Trump said Friday, October 19, 2018, that he found credible Saudi Arabia's assertion that dissident journalist Jamal Khashoggi died as a result of a fight&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;35/50&lt;/span&gt; 19 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;36/50&lt;/span&gt; 19 October 2018&lt;/h2&gt;
 &lt;p&gt;A Palestinian youth runs past a rolling burning tire during clashes with Israeli forces following a demonstration after the weekly Friday prayers, in the centre of the occupied West Bank city of Hebron&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;36/50&lt;/span&gt; 18 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;37/50&lt;/span&gt; 18 October 2018&lt;/h2&gt;
 &lt;p&gt;Honduran migrants heading in a caravan to the United States, leave Guatemala City. US President Donald Trump threatened to send the military to close its southern border if Mexico fails to stem the &quot;onslaught&quot; of migrants from Central America, in a series of tweets that blamed Democrats ahead of the midterm elections&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;37/50&lt;/span&gt; 17 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;38/50&lt;/span&gt; 17 October 2018&lt;/h2&gt;
 &lt;p&gt;Smoke billows following an Israeli air strike around the southern Gaza Strip city of Rafah. Israel launched raids against targets in the Gaza strip in response to rocket fire from the Palestinian territory that caused damage in a southern city, the Israeli army said&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;38/50&lt;/span&gt; 16 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;39/50&lt;/span&gt; 16 October 2018&lt;/h2&gt;
 &lt;p&gt;Ecuador has issued a list of rules to Julian Assange, the famous resident of the Ecuadorian Embassy in London. The list included cleaning the bathroom, not commenting on foreign political affairs online and taking better care of his cat (pictured). The document states that failure to comply with these rules “could lead to the termination of the diplomatic asylum granted by the Ecuadorian state”&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;39/50&lt;/span&gt; 15 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;40/50&lt;/span&gt; 15 October 2018&lt;/h2&gt;
 &lt;p&gt;Israeli soldiers hurl tear gas grenades during clashes following Israeli order to shut down the al-Lubban/al-Sawiyeh school near the west bank city of Nablus, 15 October 2018. According to local sources, 20 Palestinians were wounded during clashes as dozens try to defiance the Israeli order to shut down the school&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;40/50&lt;/span&gt; 14 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;41/50&lt;/span&gt; 14 October 2018&lt;/h2&gt;
 &lt;p&gt;Serbia's Novak Djokovic kisses the trophy after winning his men's final singles match against Croatia's Borna Coric at the Shanghai Masters. Djokovic, who has now won four titles this season, will move up one ranking spot to No. 2, pushing Roger Federer back to No. 3&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;41/50&lt;/span&gt; 13 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;42/50&lt;/span&gt; 13 October 2018&lt;/h2&gt;
 &lt;p&gt;Demonstrators raising red painted hands and a placard reading &quot;we must change the system not the climate&quot; referring to the need to stop climate change during a march in Bordeaux, southwestern France&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;42/50&lt;/span&gt; 12 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;43/50&lt;/span&gt; 12 October 2018&lt;/h2&gt;
 &lt;p&gt;Spanish Unionist demonstrators carry Spanish flags during a demonstration on Spain's National Day in Barcelona&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;43/50&lt;/span&gt; 11 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;44/50&lt;/span&gt; 11 October 2018&lt;/h2&gt;
 &lt;p&gt;Russia has halted all crewed space flights following the failed launch of the Soyuz MS-10 rocket (pictured). Investigations in to the rocket's malfunction are ongoing&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;44/50&lt;/span&gt;&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;45/50&lt;/span&gt;&lt;/h2&gt;
 &lt;p&gt;People look on at a damaged store after Hurricane Michael passed through Panama City, Florida. A Category 4 storm, with maximum sustained winds of 155 mph, was the most powerful storm ever to hit the Florida Panhandle&lt;/p&gt;
 &lt;p&gt;Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;45/50&lt;/span&gt; 9 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;46/50&lt;/span&gt; 9 October 2018&lt;/h2&gt;
 &lt;p&gt;The Darul Muttaqien Mosque was the heart of the community for many in Palu. A lot of the victims were inside their homes or at the mosque when the quake struck. Magareb prayer for many, was their last. Paddy Dowling travelled with UK based charity Muslim Aid to the disaster areas of North Sulawesi to witness the scale of Indonesia’s earthquake &amp;amp; tsunami. They are the only British NGO delivering aid out in Palu through local partners&lt;/p&gt;
 &lt;p&gt;Paddy Dowling&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;46/50&lt;/span&gt; 8 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;47/50&lt;/span&gt; 8 October 2018&lt;/h2&gt;
 &lt;p&gt;People take part in a candle-light vigil in memory of Bulgarian TV journalist Viktoria Marinova in Ruse&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;47/50&lt;/span&gt; 7 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;48/50&lt;/span&gt; 7 October 2018&lt;/h2&gt;
 &lt;p&gt;Supporters of Jair Bolsonaro, presidential candidate with the Social Liberal Party, celebrate in front of his house during the general elections in Rio. The far-right congressman, who waxes nostalgically about the dictatorship, won the vote but not an outright victory. The second-round-run-off will be between Bolsoanro and the leftist Workers' party Fernando Haddad&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;48/50&lt;/span&gt; 6 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;49/50&lt;/span&gt; 6 October 2018&lt;/h2&gt;
 &lt;p&gt;Demonstrators hold a banner that reads &quot;freedom of the press, not allowed to be trampled&quot; and &quot;shame on the governments vindictive move&quot; past a symbolic 'political red line' during a protest after Hong Kong immigration authorities declined a visa renewal for senior Financial Times journalist Victor Mallet, outside the immigration department building in Hong Kong. Hong Kong's decision to effectively blacklist a senior Financial Times journalist required an &quot;urgent explanation&quot;, the UK said&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;49/50&lt;/span&gt; 5 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;50/50&lt;/span&gt; 5 October 2018&lt;/h2&gt;
 &lt;p&gt;Congolese doctor Denis Mukwege and Yazidi campaigner Nadia Murad announced as the winners of the 2018 Nobel Peace Prize. The pair were awarded the honour “for their efforts to end the use of sexual violence as a weapon of war and armed conflict.”&lt;/p&gt;
 &lt;p&gt;AFP/Getty/Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;50/50&lt;/span&gt; 4 October 2018&lt;/h2&gt;
-&lt;p&gt;Dutch security services expel Russian spies over plot targeting chemical weapons watchdog. This picture shows the four GRU officers who entered the Netherlands at Amsterdam's Schiphol Airport on April 10, travelling on official Russian passports. On April 13 they parked a car carrying specialist hacking equipment outside the headquarters of the OPCW in The Hague. At that point the Dutch counter-terrorism officers intervened to disrupt the operation and the four GRU officers were ordered to leave the country&lt;/p&gt;
-&lt;p&gt;PA&lt;/p&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;1/50&lt;/span&gt; 23 November 2018&lt;/h2&gt;
+&lt;p&gt;Elias Lopez, a three-year-old Honduran migrant, plays in between the shields of a line of Mexican riot police, when the group he was part of tried to cross the Chaparral border crossing in Tijuana, Mexico. Elias Lopez is part of a group of Central American migrants that marched peacefully to the border crossing to demand better conditions and push to enter the US&lt;/p&gt;
+&lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;1/50&lt;/span&gt; 22 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;2/50&lt;/span&gt; 22 November 2018&lt;/h2&gt;
 &lt;p&gt;Lebanese army soldiers march during a parade to mark the 75th anniversary of Lebanon's Independence Day, in Beirut, commemorating the liberation from the French Mandate on 22 November 1943&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;2/50&lt;/span&gt; 21 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;3/50&lt;/span&gt; 21 November 2018&lt;/h2&gt;
 &lt;p&gt;Indian Muslim devotees wave flags as they parade atop vehicles along a street during Eid-Milad-Un-Nabi celebrations in Varanasi in the Indian state of Uttar Pradesh&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;3/50&lt;/span&gt; 20 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;4/50&lt;/span&gt; 20 November 2018&lt;/h2&gt;
 &lt;p&gt;At least 50 people were killed and dozens more injured when a suicide bomber targeted a group of Muslim religious scholars in Kabul, officials in Afghanistan say. Hundreds of clerics had gathered to mark the birthday of the Prophet Mohammed at a large wedding hall in the capital before the blast happened, interior ministry spokesman Najib Danish said. Wahi Majroh, of Afghanistan’s public health ministry, said a further 83 people had been wounded by the bomber. “The victims of the attack unfortunately are all religious scholars who gathered to commemorate the birthday of Prophet Muhammad,” said Basir Mujahid, spokesman for the Kabul police chief&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;4/50&lt;/span&gt; 19 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;5/50&lt;/span&gt; 19 November 2018&lt;/h2&gt;
 &lt;p&gt;A view of the Fuego volcano eruption at sunrise, seen from El Rodeo, Escuintla, Guatemala. More than 2,000 people were evacuated from several villages due to the strong eruption, located 50 kilometers west of the Guatemalan capital&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;5/50&lt;/span&gt; 18 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;6/50&lt;/span&gt; 18 November 2018&lt;/h2&gt;
 &lt;p&gt;French President Emmanuel Macron is applauded after speaking before the Bundestag (lower house of parliament) as the German parliament commemorates victims of wars and dictatorships in Berlin. The leaders of France and Germany jointly remember the victims of European wars, presenting also a united front in countering global turmoil stoked by US President Donald Trump&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;6/50&lt;/span&gt; 17 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;7/50&lt;/span&gt; 17 November 2018&lt;/h2&gt;
 &lt;p&gt;People wearing yellow vests, a symbol of a French drivers' nationwide protest against higher fuel prices, block the Paris-Brussels motorway in Haulchin, France&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;7/50&lt;/span&gt; 16 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;8/50&lt;/span&gt; 16 November 2018&lt;/h2&gt;
 &lt;p&gt;People hold banners of Jamal Khashoggi during a symbolic funeral prayer for the Saudi journalist, killed and dismembered in the Saudi consulate in Istanbul in October, at the courtyard of Fatih mosque in Istanbul. Turkey has more evidence contradicting the Saudi version of the murder of journalist Jamal Khashoggi including a second audio recording, revealing that the murder had been premeditated, a Turkish newspaper reported on November 16, a contradiction to the statement of the Saudi prosecutor who said that five Saudi officials faced the death penalty on charges of killing Khashoggi but exonerated the country's powerful Crown Prince of involvement in the murder&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;8/50&lt;/span&gt; 15 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;9/50&lt;/span&gt; 15 November 2018&lt;/h2&gt;
 &lt;p&gt;Alexei Navalny leaves the European Court of Human Rights today. The court has ruled that Russia's repeated arrests of Navalny were politically motivated&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;9/50&lt;/span&gt; 14 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;10/50&lt;/span&gt; 14 November 2018&lt;/h2&gt;
 &lt;p&gt;A crew member escorts a migrant child out of a plane transporting a group of 51 migrants from Niger, entitled to international protection, after its landing at the Mario De Bernardi military airport in Pratica di Mare, south of Rome&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;10/50&lt;/span&gt; 13 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;11/50&lt;/span&gt; 13 November 2018&lt;/h2&gt;
 &lt;p&gt;Palestinians gather in front of damaged buildings in Gaza City following Israeli air strikes targeting the area overnight. Israel's aircraft struck Gaza on November 12, killing three Palestinians and wounding nine after a barrage of rocket fire into its territory from the enclave. The flare-up came after a deadly Israeli special forces operation in the Gaza Strip, at the weekend, that left Hamas vowing revenge&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;11/50&lt;/span&gt; 12 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;12/50&lt;/span&gt; 12 November 2018&lt;/h2&gt;
 &lt;p&gt;Floral tributes outside Melbourne's Pellegrini's Cafe for Sisto Malaspina, after he was stabbed to death last Friday in an attack police have called an act of terrorism, in Australia&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;12/50&lt;/span&gt; 11 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;13/50&lt;/span&gt; 11 November 2018&lt;/h2&gt;
 &lt;p&gt;Heads of states and world leaders attend ceremonies at the Arc de Triomphe in Paris. Over 60 heads of state and government were taking part in a solemn ceremony at the Tomb of the Unknown Soldier, the mute and powerful symbol of sacrifice to the millions who died from 1914-18&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;13/50&lt;/span&gt; 10 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;14/50&lt;/span&gt; 10 November 2018&lt;/h2&gt;
 &lt;p&gt;Firefighters push down a wall while battling against a burning apartment complex in Paradise, north of Sacramento, California. A rapidly spreading, late-season wildfire in northern California has burned 20,000 acres of land and prompted authorities to issue evacuation orders for thousands of people. As many as 1000 homes, a hospital, a Safeway store and scores of other structures have burned in the area as the Camp fire tore through the region&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;14/50&lt;/span&gt; 9 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;15/50&lt;/span&gt; 9 November 2018&lt;/h2&gt;
 &lt;p&gt;A Fly Jamaica plane en route to Toronto crash lands at an airport in Guyana following a technical problem. At least six passengers were injured&lt;/p&gt;
 &lt;p&gt;Cheddi Jagan International Airport&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;15/50&lt;/span&gt; 8 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;16/50&lt;/span&gt; 8 November 2018&lt;/h2&gt;
 &lt;p&gt;An FBI agent talks to a potential witness as they stand near the scene Thursday in Thousand Oaks, California. where a gunman opened fire Wednesday inside a country dance bar crowded with hundreds of people on &quot;college night,&quot; wounding 11 people including a deputy who rushed to the scene. Ventura County sheriff's spokesman says gunman is dead inside the bar.&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;16/50&lt;/span&gt; 7 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;17/50&lt;/span&gt; 7 November 2018&lt;/h2&gt;
 &lt;p&gt;Democratic congressional candidate Ilhan Omar is celebrates with her husband's mother after she won a congress place during the US midterm elections. In doing do she became the first-joint Muslim woman to be elected into congress alongside Rashida Tlaib&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;17/50&lt;/span&gt; 6 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;18/50&lt;/span&gt; 6 November 2018&lt;/h2&gt;
 &lt;p&gt;Voters cast their ballots at the Tuttle Park Recreation Center polling location in Columbus, Ohio. Across the US, voters headed to the polls in one of the most high-profile midterm elections in years&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;18/50&lt;/span&gt; 5 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;19/50&lt;/span&gt; 5 November 2018&lt;/h2&gt;
 &lt;p&gt;Members of the group Your Vote Matters encourage people to vote before an event hosted by US Senator Claire McCaskill as she campaigns for the US Senate in Saint Louis, Missour. McCaskill, a Democrat, faces a challenge from Republican Missouri Attorney General Josh Hawley in the November general election&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;19/50&lt;/span&gt; 4 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;20/50&lt;/span&gt; 4 November 2018&lt;/h2&gt;
 &lt;p&gt;Police officers and rescuers work at the site of where a truck ploughed into cars at a toll booth in Lanzhou in China's northwestern Gansu province. The out-of-control truck crashed into a 31-car lineup and killed 15 people, with 44 injured&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;20/50&lt;/span&gt; 3 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;21/50&lt;/span&gt; 3 November 2018&lt;/h2&gt;
 &lt;p&gt;Simone Biles on the podium with her gold medal from the floor exercise at the gymnastics world championships. She became the most decorated female gymnast in world's history, as well as, becoming the first American to win a medal in every event at the competition&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;21/50&lt;/span&gt; 2 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;22/50&lt;/span&gt; 2 November 2018&lt;/h2&gt;
 &lt;p&gt;A Salvadorean migrant with a girl walks next to Guatemalan policemen as they approach the Guatemala-Mexico international border bridge in Ciudad Tecun Uman. Accoring to the Salvadorean General Migration Directorate, over 1,700 Salvadoreans left the country in two caravans and entered Guatemala Wednesday, in an attempt to reach the US&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;22/50&lt;/span&gt; 1 November 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;23/50&lt;/span&gt; 1 November 2018&lt;/h2&gt;
 &lt;p&gt;Google employees hold signs outside 14th street park after walking out as part of a global protest over claims of sexual harassment, gender inequality and systemic racism at the tech giant&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;23/50&lt;/span&gt; 31 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;24/50&lt;/span&gt; 31 October 2018&lt;/h2&gt;
 &lt;p&gt;The &quot;Statue of Unity&quot; portraying Sardar Vallabhbhai Patel, one of the founding fathers of India, during its inauguration in Kevadia, in the western state of Gujarat, India&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;24/50&lt;/span&gt; 30 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;25/50&lt;/span&gt; 30 October 2018&lt;/h2&gt;
 &lt;p&gt;A scavenger collects recyclable materials along the breakwater amid strong waves as weather patterns from Typhoon Yutu affect Manila Bay. Fierce winds sheared off roofs and snapped trees in half, after thousands were evacuated ahead of the powerful storm's arrival&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;25/50&lt;/span&gt; 29 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;26/50&lt;/span&gt; 29 October 2018&lt;/h2&gt;
 &lt;p&gt;Rescue team members collecting the remains of the crashed plane at Tanjung Priok Harbour, Indonesia. A Lion Air flight JT-610 lost contact with air traffic controllers soon after takeoff then crashed into the sea. The flight was en route to Pangkal Pinang, and reportedly had 189 people onboard&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;26/50&lt;/span&gt; 28 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;27/50&lt;/span&gt; 28 October 2018&lt;/h2&gt;
 &lt;p&gt;A supporter of Workers' Party presidential candidate Fernando Haddad embraces a fellow weeping supporter, after learning that rival Jair Bolsonaro was declared the winner in the Brazil presidential runoff election. Addressing supporters in Sao Paulo, Haddad did not concede or even mention Bolsonaro by name. Instead, his speech was a promise to resist&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;27/50&lt;/span&gt; 27 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;28/50&lt;/span&gt; 27 October 2018&lt;/h2&gt;
 &lt;p&gt;First responders surround the Tree of Life Synagogue in Pittsburgh, where a shooter opened fire, wounding three police officers and killing eleven&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;28/50&lt;/span&gt; 26 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;29/50&lt;/span&gt; 26 October 2018&lt;/h2&gt;
 &lt;p&gt;Broward County Sheriff's office have released a photo of Cesar Sayoc, the suspect who was arrested in connection with the pipe bombs that have been sent to several high profile Democrats and critics of President Trump over the course of this week&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;29/50&lt;/span&gt; 25 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;30/50&lt;/span&gt; 25 October 2018&lt;/h2&gt;
 &lt;p&gt;East Island in Hawaii has been swallowed by the sea following Hurricane Walaka&lt;/p&gt;
 &lt;p&gt;US Fish and Wildlife Service&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;30/50&lt;/span&gt; 24 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;31/50&lt;/span&gt; 24 October 2018&lt;/h2&gt;
 &lt;p&gt;Police officers stand outside the home of former President Bill Clinton and former Secretary of State Hillary Clinton after a &quot;functional explosive device&quot; was attemptedly delivered to the couple&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;31/50&lt;/span&gt; 23 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;32/50&lt;/span&gt; 23 October 2018&lt;/h2&gt;
 &lt;p&gt;Turkey's President Erdogan today accused Saudi Arabia of plotting the 'savage' murder of journalist Jamal Khashoggi&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;32/50&lt;/span&gt; 22 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;33/50&lt;/span&gt; 22 October 2018&lt;/h2&gt;
 &lt;p&gt;Australia's Prime Minister Scott Morrison (C) delivers a national apology to child sex abuse victims in the House of Representatives in Parliament House in Canberra on October 22, 2018. - Morrison on October 22 issued an emotive apology to children who suffered sexual abuse, saying the state had failed to protect them from &quot;evil dark&quot; crimes committed over decades&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;33/50&lt;/span&gt; 21 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;34/50&lt;/span&gt; 21 October 2018&lt;/h2&gt;
 &lt;p&gt;A derailed train in Yian, eastern Taiwan. At least 17 people died after the derailment&lt;/p&gt;
 &lt;p&gt;CNA/AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;34/50&lt;/span&gt; 20 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;35/50&lt;/span&gt; 20 October 2018&lt;/h2&gt;
 &lt;p&gt;US President Donald Trump waves as he boards Marine One after a &quot;Make America Great&quot; rally in Mesa, Arizona on October 19, 2018. - US President Donald Trump said Friday, October 19, 2018, that he found credible Saudi Arabia's assertion that dissident journalist Jamal Khashoggi died as a result of a fight&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;35/50&lt;/span&gt; 19 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;36/50&lt;/span&gt; 19 October 2018&lt;/h2&gt;
 &lt;p&gt;A Palestinian youth runs past a rolling burning tire during clashes with Israeli forces following a demonstration after the weekly Friday prayers, in the centre of the occupied West Bank city of Hebron&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;36/50&lt;/span&gt; 18 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;37/50&lt;/span&gt; 18 October 2018&lt;/h2&gt;
 &lt;p&gt;Honduran migrants heading in a caravan to the United States, leave Guatemala City. US President Donald Trump threatened to send the military to close its southern border if Mexico fails to stem the &quot;onslaught&quot; of migrants from Central America, in a series of tweets that blamed Democrats ahead of the midterm elections&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;37/50&lt;/span&gt; 17 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;38/50&lt;/span&gt; 17 October 2018&lt;/h2&gt;
 &lt;p&gt;Smoke billows following an Israeli air strike around the southern Gaza Strip city of Rafah. Israel launched raids against targets in the Gaza strip in response to rocket fire from the Palestinian territory that caused damage in a southern city, the Israeli army said&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;38/50&lt;/span&gt; 16 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;39/50&lt;/span&gt; 16 October 2018&lt;/h2&gt;
 &lt;p&gt;Ecuador has issued a list of rules to Julian Assange, the famous resident of the Ecuadorian Embassy in London. The list included cleaning the bathroom, not commenting on foreign political affairs online and taking better care of his cat (pictured). The document states that failure to comply with these rules “could lead to the termination of the diplomatic asylum granted by the Ecuadorian state”&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;39/50&lt;/span&gt; 15 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;40/50&lt;/span&gt; 15 October 2018&lt;/h2&gt;
 &lt;p&gt;Israeli soldiers hurl tear gas grenades during clashes following Israeli order to shut down the al-Lubban/al-Sawiyeh school near the west bank city of Nablus, 15 October 2018. According to local sources, 20 Palestinians were wounded during clashes as dozens try to defiance the Israeli order to shut down the school&lt;/p&gt;
 &lt;p&gt;EPA&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;40/50&lt;/span&gt; 14 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;41/50&lt;/span&gt; 14 October 2018&lt;/h2&gt;
 &lt;p&gt;Serbia's Novak Djokovic kisses the trophy after winning his men's final singles match against Croatia's Borna Coric at the Shanghai Masters. Djokovic, who has now won four titles this season, will move up one ranking spot to No. 2, pushing Roger Federer back to No. 3&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;41/50&lt;/span&gt; 13 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;42/50&lt;/span&gt; 13 October 2018&lt;/h2&gt;
 &lt;p&gt;Demonstrators raising red painted hands and a placard reading &quot;we must change the system not the climate&quot; referring to the need to stop climate change during a march in Bordeaux, southwestern France&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;42/50&lt;/span&gt; 12 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;43/50&lt;/span&gt; 12 October 2018&lt;/h2&gt;
 &lt;p&gt;Spanish Unionist demonstrators carry Spanish flags during a demonstration on Spain's National Day in Barcelona&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;43/50&lt;/span&gt; 11 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;44/50&lt;/span&gt; 11 October 2018&lt;/h2&gt;
 &lt;p&gt;Russia has halted all crewed space flights following the failed launch of the Soyuz MS-10 rocket (pictured). Investigations in to the rocket's malfunction are ongoing&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;44/50&lt;/span&gt;&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;45/50&lt;/span&gt;&lt;/h2&gt;
 &lt;p&gt;People look on at a damaged store after Hurricane Michael passed through Panama City, Florida. A Category 4 storm, with maximum sustained winds of 155 mph, was the most powerful storm ever to hit the Florida Panhandle&lt;/p&gt;
 &lt;p&gt;Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;45/50&lt;/span&gt; 9 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;46/50&lt;/span&gt; 9 October 2018&lt;/h2&gt;
 &lt;p&gt;The Darul Muttaqien Mosque was the heart of the community for many in Palu. A lot of the victims were inside their homes or at the mosque when the quake struck. Magareb prayer for many, was their last. Paddy Dowling travelled with UK based charity Muslim Aid to the disaster areas of North Sulawesi to witness the scale of Indonesia’s earthquake &amp;amp; tsunami. They are the only British NGO delivering aid out in Palu through local partners&lt;/p&gt;
 &lt;p&gt;Paddy Dowling&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;46/50&lt;/span&gt; 8 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;47/50&lt;/span&gt; 8 October 2018&lt;/h2&gt;
 &lt;p&gt;People take part in a candle-light vigil in memory of Bulgarian TV journalist Viktoria Marinova in Ruse&lt;/p&gt;
 &lt;p&gt;Reuters&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;47/50&lt;/span&gt; 7 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;48/50&lt;/span&gt; 7 October 2018&lt;/h2&gt;
 &lt;p&gt;Supporters of Jair Bolsonaro, presidential candidate with the Social Liberal Party, celebrate in front of his house during the general elections in Rio. The far-right congressman, who waxes nostalgically about the dictatorship, won the vote but not an outright victory. The second-round-run-off will be between Bolsoanro and the leftist Workers' party Fernando Haddad&lt;/p&gt;
 &lt;p&gt;AP&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;48/50&lt;/span&gt; 6 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;49/50&lt;/span&gt; 6 October 2018&lt;/h2&gt;
 &lt;p&gt;Demonstrators hold a banner that reads &quot;freedom of the press, not allowed to be trampled&quot; and &quot;shame on the governments vindictive move&quot; past a symbolic 'political red line' during a protest after Hong Kong immigration authorities declined a visa renewal for senior Financial Times journalist Victor Mallet, outside the immigration department building in Hong Kong. Hong Kong's decision to effectively blacklist a senior Financial Times journalist required an &quot;urgent explanation&quot;, the UK said&lt;/p&gt;
 &lt;p&gt;AFP/Getty&lt;/p&gt;
 
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;49/50&lt;/span&gt; 5 October 2018&lt;/h2&gt;
+&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;50/50&lt;/span&gt; 5 October 2018&lt;/h2&gt;
 &lt;p&gt;Congolese doctor Denis Mukwege and Yazidi campaigner Nadia Murad announced as the winners of the 2018 Nobel Peace Prize. The pair were awarded the honour “for their efforts to end the use of sexual violence as a weapon of war and armed conflict.”&lt;/p&gt;
 &lt;p&gt;AFP/Getty/Reuters&lt;/p&gt;
-
-&lt;h2&gt;&lt;span class=&quot;count&quot;&gt;50/50&lt;/span&gt; 4 October 2018&lt;/h2&gt;
-&lt;p&gt;Dutch security services expel Russian spies over plot targeting chemical weapons watchdog. This picture shows the four GRU officers who entered the Netherlands at Amsterdam's Schiphol Airport on April 10, travelling on official Russian passports. On April 13 they parked a car carrying specialist hacking equipment outside the headquarters of the OPCW in The Hague. At that point the Dutch counter-terrorism officers intervened to disrupt the operation and the four GRU officers were ordered to leave the country&lt;/p&gt;
-&lt;p&gt;PA&lt;/p&gt;
 &lt;/div&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;When plans for the social credit scheme were first announced in 2014, &lt;a href=&quot;https://chinacopyrightandmedia.wordpress.com/2014/06/14/planning-outline-for-the-construction-of-a-social-credit-system-2014-2020/&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://chinacopyrightandmedia.wordpress.com/2014/06/14/planning-outline-for-the-construction-of-a-social-credit-system-2014-2020/&quot; data-vars-event-id=&quot;c6&quot;&gt;the government said&lt;/a&gt; the aim was to “broadly shape a thick atmosphere in the entire society that keeping trust is glorious and breaking trust is disgraceful”.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;As well as the introduction in Beijing, the government plans a rapid national rollout. “We will implement a unified system of credit rating codes nationwide,” the country’s latest five-year plan stated.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;The move comes as Beijing also faces international scrutiny over &lt;a href=&quot;https://www.independent.co.uk/news/world/asia/china-muslims-uighurs-uskan-alcohol-internment-camps-xinjiang-a8640591.html&quot; target=&quot;_blank&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://www.independent.co.uk/news/world/asia/china-muslims-uighurs-uskan-alcohol-internment-camps-xinjiang-a8640591.html&quot; data-vars-event-id=&quot;c6&quot;&gt;its treatment&lt;/a&gt; of a Muslim minority group, who have been told to turn themselves in to authorities if they observe practices such as &lt;a href=&quot;https://www.independent.co.uk/news/world/asia/china-muslims-uighurs-uskan-alcohol-internment-camps-xinjiang-a8640591.html&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://www.independent.co.uk/news/world/asia/china-muslims-uighurs-uskan-alcohol-internment-camps-xinjiang-a8640591.html&quot; data-vars-event-id=&quot;c6&quot;&gt;abstention from alcohol&lt;/a&gt;.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;Hami city government in the far-western&lt;/span&gt; &lt;a href=&quot;https://www.independent.co.uk/topic/xinjiang&quot; class=&quot;body-link&quot; data-vars-item-name=&quot;BL-8646316-https://www.independent.co.uk/topic/xinjiang&quot; data-vars-event-id=&quot;c6&quot;&gt;&lt;span&gt;Xinjiang&lt;/span&gt;&lt;/a&gt; &lt;span&gt;region said people “poisoned by extremism, terrorism and separatism” would be treated leniently if they surrendered within the next 30 days.&lt;/span&gt;&lt;/p&gt;&lt;p dir=&quot;ltr&quot;&gt;&lt;span&gt;As many as a million Muslim Uighurs are believed to have been rounded up and placed in “re-education” centres, in what China claims is a clampdown on religious extremism.&lt;/span&gt;&lt;/p&gt;</description>
 <pubDate>Fri, 23 Nov 2018 11:56:16 +0000</pubDate>
 <dc:creator>apatters</dc:creator>
@@ -441,6 +697,20 @@
 &lt;ul class=&quot;latest-updates-panel__body&quot;&gt;&lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
 &lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
 &lt;p&gt;
+&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;The dos and don’ts of data&lt;/h3&gt;
+&lt;/p&gt;
+
+&lt;/article&gt;&lt;/li&gt;
+&lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
+&lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
+&lt;p&gt;
+&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;“The Waldheim Waltz”: notes on a scandal&lt;/h3&gt;
+&lt;/p&gt;
+
+&lt;/article&gt;&lt;/li&gt;
+&lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
+&lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
+&lt;p&gt;
 &lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;Here come the self-driving taxis&lt;/h3&gt;
 &lt;/p&gt;
 
@@ -448,7 +718,7 @@
 &lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
 &lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
 &lt;p&gt;
-&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;How I’d govern Iraq—and I’m a 16-year-old girl&lt;/h3&gt;
+&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;How I’d govern Iraq—and I’m still in high-school&lt;/h3&gt;
 &lt;/p&gt;
 
 &lt;/article&gt;&lt;/li&gt;
@@ -463,20 +733,6 @@
 &lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
 &lt;p&gt;
 &lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;Taiwan’s voters will be asked what to call the island’s Olympic team&lt;/h3&gt;
-&lt;/p&gt;
-
-&lt;/article&gt;&lt;/li&gt;
-&lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
-&lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
-&lt;p&gt;
-&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;Why the internet is obsessed with cyst-popping videos&lt;/h3&gt;
-&lt;/p&gt;
-
-&lt;/article&gt;&lt;/li&gt;
-&lt;li class=&quot;latest-updates-panel-card__wrapper&quot; readability=&quot;-2&quot;&gt;
-&lt;article class=&quot;latest-updates-panel__article-link&quot; readability=&quot;27&quot;&gt;
-&lt;p&gt;
-&lt;h3 class=&quot;latest-updates-panel-card__title&quot;&gt;The problem with the Lisbeth Salander franchise&lt;/h3&gt;
 &lt;/p&gt;
 
 &lt;/article&gt;&lt;/li&gt;
@@ -515,24 +771,34 @@
 <link>https://www.nzherald.co.nz/business/news/article.cfm?c_id=3&amp;objectid=12165136</link>
 <guid isPermaLink="true" >https://www.nzherald.co.nz/business/news/article.cfm?c_id=3&amp;objectid=12165136</guid>
 <description>&lt;p class=&quot;element element-paragraph&quot;&gt;The US government has initiated an extraordinary outreach campaign to foreign allies, trying to persuade wireless and internet providers in these countries to avoid telecommunications equipment from Chinese company Huawei, according to a &lt;em&gt;Wall Street Journal&lt;/em&gt; &lt;a href=&quot;https://www.wsj.com/articles/washington-asks-allies-to-drop-huawei-1542924205&quot; target=&quot;_blank&quot;&gt;report&lt;/a&gt;.&lt;/p&gt;
-&lt;p class=&quot;element element-paragraph&quot;&gt;The move will ramp up pressure on GCSB Minister Andrew Little and Communications Minister Kris Faafoi, who both say the government has yet to make a decision on whether Huawei should be blocked form 5G upgrades in NZ - as security agencies in the US and Australia have already recommended.&lt;/p&gt;
-&lt;p class=&quot;element element-paragraph&quot;&gt;Officials familiar with the current effort say concerns about telecom-network vulnerabilities predate the Trump era and reflect longstanding national-security worries, the &lt;em&gt;Journal&lt;/em&gt; says.&lt;/p&gt;
-&lt;p class=&quot;element element-paragraph&quot;&gt;It notes that the push comes as telcos around the world prepare to buy new hardware for 5G, the coming generation of mobile technology.&lt;/p&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;The move will ramp up pressure on GCSB Minister Andrew Little and Communications Minister Kris Faafoi to ban Huawei - as security agencies in the US and Australia have already recommended.&lt;/p&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;But Little indicates New Zealand will plot its own course, and that his government won't interfere as Spark, Vodafone and 2degrees consider technology providers for their pending 5G upgrades.&quot;&lt;/p&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;&quot;Selecting providers is a commercial decision for telecommunications service providers, subject to compliance with TICSA [the Telecommunications Interception Capability and Security Act],&quot; Little told the &lt;em&gt;Herald&lt;/em&gt; last night as the &lt;em&gt;Journal&lt;/em&gt; story broke.&lt;/p&gt;
 &lt;div class=&quot;ad-container has-text max-width-300&quot;&gt;
 &lt;p&gt;Advertisement&lt;/p&gt;
 
 
 &lt;/div&gt;
 
+&lt;p class=&quot;element element-paragraph&quot;&gt;TICSA, passed in 2013, requires telcos and ISPs to run proposed hardware upgrades past the GCSB. The security agency has yet to block any provider.&lt;/p&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;US officials familiar with the current effort say concerns about telecom-network vulnerabilities predate the Trump era and reflect longstanding national-security worries, the &lt;em&gt;Journal&lt;/em&gt; says.&lt;/p&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;It notes that the push comes as telcos around the world prepare to buy new hardware for 5G, the coming generation of mobile technology.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;US officials say they worry about the prospect of Chinese telecom-equipment makers spying on or disabling connections to an exponentially growing universe of things, including components of manufacturing plants, the &lt;em&gt;Journal&lt;/em&gt; says.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;The paper quotes an un-named US official who says, &quot;There are additional complexities to 5G networks that make them more vulnerable to cyberattacks.&quot;&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;While US suspicion of Huawei is longstanding, its previous efforts have focussed on keeping the Chinese company out of the US. Now, it's broadening its battle lines.&lt;/p&gt;
+
 &lt;p class=&quot;element element-paragraph&quot;&gt;Here, Little and Faafoi have been notably muted in their comments compared to politicians in the US and Australia, however. Little has said that New Zealand will make its own decision.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;Pressure could be eased by the fact NZ does not host US forces - unlike Italy, Japan and Germany, whose telcos all use Huawei kit.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;&quot;One US concern centers on the use of Chinese telecom equipment in countries that host American military bases, according to people familiar with the matter,&quot; the &lt;em&gt;Journal&lt;/em&gt; says. &quot;The Defense Department has its own satellites and telecom network for sensitive communications, but most traffic at many military installations travels through commercial networks.&quot;&lt;/p&gt;
-
 &lt;p class=&quot;element element-paragraph&quot;&gt;Huawei NZ deputy chief executive Andrew Bowater says there has never been any evidence tabled that his company is involved in espionage - and that reports inevitably quote un-named sources talking about un-specified incidents.&lt;/p&gt;
-&lt;p class=&quot;element element-paragraph&quot;&gt;Under the Telecommunications (Interception Capability and Security) Act (2013), the GCSB has to approve technology used by network operators for telecommunications network upgrades, Bowater says.&lt;/p&gt;
+&lt;div class=&quot;element element-image&quot;&gt;
+
+
+&lt;img id=&quot;&quot; class=&quot;responsively-lazy full-screen-img&quot; alt=&quot;&quot; src=&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=&quot; data-srcset=&quot;//www.nzherald.co.nz/resizer/F8W8coKIIdc3yeddpSf1iGHGsFc=/320x227/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 320w,//www.nzherald.co.nz/resizer/havSW0Px4peEdYp2F6iYL6edaIs=/375x266/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 375w,//www.nzherald.co.nz/resizer/AvLRvqnglBTTLqWy7qv71KfqSaw=/660x468/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 660w,//www.nzherald.co.nz/resizer/EaBNPLUronvyPkbKMY3s1ugfu9k=/810x575/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 810w,//www.nzherald.co.nz/resizer/KX_Hhfeq8ZR6dZSFvrkXWp2zJas=/970x688/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 970w,//www.nzherald.co.nz/resizer/YmbRqFMYR_lRsu_SRhINIyCn9MY=/1440x1022/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 1440w&quot;/&gt;&lt;img id=&quot;&quot; class=&quot;responsively-lazy inline-img&quot; alt=&quot;Huawei NZ deputy chief executive Andrew Bowater says no evidence has ever been produced of his company being involved in espionage. Photo / Supplied.&quot; src=&quot;data:image/png;base64,R0lGODlhAQABAPAAAOrq6v///yH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==&quot; data-srcset=&quot;//www.nzherald.co.nz/resizer/F8W8coKIIdc3yeddpSf1iGHGsFc=/320x227/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 320w,//www.nzherald.co.nz/resizer/havSW0Px4peEdYp2F6iYL6edaIs=/375x266/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 375w,//www.nzherald.co.nz/resizer/VavWWKFiq9PPHx6mOPuCUvbUvUg=/620x440/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg 620w&quot;/&gt;
+&lt;span&gt;Huawei NZ deputy chief executive Andrew Bowater says no evidence has ever been produced of his company being involved in espionage. Photo / Supplied.&lt;/span&gt;
+
+&lt;/div&gt;
+&lt;p class=&quot;element element-paragraph&quot;&gt;Under the Telecommunications Interception Capability and Security Act (2013), the GCSB has to approve technology used by network operators for telecommunications network upgrades, Bowater says.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;Huawei faced similar scrutiny by the GCHQ in the UK, which shared results with New Zealand. It has passed.&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;However, Bowater also says Huawei will not bid for Spark, Vodafone or 2degrees' core 5G business, citing &quot;sensitivities.&quot;&lt;/p&gt;
 &lt;p class=&quot;element element-paragraph&quot;&gt;Huawei &lt;em&gt;will&lt;/em&gt; bid to put 5G gear on the three telco's cellsites.&lt;/p&gt;
@@ -556,11 +822,65 @@
 <dc:creator>petethomas</dc:creator>
 <og:description>Pressure on NZ to ban the Chinese firm, which supplies Spark, Vodafone and 2degrees.</og:description>
 <og:type>article</og:type>
-<og:image>https://www.nzherald.co.nz/resizer/Edc6O5Vfds6jXdeQbL5rTdtulNA=/1200x0/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/5Q7BX75SMFGNNC45ZCDQXDSNR4.jpg</og:image>
-<og:title>US asks allies to drop Huawei</og:title>
+<og:image>https://www.nzherald.co.nz/resizer/xL8kj8VSXbPb74HtbEdPhIyAZ34=/1200x0/smart/filters:quality(70)/arc-anglerfish-syd-prod-nzme.s3.amazonaws.com/public/B5VUWOLROJHMFHIDYHWJNJ7PXI.jpg</og:image>
+<og:title>US asks allies to drop Huawei, but Little asserts independence</og:title>
 <og:url>https://www.nzherald.co.nz/business/news/article.cfm?c_id=3&amp;objectid=12165136</og:url>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://www.nzherald.co.nz/business/news/article.cfm?c_id=3&amp;objectid=12165136</dc:identifier>
+</item>
+<item>
+<title>World first as wind turbine upgraded with high temperature superconductor</title>
+<link>https://www.chemistryworld.com/news/world-first-as-wind-turbine-upgraded-with-high-temperature-superconductor/3009780.article</link>
+<guid isPermaLink="true" >https://www.chemistryworld.com/news/world-first-as-wind-turbine-upgraded-with-high-temperature-superconductor/3009780.article</guid>
+<description>&lt;p&gt;Superconductors are breaking into the energy industry for the first time after a conventional, working wind turbine had its permanent magnets replaced by superconducting tape. The switch means that it’s possible to build lighter, smaller wind turbines that are less dependent on expensive rare earth elements. This means that the price tag of turbines could fall and, in turn, cut energy costs.&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;Superconducting is coming out of its ivory tower&lt;/p&gt;
+&lt;p class=&quot;quotesource&quot;&gt;Marc Dhalle, University of Twente&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;div class=&quot;inline_image image_size_med inline_image_right&quot; data-attachment=&quot;139873&quot; data-sequence=&quot;2&quot; readability=&quot;6.5&quot;&gt;
+&lt;p class=&quot;picture&quot;&gt;&lt;img alt=&quot;Image showing Ecoswing renewable energy technology&quot; src=&quot;https://d1w9csuen3k837.cloudfront.net/Pictures/480xany/8/7/3/139873_EcoSwing1.jpg&quot; class=&quot;responsiveImage&quot; data-size-mobile=&quot;480xany&quot;/&gt;&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;p&gt;Wind turbine generators today use permanent magnets, often &lt;a class=&quot;intextlink&quot; href=&quot;https://www.chemistryworld.com/3005866.article&quot; rel=&quot;intextlink_1&quot;&gt;neodymium&lt;/a&gt;–iron–boron ones, which makes them heavy. Just like a bicycle dynamo, these magnets turn inside coils that transform magnetic power into electricity. They require substantial quantities of rare earth metals, however, which are expensive and are mostly mined in just one country – China – &lt;a href=&quot;https://www.chemistryworld.com/9473.article&quot;&gt;which has led to worries over security of supply&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Generators could be made from superconducting magnets, however, offering significant savings in size and weight. ‘We can make a machine that will deliver the same amount of power for roughly half the weight and half the volume of a regular wind turbine,’ says &lt;a href=&quot;https://people.utwente.nl/m.m.j.dhalle&quot;&gt;Marc Dhalle&lt;/a&gt;, materials scientist at the University of Twente in the Netherlands. The EU-funded project, &lt;a href=&quot;https://ecoswing.eu/&quot;&gt;EcoSwing&lt;/a&gt;, was coordinated by Danish turbine company Envision.&lt;/p&gt;
+&lt;p&gt;The new generator is 4m in diameter, 1.5m smaller than a conventional one. It sits inside an 88m high 3.6MW turbine in Thyboron, Denmark.&lt;/p&gt;
+&lt;h3 id=&quot;Magnetic_tape&quot;&gt;Magnetic tape&lt;/h3&gt;
+&lt;p&gt;What’s new is the use of magnets made from a composite tape with a ceramic superconducting layer: &lt;a class=&quot;intextlink&quot; href=&quot;https://www.chemistryworld.com/3005784.article&quot; rel=&quot;intextlink_0&quot;&gt;gadolinium&lt;/a&gt;–barium–copper oxide (GdBaCuO). The superconducting layer sits on a steel ribbon for flexibility and strength. The tape was made by Theva in Germany.&lt;/p&gt;
+&lt;blockquote readability=&quot;10&quot;&gt;
+&lt;p&gt;When groups initially started trying to put this superconductor on a flexible metal substrate, people considered them to be – let’s be polite – overly optimistic&lt;/p&gt;
+&lt;p class=&quot;quotesource&quot;&gt;Marc Dhalle, University of Twente&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;The superconducting tape is also protected from metal poisoning by layers of magnesium oxide and &lt;a class=&quot;intextlink&quot; href=&quot;https://www.chemistryworld.com/3005951.article&quot; rel=&quot;intextlink_2&quot;&gt;silver&lt;/a&gt;. The magnesium oxide also acts as a template for the precise crystalline structure needed by the GdBaCuO. An outer copper layer offers electrical and thermal stabilisation. Tens of kilometres of this tape sits inside the new wind turbine.&lt;/p&gt;
+&lt;p&gt;‘When groups initially started trying to put this superconductor on a flexible metal substrate, people considered them to be – let’s be polite – overly optimistic,’ says Dhalle. ‘A lot of technical details needed to be mastered, but they turned out to be visionaries.’&lt;/p&gt;
+&lt;div class=&quot;story_video&quot;&gt;
+&lt;div class=&quot;videoblock&quot;&gt;
+&lt;p&gt;&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/1MLWuO5-uCM&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;The gains are now there. ‘A wind generator making 1MW of power will contain roughly a tonne of neodymium in its magnets. In our generator, we use about 1kg of [the rare earth] gadolinium, so we use orders of magnitude less of this relatively rare and expensive material,’ says Dhalle. Gadolinium, which replaces neodymium in the turbine, costs just $18.70/kg (£14.50/kg) of gadolinium oxide, compared with $45.50/kg of neodymium oxide, according to Roskill and Asian Metal.&lt;/p&gt;
+&lt;p&gt;Off-the-shelf cryo-coolers from SHI Cryogenics in the UK chill the superconductor to –240°C. These coolers are similar to those used in ordinary refrigerators, although they’re far more powerful.&lt;/p&gt;
+&lt;p&gt;Envision was especially interested in these coolers’ robustness. ‘These coolers are usually used in hospital MRI machines, which is a cleaner environment than wind turbines experience,’ says Dhalle. ‘Proving that they are robust in a working turbine was therefore key.’&lt;/p&gt;
+&lt;h3 id=&quot;Test_cycle&quot;&gt;Test cycle&lt;/h3&gt;
+&lt;div class=&quot;inline_image inline_image_right image_size_med&quot; data-attachment=&quot;139872&quot; data-sequence=&quot;1&quot; readability=&quot;6.5&quot;&gt;
+&lt;p class=&quot;picture&quot;&gt;&lt;img alt=&quot;Illustration showing PM and superconductor comparison&quot; src=&quot;https://d1w9csuen3k837.cloudfront.net/Pictures/480xany/8/7/2/139872_PM-superconductor-image.jpg&quot; class=&quot;responsiveImage&quot; data-size-mobile=&quot;480xany&quot;/&gt;&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;p&gt;The generator was put through its paces at a test facility in Bremerhaven in Germany, run by the Fraunhofer Institute, before being shipped last month to Denmark. ‘This project is a first of a kind. We went from the drawing board, to building this generator and now demonstrated it in field conditions,’ Dhalle explains.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.sintef.no/en/all-employees/employee/?empId=8&quot;&gt;Magne Runde&lt;/a&gt;, energy researcher at Sintef in Norway, agrees that the main benefit is more watts per kilogram of generator weight. ‘People have been predicting a big market for all sorts of superconducting power components like cables, transformers and even generators for years now. It hasn’t materialised,’ he says. ‘Industry tends to be reluctant to use unproven technologies. But if they’ve built a full-scale wind turbine prototype, which is in ordinary service, that is an achievement.’&lt;/p&gt;
+&lt;p&gt;There are three classes of superconductor. Low temperature superconductors need to be cooled below 10K. These are usually metal alloys such as niobium–titanium, often used in hospital MRI scanners, and require very expensive cooling setups. GdBaCuO are high temperature ceramic superconductors, a class that includes yttrium–barium–copper oxide or YBCO ceramics, which superconduct at around 100K.&lt;/p&gt;
+&lt;p&gt;Magnesium diboride (MgB&lt;sub&gt;2&lt;/sub&gt;) is in the intermediate range, superconducting at 39K. ‘This is slightly more complicated to cool in a wind turbine than the ceramics,’ says &lt;a href=&quot;https://www.dtu.dk/english/service/phonebook/person?id=5758&amp;amp;tab=2&amp;amp;qt=dtupublicationquery&quot;&gt;Asger Bech Abrahamsen&lt;/a&gt;, wind energy expert at the Technical University of Denmark, who was involved in the &lt;a href=&quot;http://www.innwind.eu/&quot;&gt;InnWind&lt;/a&gt; project that trailled MgB&lt;sub&gt;2&lt;/sub&gt; in generators that might one day by used by large offshore wind turbines. MgB&lt;sub&gt;2&lt;/sub&gt; needs to be chilled below that of a ceramic superconductor, which costs more. It has the advantage of being cheaper though. MgB&lt;sub&gt;2&lt;/sub&gt; costs a few euros per metre, versus tens of euros for ceramic composites.&lt;/p&gt;
+&lt;p&gt;Dhalle says the new turbine was designed conservatively, whereas the next version will be a leaner prototype. ‘Superconducting is coming out of its ivory tower, where we had worked on big science projects like the particle accelerator at Cern and large magnets in Iter’s fusion facility,’ he says. ‘We are now in the phase where the materials can start competing with existing technologies.’&lt;/p&gt;
+</description>
+<pubDate>Thu, 22 Nov 2018 22:02:56 +0000</pubDate>
+<dc:creator>_Microft</dc:creator>
+<og:title>World first as wind turbine upgraded with high temperature superconductor</og:title>
+<og:type>Article</og:type>
+<og:url>https://www.chemistryworld.com/news/world-first-as-wind-turbine-upgraded-with-high-temperature-superconductor/3009780.article</og:url>
+<og:description>Refit cuts use of pricey metals by an order of magnitude and weight by a half</og:description>
+<og:image>https://d1w9csuen3k837.cloudfront.net/Pictures/2000x2000fit/8/7/4/139874_Offshore-wind-farm-renewable-energy.jpg</og:image>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.chemistryworld.com/news/world-first-as-wind-turbine-upgraded-with-high-temperature-superconductor/3009780.article</dc:identifier>
 </item>
 <item>
 <title>Facebook policy chief admits hiring PR firm to attack George Soros</title>
@@ -610,16 +930,16 @@ Mark Zuckerberg has said he knew nothing about the PR firm. Photograph: Gérard 
 <description>&lt;tr readability=&quot;0.55737704918033&quot;&gt;&lt;td bgcolor=&quot;#FF6600&quot;&gt;
 &lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5.8412698412698&quot;&gt;&lt;td&gt;
-&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;4.5895691609977&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18512304&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;5.8678815489749&quot;&gt;&lt;td&gt;
+&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;4.6104783599089&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18512304&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
 &lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
 &lt;center&gt;
 
 &lt;/center&gt;
 &lt;/td&gt;
 &lt;td class=&quot;title&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18512304&quot; class=&quot;storylink&quot;&gt;Thank you to dang and sctb&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;0.77922077922078&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18512304&quot;&gt;871 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=sama&quot; class=&quot;hnuser&quot;&gt;sama&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18512304&quot;&gt;19 hours ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18512304&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18512304&amp;amp;goto=item%3Fid%3D18512304&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Thank%20you%20to%20dang%20and%20sctb&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Thank%20you%20to%20dang%20and%20sctb&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18512304&amp;amp;auth=a9e6bd373427380e57397b1547ac9c6524e7f51e&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18512304&quot;&gt;97 comments&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;0.8&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
+&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18512304&quot;&gt;907 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=sama&quot; class=&quot;hnuser&quot;&gt;sama&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18512304&quot;&gt;1 day ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18512304&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18512304&amp;amp;goto=item%3Fid%3D18512304&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Thank%20you%20to%20dang%20and%20sctb&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Thank%20you%20to%20dang%20and%20sctb&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18512304&amp;amp;auth=a9e6bd373427380e57397b1547ac9c6524e7f51e&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18512304&quot;&gt;107 comments&lt;/a&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
 &lt;/tr&gt;&lt;tr readability=&quot;8.5&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
 &lt;td readability=&quot;6&quot;&gt;Dan and Scott do an incredible amount of work behind the scenes to make Hacker News what it is. I have never met two more thoughtful community stewards. They usually get more hate than thanks, which they deal with cheerfully. This community means a lot to a lot of people.
@@ -675,329 +995,6 @@ Mark Zuckerberg has said he knew nothing about the PR firm. Photograph: Gérard 
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://petapixel.com/2018/11/20/the-story-behind-that-ikea-photo-of-amsterdam/</dc:identifier>
-</item>
-<item>
-<title>Boss as a Service – Hire a boss, get stuff done</title>
-<link>https://bossasaservice.life/</link>
-<guid isPermaLink="true" >https://bossasaservice.life/</guid>
-<description>&lt;h3&gt;Why do you need proof? Don't you trust me?&lt;/h3&gt;
-&lt;p&gt;Hey, it's not like that, babe, we swear.&lt;/p&gt;
-&lt;p&gt;Okay, maybe it is, a little bit. But it's only because we're habitual procrastinators ourselves, and know that in your place, we'd totally try to cheat.&lt;/p&gt;
-&lt;p&gt;Maybe you've been lounging around in your pajamas all day eating Doritos, but you &lt;em&gt;plan&lt;/em&gt; to go for a run later that night. So you think it's okay to tell us that you already have. We know how that's going to turn out -- in a guilt-filled unholy orgy of Dorito excesses. So we wouldn't be doing you any favours if we're flexible about the &quot;Prove it&quot; rule. We'll only count the tasks you're able to prove as tasks actually done. In other words, pics or it didn't happen.&lt;/p&gt;
-&lt;p&gt;So what does proof look like?&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Go for 3km run -- you could send us a screenshot from &lt;a href=&quot;https://runkeeper.com/&quot;&gt;Runkeeper&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;Code for 1 hour -- you could send us a screenshot of your &lt;a href=&quot;https://www.rescuetime.com/&quot;&gt;Rescuetime stats&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;Fix form dropdown bug -- maybe a gif of the form dropdown now working?&lt;/li&gt;
-&lt;/ul&gt;
-You can blur out sensitive data, just make sure your computer / phone time and date is present.</description>
-<pubDate>Thu, 22 Nov 2018 20:06:28 +0000</pubDate>
-<dc:creator>thisacctforreal</dc:creator>
-<og:url>https://bossasaservice.life</og:url>
-<og:type>website</og:type>
-<og:title>Boss as a Service | Hire a boss, get stuff done</og:title>
-<og:description>BaaS helps you achieve your goals, making sure that you follow through on what you plan.</og:description>
-<og:image>https://i.imgur.com/jjrWC3a.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://bossasaservice.life/</dc:identifier>
-</item>
-<item>
-<title>A Mystery Font That Took Over New York</title>
-<link>https://www.nytimes.com/interactive/2018/11/21/nyregion/new-york-storefronts-mystery-font.html</link>
-<guid isPermaLink="true" >https://www.nytimes.com/interactive/2018/11/21/nyregion/new-york-storefronts-mystery-font.html</guid>
-<description>&lt;p class=&quot;paragraph&quot;&gt;&lt;em&gt;&lt;strong&gt;Stand just about anywhere&lt;/strong&gt;&lt;/em&gt; on Broadway, or on Canal Street with its sprightly neon and overstuffed souvenir shops, or the long stretch of restaurants, hardware stores, pharmacies, bars, realtors, barber shops, groceries and auto shops that extends through Fifth Avenue in South Brooklyn, and you’ll find a surplus of vibrant and overstated signage — a cacophony of typography.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Steven Heller, a co-chairman at the School of Visual Arts’ M.F.A. program, sees it somewhat differently. “You say ‘cacophony,’” he said. “I call it chaos.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;But amid all of this chaos there is the occasional beacon. Choc, for instance.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;It’s a typeface that draws the eye with its inherent contradictions. It seems to have been drawn improvisationally with a brush, and yet it’s so hefty it looks like it could slip off a wall. It’s both delicate and emphatic, a casual paradox, like a Nerf weapon.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Choc is far from the most popular typeface on the storefronts of New York, but it can still be found everywhere and in every borough. It’s strewn on fabric awnings and etched in frosted glass. It gleams in bright magenta or platinum lighting. It’s used for beauty salons, Mexican restaurants, laundromats, bagel shops, numerous sushi bars. It may be distorted, stacked vertically, or shoehorned into a cluster of other typefaces. But even here Choc remains clear and articulate, its voice deep and friendly, its accent foreign, perhaps, yet endearing.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;You’ve already seen it, probably repeatedly, like a stranger you recognize from your morning commute.&lt;/p&gt;
-
-
-&lt;p class=&quot;paragraph&quot;&gt;Like so many New Yorkers, Choc is an immigrant.&lt;/p&gt;
-&lt;div class=&quot;rad-slideshow&quot; data-id=&quot;100000005969958&quot; data-slug=&quot;00CHOC-ss-slide-F7P9&quot;&gt;
-&lt;h5 class=&quot;g-grid-heading&quot;/&gt;
-&lt;div class=&quot;rad-slideshow-wrapper&quot;&gt;
-&lt;div class=&quot;rad-slideshow-inner&quot;&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005969958&quot; data-slug=&quot;00CHOC-ss-slide-F7P9&quot; readability=&quot;7&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-F7P9/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:802,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1603,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-F7P9-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;1.2777777777777777&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;9&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Choc specimen, cover, 1955&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005969949&quot; data-slug=&quot;00CHOC-ss-slide-5YRC&quot; readability=&quot;7.5&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-5YRC/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:802,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1603,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-5YRC-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;1.2777777777777777&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;10&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Advertisement for the Choc typeface, in &lt;em&gt;La France graphique&lt;/em&gt;, No 107, Nov. 1955&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p class=&quot;paragraph&quot;&gt;It was designed by Roger Excoffon, a French typographer and graphic designer whose work departed from the Modernist trends that characterized midcentury type design. Based in Marseilles, Excoffon created a diverse array of typefaces during the 1940s and ’50s, but his script typefaces have become his most enduring work.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“There’s an unmistakable energy in all the designs that he does,” said Tobias Frere-Jones, &lt;a href=&quot;https://frerejones.com/&quot; title=&quot;Frere-Jones Type&quot;&gt;a Brooklyn-based typeface designer&lt;/a&gt;. “They project their personality so clearly. And it’s very obviously not Helvetica or not Times or any other generic thing that might be on the awning next door.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Excoffon’s most popular typeface is probably Mistral, which was modeled after his own handwriting. (Mistral has been widely used for years, from the title credits in “Night Court” to Connecticut Muffin or N.W.A.’s logos, not to mention many storefronts in New York and elsewhere.) There’s also Banco, which can justly be described as “shouty,” composed entirely of letters that resemble exclamation marks; Calypso, with halftone-patterned letterforms that look like miniature optical illusions; Diane, an ornate script that’s just about impossible to use outside of wedding invitations; and there is Choc, something of a synthesis of all of these.&lt;/p&gt;
-&lt;div class=&quot;rad-slideshow&quot; data-id=&quot;100000005965018&quot; data-slug=&quot;00CHOC22&quot;&gt;
-&lt;h5 class=&quot;g-grid-heading&quot;/&gt;
-&lt;div class=&quot;rad-slideshow-wrapper&quot;&gt;
-&lt;div class=&quot;rad-slideshow-inner&quot;&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005965018&quot; data-slug=&quot;00CHOC22&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC22/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139771632_d91876de-a6de-45aa-b73a-218270feb694-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Amy’s Restaurant at 586 West 207th Street in Manhattan.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195874&quot; data-slug=&quot;00CHOC-ss-slide-LZIC&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-LZIC/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LZIC-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Sushi Q at 1610 Crosby Avenue in the Bronx.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195875&quot; data-slug=&quot;00CHOC-ss-slide-C0KI&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-C0KI/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-C0KI-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Fuji at 1115 Hylan Boulevard on Staten Island.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195866&quot; data-slug=&quot;00CHOC-ss-slide-DOMQ&quot; readability=&quot;6.5&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-DOMQ/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-DOMQ-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Fukuyama Sushi and Ramen at 622 Metropolitan Avenue in Brooklyn.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Typefaces are characterized by redundancies. Notice how often the “d” and “b” can be rotated to make a “p” or a “q,” or how a capital “Z” is so plainly a grown-up version of its lowercase counterpart. But Choc is full of irregularity. Its lowercase “r” resembles a “z.” Its “g” looks like a capital “S.” And its “h” crouches forward as though in starting position for a race, whereas its more heavyset uppercase incarnation is on the verge of rolling backward.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“Choc expresses a certain violence,” said Sandra Chamaret, a French designer and publisher, and a co-author of &lt;a href=&quot;http://ypsilonediteur.com/fiche.php?id=95&quot; title=&quot;Roger Excoffon et la fonderie Olive&quot;&gt;a 2010 monograph on Excoffon&lt;/a&gt;. “It seems spattered on the page, the letters going in all directions.” (“Choc” — the ‘&lt;em&gt;ch&lt;/em&gt;’ is soft, as in ‘&lt;em&gt;sh&lt;/em&gt;’ — is French for “shock” or “crash.”)&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Choc remains distinctive for these reasons, and it lacks datedness, as evidenced in its continued use throughout the world, most visibly on storefronts.&lt;/p&gt;
-
-
-&lt;p class=&quot;paragraph&quot;&gt;Choc wouldn’t appear on storefronts until well after its 1955 conception, however.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;As an industry, type design was at this time slow-going, and its applications more limited than it is now. It wasn’t until the spread of phototypesetting in the 1960s that Choc could be used efficiently for large-scale applications. Before then, the most practical way to get your name on your business was to have it painted by hand.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“New York was just a sign painter’s heaven until designers started getting involved,” Mr. Heller said. “There were one or two or three sign producers that did all the signs, and they worked from a fairly consistent stylebook, like going into a stationery store and looking for a wedding sample.”&lt;/p&gt;
-&lt;div class=&quot;rad-slideshow&quot; data-id=&quot;100000006195294&quot; data-slug=&quot;25jpCHOC3&quot;&gt;
-&lt;h5 class=&quot;g-grid-heading&quot;/&gt;
-&lt;div class=&quot;rad-slideshow-wrapper&quot;&gt;
-&lt;div class=&quot;rad-slideshow-inner&quot;&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195294&quot; data-slug=&quot;25jpCHOC3&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/11/25/nyregion/25jpCHOC3/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-TI3L-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Hana Sushi at 211 7th Avenue in Manhattan.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005956265&quot; data-slug=&quot;25CHOC3&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/11/25/nyregion/25CHOC3/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439481_a4fa0bef-38da-4842-beed-a8ddb5205814-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Pad Thai at 409 8th Avenue in Manhattan.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006224099&quot; data-slug=&quot;00CHOC-ss-803&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/11/19/nyregion/00CHOC-ss-803/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439496_3f7d1d92-0388-4bce-ab99-4078ec37648a-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Nha Trang Centre at 148 Centre Street in Manhattan.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006223616&quot; data-slug=&quot;25jpCHOC4&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/11/25/nyregion/25jpCHOC4/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_139439520_38741e1f-6ebd-4735-9f32-39d72b9bcf52-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Ilan Shoes at 80-01 Roosevelt Avenue in Queens.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Paul Boegemann was trained as one such sign painter — he is the proprietor of &lt;a href=&quot;https://paulsignsny.com/&quot; title=&quot;Paul Signs Inc.&quot;&gt;Paul Signs&lt;/a&gt; &lt;a href=&quot;https://paulsignsny.com/&quot; title=&quot;Paul Signs Inc.&quot;&gt;Inc&lt;/a&gt;., in Greenwood Heights, Brooklyn — and has been in business for over 35 years.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“I learned how to hand letter signs and trucks,” Mr. Boegemann said. “We started with a simple pencil and paper. We designed what we wanted and used the styles we wanted and knew how to apply.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Right around the time Mr. Boegemann got into the business, the first computerized vinyl printing machines became efficient alternatives to hand-lettered signage. One was the Gerber IVB, also known as the Signmaker.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“I bought the second Signmaker in N.Y.C. back in 1984, $10,000 with three fonts and 10 colors of vinyl,” Mr. Boegeman said. “The computer makes everything faster and cheaper.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“Over the years, more computer-generated advances made more fonts and designs and sizes,” he added. “Everyone got into the sign and printing industry. You did not have to have any talent or skills.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Asked if he’s ever made a sign in Choc, Mr. Boegemann said: “This style is a ‘Bastard’ letter style.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“I hate these styles and do not consider them as sign advertising. It is all graffiti.”&lt;/p&gt;
-
-
-&lt;p class=&quot;paragraph&quot;&gt;And yet, Choc is everywhere. But the reasons for its prevalence are something of a mystery.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;There’s an abundance of Arial (Spin City Cleaners in the East Village), as well as more kitschy options like Brush Script (Economy Candy in the Lower East Side) or Impact (5th Ave. Gourmet Delight, on a corner in Park Slope). These typefaces have long been available in computer operating systems, which would account in part for their proliferation.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;This wasn’t precisely the case with Choc. In the early 1990s it was packaged with CorelDraw, a vector graphics editor, but under a different name: Staccato 555. CorelDraw, according to Mr. Frere-Jones, “would have been more common at a sign-making shop, being cheaper and Windows-based.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;At any rate, Choc is more common than its limited availability may indicate. It’s used consistently as well, and with evident purpose.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;This could have to do with what Choc evokes. For some it bears a resemblance to the calligraphic forms of Asian writing systems.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;However, it’s disputed as to whether Choc was a direct homage to these styles. According to Ms. Chamaret, José Mendoza, Excoffon’s assistant at the time of Choc’s production, said that the letterforms were drawn in outlines. “Never with a brush!” she said.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Even so, and just as pizzerias favor color schemes that recall the Italian flag, or how the names of Irish pubs rely on Gaelic-looking letters, Choc has come to signify Asia.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;John Chen, a New York-based restaurateur, claims to be among the first to have used Choc on signs in New York. (The front of Mr. Chen’s 25-year-old J.J. Garden, a Chinese restaurant in Jackson Heights, is emblazoned in Choc.) “When I wanted to use these letters, everyone thought I was crazy,” he said, speaking in Mandarin.&lt;/p&gt;
-&lt;div class=&quot;rad-slideshow&quot; data-id=&quot;100000005965034&quot; data-slug=&quot;00CHOC34&quot;&gt;
-&lt;h5 class=&quot;g-grid-heading&quot;/&gt;
-&lt;div class=&quot;rad-slideshow-wrapper&quot;&gt;
-&lt;div class=&quot;rad-slideshow-inner&quot;&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005965034&quot; data-slug=&quot;00CHOC34&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC34/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924432_0fcfdcf7-a00f-4fe5-942a-ac129bd56f5e-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Aji Sushi at 201 5th Avenue in Brooklyn.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000005965033&quot; data-slug=&quot;00CHOC32&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC32/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;merlin_138924543_7dbd91de-9abb-44ce-a9ba-95e2f7a6fdad-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Kumo II at 512 Court Street in Brooklyn.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195871&quot; data-slug=&quot;00CHOC-ss-slide-LYO1&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-LYO1/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-LYO1-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Rizo’s Beauty Salon at 955 4th Avenue in Brooklyn&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;rad-slideshow-item image&quot; data-id=&quot;100000006195867&quot; data-slug=&quot;00CHOC-ss-slide-BP0L&quot; readability=&quot;6&quot;&gt;
-&lt;div class=&quot;rad-asset-wrapper&quot;&gt;
-
-&lt;img class=&quot;rad-lazy&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7&quot; data-safe-area=&quot;{&amp;quot;top&amp;quot;:0,&amp;quot;right&amp;quot;:0,&amp;quot;bottom&amp;quot;:0,&amp;quot;left&amp;quot;:0}&quot; data-pattern=&quot;https://static01.nyt.com/images/2018/06/20/nyregion/00CHOC-ss-slide-BP0L/{{file}}&quot; data-widths=&quot;{&amp;quot;master&amp;quot;:[{&amp;quot;size&amp;quot;:180,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-master180.jpg&amp;quot;},{&amp;quot;size&amp;quot;:495,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-master495.jpg&amp;quot;},{&amp;quot;size&amp;quot;:675,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-master675.jpg&amp;quot;},{&amp;quot;size&amp;quot;:1024,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-jumbo.jpg&amp;quot;},{&amp;quot;size&amp;quot;:2048,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-superJumbo.jpg&amp;quot;}],&amp;quot;square&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-thumbStandard.jpg&amp;quot;},{&amp;quot;size&amp;quot;:150,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-thumbLarge.jpg&amp;quot;},{&amp;quot;size&amp;quot;:320,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-square320.jpg&amp;quot;},{&amp;quot;size&amp;quot;:640,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-square640.jpg&amp;quot;}],&amp;quot;threeTwo&amp;quot;:[{&amp;quot;size&amp;quot;:75,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-videoThumb.jpg&amp;quot;},{&amp;quot;size&amp;quot;:190,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-thumbWide.jpg&amp;quot;},{&amp;quot;size&amp;quot;:225,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-mediumThreeByTwo225.jpg&amp;quot;},{&amp;quot;size&amp;quot;:768,&amp;quot;filename&amp;quot;:&amp;quot;00CHOC-ss-slide-BP0L-videoLarge.jpg&amp;quot;}]}&quot; data-ratio=&quot;0.6666666666666666&quot; itemprop=&quot;url&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;rad-caption&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;rad-caption-text&quot;&gt;Deluxe Food Market at 79 Elizabeth Street in Manhattan.&lt;/span&gt; &lt;span class=&quot;rad-credit&quot; itemprop=&quot;copyrightHolder&quot;&gt;Vincent Tullo for The New York Times&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“It’s abstract. It’s modern. It’s artistic,” Mr. Chen continued. “It just gives you that certain feeling.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;There’s no denying that Choc has become a typographical shorthand for Asian-themed restaurants. Imagine a sushi bar adorned in Helvetica, and it may not seem as authentic, or as appetizing.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;“Having been used for a particular purpose,” said Mr. Frere-Jones, referring to the contemporary applications of Excoffon’s typefaces, “it starts to take on a bit of that association, which encourages that association to be repeated, which just makes it stronger.”&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;It’s true. Excoffon’s expressive, 60-year-old heavyweight script endures throughout all five boroughs: Ginger Root, on the Upper East Side; Sushi Q, in the Bronx; Sakura 6, in Greenpoint (and Natural Cleaners right across the street); Amy’s Restaurant, in Inwood; Sumo Teriyaki &amp;amp; Sushi, in Williamsburg (which is set in an excess of Choc); A Sushi in Forest Hills; Genki Sushi in Staten Island; and, in the heart of Chinatown, Deluxe Food Market.&lt;/p&gt;
-&lt;p class=&quot;paragraph&quot;&gt;Here and in countless other instances Choc can be a welcome familiarity. Consider Kami Asian, on Flatbush Avenue near Grand Army Plaza. It’s nestled between a laundromat and a Mexican restaurant, and it’s the more striking of the three storefronts: on one side is the Mexican restaurant’s folksy aesthetic (its name is ornamented with a sombrero), and on the other the laundromat’s staid sans-serif. In between is “Kami,” set in gracefully spaced Choc capitals, which at night cast an ethereal glow.&lt;/p&gt;
-
-</description>
-<pubDate>Thu, 22 Nov 2018 18:16:32 +0000</pubDate>
-<dc:creator>asnyder</dc:creator>
-<og:url>https://www.nytimes.com/interactive/2018/11/21/nyregion/new-york-storefronts-mystery-font.html</og:url>
-<og:type>article</og:type>
-<og:title>The Mystery Font That Took Over New York</og:title>
-<og:image>https://static01.nyt.com/images/2018/11/25/nyregion/25jpCHOC2/25jpCHOC2-facebookJumbo-v2.jpg</og:image>
-<og:description>How did Choc, a quirky calligraphic typeface drawn by a French graphic designer in the 1950s, end up on storefronts everywhere?</og:description>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.nytimes.com/interactive/2018/11/21/nyregion/new-york-storefronts-mystery-font.html</dc:identifier>
-</item>
-<item>
-<title>Ditching the MacBook Pro for a MacBook Air</title>
-<link>http://bradfrost.com/blog/post/ditching-the-macbook-pro-for-a-macbook-air/</link>
-<guid isPermaLink="true" >http://bradfrost.com/blog/post/ditching-the-macbook-pro-for-a-macbook-air/</guid>
-<description>&lt;p&gt;A while back I upgraded my computer to a new MacBook Pro, and ran into a ton of issues with it. My &lt;a href=&quot;http://bradfrost.com/blog/post/surviving-the-new-macbook-pro/&quot;&gt;post on the topic&lt;/a&gt; apparently found its way to Apple’s engineering team, and I ended up working with them for a few months to get to the bottom of some of the software bugs I was experiencing. It was a wild experience.&lt;/p&gt;
-&lt;p&gt;The situation has definitely improved over the last year and a half, but I still wasn’t a huge fan of the machine. I continue to find the TouchBar annoying, and the battery life I got was never impressive. So when the new MacBook Air was announced, my interest was piqued. As it happens, &lt;a href=&quot;https://twitter.com/frostyweather&quot;&gt;Ian&lt;/a&gt;‘s hand-me-down MacBook Pro was wilting and the screen got all messed up somehow, so I decided to get a MacBook Air and pass my MacBook Pro to my favorite (and only) employee.&lt;/p&gt;
-&lt;p&gt;It’s still early days, but I’ll say that the new MacBook Air is the best machine I’ve ever owned. I’ll break down some of the pros and cons of the machine.&lt;/p&gt;
-&lt;h2&gt;Pros&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;The bevel is back, baby.&lt;/strong&gt; – one of the best things about this machine is the nice slope that doesn’t hurt my wrists while typing. This was one of the biggest things I noticed when I switched from my original MacBook Air to a MacBook Pro, and I’m happy to return to a comfortable typing environment.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Waaaay better battery life&lt;/strong&gt; – With my MacBook Pro, I would be lucky to get 4 hours out of a charge. I flew last night, and after about three hours of usage my battery was still sitting pretty at about 80% battery. This makes me very happy as the stress of being plugged in always seemed to loom in the back of my mind.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Good riddance, TouchBar&lt;/strong&gt; – I’m so glad to go back to physical keys for the function keys , and especially the escape key. I’m also super glad the TouchID is still there, as that’s a pretty amazing feature for unlocking my device and password manager.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Improved keyboard&lt;/strong&gt; – There’s no doubt typing on this thing is better than the first-generation butterfly keyboard of the MacBook Pro. It feels sturdy. It’s quieter. I like it.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Thinner&lt;/strong&gt; – I was freaking out at the airport because I felt like my backpack was too light. This thing is light, and my back is thankful for that.&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;Cons&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;No MagSafe&lt;/strong&gt; – As with the other machine, the MagSafe charger is gone and USB-C port is in its place. Over the last year and a half I’ve tried a few third-party magnetic chargers, but they all ended up failing on me. I can only hope that my bulldog and infant daughter don’t ruin my machine.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Decreased ports&lt;/strong&gt; – Going from my old machine with plenty of ports to the MBP’s 4 ports was definitely a step down. Now I’m going a step further away from an ideal scenario. Thankfully, I invested in a &lt;a href=&quot;https://eshop.macsales.com/shop/docks/owc-thunderbolt-3-dock?gclid=EAIaIQobChMIgsX-zdrW3gIVQoezCh0Y6wgqEAAYASAAEgKWp_D_BwE&amp;amp;gclsrc=aw.ds&quot;&gt;fancy docking station&lt;/a&gt; for my home setup, so I can plug in one cable and have everything wired up. But the lack of ports will still be an issue on the road, and carrying around a sack of dongles (true story) definitely isn’t ideal.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;Decreased firepower?&lt;/strong&gt; – The MacBook Air isn’t as powerful as the MBP, but I’m hoping my work as a web developer doesn’t necessitate such heavy firepower. We’ll see how this plays out with my work, but so far I haven’t noticed any performance issues with my workflow.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;So yeah! I’m really happy with my decision to switch, and I hope my love affair with this machine continues as I spend more time working on it.&lt;/p&gt;
-</description>
-<pubDate>Thu, 22 Nov 2018 17:15:50 +0000</pubDate>
-<dc:creator>ingve</dc:creator>
-<og:title>Ditching the MacBook Pro for a MacBook Air</og:title>
-<og:url>http://bradfrost.com/blog/post/ditching-the-macbook-pro-for-a-macbook-air/</og:url>
-<og:type>article</og:type>
-<og:description>A while back I upgraded my computer to a new MacBook Pro, and ran into a ton of issues with it. My post on the topic apparently found its way to Apple's engineering team, and I ended up working with them for a few months to get to the bottom of some of the software bugs I was experiencing. It was a</og:description>
-<og:image>http://bradfrost.com/wp-content/uploads/2017/08/card-image.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://bradfrost.com/blog/post/ditching-the-macbook-pro-for-a-macbook-air/</dc:identifier>
-</item>
-<item>
-<title>A fullscreen desktop application resembling a sci-fi computer interface</title>
-<link>https://github.com/GitSquared/edex-ui</link>
-<guid isPermaLink="true" >https://github.com/GitSquared/edex-ui</guid>
-<description>&lt;div class=&quot;Box-body p-6&quot;&gt;
-&lt;article class=&quot;markdown-body entry-content&quot; itemprop=&quot;text&quot;&gt;&lt;p align=&quot;center&quot;&gt;&lt;br/&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/logo.png&quot;&gt;&lt;img alt=&quot;Logo&quot; src=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/logo.png&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;eDEX-UI is a fullscreen desktop application resembling a sci-fi computer interface, heavily inspired from &lt;a href=&quot;https://github.com/seenaburns/dex-ui&quot;&gt;DEX-UI&lt;/a&gt; and the &lt;a href=&quot;https://web.archive.org/web/20170511000410/http://jtnimoy.com/blogs/projects/14881671&quot; rel=&quot;nofollow&quot;&gt;TRON Legacy movie effects&lt;/a&gt;. It runs the shell of your choice in a real terminal, and displays live information about your system. It was made to be used on large touchscreens but will work nicely on a regular desktop computer or perhaps a tablet PC or one of those funky 360° laptops with touchscreens.&lt;/p&gt;
-&lt;p&gt;I had no ideas for a name so i took DEX-UI and added a &quot;e&quot; for Electron. Deal with it.&lt;/p&gt;
-&lt;p&gt;(&lt;a href=&quot;https://aur.archlinux.org/packages/edex-ui/&quot; rel=&quot;nofollow&quot;&gt;Official ArchLinux AUR package&lt;/a&gt; maintained by &lt;a href=&quot;https://github.com/JesusCrie&quot;&gt;@JesusCrie&lt;/a&gt;)&lt;/p&gt;
-&lt;h2&gt;Screenshots&lt;/h2&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_default.png&quot;&gt;&lt;img src=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_default.png&quot; alt=&quot;Default screenshot&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;(&lt;a href=&quot;https://github.com/dylanaraps/neofetch&quot;&gt;neofetch&lt;/a&gt; on eDEX-UI 1.0 with the default &quot;tron&quot; theme &amp;amp; QWERTY keyboard)&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_blade.png&quot;&gt;&lt;img src=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_blade.png&quot; alt=&quot;Blade screenshot&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;(&lt;a href=&quot;https://github.com/browsh-org/browsh&quot;&gt;browsh&lt;/a&gt; showing the results of a DuckDuckGo image search on eDEX-UI 1.0 with the &quot;blade&quot; theme &amp;amp; AZERTY keyboard)&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_disrupted.png&quot;&gt;&lt;img src=&quot;https://github.com/GitSquared/edex-ui/raw/master/media/screenshot_disrupted.png&quot; alt=&quot;Disrupted screenshot&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;(&lt;a href=&quot;https://github.com/antonmedv/fx&quot;&gt;fx&lt;/a&gt; showing the results of a &lt;a href=&quot;https://github.com/GitSquared/ipapi&quot;&gt;ipapi&lt;/a&gt; query on eDEX-UI 1.0 with the experimental &quot;tron-disrupted&quot; theme, and the French AZERTY keyboard)&lt;/em&gt;&lt;/p&gt;
-&lt;h2&gt;Q&amp;amp;A&lt;/h2&gt;
-&lt;h4&gt;What OS can this thing run on?&lt;/h4&gt;
-&lt;p&gt;Currently Windows, the latest macOS and any Linux distro that can run Chromium (AppImage package).&lt;/p&gt;
-&lt;h4&gt;Is this a real terminal?&lt;/h4&gt;
-&lt;p&gt;Yes. By default, eDEX runs bash on Linux and Powershell on Windows, but you can change that to any command in the settings.json file.&lt;/p&gt;
-&lt;h4&gt;I don't like the colors/the keyboard layout is not right for me!&lt;/h4&gt;
-&lt;p&gt;We got you covered! Check the &lt;a href=&quot;https://github.com/GitSquared/edex-ui/wiki&quot;&gt;repo's Wiki&lt;/a&gt; for in-depth information about customizing eDEX.&lt;/p&gt;
-&lt;h4&gt;Why is there a keyboard?&lt;/h4&gt;
-&lt;p&gt;eDEX-UI is meant to be used on touchscreens, even if it works well on regular displays! If you have a physical keyboard wired to your computer, pressing keys IRL will illuminate the virtual keyboard: &lt;em&gt;please remember to not type any passwords if you are recording your screen!&lt;/em&gt;&lt;/p&gt;
-&lt;h4&gt;What's the difference between this and the original DEX-UI?&lt;/h4&gt;
-&lt;p&gt;Seenaburns' DEX-UI was created &lt;em&gt;&quot;as an experiment or an art piece, not distributable software&quot;&lt;/em&gt;. The goal of this project is to push Seena's vision forward by making such an interface usable in real-life scenarios.&lt;/p&gt;
-&lt;h4&gt;Will using this make me insanely badass?&lt;/h4&gt;
-&lt;p&gt;Yes.&lt;/p&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://camo.githubusercontent.com/2d609664687c52e8c43c23aa580b24387ce36c41/68747470733a2f2f37382e6d656469612e74756d626c722e636f6d2f33356434656634343437653031313266373736623632396266666439393138382f74756d626c725f6d6b346766387a767943317335363775776f315f3530302e676966&quot;&gt;&lt;img width=&quot;220&quot; src=&quot;https://camo.githubusercontent.com/2d609664687c52e8c43c23aa580b24387ce36c41/68747470733a2f2f37382e6d656469612e74756d626c722e636f6d2f33356434656634343437653031313266373736623632396266666439393138382f74756d626c725f6d6b346766387a767943317335363775776f315f3530302e676966&quot; data-canonical-src=&quot;https://78.media.tumblr.com/35d4ef4447e0112f776b629bffd99188/tumblr_mk4gf8zvyC1s567uwo1_500.gif&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;Featured in...&lt;/h2&gt;
-&lt;h2&gt;Useful commands for the nerds&lt;/h2&gt;
-&lt;h4&gt;Starting from source:&lt;/h4&gt;
-&lt;p&gt;on *nix systems (You'll need the Xcode command line tools on macOS):&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;clone the repository&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm run install-linux&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm start&lt;/code&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;on Windows:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;start cmd or powershell &lt;strong&gt;as administrator&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;clone the repository&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm run install-windows&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm start&lt;/code&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h4&gt;Building&lt;/h4&gt;
-&lt;p&gt;Note: Due to native modules, you can only compile binaries for the OS you are compiling from. Note²: It is recommended to start building from a fresh clone to prevent the code minifier script from parsing an entire &lt;code&gt;node_modules&lt;/code&gt; folder.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;make a fresh clone (recommended)&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm install&lt;/code&gt; (NOT &lt;code&gt;install-linux&lt;/code&gt; or &lt;code&gt;install-windows&lt;/code&gt;)&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;npm run build-linux&lt;/code&gt; or &lt;code&gt;build-windows&lt;/code&gt; or &lt;code&gt;build-darwin&lt;/code&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;Resulting binaries and assets will be in the &lt;code&gt;dist&lt;/code&gt; folder.&lt;/p&gt;
-&lt;h2&gt;Credits&lt;/h2&gt;
-&lt;p&gt;eDEX-UI's source code was primarily written by me, &lt;a href=&quot;https://github.com/GitSquared&quot;&gt;Squared&lt;/a&gt;. If you want to get in touch with me or find other projects I'm involved in, check out &lt;a href=&quot;https://squared.codebrew.fr&quot; rel=&quot;nofollow&quot;&gt;my website&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/PixelyIon&quot;&gt;PixelyIon&lt;/a&gt; helped me get started with Windows compatibility and offered some precious advice when I started to work on this project seriously.&lt;/p&gt;
-&lt;h2&gt;Thanks&lt;/h2&gt;
-&lt;p&gt;Of course, eDEX would never have existed if I hadn't stumbled upon the amazing work of &lt;a href=&quot;https://github.com/seenaburns&quot;&gt;Seena&lt;/a&gt; on &lt;a href=&quot;https://reddit.com/r/unixporn&quot; rel=&quot;nofollow&quot;&gt;r/unixporn&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;This project uses a bunch of open-source libraries, frameworks and tools, see &lt;a href=&quot;https://github.com/GitSquared/edex-ui/network/dependencies&quot;&gt;the full dependency graph&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;I want to namely thank the developers behind &lt;a href=&quot;https://github.com/xtermjs/xterm.js&quot;&gt;xterm.js&lt;/a&gt;, &lt;a href=&quot;https://github.com/sebhildebrandt/systeminformation&quot;&gt;systeminformation&lt;/a&gt; and &lt;a href=&quot;https://github.com/joewalnes/smoothie&quot;&gt;SmoothieCharts&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;Huge thanks to &lt;a href=&quot;https://github.com/arscan&quot;&gt;Rob &quot;Arscan&quot; Scanlon&lt;/a&gt; for making the fantastic &lt;a href=&quot;https://github.com/arscan/encom-globe&quot;&gt;ENCOM Globe&lt;/a&gt;, also inspired by the TRON: Legacy movie, and distributing it freely. His work really puts the icing on the cake.&lt;/p&gt;
-&lt;/article&gt;&lt;/div&gt;
-</description>
-<pubDate>Thu, 22 Nov 2018 13:23:23 +0000</pubDate>
-<dc:creator>nailer</dc:creator>
-<og:image>https://avatars2.githubusercontent.com/u/24496417?s=400&amp;v=4</og:image>
-<og:type>object</og:type>
-<og:title>GitSquared/edex-ui</og:title>
-<og:url>https://github.com/GitSquared/edex-ui</og:url>
-<og:description>A science fiction desktop running everywhere. Awesome. - GitSquared/edex-ui</og:description>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://github.com/GitSquared/edex-ui</dc:identifier>
 </item>
 </channel>
 </rss>
