@@ -9,6 +9,426 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>Learning KVM – implement your own kernel</title>
+<link>https://david942j.blogspot.com/2018/10/note-learning-kvm-implement-your-own.html</link>
+<guid isPermaLink="true" >https://david942j.blogspot.com/2018/10/note-learning-kvm-implement-your-own.html</guid>
+<description>Few weeks ago I solved a great KVM escaping challenge from TWCTF hosted by &lt;a href=&quot;https://twitter.com/TokyoWesterns&quot; target=&quot;_blank&quot;&gt;@TokyoWesterns&lt;/a&gt;. I have given a writeup on my blog: &lt;a href=&quot;https://david942j.blogspot.com/2018/09/write-up-tokyowesterns-ctf-2018.html&quot; target=&quot;_blank&quot;&gt;[Write-up] TokyoWesterns CTF 2018 - pwn240+300+300 EscapeMe&lt;/a&gt;, but it mentions nothing about KVM because there's no bug (at least I didn't find) around it.&lt;p&gt;Most introduction of KVM I found are actually introducing either libvirt or qemu, lack of how to utilize KVM by hand, that's why I have this post.&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://lwn.net/Articles/658511/&quot; target=&quot;_blank&quot;&gt;This thread&lt;/a&gt; is a good start to implement a simple KVM program. Some projects such as &lt;a href=&quot;https://github.com/dpw/kvm-hello-world&quot;&gt;kvm-hello-world&lt;/a&gt; and &lt;a href=&quot;https://github.com/kvmtool/kvmtoo&quot;&gt;kvmtool&lt;/a&gt; are worthy to take a look as well. And &lt;a href=&quot;https://wiki.osdev.org/Main_Page&quot;&gt;OSDev.org&lt;/a&gt; has great resources to learn system architecture knowledge.&lt;/p&gt;&lt;p&gt;In this post I will introduce how to use KVM directly and how it works, wish this article can be a quick start for beginners learning KVM.&lt;/p&gt;&lt;p&gt;I've created a public repository for the source code of KVM-based hypervisor and the kernel: &lt;a href=&quot;https://github.com/david942j/kvm-kernel-example&quot; target=&quot;_blank&quot;&gt;david942j/kvm-kernel-example&lt;/a&gt;. You can clone and try it after reading this article.&lt;br/&gt;&lt;em&gt;Warning&lt;/em&gt;: all code in this post may be simplified to clearly show its function, if you want to write some code, I highly recommend you read examples in the repository instead of copy-paste code from here.&lt;/p&gt;&lt;p&gt;&lt;br/&gt;The kernel I implemented is able to execute an ELF in user-space, this is the screenshot of execution result:&lt;br/&gt;&lt;a href=&quot;https://1.bp.blogspot.com/--7vsSQoMFw8/W7OZ3zPoETI/AAAAAAAAApI/M9JC3Fgbxb864DKaxb2hcKqTw1wUOkFMwCK4BGAYYCw/s1600/%25E8%259E%25A2%25E5%25B9%2595%25E5%25BF%25AB%25E7%2585%25A7%2B2018-10-03%2B00.15.07.png&quot; imageanchor=&quot;1&quot;&gt;&lt;img border=&quot;0&quot; height=&quot;263&quot; src=&quot;https://1.bp.blogspot.com/--7vsSQoMFw8/W7OZ3zPoETI/AAAAAAAAApI/M9JC3Fgbxb864DKaxb2hcKqTw1wUOkFMwCK4BGAYYCw/s640/%25E8%259E%25A2%25E5%25B9%2595%25E5%25BF%25AB%25E7%2585%25A7%2B2018-10-03%2B00.15.07.png&quot; width=&quot;640&quot;/&gt;&lt;/a&gt;&lt;/p&gt;&lt;p&gt;&lt;strong&gt;&lt;span&gt;Introduction&lt;/span&gt;&lt;/strong&gt;&lt;br/&gt;KVM (Kernel-base Virtual Machine) is a virtual machine that implemented native in Linux kernel. As you know, VM usually used for creating a separated and independent environment. As the official site described, each virtual machine created by KVM has private virtualized hardware: a network card, disk, graphics adapter, etc.&lt;/p&gt;&lt;p&gt;First I'll introduce how to use KVM to execute simple assembled code, and then describe some key points to implement a Linux kernel. The Linux kernel we will implement is extremely simple, but more features might be added after this post released.&lt;/p&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;Get Started&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;All communication with KVM is done by the &lt;span&gt;ioctl&lt;/span&gt; syscall, which is usually used for getting and setting device status.&lt;/p&gt;&lt;p&gt;Creating a KVM-based VM basically needs 7 steps:&lt;/p&gt;&lt;ol&gt;&lt;li&gt;Open the KVM device, &lt;span&gt;kvmfd=open(&quot;/dev/kvm&quot;, O_RDWR|O_CLOEXEC)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Do create a VM,&lt;/span&gt; &lt;span&gt;vmfd=ioctl(kvmfd, KVM_CREATE_VM, 0)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;Set up memory for VM guest, &lt;span&gt;ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &amp;amp;region)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Create a virtual CPU for the VM, &lt;/span&gt;&lt;span&gt;vcpufd=ioctl(vmfd, KVM_CREATE_VCPU, 0)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;Set up memory for the vCPU
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;vcpu_size=ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL)&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;run=(struct kvm_run*)mmap(NULL, mmap_size, PROT_READ|PROT_WRITE, MAP_SHARED, vcpufd, 0)&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;Put assembled code on user memory region, set up vCPU's registers such as &lt;span&gt;rip&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;Run and handle exit reason. &lt;span&gt;while(1) { ioctl(vcpufd, KVM_RUN, 0); ... }&lt;/span&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;br/&gt;Too complicated!? See this figure&lt;div class=&quot;separator&quot;&gt;&lt;a href=&quot;https://3.bp.blogspot.com/-JAMnkb_Wrf4/W5EfEu4By_I/AAAAAAAAAoY/GLwczGKZgmE9T57Y390gLjPhkr_Sf11BQCK4BGAYYCw/s1600/kvm.png&quot; imageanchor=&quot;1&quot;&gt;&lt;img border=&quot;0&quot; height=&quot;308&quot; src=&quot;https://3.bp.blogspot.com/-JAMnkb_Wrf4/W5EfEu4By_I/AAAAAAAAAoY/GLwczGKZgmE9T57Y390gLjPhkr_Sf11BQCK4BGAYYCw/s320/kvm.png&quot; width=&quot;320&quot;/&gt;&lt;/a&gt;&lt;/div&gt;&lt;br/&gt;A VM needs &lt;strong&gt;user memory region&lt;/strong&gt; and &lt;strong&gt;virtual CPU(s)&lt;/strong&gt;, so all we need is to create VM, set up user memory region, create vCPU(s) and its working space then execute it!&lt;p&gt;Code is better than plaintext for hackers. &lt;em&gt;Warning&lt;/em&gt;:&lt;strong&gt; &lt;/strong&gt;code posted here has no error handling&lt;strong&gt;.&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt; &lt;strong&gt;Step 1 - 3, set up a new VM&lt;/strong&gt;&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* step 1~3, create VM and set up user memory region */
+void kvm(uint8_t code[], size_t code_len) {
+  // step 1, open /dev/kvm
+  int kvmfd = open(&quot;/dev/kvm&quot;, O_RDWR|O_CLOEXEC);
+  if(kvmfd == -1) errx(1, &quot;failed to open /dev/kvm&quot;);
+
+  // step 2, create VM
+  int vmfd = ioctl(kvmfd, KVM_CREATE_VM, 0);
+
+  // step 3, set up user memory region
+  size_t mem_size = 0x40000000; // size of user memory you want to assign
+  void *mem = mmap(0, mem_size, PROT_READ|PROT_WRITE,
+                   MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+  int user_entry = 0x0;
+  memcpy((void*)((size_t)mem + user_entry), code, code_len);
+  struct kvm_userspace_memory_region region = {
+    .slot = 0,
+    .flags = 0,
+    .guest_phys_addr = 0,
+    .memory_size = mem_size,
+    .userspace_addr = (size_t)mem
+  };
+  ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &amp;amp;region);
+  /* end of step 3 */
+  // not finished ...
+}
+&lt;/pre&gt;
+In above code fragment I assign 1GB memory (&lt;span&gt;mem_size&lt;/span&gt;) to the guest, and put assembled code on the first page. Later we will set the instruction pointer to 0x0 (&lt;span&gt;user_entry&lt;/span&gt;), where the guest should start to execute.&lt;p&gt;&lt;strong&gt;Step 4 - 6, set up a new vCPU&lt;/strong&gt;&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* step 4~6, create and set up vCPU */
+void kvm(uint8_t code[], size_t code_len) {
+  /* ... step 1~3 omitted */
+
+  // step 4, create vCPU
+  int vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
+
+  // step 5, set up memory for vCPU
+  size_t vcpu_mmap_size = ioctl(kvmfd, KVM_GET_VCPU_MMAP_SIZE, NULL);
+  struct kvm_run* run = (struct kvm_run*) mmap(0, vcpu_mmap_size,
+                                               PROT_READ | PROT_WRITE, MAP_SHARED,
+                                               vcpufd, 0);
+
+  // step 6, set up vCPU's registers
+  /* standard registers include general-purpose registers and flags */
+  struct kvm_regs regs;
+  ioctl(vcpufd, KVM_GET_REGS, &amp;amp;regs);
+  regs.rip = user_entry;
+  regs.rsp = 0x200000; // stack address
+  regs.rflags = 0x2; // in x86 the 0x2 bit should always be set
+  ioctl(vcpufd, KVM_SET_REGS, &amp;amp;regs); // set registers
+
+  /* special registers include segment registers */
+  struct kvm_sregs sregs;
+  ioctl(vcpufd, KVM_GET_SREGS, &amp;amp;sregs);
+  sregs.cs.base = sregs.cs.selector = 0; // let base of code segment equal to zero
+  ioctl(vcpufd, KVM_SET_SREGS, &amp;amp;sregs);
+  // not finished ...
+}
+&lt;/pre&gt;
+Here we create a vCPU and set up its registers include standard registers and &quot;special&quot; registers. Each &lt;span&gt;kvm_run&lt;/span&gt; structure corresponds to one vCPU, and we will use it to get the CPU status after execution. Notice that we can create multiple vCPUs under one VM, then with multithread we can emulate a VM with multiple CPUs. Note: by default, the vCPU runs in &lt;a href=&quot;https://en.wikipedia.org/wiki/Real_mode&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;real mode&lt;/strong&gt;&lt;/a&gt;, which only executes &lt;strong&gt;16-bit assembled code&lt;/strong&gt;. &lt;strong&gt;To run 32 or 64-bit, the page table must be set up&lt;/strong&gt;, which we'll describe later.&lt;p&gt;&lt;strong&gt;Step 7, execute!&lt;/strong&gt;&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* last step, run it! */
+void kvm(uint8_t code[], size_t code_len) {
+  /* ... step 1~6 omitted */
+  // step 7, execute vm and handle exit reason
+  while (1) {
+    ioctl(vcpufd, KVM_RUN, NULL);
+    switch (run-&amp;gt;exit_reason) {
+    case KVM_EXIT_HLT:
+      fputs(&quot;KVM_EXIT_HLT&quot;, stderr);
+      return 0;
+    case KVM_EXIT_IO:
+      /* TODO: check port and direction here */
+      putchar(*(((char *)run) + run-&amp;gt;io.data_offset));
+      break;
+    case KVM_EXIT_FAIL_ENTRY:
+      errx(1, &quot;KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason = 0x%llx&quot;,
+        run-&amp;gt;fail_entry.hardware_entry_failure_reason);
+    case KVM_EXIT_INTERNAL_ERROR:
+      errx(1, &quot;KVM_EXIT_INTERNAL_ERROR: suberror = 0x%x&quot;,
+        run-&amp;gt;internal.suberror);
+    case KVM_EXIT_SHUTDOWN:
+      errx(1, &quot;KVM_EXIT_SHUTDOWN&quot;);
+    default:
+      errx(1, &quot;Unhandled reason: %d&quot;, run-&amp;gt;exit_reason);
+    }
+  }
+}
+&lt;/pre&gt;
+Typically we only care about the first two cases, &lt;span&gt;KVM_EXIT_HLT&lt;/span&gt; and &lt;span&gt;KVM_EXIT_IO&lt;/span&gt;. With instruction &lt;span&gt;hlt&lt;/span&gt;, the &lt;span&gt;KVM_EXIT_HLT&lt;/span&gt; is triggered. Instructions &lt;a href=&quot;https://c9x.me/x86/html/file_module_x86_id_139.html&quot; target=&quot;_blank&quot;&gt;in&lt;/a&gt; and &lt;a href=&quot;https://c9x.me/x86/html/file_module_x86_id_222.html&quot; target=&quot;_blank&quot;&gt;out&lt;/a&gt; trigger &lt;span&gt;KVM_EXIT_IO&lt;/span&gt;. And not only for I/O, we can also use this as hypercall, i.e. to &lt;strong&gt;communicate with the host&lt;/strong&gt;. Here we only print one character sent to device.&lt;br/&gt;&lt;span&gt;ioctl(vcpufd, KVM_RUN, NULL)&lt;/span&gt; will run until an exit-like instruction occurred (such as &lt;span&gt;hlt&lt;/span&gt;, &lt;span&gt;out&lt;/span&gt;, or an error). You can also enable the single-step mode (not demonstrated here), then it will stop on every instructions.&lt;p&gt;Let's try our first KVM-based VM:&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+int main() {
+  /*
+  .code16
+  mov al, 0x61
+  mov dx, 0x217
+  out dx, al
+  mov al, 10
+  out dx, al
+  hlt
+  */
+  uint8_t code[] = &quot;\xB0\x61\xBA\x17\x02\xEE\xB0\n\xEE\xF4&quot;;
+  kvm(code, sizeof(code));
+}
+&lt;/pre&gt;
+And the execution result is:&lt;pre class=&quot;prettyprint&quot;&gt;
+$ ./kvm
+a
+KVM_EXIT_HLT
+&lt;/pre&gt;
+&lt;br/&gt;&lt;strong&gt;&lt;span&gt;64-bit World&lt;/span&gt;&lt;/strong&gt;&lt;br/&gt;To execute 64-bit assembled code, we need to set vCPU into &lt;a href=&quot;https://en.wikipedia.org/wiki/Long_mode&quot; target=&quot;_blank&quot;&gt;long mode&lt;/a&gt;. And &lt;a href=&quot;https://wiki.osdev.org/Setting_Up_Long_Mode&quot; target=&quot;_blank&quot;&gt;this wiki page&lt;/a&gt; describes how to switch from real mode to long mode, I highly recommend you read it as well. The most complicated part of switching into long mode is to set up the page tables for mapping virtual address into physical address. x86-64 processor uses a memory management feature named &lt;a href=&quot;https://en.wikipedia.org/wiki/Physical_Address_Extension&quot; target=&quot;_blank&quot;&gt;PAE (Physical Address Extension)&lt;/a&gt;, contains of four kinds of tables: PML4T, PDPT, PDT, and PT. The way these tables work is that each entry in the PML4T points to a PDPT, each entry in a PDPT to a PDT and each entry in a PDT to a PT. Each entry in a PT then points to the physical address.&lt;br/&gt;
+
+The figure above is called 4K paging. There's another paging method named 2M paging, with the PT (page table) removed. In this method the PDT entries point to physical address.&lt;p&gt;The control registers (&lt;span&gt;cr*&lt;/span&gt;) are used for setting paging attributes. For example, &lt;span&gt;cr3&lt;/span&gt; should point to physical address of &lt;span&gt;pml4&lt;/span&gt;. More information about control registers can be found &lt;a href=&quot;https://en.wikipedia.org/wiki/Control_register&quot; target=&quot;_blank&quot;&gt;in wikipedia&lt;/a&gt;.&lt;br/&gt;This code set up the tables, using the &lt;strong&gt;2M paging&lt;/strong&gt;.&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* Maps: 0 ~ 0x200000 -&amp;gt; 0 ~ 0x200000 */
+void setup_page_tables(void *mem, struct kvm_sregs *sregs){
+  uint64_t pml4_addr = 0x1000;
+  uint64_t *pml4 = (void *)(mem + pml4_addr);
+
+  uint64_t pdpt_addr = 0x2000;
+  uint64_t *pdpt = (void *)(mem + pdpt_addr);
+
+  uint64_t pd_addr = 0x3000;
+  uint64_t *pd = (void *)(mem + pd_addr);
+
+  pml4[0] = 3 | pdpt_addr; // PDE64_PRESENT | PDE64_RW | pdpt_addr
+  pdpt[0] = 3 | pd_addr; // PDE64_PRESENT | PDE64_RW | pd_addr
+  pd[0] = 3 | 0x80; // PDE64_PRESENT | PDE64_RW | PDE64_PS
+
+  sregs-&amp;gt;cr3 = pml4_addr;
+  sregs-&amp;gt;cr4 = 1 &amp;lt;&amp;lt; 5; // CR4_PAE;
+  sregs-&amp;gt;cr4 |= 0x600; // CR4_OSFXSR | CR4_OSXMMEXCPT; /* enable SSE instruction */
+  sregs-&amp;gt;cr0 = 0x80050033; // CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG
+  sregs-&amp;gt;efer = 0x500; // EFER_LME | EFER_LMA
+}
+&lt;/pre&gt;
+There're some control bits record in the tables, include if the page is mapped, is writable, and can be accessed in user-mode. e.g. 3 (&lt;span&gt;PDE64_PRESENT|PDE64_RW&lt;/span&gt;) stands for the memory is mapped and writable, and 0x80 (&lt;span&gt;PDE64_PS&lt;/span&gt;) stands for it's 2M paging instead of 4K. As a result, these page tables can map address below 0x200000 to itself (i.e. virtual address equals to physical address).&lt;p&gt;Remaining is setting segment registers:&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+void setup_segment_registers(struct kvm_sregs *sregs) {
+  struct kvm_segment seg = {
+    .base = 0,
+    .limit = 0xffffffff,
+    .selector = 1 &amp;lt;&amp;lt; 3,
+    .present = 1,
+    .type = 11, /* execute, read, accessed */
+    .dpl = 0, /* privilege level 0 */
+    .db = 0,
+    .s = 1,
+    .l = 1,
+    .g = 1,
+  };
+  sregs-&amp;gt;cs = seg;
+  seg.type = 3; /* read/write, accessed */
+  seg.selector = 2 &amp;lt;&amp;lt; 3;
+  sregs-&amp;gt;ds = sregs-&amp;gt;es = sregs-&amp;gt;fs = sregs-&amp;gt;gs = sregs-&amp;gt;ss = seg;
+}
+&lt;/pre&gt;
+&lt;br/&gt;We only need to modify VM setup in step 6 to support 64-bit instructions, change code from&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+  sregs.cs.base = sregs.cs.selector = 0; // let base of code segment equal to zero
+&lt;/pre&gt;
+to&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+  setup_page_tables(mem, &amp;amp;sregs);
+  setup_segment_registers(&amp;amp;sregs);
+&lt;/pre&gt;
+&lt;br/&gt;Now we can execute 64-bit assembled code.&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+int main() {
+  /*
+  movabs rax, 0x0a33323144434241
+  push 8
+  pop rcx
+  mov edx, 0x217
+OUT:
+  out dx, al
+  shr rax, 8
+  loop OUT
+  hlt
+  */
+  uint8_t code[] = &quot;H\xB8\x41\x42\x43\x44\x31\x32\x33\nj\bY\xBA\x17\x02\x00\x00\xEEH\xC1\xE8\b\xE2\xF9\xF4&quot;;
+  kvm(code, sizeof(code));
+}
+&lt;/pre&gt;
+And the execution result is:&lt;pre class=&quot;prettyprint&quot;&gt;
+$ ./kvm64
+ABCD123
+KVM_EXIT_HLT
+&lt;/pre&gt;
+&lt;span&gt;&lt;br/&gt;&lt;/span&gt;&lt;span&gt;The source code of hypervisor can be found in the &lt;a href=&quot;https://github.com/david942j/kvm-kernel-example/tree/master/hypervisor&quot; target=&quot;_blank&quot;&gt;repository/hypervisor&lt;/a&gt;.&lt;/span&gt;&lt;br/&gt;&lt;span&gt;So far you are already able to run x86-64 assembled code under KVM, so our &lt;strong&gt;introduction to KVM is almost finished&lt;/strong&gt; (except handling hypercalls). In the next section I will describe how to implement a simple kernel, which contains some OS knowledge. If you are interesting in how kernel works, go ahead.&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;br/&gt;&lt;/span&gt; &lt;strong&gt;Kernel&lt;/strong&gt;&lt;br/&gt;Before implementing a kernel, some questions need to be dealt with:&lt;br/&gt;&lt;ol&gt;&lt;li&gt;How CPU distinguishes between kernel-mode and user-mode?&lt;/li&gt;
+&lt;li&gt;How could CPU transfer control to kernel when user invokes &lt;span&gt;syscall&lt;/span&gt;?&lt;/li&gt;
+&lt;li&gt;How kernel switches between kernel and user?&lt;/li&gt;
+&lt;/ol&gt;&lt;div&gt;&lt;span&gt;&lt;strong&gt;kernel-mode v.s. user-mode&lt;/strong&gt;&lt;/span&gt;&lt;/div&gt;
+&lt;div&gt;An important difference between kernel-mode and user-mode is some instructions can only be executed under kernel-mode, such as &lt;span&gt;hlt&lt;/span&gt; and &lt;span&gt;wrmsr&lt;/span&gt;. The two modes are distinguish by the &lt;span&gt;dpl&lt;/span&gt; (descriptor privilege level) field in segment register &lt;span&gt;cs&lt;/span&gt;. &lt;span&gt;dpl=3&lt;/span&gt;  in &lt;span&gt;cs&lt;/span&gt; for user-mode, and zero for kernel-mode (not sure if this &quot;level&quot; equivalent to so-called ring3 and ring0).&lt;br/&gt;In real mode kernel should handle the segment registers carefully, while in x86-64, instructions &lt;span&gt;syscall&lt;/span&gt; and &lt;span&gt;sysret&lt;/span&gt; will properly set segment registers automatically, so we don't need to maintain segment registers manually.&lt;/div&gt;
+
+&lt;div&gt;And another difference is the permission setting in page tables. In the above example I set all entries as non-user-accessible:&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+  pml4[0] = 3 | pdpt_addr; // PDE64_PRESENT | PDE64_RW | pdpt_addr
+  pdpt[0] = 3 | pd_addr; // PDE64_PRESENT | PDE64_RW | pd_addr
+  pd[0] = 3 | 0x80; // PDE64_PRESENT | PDE64_RW | PDE64_PS
+&lt;/pre&gt;
+If kernel wants to create virtual memory for user-space, such as handling &lt;span&gt;mmap&lt;/span&gt; syscall from user, the page tables must set the 3rd bit, i.e. have bit (&lt;span&gt;1 &amp;lt;&amp;lt; 2&lt;/span&gt;) set, then the page can be accessed in user-space. For example,&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+  pml4[0] = 7 | pdpt_addr; // PDE64_USER | PDE64_PRESENT | PDE64_RW | pdpt_addr
+  pdpt[0] = 7 | pd_addr; // PDE64_USER | PDE64_PRESENT | PDE64_RW | pd_addr
+  pd[0] = 7 | 0x80; // PDE64_USER | PDE64_PRESENT | PDE64_RW | PDE64_PS
+&lt;/pre&gt;
+&lt;br/&gt;This is just an example, we should &lt;strong&gt;NOT&lt;/strong&gt; set user-accessible pages in hypervisor, user-accessible pages should be handled by our kernel.&lt;p&gt;&lt;span&gt;&lt;strong&gt;Syscall&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;There's a special register can enable &lt;span&gt;syscall&lt;/span&gt;/&lt;span&gt;sysenter&lt;/span&gt; instruction: &lt;a href=&quot;https://wiki.osdev.org/CPU_Registers_x86-64#IA32_EFER&quot; target=&quot;_blank&quot;&gt;EFER (Extended Feature Enable Register)&lt;/a&gt;. We have used it for entering long mode before:&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+sregs-&amp;gt;efer = 0x500; // EFER_LME | EFER_LMA
+&lt;/pre&gt;
+LME and LMA stand for Long Mode Enable and Long Mode Active, respectively.&lt;br/&gt;To enable &lt;span&gt;syscall&lt;/span&gt; as well, we should do&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+sregs-&amp;gt;efer |= 0x1; // EFER_SCE
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;div&gt;We also need to register syscall handler so that CPU knows where to jump when user invokes syscalls. And of course, this registration should be done in kernel instead of hypervisor. Registration of syscall handler can be achieved via setting special registers named &lt;a href=&quot;https://wiki.osdev.org/Model_Specific_Registers&quot; target=&quot;_blank&quot;&gt;MSR (Model Specific Registers)&lt;/a&gt;. We can get/set MSR in hypervisor through &lt;span&gt;ioctl&lt;/span&gt; on &lt;span&gt;vcpufd&lt;/span&gt;, or in kernel using instructions &lt;span&gt;rdmsr&lt;/span&gt; and &lt;span&gt;wrmsr&lt;/span&gt;.&lt;br/&gt;To register a syscall handler:&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+  lea rdi, [rip+syscall_handler]
+  call set_handler
+syscall_handler:
+  // handle syscalls!
+set_handler:
+  mov eax, edi
+  mov rdx, rdi
+  shr rdx, 32
+  /* input of msr is edx:eax */
+  mov ecx, 0xc0000082 /* MSR_LSTAR, Long Syscall TARget */
+  wrmsr
+  ret
+&lt;/pre&gt;
+&lt;br/&gt;The magic number 0xc0000082 is the index for MSR, you can find the definitions in &lt;a href=&quot;https://code.woboq.org/linux/linux/arch/x86/include/asm/msr-index.h.html#12&quot; target=&quot;_blank&quot;&gt;Linux source code&lt;/a&gt;.&lt;p&gt;After setup, we can invoke &lt;span&gt;syscall&lt;/span&gt; instruction and the program will jump to the handler we registered. &lt;span&gt;syscall&lt;/span&gt; instruction not only changes &lt;span&gt;rip&lt;/span&gt;, but also sets &lt;span&gt;rcx&lt;/span&gt; as return address so that kernel knows where to go back after handling syscall, and sets &lt;span&gt;r11&lt;/span&gt; as rflags. It will change two segment registers &lt;span&gt;cs&lt;/span&gt; and &lt;span&gt;ss&lt;/span&gt; as well, which we will describe in the next section.&lt;/p&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;Switching between kernel and user&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;We also need to register the &lt;span&gt;cs&lt;/span&gt;'s selector for both kernel and user, via the register MSR we have used before.&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://www.felixcloutier.com/x86/SYSCALL.html&quot; target=&quot;_blank&quot;&gt;Here&lt;/a&gt; and &lt;a href=&quot;https://www.felixcloutier.com/x86/SYSRET.html&quot; target=&quot;_blank&quot;&gt;here&lt;/a&gt; describe what does &lt;span&gt;syscall&lt;/span&gt; and &lt;span&gt;sysret&lt;/span&gt; do in details, respectively.&lt;br/&gt;From the pseudo code of &lt;span&gt;sysret&lt;/span&gt; you can see it sets attributes of &lt;span&gt;cs&lt;/span&gt; and &lt;span&gt;ss&lt;/span&gt; explicitly:&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+CS.Selector ← IA32_STAR[63:48]+16;
+CS.Selector ← CS.Selector OR 3; /* RPL forced to 3 */
+/* Set rest of CS to a fixed value */
+CS.Base ← 0; /* Flat segment */
+CS.Limit ← FFFFFH; /* With 4-KByte granularity, implies a 4-GByte limit */
+CS.Type ← 11; /* Execute/read code, accessed */
+CS.S ← 1;
+CS.DPL ← 3;
+CS.P ← 1;
+CS.L ← 1;
+CS.G ← 1; /* 4-KByte granularity */
+CPL ← 3;
+SS.Selector ← (IA32_STAR[63:48]+8) OR 3; /* RPL forced to 3 */
+/* Set rest of SS to a fixed value */
+SS.Base ← 0; /* Flat segment */
+SS.Limit ← FFFFFH; /* With 4-KByte granularity, implies a 4-GByte limit */
+SS.Type ← 3; /* Read/write data, accessed */
+SS.S ← 1;
+SS.DPL ← 3;
+SS.P ← 1;
+SS.B ← 1; /* 32-bit stack segment*/
+SS.G ← 1; /* 4-KByte granularity */
+&lt;/pre&gt;
+&lt;br/&gt;We have to register the value of &lt;span&gt;cs&lt;/span&gt; for both kernel and user through MSR:&lt;br/&gt;&lt;div&gt;
+&lt;pre class=&quot;prettyprint lang-asm&quot;&gt;
+  xor rax, rax
+  mov rdx, 0x00200008
+  mov ecx, 0xc0000081 /* MSR_STAR */
+  wrmsr
+&lt;/pre&gt;
+&lt;br/&gt;The last is set flags mask:&lt;pre class=&quot;prettyprint lang-asm&quot;&gt;
+  mov eax, 0x3f7fd5
+  xor rdx, rdx
+  mov ecx, 0xc0000084 /* MSR_SYSCALL_MASK */
+  wrmsr
+&lt;/pre&gt;
+The mask is important, when &lt;span&gt;syscall&lt;/span&gt; instruction is invoked, CPU will do:&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+rcx = rip;
+r11 = rflags;
+rflags &amp;amp;= ~SYSCALL_MASK;
+&lt;/pre&gt;
+If the mask is not set properly, kernel will inherit the &lt;span&gt;rflags&lt;/span&gt; set in user mode, which can cause severely security issues.&lt;/div&gt;
+&lt;br/&gt;The full code of registration is:&lt;pre class=&quot;prettyprint lang-asm&quot;&gt;
+register_syscall:
+  xor rax, rax
+  mov rdx, 0x00200008
+  mov ecx, 0xc0000081 /* MSR_STAR */
+  wrmsr
+
+  mov eax, 0x3f7fd5
+  xor rdx, rdx
+  mov ecx, 0xc0000084 /* MSR_SYSCALL_MASK */
+  wrmsr
+
+  lea rdi, [rip + syscall_handler]
+  mov eax, edi
+  mov rdx, rdi
+  shr rdx, 32
+  mov ecx, 0xc0000082 /* MSR_LSTAR */
+  wrmsr
+&lt;/pre&gt;
+&lt;br/&gt;Then we can safely use the &lt;span&gt;syscall&lt;/span&gt; instruction in user-mode. Now let's implement the &lt;span&gt;syscall_handler&lt;/span&gt;:&lt;pre class=&quot;prettyprint lang-asm&quot;&gt;
+.globl syscall_handler, kernel_stack
+.extern do_handle_syscall
+.intel_syntax noprefix
+
+kernel_stack: .quad 0 /* initialize it before the first time switching into user-mode */
+user_stack: .quad 0
+
+syscall_handler:
+  mov [rip + user_stack], rsp
+  mov rsp, [rip + kernel_stack]
+  /* save non-callee-saved registers */
+  push rdi
+  push rsi
+  push rdx
+  push rcx
+  push r8
+  push r9
+  push r10
+  push r11
+
+  /* the forth argument */
+  mov rcx, r10
+  call do_handle_syscall
+
+  pop r11
+  pop r10
+  pop r9
+  pop r8
+  pop rcx
+  pop rdx
+  pop rsi
+  pop rdi
+
+  mov rsp, [rip + user_stack]
+  .byte 0x48 /* REX.W prefix, to indicate sysret is a 64-bit instruction */
+  sysret
+&lt;/pre&gt;
+Notice that we have to properly push-and-pop not callee-saved registers. The &lt;span&gt;syscall&lt;/span&gt;/&lt;span&gt;sysret&lt;/span&gt; will not modify the stack pointer &lt;span&gt;rsp&lt;/span&gt;, so we have to handle it manually.&lt;p&gt;&lt;span&gt;&lt;strong&gt;Hypercall&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;Sometimes our kernel needs to communicate with the hypervisor, this can be done in many ways, in my kernel I use the &lt;span&gt;out&lt;/span&gt;/&lt;span&gt;in&lt;/span&gt; instructions for hypercalls. We have used the &lt;span&gt;out&lt;/span&gt; instruction to simply print a byte to stdout, now we extend it to do more fun things.&lt;br/&gt;An &lt;span&gt;in&lt;/span&gt;/&lt;span&gt;out&lt;/span&gt; instruction contains two arguments, 16-bit &lt;span&gt;dx&lt;/span&gt; and 32-bit &lt;span&gt;eax&lt;/span&gt;. I use the value of &lt;span&gt;dx&lt;/span&gt; for indicating what kind of hypercalls is intended to call, and &lt;span&gt;eax&lt;/span&gt; as its argument. I defined these hypercalls:&lt;br/&gt;&lt;/p&gt;&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+#define HP_NR_MARK 0x8000
+
+#define NR_HP_open  (HP_NR_MARK | 0)
+#define NR_HP_read  (HP_NR_MARK | 1)
+#define NR_HP_write  (HP_NR_MARK | 2)
+#define NR_HP_close  (HP_NR_MARK | 3)
+#define NR_HP_lseek  (HP_NR_MARK | 4)
+#define NR_HP_exit  (HP_NR_MARK | 5)
+
+#define NR_HP_panic (HP_NR_MARK | 0x7fff)
+&lt;/pre&gt;
+&lt;br/&gt;Then modify the hypervisor to not only print bytes when encountering &lt;span&gt;KVM_EXIT_IO&lt;/span&gt;:&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+while (1) {
+  ioctl(vm-&amp;gt;vcpufd, KVM_RUN, NULL);
+  switch (vm-&amp;gt;run-&amp;gt;exit_reason) {
+  /* other cases omitted */
+  case KVM_EXIT_IO:
+    // putchar(*(((char *)vm-&amp;gt;run) + vm-&amp;gt;run-&amp;gt;io.data_offset));
+    if(vm-&amp;gt;run-&amp;gt;io.port &amp;amp; HP_NR_MARK) {
+      switch(vm-&amp;gt;run-&amp;gt;io.port) {
+      case NR_HP_open: hp_handle_open(vm); break;
+      /* other cases omitted */
+      default: errx(1, &quot;Invalid hypercall&quot;);
+    }
+    else errx(1, &quot;Unhandled I/O port: 0x%x&quot;, vm-&amp;gt;run-&amp;gt;io.port);
+    break;
+  }
+}
+&lt;/pre&gt;
+&lt;br/&gt;Take &lt;span&gt;open&lt;/span&gt; as example, I implemented the handler of &lt;span&gt;open&lt;/span&gt; hypercall in hypervisor as: (&lt;strong&gt;&lt;em&gt;warning&lt;/em&gt;: this code lacks security checks&lt;/strong&gt;):&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* hypervisor/hypercall.c */
+static void hp_handle_open(VM *vm) {
+  static int ret = 0;
+  if(vm-&amp;gt;run-&amp;gt;io.direction == KVM_EXIT_IO_OUT) { // out instruction
+    uint32_t offset = *(uint32_t*)((uint8_t*)vm-&amp;gt;run + vm-&amp;gt;run-&amp;gt;io.data_offset);
+    const char *filename = (char*) vm-&amp;gt;mem + offset;
+
+    MAY_INIT_FD_MAP(); // initialize fd_map if it's not initialized
+    int min_fd;
+    for(min_fd = 0; min_fd &amp;lt;= MAX_FD; min_fd++)
+      if(fd_map[min_fd].opening == 0) break;
+    if(min_fd &amp;gt; MAX_FD) ret = -ENFILE;
+    else {
+      int fd = open(filename, O_RDONLY, 0);
+      if(fd &amp;lt; 0) ret = -errno;
+      else {
+        fd_map[min_fd].real_fd = fd;
+        fd_map[min_fd].opening = 1;
+        ret = min_fd;
+      }
+    }
+  } else { // in instruction
+    *(uint32_t*)((uint8_t*)vm-&amp;gt;run + vm-&amp;gt;run-&amp;gt;io.data_offset) = ret;
+  }
+}
+&lt;/pre&gt;
+In kernel we invoke the &lt;span&gt;open&lt;/span&gt; hypercall with:&lt;pre class=&quot;prettyprint lang-c&quot;&gt;
+/* kernel/hypercalls/hp_open.c */
+int hp_open(uint32_t filename_paddr) {
+  int ret = 0;
+  asm(
+    &quot;mov dx, %[port];&quot; /* hypercall number */
+    &quot;mov eax, %[data];&quot;
+    &quot;out dx, eax;&quot; /* trigger hypervisor to handle the hypercall */
+    &quot;in eax, dx;&quot;  /* get return value of the hypercall */
+    &quot;mov %[ret], eax;&quot;
+    : [ret] &quot;=r&quot;(ret)
+    : [port] &quot;r&quot;(NR_HP_open), [data] &quot;r&quot;(filename_paddr)
+    : &quot;rax&quot;, &quot;rdx&quot;
+  );
+  return ret;
+}
+&lt;/pre&gt;
+&lt;br/&gt;&lt;span&gt;&lt;strong&gt;Almost done&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;Now you should know all things to implement a simple Linux kernel running under KVM. Some details are worthy to be mentioned during the implementation.&lt;br/&gt;&lt;span&gt;&lt;strong&gt;execve&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;My kernel is able to execute a simple ELF, to do this you will need knowledge with structure of ELF, which is too complicated to introduce here. You can refer to the source code of Linux for details: &lt;a href=&quot;https://code.woboq.org/linux/linux/fs/binfmt_elf.c.html#load_elf_binary&quot; target=&quot;_blank&quot;&gt;linux/fs/binfmt_elf.c#load_elf_binary&lt;/a&gt;.&lt;p&gt;&lt;span&gt;&lt;strong&gt;memory allocator&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;You will need &lt;span&gt;malloc&lt;/span&gt;/&lt;span&gt;free&lt;/span&gt; for kernel, try to implement a memory allocator by yourself!&lt;/p&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;paging&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;Kernel has to handle the &lt;span&gt;mmap&lt;/span&gt; request from user mode, so you will need to modify the page tables during runtime. Be care of NOT mixing kernel-only addresses with user-accessible addresses.&lt;/p&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;permission checking&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;All arguments passed from user-mode most be carefully checked. I've implemented checking methods in &lt;a href=&quot;https://github.com/david942j/kvm-kernel-example/blob/master/kernel/mm/uaccess.c&quot; target=&quot;_blank&quot;&gt;kernel/mm/uaccess.c&lt;/a&gt;. Without properly checking, user-mode may be able to do arbitrary read/write on kernel-space, which is a severe security issue.&lt;/p&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;Conclusion&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;This post introduces how to implement a KVM-based hypervisor and a simple Linux kernel, wish it can help you know about KVM and Linux more clearly.&lt;br/&gt;I know I've omitted many details here, especially for the kernel part. Since this post is intended to be an introduction of KVM, I think this arrangement is appropriate.&lt;/p&gt;&lt;p&gt;If you have any questions or find bugs in my code, leave comments here or file an issue on &lt;a href=&quot;https://github.com/david942j/kvm-kernel-example&quot; target=&quot;_blank&quot;&gt;github&lt;/a&gt;.&lt;br/&gt;If this post is helpful to you, I'll be very grateful to see 'thanks' on twitter &lt;a href=&quot;https://twitter.com/david942j&quot; target=&quot;_blank&quot;&gt;@david942j&lt;/a&gt; :D&lt;/p&gt;&lt;/div&gt;
+
+</description>
+<pubDate>Tue, 01 Jan 2019 04:25:13 +0000</pubDate>
+<dc:creator>signa11</dc:creator>
+<og:url>https://david942j.blogspot.com/2018/10/note-learning-kvm-implement-your-own.html</og:url>
+<og:title>[Note] Learning KVM - implement your own Linux kernel</og:title>
+<og:description>Few weeks ago I solved a great KVM escaping challenge from TWCTF hosted by @TokyoWesterns . I have given a writeup on my blog:  [Write-up] T...</og:description>
+<og:image>https://1.bp.blogspot.com/--7vsSQoMFw8/W7OZ3zPoETI/AAAAAAAAApI/M9JC3Fgbxb864DKaxb2hcKqTw1wUOkFMwCK4BGAYYCw/w1200-h630-p-k-no-nu/%25E8%259E%25A2%25E5%25B9%2595%25E5%25BF%25AB%25E7%2585%25A7%2B2018-10-03%2B00.15.07.png</og:image>
+<dc:language>zh-TW</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://david942j.blogspot.com/2018/10/note-learning-kvm-implement-your-own.html</dc:identifier>
+</item>
+<item>
 <title>Federal judge finds state law governing who is an engineer violates free speech</title>
 <link>https://www.oregonlive.com/news/2018/12/federal-judge-finds-state-law-governing-who-is-an-engineer-violates-free-speech.html</link>
 <guid isPermaLink="true" >https://www.oregonlive.com/news/2018/12/federal-judge-finds-state-law-governing-who-is-an-engineer-violates-free-speech.html</guid>
@@ -294,16 +714,16 @@
 <description>&lt;tr readability=&quot;0.55737704918033&quot;&gt;&lt;td bgcolor=&quot;#FF6600&quot;&gt;
 &lt;/td&gt;
 &lt;/tr&gt;&lt;tr id=&quot;pagespace&quot; title=&quot;Ask HN: Engineers from non-CS background, how did you pivot into ML/AI?&quot;&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;10.761670761671&quot;&gt;&lt;td&gt;
-&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;7.1744471744472&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18793849&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;10.779327317473&quot;&gt;&lt;td&gt;
+&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;7.1862182116489&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;18793849&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
 &lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
 &lt;center&gt;
 
 &lt;/center&gt;
 &lt;/td&gt;
 &lt;td class=&quot;title&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18793849&quot; class=&quot;storylink&quot;&gt;Ask HN: Engineers from non-CS background, how did you pivot into ML/AI?&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;0.70588235294118&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18793849&quot;&gt;287 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=ultrasounder&quot; class=&quot;hnuser&quot;&gt;ultrasounder&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18793849&quot;&gt;17 hours ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18793849&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18793849&amp;amp;goto=item%3Fid%3D18793849&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Ask%20HN%3A%20Engineers%20from%20non-CS%20background%2C%20how%20did%20you%20pivot%20into%20ML%2FAI%3F&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Ask%20HN%3A%20Engineers%20from%20non-CS%20background%2C%20how%20did%20you%20pivot%20into%20ML%2FAI%3F&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18793849&amp;amp;auth=0be62b43e74441a55ca2ab173ff1b771bea52f69&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18793849&quot;&gt;97 comments&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;0.72289156626506&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
+&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_18793849&quot;&gt;316 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=ultrasounder&quot; class=&quot;hnuser&quot;&gt;ultrasounder&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=18793849&quot;&gt;1 day ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_18793849&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=18793849&amp;amp;goto=item%3Fid%3D18793849&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Ask%20HN%3A%20Engineers%20from%20non-CS%20background%2C%20how%20did%20you%20pivot%20into%20ML%2FAI%3F&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Ask%20HN%3A%20Engineers%20from%20non-CS%20background%2C%20how%20did%20you%20pivot%20into%20ML%2FAI%3F&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=18793849&amp;amp;auth=0be62b43e74441a55ca2ab173ff1b771bea52f69&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=18793849&quot;&gt;109 comments&lt;/a&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
 &lt;/tr&gt;&lt;tr readability=&quot;11&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
 &lt;td&gt;I am a EE, hardware engineer with about a decade of experience in PCB electronics and systems engineering experience which includes a brief stint at a FAANG that also happens to be an E-tailer. I have been &quot;dabbling&quot; in Python for about a year now and just recently started with DL using PyTorch and find it quite interesting. To be clear I don't write code at work, atleast not until now. I intend to utilize any free resources (MOOCs) to teach myself the latest techniques in DL for CV. What I am not clear is the next logical step.A part of me wants to Boostrap a SAAS using Python stack to build something that I can market using the traditional channels(PH,Show HN,Reddit,answer SO questions) and show it to potential employers but am not sure if I will even get to the interview stage with a resume but that doesn't look anything like a programmer with a tradional CS background and work experience to boot. Sorry about the long and winding question, but what should I do to get noticed by recruiters at FAANG and non-FAANG to stand apart from the CS crowd?&lt;/td&gt;
@@ -357,593 +777,6 @@
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://theconversation.com/people-with-depression-use-language-differently-heres-how-to-spot-it-90877</dc:identifier>
-</item>
-<item>
-<title>The Uncharity of College: The Big Business Nobody Understands</title>
-<link>https://www.conradbastable.com/essays/the-uncharity-of-college-the-big-business-nobody-understands</link>
-<guid isPermaLink="true" >https://www.conradbastable.com/essays/the-uncharity-of-college-the-big-business-nobody-understands</guid>
-<description>&lt;div class=&quot;sqs-layout sqs-grid-12 columns-12&quot; data-layout-label=&quot;Post Body&quot; data-type=&quot;item&quot; data-updated-on=&quot;1545947593780&quot; id=&quot;item-5c2404b22b6a28a419cd6f0f&quot;&gt;
-&lt;div class=&quot;row sqs-row&quot;&gt;
-&lt;div class=&quot;col sqs-col-12 span-12&quot;&gt;
-
-&lt;div class=&quot;sqs-block markdown-block sqs-block-markdown&quot; data-block-type=&quot;44&quot; id=&quot;block-yui_3_17_2_1_1545864346754_27558&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Some people naively dismiss the insane increases in the Cost of Education over the last 50 years as merely Vanilla flavored &lt;a href=&quot;http://slatestarcodex.com/2017/02/09/considerations-on-cost-disease/&quot;&gt;Cost Disease&lt;/a&gt;. Don’t be fooled by the marshmallow swirl — this is Rocky Road, and the &lt;del&gt;shit&lt;/del&gt; chocolatey-covered almond pieces are buried deep.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_28615&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-hidden design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26b80df950b760dd3ce15e/1546041365569/rocky_road.png&quot; alt=&quot;rocky_road.png&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26b80df950b760dd3ce15e/1546041365569/rocky_road.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26b80df950b760dd3ce15e/1546041365569/rocky_road.png&quot; data-image-dimensions=&quot;350x269&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;rocky_road.png&quot; data-load=&quot;false&quot; data-image-id=&quot;5c26b80df950b760dd3ce15e&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_367795&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;A very brief summary of what’s to come in this essay:&lt;/p&gt;
-&lt;ul data-rte-list=&quot;default&quot;&gt;&lt;li&gt;
-&lt;p&gt;College degrees are more valuable than ever in post-industrial economies, so applicants to top-tier schools are up 240% over the last 25 years &lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Meanwhile, available spots at top-tier colleges in America have increased just 2% over the last 25  years&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;strong&gt;Microeconomics 101: Fixed Supply + Increased Demand =&lt;/strong&gt; &lt;strong&gt;Increased Price&lt;/strong&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;That’s the obvious part&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;strong&gt;The non-obvious part is that this is intentional&lt;/strong&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Because the Charity-status ( &lt;strong&gt;&lt;em&gt;501(c)(3)&lt;/em&gt;&lt;/strong&gt; )of Colleges in America depends on more-than-half of their students being unable to afford the education (read: “receiving financial aid”)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;That Charity-status protects the Investment Returns of College Endowments from Uncle Sam &amp;amp; the IRS&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Investment Returns Compound over time, and there is no more powerful force on Earth — anyone not playing the game to maximize Compound-returns will lose to everyone who is&lt;/p&gt;
-&lt;ul data-rte-list=&quot;default&quot;&gt;&lt;li&gt;
-&lt;p&gt;Investment Returns already generate more revenue than undergrad tuition income at: Princeton &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://finance.princeton.edu/princeton-financial-overv/report-of-the-treasurer/audited_financial_statement_fy17.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;911% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Harvard &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://finance.harvard.edu/files/fad/files/final_harvard_university_financial_report_2017.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;529% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Yale &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://your.yale.edu/sites/default/files/2016-2017_yale_financial_report.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;254% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; MIT &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://vpf.mit.edu/sites/default/files/downloads/TreasurersReport/MITTreasurersReport2017.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;118% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Stanford &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://bondholder-information.stanford.edu/pdf/SU_AnnualFinancialReport_2017.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;115% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Brown &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://www.brown.edu/about/administration/president/sites/president/files/Presidents_Financial_Report_FY17.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;29% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Duke &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://finance.duke.edu/resources/docs/financial_reports2016-17.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;13% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; Dartmouth &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://www.dartmouth.edu/~control/docs/financialrept/2017-dcfinancialstmt.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;9% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;),&lt;/em&gt; and U Chicago &lt;em&gt;(&lt;/em&gt;&lt;a href=&quot;https://finserv.uchicago.edu/sites/finserv.uchicago.edu/files/uploads/Documents/doc/F_666275_RESTRICTED_17_TheUniversityofChicago_FS.pdf&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;6% more&lt;/em&gt;&lt;/a&gt;&lt;em&gt;)&lt;/em&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Undergrad tuition brings in just 10% - 20% of total revenue at the Ivy League / Top-10 schools not listed above. Undergrad Tuition is not more than a quarter of revenue at any of these schools.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Thus: &lt;strong&gt;&lt;em&gt;if Colleges want to keep their Investment Returns tax-free,&lt;/em&gt;&lt;/strong&gt; &lt;strong&gt;&lt;em&gt;Tuition MUST remain unaffordable for at least 50% of undergrads&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_493019&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;You think its your TUITION dollars that add $1 billion a year to this?&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2703eeb8a0456c72b2cd52/1546114690755/endowment_growth_example.png&quot; alt=&quot;You think its your TUITION dollars that add $1 billion a year to this?&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2703eeb8a0456c72b2cd52/1546114690755/endowment_growth_example.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2703eeb8a0456c72b2cd52/1546114690755/endowment_growth_example.png&quot; data-image-dimensions=&quot;435x329&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;You think its your TUITION dollars that add $1 billion a year to this?&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2703eeb8a0456c72b2cd52&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;You think its your TUITION dollars that add $1 billion a year to this?&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_493305&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;h2&gt;Ricardo’s Cost Disease&lt;/h2&gt;
-&lt;p&gt;The traditional formulation of &lt;a href=&quot;https://en.wikipedia.org/wiki/Baumol%27s_cost_disease&quot; target=&quot;_blank&quot;&gt;Baumol’s cost disease&lt;/a&gt; is quite simple: the cost of [SOMETHING] is not related to the direct cost of providing that [SOMETHING], but to the cost of the [MOST PRODUCTIVE OTHER THING] that could have been provided with the same resources instead.&lt;/p&gt;
-&lt;p&gt;They say there is nothing new under the sun, so naturally Baumol’s cost disease is a restatement for the modern era of a Law of economics developed by a Founding Father of the dismal science: &lt;a href=&quot;https://en.wikipedia.org/wiki/David_Ricardo&quot; target=&quot;_blank&quot;&gt;David Ricardo&lt;/a&gt;.&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;&lt;strong&gt;The&lt;/strong&gt; &lt;a href=&quot;https://en.wikipedia.org/wiki/Law_of_rent&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;Law of Rent&lt;/strong&gt;&lt;/a&gt; &lt;strong&gt;states that the rent of a land site is equal to the economic advantage obtained by using the site in its most productive use…&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;And Adam Smith himself &lt;a href=&quot;https://en.wikipedia.org/wiki/Law_of_rent#Description&quot; target=&quot;_blank&quot;&gt;wrote&lt;/a&gt; in The Wealth of Nations:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;The rent of land, therefore, considered as the price paid for the use of the land, is naturally a monopoly price. It is not at all proportioned to what the landlord may have laid out upon the improvement of the land, or to what he can afford to take; &lt;strong&gt;but to what the farmer can afford to give.&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;In a Feudal Agrarian society, land is the major productive asset. So of course this conversation between Adam Smith and David Ricardo would be about Rent — what else would the average man spend his Wealth on?&lt;/p&gt;
-&lt;p&gt;But in 2018, we’ve got so many potential outlets for Capital — capital C — that Ricardo’s Law of Rent bleeds into every possible cost, from Infrastructure to Education to the Barbershop.&lt;/p&gt;
-&lt;p&gt;However.&lt;/p&gt;
-&lt;h2&gt;Lay of the Land: Education is a More Complex Flavor of Cost Disease&lt;/h2&gt;
-&lt;p&gt;Conventional wisdom says “a generation” is &lt;a href=&quot;https://www.quora.com/How-long-is-a-generation&quot; target=&quot;_blank&quot;&gt;about 25 years&lt;/a&gt;, plus or minus 5.&lt;/p&gt;
-&lt;p&gt;3 months ago, the class of 2022 began their first semester at my alma mater: MIT. &lt;/p&gt;
-&lt;p&gt;A Generation ago, the class of 1997 also began their first semester.&lt;/p&gt;
-&lt;p&gt;How has this small world of education changed in one Generation?&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Total US College Enrollment Up&lt;/strong&gt; &lt;a href=&quot;https://www.statista.com/statistics/183995/us-college-enrollment-and-projections-in-public-and-private-institutions/&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;39%&lt;/strong&gt;&lt;/a&gt; &lt;strong&gt;from 1993 to 2018&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_68321&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;How many people actually applied each year? Unclear. We genuinely don’t seem to have that data — or at least Google didn’t dig it up for me yet.&lt;/p&gt;
-&lt;p&gt;Similarly, you can cut the green line off on my &lt;a href=&quot;https://www.conradbastable.com/essays/the-bermuda-triangle-of-wealth&quot; target=&quot;_blank&quot;&gt;previous essay’s&lt;/a&gt; chart around 1993…&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_68874&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254e4621c67c5f35edcc06/1545948773003/cost_of_tuition.png&quot; alt=&quot;cost_of_tuition.png&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254e4621c67c5f35edcc06/1545948773003/cost_of_tuition.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254e4621c67c5f35edcc06/1545948773003/cost_of_tuition.png&quot; data-image-dimensions=&quot;664x400&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;cost_of_tuition.png&quot; data-load=&quot;false&quot; data-image-id=&quot;5c254e4621c67c5f35edcc06&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_73010&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;…and see that the cost of this education has increased about 300% since 1993 &lt;em&gt;(1,225% / 300% - 1) &lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;And to re-include just one more chart, you can see that 1993 marks a period that began a ~20% increase in real wages for male workers with Bachelor’s Degrees &lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1546122117736_41409&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-hidden design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c280055575d1f0c316ffa3a/1546125406045/wages_by_education_level.png&quot; alt=&quot;wages_by_education_level.png&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c280055575d1f0c316ffa3a/1546125406045/wages_by_education_level.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c280055575d1f0c316ffa3a/1546125406045/wages_by_education_level.png&quot; data-image-dimensions=&quot;679x368&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;wages_by_education_level.png&quot; data-load=&quot;false&quot; data-image-id=&quot;5c280055575d1f0c316ffa3a&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1546122117736_41696&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;So over this last Generation, &lt;strong&gt;a Bachelor’s Degree or higher has increased real wages by &lt;em&gt;20% - 40%&lt;/em&gt;, the total number of college-enrolled students has increased 39%, and the cost has increased by &lt;em&gt;~300%&lt;/em&gt;.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Adam Smith suggests that &lt;strong&gt;the cost of this education should rise according to what the middle-class can afford to give. &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;I concur.&lt;/p&gt;
-&lt;p&gt;David Ricardo suggests that &lt;strong&gt;the cost of this education should mirror the maximum possible benefit from the education&lt;/strong&gt;, regardless of what major was chosen and GPA achieved. &lt;/p&gt;
-&lt;p&gt;I concur.&lt;/p&gt;
-&lt;p&gt;Baumol’s Cost Disease suggests that &lt;strong&gt;the cost of this education should rise with the productivity of the rest of our economy. &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;I concur. And incidentally, the Cost of Tuition chart above is not-inflation-adjusted, so if we look at nominal-GDP between 1993 and 2018 we find it increased from &lt;a href=&quot;https://fred.stlouisfed.org/series/GDP&quot; target=&quot;_blank&quot;&gt;$7,247B to $20,412B&lt;/a&gt; — or &lt;em&gt;182%.&lt;/em&gt; That is to say, perhaps as much as 2/3rds of the increase in the cost of education might be driven by an increase in overall productivity over the same time period — assuming that education is well-positioned to capture a large share of that surplus production.&lt;/p&gt;
-&lt;p&gt;Which it is.&lt;/p&gt;
-&lt;p&gt;But what of the remainder?&lt;/p&gt;
-&lt;h2&gt;Mens et Manus and No More Bodies&lt;/h2&gt;
-&lt;p&gt;I’m going to focus on MIT because I love the school and I was lucky enough to get in 10 years ago today. I focus here because I know it best, and I know it is the best. Which brings me to MIT’s Class of 1997, who began their undergraduate journey 25 years ago. Being the advanced institute that it is, MIT kindly uploaded the admittance stats for this class:&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_74628&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;http://news.mit.edu/1993/class-0331&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f1fb8a045c5250ec23c/1545948985776/mit_class_of_1997.png&quot; alt=&quot;http://news.mit.edu/1993/class-0331&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f1fb8a045c5250ec23c/1545948985776/mit_class_of_1997.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f1fb8a045c5250ec23c/1545948985776/mit_class_of_1997.png&quot; data-image-dimensions=&quot;627x239&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;http://news.mit.edu/1993/class-0331&quot; data-load=&quot;false&quot; data-image-id=&quot;5c254f1fb8a045c5250ec23c&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;http://news.mit.edu/1993/class-0331&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_78798&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Yes, you read that right.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;32% of applicants were accepted to MIT last Generation.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Total class size: 1,100.&lt;/p&gt;
-&lt;p&gt;Step forward a Generation, and look at today’s MIT Class of 2022:&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_79358&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;&amp;lt;a href=&amp;quot;https://web.archive.org/web/20181120235014/https://mitadmissions.org/apply/process/stats/&amp;quot; target=&amp;quot;_blank&amp;quot;&amp;gt;https://web.archive.org/web/20181120235014/https://mitadmissions.org/apply/process/stats/&amp;lt;/a&amp;gt;&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f5bb8a045c5250ec608/1545949040294/mit_class_of_2022.png&quot; alt=&quot;https://web.archive.org/web/20181120235014/https://mitadmissions.org/apply/process/stats/&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f5bb8a045c5250ec608/1545949040294/mit_class_of_2022.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254f5bb8a045c5250ec608/1545949040294/mit_class_of_2022.png&quot; data-image-dimensions=&quot;788x176&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;https://web.archive.org/web/20181120235014/https://mitadmissions.org/apply/process/stats/&quot; data-load=&quot;false&quot; data-image-id=&quot;5c254f5bb8a045c5250ec608&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_83289&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Of those 1,464 admits, &lt;a href=&quot;https://web.archive.org/web/20181120235018/https://mitadmissions.org/apply/process/profile/&quot; target=&quot;_blank&quot;&gt;1,122 of them&lt;/a&gt; ultimately decided to make MIT their home for the next 4 years (good choice!).&lt;/p&gt;
-&lt;p&gt;Thus, &lt;strong&gt;the Total Applicant Pool increased 239% over this 25 year period&lt;/strong&gt; — from 6,410 to 21,706.&lt;/p&gt;
-&lt;p&gt;Meanwhile, &lt;strong&gt;Class Size increased 2% over that same time period&lt;/strong&gt;, from 1,100 to 1,122 — just 22 extra bodies.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;The Cost of Tuition increased 171%&lt;/strong&gt; — excluding room &amp;amp; board and other expenses — from &lt;a href=&quot;http://news.mit.edu/1993/tuition-0310&quot; target=&quot;_blank&quot;&gt;$19,000&lt;/a&gt; to &lt;a href=&quot;https://web.archive.org/web/20180922222114/https://sfs.mit.edu/undergraduate-students/the-cost-of-attendance/annual-student-budget/&quot; target=&quot;_blank&quot;&gt;$51,520&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Education therefore exists at the intersection of increased productivity driving up overall costs — Vanilla Cost Disease — with massively increased competition in an ever-growing applicant pool for a fixed number of spots. My claim is that this is a feature, not a bug.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Due to the way signaling, ranking, social hierarchies, and prestige work in human society, opening a brand new University does not lower the value of MIT &amp;amp; the Ivy League schools. It actually increases their value. &lt;em&gt;Not&lt;/em&gt; attending has the same signaling weight as attending, just in the other direction. &lt;/p&gt;
-&lt;p&gt;In a world where &lt;em&gt;32%&lt;/em&gt; of applicants are accepted to MIT, perhaps the signaling value is moderately strong. In a world where &lt;em&gt;93.3%&lt;/em&gt; of applicants are &lt;em&gt;rejected&lt;/em&gt;, the signaling value of being one of the lucky view goes up, not down. People tend to like people that other people like (lol) — but they tend to avoid people that other people have rejected. The impulse to avoid is stronger than the impulse to seek-out, because the downsides of social-association can be unbounded.&lt;/p&gt;
-&lt;p&gt;Why is increasing competition for a constant number of spots a feature (intended), not a bug (accidental)?&lt;/p&gt;
-&lt;p&gt;Question: As someone who has already applied, been accepted, attended, and graduated from a prestigious Institute, is my personal value-by-association-with-MIT increased or decreased by MIT becoming more selective? &lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Trivially: my value increases as the value of an MIT-stamp-of-approval increases.&lt;/strong&gt; &lt;/p&gt;
-&lt;p&gt;&lt;em&gt;Spoiler alert: this describes all alumni, staff, and current and future students. &lt;/em&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block markdown-block sqs-block-markdown&quot; data-block-type=&quot;44&quot; id=&quot;block-yui_3_17_2_1_1545864346754_701360&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;&lt;strong&gt;So how do you increase the &lt;del&gt;prestige&lt;/del&gt; &lt;del&gt;price&lt;/del&gt; value of a social signal?&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_84023&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Thanks to &amp;lt;a href=&amp;quot;https://www.cs.mcgill.ca/~rwest/wikispeedia/wpcd/wp/s/Supply_and_demand.htm&amp;quot; target=&amp;quot;_blank&amp;quot;&amp;gt;McGill for this chart&amp;lt;/a&amp;gt; — here’s &amp;lt;a href=&amp;quot;https://ocw.mit.edu/courses/economics/14-01sc-principles-of-microeconomics-fall-2011/&amp;quot; target=&amp;quot;_blank&amp;quot;&amp;gt;a link to &amp;lt;/a&amp;gt;MIT’s Microeconomics class if anyone needs to brush up on the fundamentals. Don’t worry, taking this class online for free doesn’t lower the value of getting accepted by MIT — why is that? 6.7% btw&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254fbd758d460c2acda1e7/1546032817196/vertical_supply_curve.png&quot; alt=&quot;Thanks to McGill for this chart — here’s a link to MIT’s Microeconomics class if anyone needs to brush up on the fundamentals. Don’t worry, taking this class online for free doesn’t lower the value of getting accepted by MIT — why is that? 6.7% btw&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254fbd758d460c2acda1e7/1546032817196/vertical_supply_curve.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c254fbd758d460c2acda1e7/1546032817196/vertical_supply_curve.png&quot; data-image-dimensions=&quot;328x256&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Thanks to McGill for this chart — here’s a link to MIT’s Microeconomics class if anyone needs to brush up on the fundamentals. Don’t worry, taking this class online for free doesn’t lower the value of getting accepted by MIT — why is that? 6.7% btw&quot; data-load=&quot;false&quot; data-image-id=&quot;5c254fbd758d460c2acda1e7&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;Thanks to &lt;a href=&quot;https://www.cs.mcgill.ca/~rwest/wikispeedia/wpcd/wp/s/Supply_and_demand.htm&quot; target=&quot;_blank&quot;&gt;McGill for this chart&lt;/a&gt; — here’s &lt;a href=&quot;https://ocw.mit.edu/courses/economics/14-01sc-principles-of-microeconomics-fall-2011/&quot; target=&quot;_blank&quot;&gt;a link to&lt;/a&gt; MIT’s Microeconomics class if anyone needs to brush up on the fundamentals. Don’t worry, taking this class online for free doesn’t lower the value of getting accepted by MIT — why is that? 6.7% btw&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_87764&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;This is where I add that my own Class — 2013 — only had to deal with a &lt;a href=&quot;https://thetech.com/2009/03/13/admissions-v129-n12&quot; target=&quot;_blank&quot;&gt;10% Admit Rate&lt;/a&gt; at MIT, a “record low” at the time. But 25 years from now, when the admit rate is 2%, I’ll be very appreciative of the increased prestige that comes by association with such an &lt;em&gt;elite&lt;/em&gt; institution.&lt;/p&gt;
-&lt;p&gt;Again — &lt;strong&gt;I’m only focusing in on MIT because I love the school and I was lucky enough to get in 10 years ago today.&lt;/strong&gt; Don’t think Yale didn’t accept &lt;a href=&quot;https://web.archive.org/web/20120801095304/http://oir.yale.edu/factsheet-archive&quot; target=&quot;_blank&quot;&gt;20% of applicants in 1995&lt;/a&gt;, UChicago didn’t accept &lt;a href=&quot;https://www.chicagomaroon.com/2010/4/2/acceptance-rate-falls-by-one-third-reaching-record-low-of-18-percent/&quot; target=&quot;_blank&quot;&gt;77% of applicants in 1993&lt;/a&gt;, or that the Harvard Class of 1988 didn’t &lt;a href=&quot;https://www.quora.com/What-was-the-acceptance-rate-at-Harvard-+30-years-ago&quot; target=&quot;_blank&quot;&gt;admit more kids&lt;/a&gt; than the Class of 2022 &lt;a href=&quot;https://web.archive.org/web/20181221100551/https://college.harvard.edu/admissions/admissions-statistics&quot; target=&quot;_blank&quot;&gt;just did&lt;/a&gt;. Because all those things are true.&lt;/p&gt;
-&lt;p&gt;I leave as an exercise for the reader to explore how massively increased competition for strictly limited spots at the nations most prestigious institutions impacts cultural cohesion and the perception of &lt;em&gt;the elite&lt;/em&gt; in the rest of the country — especially during a time in which the stamp-of-approval from said prestigious institutions becomes ever-more critical to career success and wage growth.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_88279&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Pictured: College admissions for the Class of 2035&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2696d04ae2379d32102fdc/1546032870118/increased_competition.gif&quot; alt=&quot;Pictured: College admissions for the Class of 2035&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2696d04ae2379d32102fdc/1546032870118/increased_competition.gif&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2696d04ae2379d32102fdc/1546032870118/increased_competition.gif&quot; data-image-dimensions=&quot;500x200&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Pictured: College admissions for the Class of 2035&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2696d04ae2379d32102fdc&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;Pictured: College admissions for the Class of 2035&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_92260&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;h2&gt;One More Thing: &lt;em&gt;If you're not paying for the product, you are the product&lt;/em&gt;&lt;/h2&gt;
-&lt;p&gt;There’s an extra layer to this strange ice cream cake of constant-supply education, I told you the almonds were buried deep: &lt;strong&gt;we didn’t get to Tuition yet.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;If you actually followed that earlier “$19,000” link to a 1993 MIT article on their Tuition, and you read the President’s quote at the end, and you were wondering what he meant by: &lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;These two actions are consistent with our stand against the &lt;strong&gt;Justice Department's anti-trust suit&lt;/strong&gt;, and are major driving forces in the development of an imbalance in our operating budget.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_92945&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26973fcd836676a18b0981/1546033015843/justice_department.png&quot; alt=&quot;justice_department.png&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26973fcd836676a18b0981/1546033015843/justice_department.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c26973fcd836676a18b0981/1546033015843/justice_department.png&quot; data-image-dimensions=&quot;1600x1600&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;justice_department.png&quot; data-load=&quot;false&quot; data-image-id=&quot;5c26973fcd836676a18b0981&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_97832&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;You’ll be &lt;a href=&quot;https://www.nytimes.com/1993/12/30/opinion/justice-serves-mit-and-needy-students.html&quot; target=&quot;_blank&quot;&gt;pleased to read&lt;/a&gt; that MIT prevailed in defending its practices from the Justice Department in December, 1993:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;The case involved the widespread practice of pooling information about applicants for financial aid. The nation's brightest high school seniors often apply to several elite colleges. &lt;strong&gt;To prevent a bidding war, with colleges &quot;buying&quot; the best students with big aid packages, some institutions share information about their applicants, agreeing to limit their offers to the students' financial need.&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;I was under the impression that service-providers entering a “bidding war” to offer consumers lower prices was known as “Competition” in America. Thanks Uber &amp;amp; Lyft, btw. And I thought the opposite — NYTimes dubbed “cooperative practices” in that article — was known as “Price Fixing”?&lt;/p&gt;
-&lt;p&gt;And since when was the salesman of a service the right person to determine my financial &lt;em&gt;“need”&lt;/em&gt;?&lt;/p&gt;
-&lt;h2&gt;A Charitable Misunderstanding&lt;/h2&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block markdown-block sqs-block-markdown&quot; data-block-type=&quot;44&quot; id=&quot;block-yui_3_17_2_1_1545864346754_181969&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;In true Ivy League fashion, the eight Ivy League schools targeted by the Justice Department agreed to sign a “consent decree” barring such &lt;del&gt;price fixing&lt;/del&gt; cooperation, while admitting no wrongdoing at all. Shoutout to the &lt;a href=&quot;https://www.rollingstone.com/politics/politics-news/why-isnt-wall-street-in-jail-179414/&quot;&gt;financial crisis of 2008&lt;/a&gt; (ctrl-f for “wrongdoing” in that bad boy if you hate low blood pressure).&lt;/p&gt;
-&lt;p&gt;In true wronged-nerd fashion, MIT soldiered on and fought the Justice Department, once more teaching the world that if you start an argument with a nerd it will only end when somebody starts crying.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_99013&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Pictured: Justice Dept., circa 1993&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2697b4b8a0456c72ae530a/1546033091844/sad_justice_department.jpeg&quot; alt=&quot;Pictured: Justice Dept., circa 1993&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2697b4b8a0456c72ae530a/1546033091844/sad_justice_department.jpeg&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2697b4b8a0456c72ae530a/1546033091844/sad_justice_department.jpeg&quot; data-image-dimensions=&quot;250x296&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Pictured: Justice Dept., circa 1993&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2697b4b8a0456c72ae530a&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;Pictured: Justice Dept., circa 1993&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_103039&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;What’s great about this is that MIT marshaled the media (see: NYTimes above) and published their own view of the case &lt;a href=&quot;http://news.mit.edu/1992/history-0903&quot; target=&quot;_blank&quot;&gt;while it was being litigated&lt;/a&gt;. Which means we can read their argument as they present it best:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;&lt;span&gt;In presenting its case, MIT made these key points:&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;i) MIT financial aid is a &lt;strong&gt;gift policy, not a pricing policy&lt;/strong&gt;. &lt;/p&gt;
-&lt;p&gt;ii) Tuition covers only half the cost of a student's education; all &lt;strong&gt;students receive a subsidy&lt;/strong&gt; of more than $16,000 from MIT's endowment and income.&lt;/p&gt;
-&lt;p&gt;iii) &lt;strong&gt;Fifty-seven percent of students receive aid&lt;/strong&gt; at MIT.&lt;/p&gt;
-&lt;p&gt;iv) The consent decree gave unequal treatment to non-athlete students by specifically excluding Ivy League athletes from the general ban on collaborative agreements.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block markdown-block sqs-block-markdown&quot; data-block-type=&quot;44&quot; id=&quot;block-yui_3_17_2_1_1545864346754_103765&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Ignore that last point about athletes as it’s not important to MIT (shocking: Ivy League schools still wanted to be able to &lt;del&gt;price fix&lt;/del&gt; cooperate in attracting star athletes), and focus on the first three points.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_104695&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;At first glance, this passes the sniff-test. MIT claims to be operating a charity — literally, that’s what they claim: &lt;em&gt;“MIT said its need-based policy of distributing MIT scholarships is&lt;/em&gt; &lt;strong&gt;&lt;em&gt;a policy of charitable gifts to students&lt;/em&gt;&lt;/strong&gt;&lt;em&gt;…”&lt;/em&gt; They say they can barely keep the lights on if they receive $51,520 in Tuition from students, they say they give all students a permanent 50% discount out of benevolence, and then they actually have to reach into their coffers and hand-out even more money to the 57% of students who otherwise would be unable to attend. &lt;/p&gt;
-&lt;p&gt;Interesting note: the percentage of students who receive “financial aid” has not changed in the last 25 years. How perfect is that? &lt;strong&gt;The cost of MIT has gone up $32,520, but the number of kids in “financial need” has stayed the same!&lt;/strong&gt; Pretty awesome that the 42% of families who don’t get any aid at all have all got at least $130,000 (4-years of tuition) in extra Wealth!&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_105188&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;I said I wouldn’t include another chart from my first essay, but sometimes you just gotta do it. &amp;lt;a href=&amp;quot;https://en.wikipedia.org/wiki/Law_of_the_instrument&amp;quot; target=&amp;quot;_blank&amp;quot;&amp;gt;Call me a hammer&amp;lt;/a&amp;gt;, if you must.&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269855b8a0456c72ae5cf1/1546033254946/middle_class_wealth.png&quot; alt=&quot;I said I wouldn’t include another chart from my first essay, but sometimes you just gotta do it. Call me a hammer , if you must.&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269855b8a0456c72ae5cf1/1546033254946/middle_class_wealth.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269855b8a0456c72ae5cf1/1546033254946/middle_class_wealth.png&quot; data-image-dimensions=&quot;714x463&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;I said I wouldn’t include another chart from my first essay, but sometimes you just gotta do it. Call me a hammer , if you must.&quot; data-load=&quot;false&quot; data-image-id=&quot;5c269855b8a0456c72ae5cf1&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;I said I wouldn’t include another chart from my first essay, but sometimes you just gotta do it. &lt;a href=&quot;https://en.wikipedia.org/wiki/Law_of_the_instrument&quot; target=&quot;_blank&quot;&gt;Call me a hammer&lt;/a&gt;, if you must.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_108769&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Hmmmmmmm.&lt;/p&gt;
-&lt;p&gt;Back to the “&lt;strong&gt;&lt;em&gt;charitable gifts to students&lt;/em&gt;&lt;/strong&gt;”: Follow the actual trail of REAL dollars, and not the imaginary zeroes and monopoly money shifted around behind the scenes — when MIT gives you $40,000 of financial aid, they don’t take a full tuition from another student and give it to you, they don’t reach into a vault and give you physical dollars. They simply charge you less, a mere “&lt;strong&gt;&lt;em&gt;discount&lt;/em&gt;&lt;/strong&gt;” — the exchange is theoretical, monopoly money.&lt;/p&gt;
-&lt;p&gt;When you drop out after your first week to start the next Facebook…you don’t owe MIT $40,000!&lt;/p&gt;
-&lt;p&gt;The tax implications of this — &lt;strong&gt;you can’t fuck the IRS&lt;/strong&gt; — are zero.&lt;/p&gt;
-&lt;h2&gt;More Economics: Variable vs. Fixed Costs and a Slush Fund&lt;/h2&gt;
-&lt;p&gt;You think of Tuition in terms of individual student amounts because that’s how you experience Tuition and that’s exactly how The Institute presents the bill to you. &lt;em&gt;“This is what it costs us to educate you, individually! Yes, all $51,520 of it! Times two!”&lt;/em&gt; &lt;strong&gt;But the actual marginal cost of educating a given student at MIT is approximately zero&lt;/strong&gt; (spoiler alert: you will not get much tender affection from your lecturers at MIT, and after the first week of class there’ll be many empty seats in your lecture hall).&lt;/p&gt;
-&lt;p&gt;Universities are DOMINATED by fixed costs, not variable costs. Lab operating costs, building construction, rents, research salaries, professor salaries, administration salaries, energy costs, etc. etc..&lt;/p&gt;
-&lt;p&gt;Which means &lt;strong&gt;the cost of operating The Institute for a given year is determined before any kids are admitted.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;And this cost is funded by three things: The Endowment and Income.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;“But that’s only two things!”&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;Right, that’s the magic. Read MIT’s second key point again. The Tuition you’re asked to pay ($51,520!!!) &lt;em&gt;“only covers half of The Institute's costs”&lt;/em&gt; (yes, they still say &lt;a href=&quot;https://web.archive.org/web/20180922222114/https://sfs.mit.edu/undergraduate-students/the-cost-of-attendance/annual-student-budget/&quot; target=&quot;_blank&quot;&gt;the same thing&lt;/a&gt; today that they said 25 years ago), so the remaining fixed cost must be covered by The Endowment and “Income”. What’s included in “Income”? Tuitions from other students, of course!&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_109893&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Little pink slice in the&amp;lt;a href=&amp;quot;https://web.mit.edu/facts/financial.html&amp;quot; target=&amp;quot;_blank&amp;quot;&amp;gt; bottom right&amp;lt;/a&amp;gt;&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2698e78985832b19608927/1546033396839/MIT_revenues_2016.png&quot; alt=&quot;Little pink slice in the bottom right&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2698e78985832b19608927/1546033396839/MIT_revenues_2016.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2698e78985832b19608927/1546033396839/MIT_revenues_2016.png&quot; data-image-dimensions=&quot;470x481&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Little pink slice in the bottom right&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2698e78985832b19608927&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_113879&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Duh, how else could a college get money? “Net of discount” just means &lt;em&gt;“ignore all the fuzzy monopoly money and just look at what we actually got wired by the entire student body.”&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;Your Tuition doesn’t pay for &lt;em&gt;your&lt;/em&gt; education — it goes into a shared pot that pays for the fixed costs of educating the whole student body, including you. &lt;/p&gt;
-&lt;p&gt;To the extent that Tuitions received don’t cover all the costs, &lt;strong&gt;gifts from Benevolent Alumni /&lt;/strong&gt; &lt;a href=&quot;https://en.wikipedia.org/wiki/DARPA&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;DARPA&lt;/strong&gt;&lt;/a&gt; &lt;strong&gt;and Investment returns from the Endowment’s portfolio must necessarily fund the remaining balance.&lt;/strong&gt;&lt;/p&gt;
-&lt;h2&gt;Two Plus Two is Four, Minus One that's Three: Quick Maths Dodge the IRS&lt;/h2&gt;
-&lt;p&gt;Flash back to the comment that has been clearly stated on all MIT admissions pages for the last 25 years &lt;em&gt;(to remind the Justice Department that this is a Charitable institution)&lt;/em&gt;:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;&lt;a href=&quot;https://web.archive.org/web/20181224185115/https://sfs.mit.edu/undergraduate-students/the-cost-of-attendance/how-much-it-costs/&quot; target=&quot;_blank&quot;&gt;The actual cost of an MIT education is about twice the annual tuition&lt;/a&gt;…&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;And then look again at the pie-chart of Revenues above. If Tuitions received total &lt;strong&gt;$361.5M&lt;/strong&gt; and that amounts to half the “&lt;em&gt;actual cost&lt;/em&gt;” of an MIT education, &lt;strong&gt;then the full cost of educating undergraduates could be&lt;/strong&gt; &lt;span&gt;&lt;strong&gt;$723M&lt;/strong&gt;&lt;/span&gt;&lt;strong&gt;.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;But that must be understating the number hugely! MIT claims that the full cost is about double the list price of $51,520, or about $100,000, and since &lt;em&gt;“&lt;/em&gt;&lt;a href=&quot;https://web.archive.org/web/20181224185253/https://sfs.mit.edu/undergraduate-students/types-of-aid/mit-scholarship/&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;58%&lt;/em&gt;&lt;/a&gt; &lt;em&gt;of our undergraduates receive MIT Scholarships that average $45,542 per student”&lt;/em&gt; &lt;strong&gt;the Tuition Net of Discounts income of $361.5M&lt;/strong&gt; &lt;strong&gt;must be much less than the actual amount MIT needs, because most of the kids get “financial aid”.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Thankfully, we can do napkin math. Since there are approx. 4,500 undergraduates at The Institute, &lt;strong&gt;MIT’s own words suggest that the actual Fixed Cost of providing MIT educations to all those kids must be $100,000 * 4,500 or…$450M.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Huh??? $450M is pretty close to the total income from Tuition in that pie-chart. How can MIT be subsidizing half the costs for &lt;em&gt;every&lt;/em&gt; student, then giving 58% of them another huge discount in “financial aid” that averages $45,542, and yet still be collecting such a huge fraction of the needed amount??&lt;/p&gt;
-&lt;p&gt;This is like those goddamn word-problems they put on the Math section of the SAT…screw that. Have a spreadsheet instead:&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_115189&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Uncharitable observation: if all students paid exactly the same price — zero financial aid — and MIT collected the same $113M in total tuitions, the revenue from a new student would be $25,105 per student per year. &amp;lt;strong&amp;gt;Rephrased: the Expected Value of a marginal student to MIT is $25,105…&amp;lt;/strong&amp;gt;&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699471ae6cf9b883128f0/1546033519223/quick_tuition_maths.png&quot; alt=&quot;Uncharitable observation: if all students paid exactly the same price — zero financial aid — and MIT collected the same $113M in total tuitions, the revenue from a new student would be $25,105 per student per year. Rephrased: the Expected Value of a marginal student to MIT is $25,105…&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699471ae6cf9b883128f0/1546033519223/quick_tuition_maths.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699471ae6cf9b883128f0/1546033519223/quick_tuition_maths.png&quot; data-image-dimensions=&quot;415x295&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Uncharitable observation: if all students paid exactly the same price — zero financial aid — and MIT collected the same $113M in total tuitions, the revenue from a new student would be $25,105 per student per year. Rephrased: the Expected Value of a marginal student to MIT is $25,105…&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2699471ae6cf9b883128f0&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;Uncharitable observation: if all students paid exactly the same price — zero financial aid — and MIT collected the same $113M in total tuitions, the revenue from a new student would be $25,105 per student per year. &lt;strong&gt;Rephrased: the Expected Value of a marginal student to MIT is $25,105…&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_118768&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;Answer: apparently they don’t — this doesn’t add up to the $361.5M in income listed as coming from Tuitions. Not even close.&lt;/p&gt;
-&lt;p&gt;The 1,890 students who pay the full sticker price of $51,520 a year contribute about $100M to MIT’s income statement. The 2,610 students who receive some form of aid, contribute another $16M. That’s $245M short of what MIT actually collected in Tuition in 2016.&lt;/p&gt;
-&lt;p&gt;Even if every undergraduate paid $51,520 a year, MIT would be $132M short. Graduate students, I suppose, must make up the difference? Are the MBA kids really subsidizing undergraduate educations? But then wouldn’t those Graduate students have a cost associated with their own education? Who is actually paying all this tuition?!&lt;/p&gt;
-&lt;p&gt;And, more importantly, &lt;strong&gt;who is subsidizing all those costs. MIT “needs” $450M to educate the undergraduates alone — according to MIT — and those guys are only contributing $113M…&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Whatever the shortfall really is, it’s got to come out of the mythical Endowment, right?&lt;/strong&gt; That’s what this is all about. That’s why this is a subsidy, “aid”, a &lt;em&gt;charity&lt;/em&gt;.&lt;/p&gt;
-&lt;h2&gt;The Case for Charity: A Charity Case&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;Is this Charity?&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;If tuition had not increased by $32,520 over the last 25 years, what percent of undergraduates would qualify for “financial aid”, by the standards of 2018? If 58% of undergrads qualify for “aid” when the price is $51,520, &lt;strong&gt;surely many fewer would qualify for aid if tuition were a mere $19,000 a year.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Would under 50% qualify for “aid”? Almost certainly.&lt;/p&gt;
-&lt;p&gt;Under 25%? Perhaps.&lt;/p&gt;
-&lt;p&gt;At that point, if only a minority of students are even receiving any aid at all — &lt;strong&gt;IS THIS STILL A CHARITY?&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_119913&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-below design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&amp;lt;p&amp;gt;Units are in millions btw&amp;lt;/p&amp;gt;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699ad1ae6cf9b88312f31/1546033591288/MIT_investment_returns.png&quot; alt=&quot;Units are in millions btw&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699ad1ae6cf9b88312f31/1546033591288/MIT_investment_returns.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699ad1ae6cf9b88312f31/1546033591288/MIT_investment_returns.png&quot; data-image-dimensions=&quot;200x138&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;Units are in millions btw&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2699ad1ae6cf9b88312f31&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;div class=&quot;image-caption-wrapper&quot;&gt;
-&lt;div class=&quot;image-caption&quot;&gt;
-&lt;p&gt;Units are in millions btw&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_123619&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;You know they don’t pay taxes on that, right?&lt;/p&gt;
-&lt;p&gt;You know that means it will compound faster than any other source of Wealth in the country, right?&lt;/p&gt;
-&lt;p&gt;Or do you &lt;em&gt;still&lt;/em&gt; not understand &lt;a href=&quot;https://whoisnnamdi.com/you-dont-understand-compound-growth/&quot; target=&quot;_blank&quot;&gt;compound growth&lt;/a&gt;?&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;The Justice Department lost their suit against MIT on the basis that MIT was operating a Charity, which means there’s legal precedent that you count as a Charity and are subject to different laws as long as more than half your customers don’t pay anything for your education product…&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;…and you think it’s a coincidence that exactly 58% of students qualify for “financial aid” every year for 25 years in a row?&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;It’s not “aid” when the price is calibrated to maintain unaffordability and necessitate 501(c)(3) Status.&lt;/p&gt;
-&lt;p&gt;The eagles of Justice have sharp eyes and sharper talons — best play it safe.&lt;/p&gt;
-&lt;h2&gt;You Can’t Spell Irony Without The Alphabet Soup&lt;/h2&gt;
-&lt;p&gt;There’s a delicious irony here, which is that &lt;strong&gt;donations to a college’s Endowment are tax-deductible&lt;/strong&gt; &lt;a href=&quot;https://turbotax.intuit.com/tax-tips/charitable-contributions/charitable-contributions/L6ZyAXJ4Y&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;up to 50% of your Income&lt;/strong&gt;&lt;/a&gt;. This is because that endowment is hypothetically spent “Charitably” funding the education of students that otherwise &lt;em&gt;just could not happen.&lt;/em&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_124668&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-hidden design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699f34fa51a03a87b3d14/1546033713485/maximum_tax_advantaged_donation.png&quot; alt=&quot;maximum_tax_advantaged_donation.png&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699f34fa51a03a87b3d14/1546033713485/maximum_tax_advantaged_donation.png&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c2699f34fa51a03a87b3d14/1546033713485/maximum_tax_advantaged_donation.png&quot; data-image-dimensions=&quot;628x327&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;maximum_tax_advantaged_donation.png&quot; data-load=&quot;false&quot; data-image-id=&quot;5c2699f34fa51a03a87b3d14&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_130307&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;They’ve got a point, by the way. Imagine what would happen if a clerical error deleted MIT’s endowment. No other source of Revenue even approaches the magnitude of the Investment gains from the Endowment (well, except the DARPA funding but that’s perhaps unique to MIT) — go back and check the pie-chart if you don’t believe me. If MIT’s endowment evaporated, it just wouldn’t be able to &lt;em&gt;compete&lt;/em&gt; for talented professors or afford the latest research labs and facilities — because the cost of those scarce commodities is bid up by all the other colleges who’ve got their own big swinging 501(c)(3)-protected endowments to throw around.&lt;/p&gt;
-&lt;p&gt;The best way to &lt;em&gt;compete&lt;/em&gt; for talented professors and the best facilities is to have the largest pile of money, and then earn tax-free investment returns on that money. I’m not knocking it, everyone else in America learned this at birth, in fact I think it’s in the Pledge of Allegiance — the best way to &lt;em&gt;compete&lt;/em&gt; in Capitalism is to have the largest pile of Capital.&lt;/p&gt;
-&lt;p&gt;So donations to MIT must continue to be “tax advantaged”, and they’ll help you work out how to lower your tax bill by doing so with three different web pages.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Your own child’s Tuition, however&lt;/strong&gt; — which as we see in the pie chart above ends up in the same shared pile as the donations — &lt;strong&gt;is only tax deductible up to&lt;/strong&gt; &lt;a href=&quot;https://studentloanhero.com/buy-rent-home/are-college-expenses-tax-deductible/&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;$4,000 dollars&lt;/strong&gt;&lt;/a&gt;. Unless you and your spouse jointly make more than $160,000 (i.e. unless you and your spouse both work and have degrees from a school in MIT’s tier), in which case you’ll spend $51,520 on tuition and say fucking &lt;em&gt;thank you&lt;/em&gt;.&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;A Ditty for Your Pity:&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;Tuition for thee&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;501(c)(3)&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;For me&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;If you get college with no fee&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;You’re the reason investment returns are tax free&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;The product is &lt;em&gt;you&lt;/em&gt;.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Thank the &lt;a href=&quot;https://bizfluent.com/about-5579857-history-501-c--3--non-profit.html&quot; target=&quot;_blank&quot;&gt;Revenue Act of 1954&lt;/a&gt; for establishing a legal way to fuck the IRS btw — I said earlier: &lt;strong&gt;you can’t fuck the IRS. The emphasis was on &lt;em&gt;you.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;h2&gt;The Eight Levels of Giving &lt;a href=&quot;https://www.jewishvirtuallibrary.org/eight-levels-of-charitable-giving&quot; target=&quot;_blank&quot;&gt;Tzedakah&lt;/a&gt;&lt;/h2&gt;
-&lt;p&gt;Making a donation to MIT appears to satisfy the second-highest level of giving possible, according to a 12th century &lt;a href=&quot;https://www.jewishvirtuallibrary.org/moses-maimonides-rambam&quot; target=&quot;_blank&quot;&gt;Jewish sage&lt;/a&gt;:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;2. Giving assistance in such a way that the giver and recipient are unknown to each other. Communal funds, administered by responsible people are also in this category.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;There doesn’t seem to be a qualifier in his ancient text for giving in a way that offers the “greatest tax advantage” or “giving” money that you were never going to see anyway because Uncle Sam had it earmarked in his name — but hey, we make allowances in the modern day.&lt;/p&gt;
-&lt;p&gt;Since MIT is the one with the 501(c)(3) Charity Status, I wonder where its giving from the mythical Endowment ranks on the ancient scale?&lt;/p&gt;
-&lt;p&gt;It turns out that lately, colleges like to boast about the size of their &lt;em&gt;endowment&lt;/em&gt; — look, I get it — which means we know roughly how big MIT’s is. In the past, however, they weren’t nearly as forthcoming with data about its size. I don’t think you need an advanced degree in &lt;a href=&quot;https://en.wikipedia.org/wiki/Phallocentrism&quot; target=&quot;_blank&quot;&gt;Phallocentrism&lt;/a&gt; to understand why.&lt;/p&gt;
-&lt;p&gt;Thankfully, we can hold a magnifying glass to the past with the power of the internet and vague statements made to college newspapers…&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;In 1990, MIT’s operating budget was&lt;/strong&gt; &lt;a href=&quot;http://tech.mit.edu/V110/N51/budget.51n.html&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;$1B dollars&lt;/strong&gt;&lt;/a&gt;&lt;strong&gt;, and its Endowment was approximately the&lt;/strong&gt; &lt;a href=&quot;http://tech.mit.edu/V110/N51/budget.51n.html&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;same amount&lt;/strong&gt;&lt;/a&gt;&lt;strong&gt;: $1 billion.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;In 2018, MIT’s operating budget was&lt;/strong&gt; &lt;a href=&quot;https://web.mit.edu/facts/financial.html&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;~$3.5B dollars&lt;/strong&gt;&lt;/a&gt;&lt;strong&gt;, and its Endowment was&lt;/strong&gt; &lt;a href=&quot;http://news.mit.edu/2018/mit-endowment-financials-0914&quot; target=&quot;_blank&quot;&gt;&lt;strong&gt;$16.4&lt;/strong&gt;&lt;/a&gt; &lt;strong&gt;billion&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;If this is a Charity, they have become remarkably inefficient with their assets over the last generation. &lt;/p&gt;
-&lt;p&gt;At the bottom of the giving scale we have:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;8. When donations are given grudgingly.&lt;/p&gt;
-&lt;p&gt;7. When one gives less than he should, but does so cheerfully.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Perhaps some received their “financial aid” cheerfully, but my interactions with MIT’s Financial Services arm were like pulling teeth — bloody, painful, leaving a wreck behind and a bad taste in the mouth, and best done under the influence of drugs. To be clear here lest this leaves too bitter of a taste in the mouth: from the individual family’s perspective, “aid” is not judged by the magnitude of the “discount” received, but by the percentage of the family’s existing assets the school decides we &quot;need” going forward. While The Institute finds your family “&lt;em&gt;not in need&lt;/em&gt;” of an extra $20,000 this year, you’ll find their Endowment increased by another billion dollars…&lt;/p&gt;
-&lt;p&gt;How &lt;strong&gt;&lt;em&gt;much&lt;/em&gt;&lt;/strong&gt; should MIT give though? Only God knows. Somehow they’ve been able to &lt;em&gt;give, and give, and give&lt;/em&gt;, each and every year to students, subsidizing them all for 50%, and then giving 58% of them another 80%+ discount…&lt;strong&gt;and yet the Endowment has grown by $15.4 billion.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;If this is a “charity”, I’d hate to see what they think a business looks like.&lt;/p&gt;
-&lt;h2&gt;Big Business is Booming&lt;/h2&gt;
-&lt;p&gt;A Generation ago, The Institute was able to fund its Fixed Costs with Tuitions, donations, grants, and an Endowment equal in size to its operating budget. &lt;/p&gt;
-&lt;p&gt;Today, it needs Tuitions, donations, grants, and an Endowment 4.7x the size of the annual budget.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;An Endowment that has grown&lt;/strong&gt; &lt;span&gt;&lt;strong&gt;&lt;em&gt;1,500%&lt;/em&gt;&lt;/strong&gt;&lt;/span&gt; &lt;strong&gt;in 25 years.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;While the class size has grown a mere 2% — don’t forget the first half of this essay.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;A JPMorgan colleague once said to me: &lt;em&gt;the power of compound growth means the best way to give to charity is to invest wisely.&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;Self-serving, of course, but all the best rationalizations are. But it turns out he had it the wrong way round: &lt;strong&gt;perhaps the best way to make money is actually to give money.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Not so much of it that you can’t compound what you’ve got, though: &lt;strong&gt;just enough to stay 501(c)(3).&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Which means &lt;strong&gt;your product must remain unaffordable&lt;/strong&gt;, to justify your benevolence.&lt;/p&gt;
-&lt;p&gt;Which means &lt;strong&gt;its cost must grow faster than the wealth of your customers.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The Justice Department’s eagles are out hunting mice, so you can’t conspire too openly to raise prices.&lt;/p&gt;
-&lt;p&gt;But &lt;strong&gt;limiting supply?&lt;/strong&gt; Despite the Expected Value of an additional student being $25,000-per-year? That’s playing the game on easy mode, and comes with extra bonuses to institutional prestige to boot.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Tuition is meaningless income to MIT now&lt;/strong&gt; — a drop in the bucket, &lt;em&gt;just 3.2% of their income comes from undergraduate tuition&lt;/em&gt; — but &lt;strong&gt;so long as the Tuitions are unaffordable for 58% of undergraduates, the Investment returns on $16.4 billion dollars are tax free.&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block image-block sqs-block-image&quot; data-block-type=&quot;5&quot; id=&quot;block-yui_3_17_2_1_1545864346754_133174&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;image-block-outer-wrapper layout-caption-hidden design-layout-inline combination-animation-none individual-animation-none individual-text-animation-none&quot;&gt;
-&lt;div class=&quot;intrinsic&quot;&gt;
-&lt;div class=&quot;image-block-wrapper has-aspect-ratio&quot; data-description=&quot;&quot;&gt;&lt;noscript&gt;
-&lt;p&gt;&lt;img src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269d5370a6adae0b0feaee/1546034674194/untaxed_investment_returns.gif&quot; alt=&quot;untaxed_investment_returns.gif&quot;/&gt;&lt;/p&gt;
-&lt;/noscript&gt;&lt;img class=&quot;thumb-image&quot; data-src=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269d5370a6adae0b0feaee/1546034674194/untaxed_investment_returns.gif&quot; data-image=&quot;https://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/t/5c269d5370a6adae0b0feaee/1546034674194/untaxed_investment_returns.gif&quot; data-image-dimensions=&quot;500x282&quot; data-image-focal-point=&quot;0.5,0.5&quot; alt=&quot;untaxed_investment_returns.gif&quot; data-load=&quot;false&quot; data-image-id=&quot;5c269d5370a6adae0b0feaee&quot; data-type=&quot;image&quot;/&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_137569&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;&lt;strong&gt;BONUS:&lt;/strong&gt; this all serves to keep Alumni exceedingly happy with the ever-appreciating value of their degree, ensuring that everyone affiliated with The Institute is happy, donates more &lt;em&gt;(did you even notice Charitable contributions were already a larger source of income than undergrad tuition?)&lt;/em&gt;, and acts as good brand ambassadors.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;EXTRA BONUS:&lt;/strong&gt; the only people unhappy with this state of affairs are the ones who did not get into MIT, but might have if the admit-rate wasn’t 6.7%, so we can write them off as salty haters and nobody listens to their whining. &lt;em&gt;Of course the plebs would want more places at MIT — but what do they think we’re going to do? Lower standards???&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;EXTRA EXTRA BONUS:&lt;/strong&gt; Imagine for a moment the reaction in the admissions office at MIT and the rest of the Ivy League on reading the headline: &lt;span&gt;&lt;strong&gt;&lt;em&gt;HARVARD DOUBLES ENROLLMENT&lt;/em&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block markdown-block sqs-block-markdown&quot; data-block-type=&quot;44&quot; id=&quot;block-yui_3_17_2_1_1545864346754_138071&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.mbacrystalball.com/blog/2016/08/22/enrollment-management-strategies-colleges-yield/&quot;&gt;Yield manage&lt;/a&gt; that one, rest of the fucking world. The fact that this doesn’t — and won’t — happen tells you much about the “competitive” state of the industry. You learn in the first week of Microeconomics that under a state of Perfect Competition, excess profits are competed away. Harvard got flack this year because their &lt;del&gt;Investment Profits&lt;/del&gt; Endowment only grew 10%, &lt;a href=&quot;https://www.nytimes.com/2018/09/28/business/harvard-endowment-gains.html&quot;&gt;to $40 billion dollars&lt;/a&gt;. It took Apple &lt;a href=&quot;https://www.businessinsider.com/apple-cash-balance-2013-2012-6&quot;&gt;3 years after the release of the iPhone&lt;/a&gt; to build up a cash balance the size of the one Harvard now has. Call it Imperfect Competition? Far-From-Perfect Competition? Perhaps Big Business will do after all.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_139604&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;p&gt;&lt;strong&gt;EXTRA EXTRA EXTRA BONUS:&lt;/strong&gt; Colleges who do not have $10+ Billion dollar endowments (most of them) still have to compete with the Ivy League-tier schools for Professors, Facilities, and more — they just don’t have the investment returns to help pay for it. What’s the only source of income they have left? &lt;em&gt;Tuition&lt;/em&gt;.&lt;/p&gt;
-&lt;p&gt;So both the Big Dogs and the Small Dogs in the yard have an incentive to keep Tuitions unaffordable — the little guys are still relying on capturing all the surplus Wealth from America to keep the doors open (again, see: my first essay). If I were a Small Dog, though, I’d be &lt;a href=&quot;https://www.insidehighered.com/digital-learning/article/2017/04/28/clay-christensen-sticks-predictions-massive-college-closures&quot;&gt;very worried&lt;/a&gt; about the future.&lt;/p&gt;
-&lt;p&gt;You can’t compete with Compound Growth when you’re only collecting linear returns.&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block newsletter-block sqs-block-newsletter&quot; data-block-type=&quot;51&quot; id=&quot;block-yui_3_17_2_1_1545864346754_443532&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;div class=&quot;newsletter-form-wrapper newsletter-form-wrapper--layoutFloat newsletter-form-wrapper--alignCenter&quot;&gt;
-&lt;form class=&quot;newsletter-form&quot; data-form-id=&quot;5c26b8f170a6adae0b115464&quot; autocomplete=&quot;on&quot; method=&quot;post&quot; onsubmit=&quot;return (function(form) { Y.use ('squarespace-form-submit', 'node', function (Y) { (new Y.Squarespace.FormSubmit({ formNode: Y.Node(form) })).submit('5c26b8f170a6adae0b115464', '5b7dc2f9032be4fd52b63a13', 'item-5c2404b22b6a28a419cd6f0f') }); return false;})(this)&quot;&gt;
-&lt;header class=&quot;newsletter-form-header&quot;&gt;&lt;h2 class=&quot;newsletter-form-header-title&quot;&gt;Hi! I'm Conrad. Thanks for reading.&lt;/h2&gt;
-&lt;div class=&quot;newsletter-form-header-description&quot;&gt;
-&lt;p&gt;There’s more coming! Drop your email below to get a fresh perspective on Wealth, Technology, History, and (Pop) Culture&lt;/p&gt;
-&lt;/div&gt;
-&lt;/header&gt;
-
-&lt;div class=&quot;hidden form-submission-text&quot;&gt;
-&lt;p&gt;Thanks for reading — and thanks for signing up to get more thoughts from me in the future. I try to reply to everyone who reaches out to me, publicly or privately, so leave a comment or shoot me an email if you want to talk more, provide counterpoints, or just say “hi!”&lt;/p&gt;
-&lt;/div&gt;
-
-&lt;/form&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;sqs-block html-block sqs-block-html&quot; data-block-type=&quot;2&quot; id=&quot;block-yui_3_17_2_1_1545864346754_450232&quot;&gt;
-&lt;div class=&quot;sqs-block-content&quot;&gt;
-&lt;h2&gt;NOTES&lt;/h2&gt;
-&lt;ol data-rte-list=&quot;default&quot;&gt;&lt;li&gt;
-&lt;p&gt;I said it twice already, but I’ll say it again to be sure: I love MIT, and feel both intense pride and gratitude about being able to attend (an odd mix of emotions). It’s the only college I ever applied to — I knew I wanted to go before I got there, and I’m much better off having gone than not. If you get in, you should go. This is not an indictment of MIT — it’s an explanation of a “Why?” that I think is somewhat hidden and not widely understood.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;I worked in the call center soliciting donations from Alumni as an undergrad — the people were great, the job was fantastic, the pay was excellent, the hours were flexible, the Alumni were wonderful and happy to speak to me, and it was just a good experience all round. If you need a job in college, I recommend it. Bonus for MIT kids today: you might get to see me on your training video!&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;When MIT mandated freshmen live on campus, there was actually a decrease in admitted Class size. Much credit to Dean of Admissions Stu Schmill for &lt;a href=&quot;https://www.thecrimson.com/article/2009/11/10/increase-schmill-size-students/&quot; target=&quot;_blank&quot;&gt;increasing the class size back to prior levels&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Credit to Philip Greenspun for articulating some of this a whole generation ago. There truly is nothing new under the sun: &lt;a href=&quot;https://philip.greenspun.com/school/tuition-free-mit.html&quot; target=&quot;_blank&quot;&gt;https://philip.greenspun.com/school/tuition-free-mit.html&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Credit also to &lt;a href=&quot;https://marginalrevolution.com/&quot; target=&quot;_blank&quot;&gt;Tyler Cowen&lt;/a&gt; and others in the rationalist sphere who &lt;a href=&quot;https://www.bloomberg.com/opinion/articles/2018-11-01/let-harvard-be-harvard-only-bigger&quot; target=&quot;_blank&quot;&gt;write online&lt;/a&gt; and first introduced me to the &lt;a href=&quot;https://marginalrevolution.com/marginalrevolution/2009/11/why-its-harder-than-before-to-get-into-your-favorite-college.html&quot; target=&quot;_blank&quot;&gt;question&lt;/a&gt;: &lt;em&gt;“why don’t universities add more spaces for undergrads?”&lt;/em&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Mon, 31 Dec 2018 01:45:48 +0000</pubDate>
-<dc:creator>cjmb</dc:creator>
-<og:title>The Uncharity of College: The Big Business Nobody Understands</og:title>
-<og:url>https://www.conradbastable.com/essays/the-uncharity-of-college-the-big-business-nobody-understands</og:url>
-<og:type>article</og:type>
-<og:description>How Colleges Make More Money Than God By Giving It Away</og:description>
-<og:image>http://static1.squarespace.com/static/5a571a7d80bd5e91de77e8e6/5b7dc2f9032be4fd52b63a13/5c2404b22b6a28a419cd6f0f/1546233819284/endowment_growth_example.png?format=1500w</og:image>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.conradbastable.com/essays/the-uncharity-of-college-the-big-business-nobody-understands</dc:identifier>
 </item>
 </channel>
 </rss>
