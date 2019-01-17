@@ -9,6 +9,708 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Node程序debug小记 - 贾顺名</title>
+<link>http://www.cnblogs.com/jiasm/p/10280277.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jiasm/p/10280277.html</guid>
+<description>&lt;p&gt;有时候，所见并不是所得，有些包，你需要去翻他的源码才知道为什么会这样。&lt;/p&gt;
+&lt;h2 id=&quot;背景&quot;&gt;背景&lt;/h2&gt;
+&lt;p&gt;今天调试一个程序，用到了一个很久之前的NPM包，名为&lt;a href=&quot;https://www.npmjs.com/package/formstream&quot;&gt;formstream&lt;/a&gt;，用来将&lt;code&gt;form&lt;/code&gt;表单数据转换为流的形式进行接口调用时的数据传递。&lt;/p&gt;
+&lt;p&gt;这是一个几年前的项目，所以使用的是&lt;code&gt;Generator&lt;/code&gt;+&lt;code&gt;co&lt;/code&gt;实现的异步流程。&lt;/p&gt;
+&lt;p&gt;其中有这样一个功能，从某处获取一些图片&lt;code&gt;URL&lt;/code&gt;，并将&lt;code&gt;URL&lt;/code&gt;以及一些其他的常规参数组装到一起，调用另外的一个服务，将数据发送过去。&lt;/p&gt;
+&lt;p&gt;大致是这样的代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;const co         = require('co')
+const moment     = require('moment')
+const urllib     = require('urllib')
+const Formstream = require('formstream')
+
+function * main () {
+  const imageUrlList = [
+    'img1',
+    'img2',
+    'img3',
+  ]
+
+  // 实例化 form 表单对象
+  const form = new Formstream()
+
+  // 常规参数
+  form.field('timestamp', moment().unix())
+
+  // 将图片 URL 拼接到 form 表单中
+  imageUrlList.forEach(imgUrl =&amp;gt; {
+    form.field('image', imgUrl)
+  })
+
+  const options = {
+    method: 'POST',
+    // 生成对应的 headers 参数
+    headers: form.headers(),
+    // 告诉 urllib，我们通过流的方式进行传递数据，并指定流对象
+    stream: form
+  }
+
+  // 发送请求
+  const result = yield urllib.request(url, options)
+
+  // 输出结果
+  console.log(result)
+}
+
+co(main)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;也算是一个比较清晰的逻辑，这样的代码也正常运行了一段时间。&lt;/p&gt;
+&lt;p&gt;如果没有什么意外，这段代码可能还会在这里安静的躺很多年。&lt;br/&gt;但是，现实总是残酷的，因为一些不可抗拒因素，必须要去调整这个逻辑。&lt;br/&gt;之前调用接口传递的是图片&lt;code&gt;URL&lt;/code&gt;地址，现在要改为直接上传二进制数据。&lt;/p&gt;
+&lt;p&gt;所以需求很简单，就是将之前的&lt;code&gt;URL&lt;/code&gt;下载，拿到&lt;code&gt;buffer&lt;/code&gt;，然后将&lt;code&gt;buffer&lt;/code&gt;传到&lt;code&gt;formstream&lt;/code&gt;实例中即可。&lt;br/&gt;大致是这样的操作：&lt;/p&gt;
+&lt;pre class=&quot;diff&quot;&gt;
+&lt;code&gt;-  imageUrlList.forEach(imgUrl =&amp;gt; {
+-    form.field('image', imgUrl)
+-  })
+
++  let imageUrlResults = yield Promise.all(imageUrlList.map(imgUrl =&amp;gt; 
++    urllib.request(url)
++  ))
++  
++  imageUrlResults = imageUrlResults.filter(img =&amp;gt; img &amp;amp;&amp;amp; img.status === 200).map(img =&amp;gt; img.data)
++
++  imageUrlResults.forEach(imgBuffer =&amp;gt; {
++    form.buffer('image', imgBuffer)
++  })&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;下载图片 -&amp;gt; 过滤空数据 -&amp;gt; 拼接到&lt;code&gt;form&lt;/code&gt;中去，代码看起来毫无问题。&lt;/p&gt;
+&lt;p&gt;不过在执行的时候，却出现了一个令人头大的问题。&lt;br/&gt;最终调用&lt;code&gt;yield urllib.request(url, options)&lt;/code&gt;的时候，提示接口超时了，起初还以为是网络问题，于是多执行了几次，发现还是这样，开始意识到，应该是刚才的代码改动引发的&lt;code&gt;bug&lt;/code&gt;。&lt;/p&gt;
+&lt;h2 id=&quot;开始-debug&quot;&gt;开始 debug&lt;/h2&gt;
+&lt;h3 id=&quot;定位引发-bug-的代码&quot;&gt;定位引发 bug 的代码&lt;/h3&gt;
+&lt;p&gt;我习惯的调试方式，是先用最原始的方式，&lt;strong&gt;眼&lt;/strong&gt;，看有哪些代码修改。&lt;br/&gt;因为代码都有版本控制，所以大多数编辑器都可以很直观的看到有什么代码修改，即使编辑器中无法看到，也可以在命令行中通过&lt;code&gt;git diff&lt;/code&gt;来查看修改。&lt;/p&gt;
+&lt;p&gt;这次的改动就是新增的一个批量下载逻辑，以及&lt;code&gt;URL&lt;/code&gt;改为&lt;code&gt;Buffer&lt;/code&gt;。&lt;br/&gt;先用最简单粗暴的方式来确认是这些代码影响的，&lt;strong&gt;注释掉新增的代码，还原老代码&lt;/strong&gt;。&lt;br/&gt;结果果然是可以正常执行了，那么我们就可以断定&lt;code&gt;bug&lt;/code&gt;就是由这些代码所导致的。&lt;/p&gt;
+&lt;h3 id=&quot;逐步还原错误代码&quot;&gt;逐步还原错误代码&lt;/h3&gt;
+&lt;p&gt;上边那个方式只是一个&lt;code&gt;rollback&lt;/code&gt;，帮助确定了大致的范围。&lt;br/&gt;接下来就是要缩小错误代码的范围。&lt;br/&gt;一般代码改动大的时候，会有多个函数的声明，那么就按照顺序逐个解开注释，来查看运行的效果。&lt;br/&gt;这次因为是比较小的逻辑调整，所以直接在一个函数中实现。&lt;br/&gt;那么很简单的，在保证程序正常运行的前提下，我们就按照代码语句一行行的释放。&lt;/p&gt;
+&lt;p&gt;很幸运，在第一行代码的注释被打开后就复现了&lt;code&gt;bug&lt;/code&gt;，也就是那一行&lt;code&gt;yield Promsie.all(XXX)&lt;/code&gt;。&lt;br/&gt;但是这个语句实际上也可以继续进行拆分，为了排除是&lt;code&gt;urllib&lt;/code&gt;的问题，我将该行代码换为一个最基础的&lt;code&gt;Promise&lt;/code&gt;对象：&lt;code&gt;yield Promise.resolve(1)&lt;/code&gt;。&lt;br/&gt;结果令我很吃惊，这么一个简单的&lt;code&gt;Promise&lt;/code&gt;执行也会导致下边的请求超时。&lt;/p&gt;
+&lt;p&gt;当前的部分代码状态：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;const form = new Formstream()
+
+form.field('timestamp', moment().unix())
+
+yield Promise.resolve(1)
+
+const options = {
+ method: 'POST',
+ headers: form.headers(),
+ stream: form
+}
+
+// 超时
+const result = yield urllib.request(url, options)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;再缩小了范围以后，进一步进行排查。&lt;br/&gt;目前所剩下的代码已经不错了，唯一可能会导致请求超时的情况，可能就是发请求时的那些&lt;code&gt;options&lt;/code&gt;参数了。&lt;br/&gt;所以将&lt;code&gt;options&lt;/code&gt;中的&lt;code&gt;headers&lt;/code&gt;和&lt;code&gt;stream&lt;/code&gt;都注释掉，再次执行程序后，果然可以正常访问接口（虽说会提示出错，因为必选的参数没有传递）。&lt;/p&gt;
+&lt;p&gt;那么目前我们可以得到一个结论：&lt;code&gt;formstream&lt;/code&gt;实例+&lt;code&gt;Promise&lt;/code&gt;调用会导致这个问题。&lt;/p&gt;
+&lt;h3 id=&quot;冷静忏悔&quot;&gt;冷静、忏悔&lt;/h3&gt;
+&lt;p&gt;接下来要做的就是深呼吸，冷静，让心率恢复平稳再进行下一步的工作。&lt;br/&gt;在我得到上边的结论之后，第一时间是崩溃的，因为导致这个&lt;code&gt;bug&lt;/code&gt;的环境还是有些复杂的，涉及到了三个第三方包，&lt;code&gt;co&lt;/code&gt;、&lt;code&gt;formstream&lt;/code&gt;和&lt;code&gt;urllib&lt;/code&gt;。&lt;br/&gt;而直观的去看代码，自己写的逻辑其实是很少的，所以难免会在心中开始抱怨，觉得是第三方包在搞我。&lt;br/&gt;但这时候要切记「程序员修炼之道」中的一句话：&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;&quot;Select&quot; Isn't Broken&lt;br/&gt;“Select” 没有问题&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;所以一定要在内心告诉自己：“你所用的包都是经过了N久时间的洗礼，一定是一个很稳健的包，这个&lt;code&gt;bug&lt;/code&gt;一定是你的问题”。&lt;/p&gt;
+&lt;h3 id=&quot;分析问题&quot;&gt;分析问题&lt;/h3&gt;
+&lt;p&gt;当我们达成这个共识以后，就要开始进行问题的分析了。&lt;br/&gt;首先你要了解你所使用的这几个包的作用是什么，如果能知道他们是怎么实现的那就更好了。&lt;/p&gt;
+&lt;p&gt;对于&lt;code&gt;co&lt;/code&gt;，就是一个利用&lt;code&gt;yield&lt;/code&gt;语法特性将&lt;code&gt;Promise&lt;/code&gt;转换为更直观的写法罢了，没有什么额外的逻辑。&lt;br/&gt;而&lt;code&gt;urllib&lt;/code&gt;也会在每次调用&lt;code&gt;request&lt;/code&gt;时创建一个新的&lt;code&gt;client&lt;/code&gt;（刚开始有想过会不会是因为多次调用&lt;code&gt;urllib&lt;/code&gt;导致的，不过用简单的&lt;code&gt;Promise.resolve&lt;/code&gt;代替之后，这个念头也打消了）&lt;/p&gt;
+&lt;p&gt;那么矛头就指向了&lt;code&gt;formstream&lt;/code&gt;，现在要进一步的了解它，不过通过官方文档进行查阅，并不能得到太多的有效信息。&lt;/p&gt;
+&lt;h3 id=&quot;源码阅读&quot;&gt;源码阅读&lt;/h3&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/node-modules/formstream/blob/master/lib/formstream.js&quot;&gt;源码地址&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;所以为了解决问题，我们需要去阅读它的源码，从你在代码中调用的那些 API 入手：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://github.com/node-modules/formstream/blob/master/lib/formstream.js#L38&quot;&gt;构造函数&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/node-modules/formstream/blob/master/lib/formstream.js#L133&quot;&gt;field&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/node-modules/formstream/blob/master/lib/formstream.js#L88&quot;&gt;headers&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;构造函数营养并不多，就是一些简单的属性定义，并且看到了它继承自&lt;code&gt;Stream&lt;/code&gt;，这也是为什么能够在&lt;code&gt;urllib&lt;/code&gt;的&lt;code&gt;options&lt;/code&gt;中直接填写它的原因，因为是一个&lt;code&gt;Stream&lt;/code&gt;的子类。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;util.inherits(FormStream, Stream);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后就要看&lt;code&gt;field&lt;/code&gt;函数的实现了。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;FormStream.prototype.field = function (name, value) {
+  if (!Buffer.isBuffer(value)) {
+    // field(String, Number)
+    // https://github.com/qiniu/nodejs-sdk/issues/123
+    if (typeof value === 'number') {
+      value = String(value);
+    }
+    value = new Buffer(value);
+  }
+  return this.buffer(name, value);
+};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;从代码的实现看，&lt;code&gt;field&lt;/code&gt;也只是一个&lt;code&gt;Buffer&lt;/code&gt;的封装处理，最终还是调用了&lt;code&gt;.buffer&lt;/code&gt;函数。&lt;br/&gt;那么我们就顺藤摸瓜，继续查看&lt;a href=&quot;https://github.com/node-modules/formstream/blob/master/lib/formstream.js#L181&quot;&gt;buffer&lt;/a&gt;函数的实现。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;FormStream.prototype.buffer = function (name, buffer, filename, mimeType) {
+  if (filename &amp;amp;&amp;amp; !mimeType) {
+    mimeType = mime.lookup(filename);
+  }
+
+  var disposition = { name: name };
+  if (filename) {
+    disposition.filename = filename;
+  }
+
+  var leading = this._leading(disposition, mimeType);
+
+  this._buffers.push([leading, buffer]);
+
+  // plus buffer length to total content-length
+  this._contentLength += leading.length;
+  this._contentLength += buffer.length;
+  this._contentLength += NEW_LINE_BUFFER.length;
+
+  process.nextTick(this.resume.bind(this));
+
+  return this;
+};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;代码不算少，不过大多都不是这次需要关心的，大致的逻辑就是将&lt;code&gt;Buffer&lt;/code&gt;拼接到数组中去暂存，在最后结尾的地方，发现了这样的一句代码：&lt;code&gt;process.nextTick(this.resume.bind(this))&lt;/code&gt;。&lt;br/&gt;顿时眼前一亮，重点的是那个&lt;code&gt;process.nextTick&lt;/code&gt;，大家应该都知道，这个是在&lt;code&gt;Node&lt;/code&gt;中实现微任务的其中一个方式，而另一种实现微任务的方式，就是用&lt;code&gt;Promise&lt;/code&gt;。&lt;/p&gt;
+&lt;h3 id=&quot;修改代码验证猜想&quot;&gt;修改代码验证猜想&lt;/h3&gt;
+&lt;p&gt;拿到这样的结果以后，我觉得仿佛找到了突破口，于是尝试性的将前边的代码改为这样：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;const form = new Formstream()
+
+form.field('timestamp', moment().unix())
+
+yield Promise.resolve(1)
+
+const options = {
+ method: 'POST',
+ headers: form.headers(),
+ stream: form
+}
+
+process.nextTick(() =&amp;gt; {
+  urllib.request(url, options)
+})&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;发现，果然超时了。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;从这里就能大致推断出问题的原因了。&lt;br/&gt;因为看代码可以很清晰的看出，&lt;code&gt;field&lt;/code&gt;函数在调用后，会注册一个微任务，而我们使用的&lt;code&gt;yield&lt;/code&gt;或者&lt;code&gt;process.nextTick&lt;/code&gt;也会注册一个微任务，但是&lt;code&gt;field&lt;/code&gt;的先注册，所以它的一定会先执行。&lt;br/&gt;那么很显而易见，问题就出现在这个&lt;code&gt;resume&lt;/code&gt;函数中，因为&lt;code&gt;resume&lt;/code&gt;的执行早于&lt;code&gt;urllib.request&lt;/code&gt;，所以导致其超时。&lt;br/&gt;这时候也可以同步的想一下造成&lt;code&gt;request&lt;/code&gt;超时的情况会是什么。&lt;br/&gt;只有一种可能性是比较高的，因为我们使用的是&lt;code&gt;stream&lt;/code&gt;，而这个流的读取是需要事件来触发的，&lt;code&gt;stream.on('data')&lt;/code&gt;、&lt;code&gt;stream.on('end')&lt;/code&gt;，那么超时很有可能是因为程序没有正确接收到&lt;code&gt;stream&lt;/code&gt;的事件导致的。&lt;/p&gt;
+&lt;p&gt;当然了，「程序员修炼之道」还讲过：&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;Don't Assume it - Prove It&lt;br/&gt;不要假定，要证明&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;所以为了证实猜测，需要继续阅读&lt;code&gt;formstream&lt;/code&gt;的源码，查看&lt;code&gt;resume&lt;/code&gt;函数究竟做了什么。&lt;br/&gt;&lt;code&gt;resume&lt;/code&gt;函数是一个很简单的一次性函数，在第一次被触发时调用&lt;code&gt;drain&lt;/code&gt;函数。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;FormStream.prototype.resume = function () {
+  this.paused = false;
+
+  if (!this._draining) {
+    this._draining = true;
+    this.drain();
+  }
+
+  return this;
+};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;那么继续查看&lt;code&gt;drain&lt;/code&gt;函数做的是什么事情。&lt;br/&gt;因为上述使用的是&lt;code&gt;field&lt;/code&gt;，而非&lt;code&gt;stream&lt;/code&gt;，所以在获取&lt;code&gt;item&lt;/code&gt;的时候，肯定为空，那么这就意味着会继续调用&lt;code&gt;_emitEnd&lt;/code&gt;函数。&lt;br/&gt;而&lt;code&gt;_emitEnd&lt;/code&gt;函数只有简单的两行代码&lt;code&gt;emit('data')&lt;/code&gt;和&lt;code&gt;emit('end')&lt;/code&gt;。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;FormStream.prototype.drain = function () {
+  console.log('start drain')
+  this._emitBuffers();
+
+  var item = this._streams.shift();
+  if (item) {
+    this._emitStream(item);
+  } else {
+    this._emitEnd();
+  }
+
+  return this;
+};
+
+FormStream.prototype._emitEnd = function () {
+  this.emit('data', this._endData);
+  this.emit('end');
+};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;看到这两行代码，终于可以证实了我们的猜想，因为&lt;code&gt;stream&lt;/code&gt;是一个流，接收流的数据需要通过事件传递，而&lt;code&gt;emit&lt;/code&gt;就是触发事件所使用的函数。&lt;br/&gt;这也就意味着，&lt;code&gt;resume&lt;/code&gt;函数的执行，就代表着&lt;code&gt;stream&lt;/code&gt;发送数据的动作，在发送完毕数据后，会执行&lt;code&gt;end&lt;/code&gt;，也就是关闭流的操作。&lt;/p&gt;
+&lt;h3 id=&quot;得出结论&quot;&gt;得出结论&lt;/h3&gt;
+&lt;p&gt;到了这里，终于可以得出完整的结论：&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;formstream&lt;/code&gt;在调用&lt;code&gt;field&lt;/code&gt;之类的函数后会注册一个微任务&lt;br/&gt;微任务执行时会使用流开始发送数据，数据发送完毕后关闭流&lt;br/&gt;因为在调用&lt;code&gt;urllib&lt;/code&gt;之前还注册了一个微任务，导致&lt;code&gt;urllib.request&lt;/code&gt;实际上是在这个微任务内部执行的&lt;br/&gt;也就是说在&lt;code&gt;request&lt;/code&gt;执行的时候，流已经关闭了，一直拿不到数据，所以就抛出异常，提示接口超时。&lt;/p&gt;
+&lt;p&gt;那么根据以上的结论，现在就知道该如何修改对应的代码。&lt;br/&gt;在调用&lt;code&gt;field&lt;/code&gt;方法之前进行下载图片资源，保证&lt;code&gt;formstream.field&lt;/code&gt;与&lt;code&gt;urllib.request&lt;/code&gt;之间的代码都是同步的。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;let imageUrlResults = yield Promise.all(imageUrlList.map(imgUrl =&amp;gt; 
+  urllib.request(url)
+))
+
+const form = new Formstream()
+
+form.field('timestamp', moment().unix())
+
+imageUrlResults = imageUrlResults.filter(img =&amp;gt; img &amp;amp;&amp;amp; img.status === 200).map(img =&amp;gt; img.data)
+imageUrlResults.forEach(imgBuffer =&amp;gt; {
+  form.buffer('image', imgBuffer)
+})
+
+const options = {
+ method: 'POST',
+ headers: form.headers(),
+ stream: form
+}
+
+yield urllib.request(url, options)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;小结&quot;&gt;小结&lt;/h2&gt;
+&lt;p&gt;这并不是一个有各种高大上名字、方法论的一个调试方式。&lt;br/&gt;不过我个人觉得，它是一个非常有效的方式，而且是一个收获会非常大的调试方式。&lt;br/&gt;因为在调试的过程中，你会去认真的了解你所使用的工具究竟是如何实现的，他们是否真的就像文档中所描述的那样运行。&lt;/p&gt;
+&lt;p&gt;关于上边这点，顺便吐槽一下这个包：&lt;a href=&quot;https://www.npmjs.com/package/thenify-all&quot;&gt;thenify-all&lt;/a&gt;。&lt;br/&gt;是一个不错的包，用来将普通的&lt;code&gt;Error-first-callback&lt;/code&gt;函数转换为&lt;code&gt;thenalbe&lt;/code&gt;函数，但是在涉及到&lt;code&gt;callback&lt;/code&gt;会接收多个返回值的时候，该包会将所有的返回值拼接为一个数组并放入&lt;code&gt;resolve&lt;/code&gt;中。&lt;br/&gt;实际上这是很令人困惑的一点，因为根据&lt;code&gt;callback&lt;/code&gt;返回参数的数量来区别编写代码。&lt;br/&gt;而且&lt;code&gt;thenable&lt;/code&gt;约定的规则就是返回&lt;code&gt;callback&lt;/code&gt;中的除了&lt;code&gt;error&lt;/code&gt;以外的第一个参数。&lt;/p&gt;
+&lt;p&gt;但是这个在文档中并没有体现，而是简单的使用&lt;code&gt;readFile&lt;/code&gt;来举例，很容易对使用者产生误导。&lt;br/&gt;一个最近的例子，就是我使用&lt;code&gt;util.promisify&lt;/code&gt;来替换掉&lt;code&gt;thenify-all&lt;/code&gt;的时候，发现之前的&lt;code&gt;mysql.query&lt;/code&gt;调用莫名其妙的报错了。&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;// 之前的写法
+const [res] = await mysqlClient.query(`SELECT XXX`)
+
+// 现在的写法
+const res = await mysqlClient.query(`SELECT XXX`)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这是因为在&lt;a href=&quot;https://github.com/mysqljs/mysql#introduction&quot;&gt;mysql&lt;/a&gt;文档中明确定义了，&lt;code&gt;SELECT&lt;/code&gt;语句之类的会传递两个参数，第一个是查询的结果集，而第二个是字段的描述信息。&lt;br/&gt;所以&lt;code&gt;thenify-all&lt;/code&gt;就将两个参数拼接为了数组进行&lt;code&gt;resolve&lt;/code&gt;，而在切换到了官方的实现后，就造成了使用数组解构拿到的只是结果集中的第一条数据。&lt;/p&gt;
+&lt;p&gt;最后，再简单的总结一下套路，希望能够帮到其他人：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;屏蔽异常代码，确定稳定复现（还原修改）&lt;/li&gt;
+&lt;li&gt;逐步释放，缩小范围（一行行的删除注释）&lt;/li&gt;
+&lt;li&gt;确定问题，利用基础&lt;code&gt;demo&lt;/code&gt;来屏蔽噪音（类似前边的&lt;code&gt;yield Promise.resolve(1)&lt;/code&gt;操作）&lt;/li&gt;
+&lt;li&gt;分析原因，看文档，啃源码（了解这些代码为什么会出错）&lt;/li&gt;
+&lt;li&gt;通过简单的实验来验证猜想（这时候你就能知道怎样才能避免类似的错误）&lt;/li&gt;
+&lt;/ol&gt;</description>
+<pubDate>Wed, 16 Jan 2019 17:46:00 +0000</pubDate>
+<dc:creator>贾顺名</dc:creator>
+<og:description>有时候，所见并不是所得，有些包，你需要去翻他的源码才知道为什么会这样。 &lt;! more 背景 今天调试一个程序，用到了一个很久之前的NPM包，名为 'formstream' ，用来将 表单数据转换为流</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jiasm/p/10280277.html</dc:identifier>
+</item>
+<item>
+<title>安卓之必须了解的实时通信 - 东小东</title>
+<link>http://www.cnblogs.com/dongxiaodong/p/10280104.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/dongxiaodong/p/10280104.html</guid>
+<description>&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;Socket：&lt;/strong&gt;&lt;/span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;有服务器和客户端之分，其是对TCP/IP的封装，使用IP地址加端口，确定一个唯一的点。在Internet上的主机一般运行了多个服务软件，同时提供几种服务。每种服务都打开一个Socket，并绑定到一个端口上，不同的端口对应于不同的服务。值得注意的是用户使用的端口最好大于1024，因为小于1024的大部分端口都是被系统占用的。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;安卓的线程基本机制&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;一个程序就是一个进程，一个进程里可以有多个线程，每个进程必须有一个主线程。对应安卓一个应用程序就是一个进程，其主线程就是平常所说的安卓主UI线程。安卓实现多线程编程，其有一个重要的原则就是更新UI必须在主线程，但耗时操作必须在子线程中，如果耗时操作在主线程编写（如网络访问）当阻塞时间达到一定时，应用就会强制退出，那网络访问就面临着一个不可避免的问题：子线程更新UI操作如何实现。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;Handler&lt;/strong&gt;&lt;/span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Handler主要用于异步消息的处理： 有点类似辅助类，封装了消息投递、消息处理等接口。当发出一个消息之后，首先进入一个消息队列，发送消息的函数即刻返回，而另外一个部分在消息队列中逐一将消息取出，然后对消息进行处理，也就是发送消息和接收消息不是同步的处理。 这种机制通常用来处理相对耗时比较长的操作。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;Message&lt;/strong&gt;&lt;/span&gt;&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;Handler接收与处理的消息对象，其中消息类型有&lt;/p&gt;
+&lt;p&gt;public int arg1和public int arg2：存放简单的整数类型消息&lt;/p&gt;
+&lt;p&gt;public Object obj：发送给接收器的任意对象，不管是整数，字符串，某个类对象均可&lt;/p&gt;
+&lt;p&gt;public int what：用户自定义的消息代码，这样接受者可以了解这个消息的信息，每个handler各自包含自己的消息代码，所以不用担心自定义的消息跟其他handlers有冲突。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt; 安卓端实现效果&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;在同一网络下的一个设备开启一个端口的监听，做为socket服务器，并获取到服务器设备的IP地址和端口号，将其格式化为 “IP：端口” 进行输入，如 “193.169.44.198:8081” ,点击连接即可。&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1485202/201901/1485202-20190116234251225-1090337978.png&quot; alt=&quot;&quot; width=&quot;277&quot; height=&quot;492&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;编程实现&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;获取网络访问权限:&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;实现socket编程，必须开启网络访问权限&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;uses-permission &lt;/span&gt;&lt;span&gt;android:name&lt;/span&gt;&lt;span&gt;=&quot;android.permission.INTERNET&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;编写Handler消息处理类：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;handler消息处理类是MainActivity类的内部类，当消息队列不为空时将自动进入，获取到消息值并分析其中内容&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;private&lt;/span&gt; Handler mainhandler=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Handler(){
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;    @Override
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; handleMessage(Message msg) {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取到命令，进行命令分支&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt;         &lt;span&gt;int&lt;/span&gt; handi=&lt;span&gt;msg.arg1;
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;switch&lt;/span&gt;&lt;span&gt; (handi){
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             &lt;span&gt;case&lt;/span&gt; 0&lt;span&gt;:
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;                 String ormsg=&lt;span&gt;(String)msg.obj;
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;                 disSocket();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;断开网络&lt;/span&gt;
+&lt;span&gt;10&lt;/span&gt;                 Toast.makeText(MainActivity.&lt;span&gt;this&lt;/span&gt;,&quot;发生错误=&amp;gt;：&quot;+&lt;span&gt;ormsg,Toast.LENGTH_SHORT).show();
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;                 &lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;             &lt;span&gt;case&lt;/span&gt; 1&lt;span&gt;:
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;                 Toast.makeText(MainActivity.&lt;span&gt;this&lt;/span&gt;,&quot;连接成功&quot;&lt;span&gt;,Toast.LENGTH_SHORT).show();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;                 &lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;             &lt;span&gt;case&lt;/span&gt; 2&lt;span&gt;:
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt;                 &lt;span&gt;//&lt;/span&gt;&lt;span&gt;收到数据&lt;/span&gt;
+&lt;span&gt;17&lt;/span&gt;                 String str1=&lt;span&gt;(String)msg.obj;
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;                main_rx.setText(str1);
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;                 &lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;             &lt;span&gt;default&lt;/span&gt;:&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; };
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;连接按钮监听：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;当连接按钮按下时，将会立即获取输入框的内容并进行字符串分隔，得到IP地址和端口号，开启线程进行网络连接 &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;连接按钮监听&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; main_conn.setOnClickListener(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; View.OnClickListener() {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;      @Override
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;       &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; onClick(View v) {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;           String strip=&lt;span&gt;main_ip.getText().toString().trim();
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;           &lt;span&gt;if&lt;/span&gt;(strip.indexOf(&quot;:&quot;)&amp;gt;=0&lt;span&gt;){
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;              
+&lt;span&gt; 8&lt;/span&gt;               &lt;span&gt;//&lt;/span&gt;&lt;span&gt;开始启动连接线程&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;               &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Socket_thread(strip).start();
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; 
+&lt;span&gt;11&lt;/span&gt; &lt;span&gt;          }
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; 
+&lt;span&gt;13&lt;/span&gt; &lt;span&gt;      }
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; });
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;发送数据按钮监听：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;当发送数据按钮按下时，将会立即获取到发送输入框的内容，分别可以调用字符串发送函数和十六进制发送函数进行数据发送&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送按钮监听&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; main_send.setOnClickListener(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; View.OnClickListener() {
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt; @Override
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;  &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; onClick(View v) {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;    &lt;span&gt;//&lt;/span&gt;&lt;span&gt;得到输入框内容&lt;/span&gt;
+&lt;span&gt; 6&lt;/span&gt;    &lt;span&gt;final&lt;/span&gt; String senddata=&lt;span&gt;main_tx.getText().toString().trim();
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
+&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt;(!senddata.equals(&quot;&quot;&lt;span&gt;)){
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送因为使用的是线程，所以先后顺序不一定
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送字符串数据&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt; &lt;span&gt;            sendStrSocket(senddata);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送十六进制数据&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt;             sendByteSocket(&lt;span&gt;new&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[]{0x01,0x02,0x03&lt;span&gt;});
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; 
+&lt;span&gt;15&lt;/span&gt;            }&lt;span&gt;else&lt;/span&gt; Toast.makeText(MainActivity.&lt;span&gt;this&lt;/span&gt;,&quot;输入不可为空&quot;&lt;span&gt;,Toast.LENGTH_SHORT).show();
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; });
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;开始网络连接线程：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;该类为MainActivity类的内部类，实现线程连接socket服务器，并获取输入输出流，并开启接收线程&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Socket_thread &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; Thread
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;{
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt; String IP=&quot;&quot;;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;ip地址&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; PORT=0;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;端口号&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Socket_thread(String strip){
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;构造方法需要传递服务器的IP地址和端口号
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;如: 192.168.43.222:8099
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;进行字符串分隔，得到服务器IP地址和端口号&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;         String[] stripx= strip.split(&quot;:&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.IP=stripx[0&lt;span&gt;];
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.PORT=Integer.parseInt(stripx[1&lt;span&gt;]);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;    @Override
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; 
+&lt;span&gt;17&lt;/span&gt;             disSocket();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;断开上次连接&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt;             &lt;span&gt;if&lt;/span&gt;(sock !=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;                outx.close();
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;                inx.close();
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;                 sock.close();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;关闭&lt;/span&gt;
+&lt;span&gt;22&lt;/span&gt;                 sock=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;开始连接服务器，此处会一直处于阻塞，直到连接成功&lt;/span&gt;
+&lt;span&gt;25&lt;/span&gt;             sock=&lt;span&gt;new&lt;/span&gt; Socket(&lt;span&gt;this&lt;/span&gt;.IP,&lt;span&gt;this&lt;/span&gt;&lt;span&gt;.PORT);
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; 
+&lt;span&gt;27&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;阻塞停止，表示连接成功，发送连接成功消息&lt;/span&gt;
+&lt;span&gt;28&lt;/span&gt;             Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;             message.arg1=1&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;            mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; 
+&lt;span&gt;32&lt;/span&gt;          }&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt;             Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt;             message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;35&lt;/span&gt;             message.obj=&quot;连接服务器时异常&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt; &lt;span&gt;            mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt; 
+&lt;span&gt;38&lt;/span&gt;             System.out.println(&quot;建立失败////////////////////////////////////////////&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;39&lt;/span&gt; &lt;span&gt;            e.printStackTrace();
+&lt;/span&gt;&lt;span&gt;40&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;41&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;42&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;43&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;获取到输入输出流&lt;/span&gt;
+&lt;span&gt;44&lt;/span&gt;             outx=&lt;span&gt;sock.getOutputStream();
+&lt;/span&gt;&lt;span&gt;45&lt;/span&gt;             inx=&lt;span&gt;sock.getInputStream();
+&lt;/span&gt;&lt;span&gt;46&lt;/span&gt;         } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;47&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送连接失败异常&lt;/span&gt;
+&lt;span&gt;48&lt;/span&gt;             Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;49&lt;/span&gt;             message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;50&lt;/span&gt;             message.obj=&quot;获取输入输出流异常&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;51&lt;/span&gt; &lt;span&gt;            mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;52&lt;/span&gt; 
+&lt;span&gt;53&lt;/span&gt;             System.out.println(&quot;流获取失败////////////////////////////////////////////&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;54&lt;/span&gt; &lt;span&gt;            e.printStackTrace();
+&lt;/span&gt;&lt;span&gt;55&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;56&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;57&lt;/span&gt; 
+&lt;span&gt;58&lt;/span&gt;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt; new Outx().start();&lt;/span&gt;
+&lt;span&gt;59&lt;/span&gt;         &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Inx().start();
+&lt;/span&gt;&lt;span&gt;60&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;61&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;关闭socket函数：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;关闭socket之前将先关闭输入输出流，这样才能更加安全的关闭socket &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; disSocket(){
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果不为空，则断开socket&lt;/span&gt;
+&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;if&lt;/span&gt;(sock !=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;            outx.close();
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; &lt;span&gt;            inx.close();
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             sock.close();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;关闭&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;             sock = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         }&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e){
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送连接失败异常&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;             Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;             message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;             message.obj=&quot;断开连接时发生错误&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;            mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; 
+&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; 
+&lt;span&gt;19&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;数据接收线程实现：&lt;/span&gt;&lt;/strong&gt;&lt;strong&gt;&lt;span&gt; &lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;接收线程将实现数据的接收，并把接收到的数据通过消息发送给处理类，特别注意的是 inx.read(bu) 返回如果是 -1 则表示服务器断开了连接或者其它非主动调用关闭socket方法断开造成的错误&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;循环接收数据&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Inx &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; Thread{
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;        @Override
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt;         &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         &lt;span&gt;while&lt;/span&gt;(&lt;span&gt;true&lt;/span&gt;&lt;span&gt;){
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; 
+&lt;span&gt; 7&lt;/span&gt;         &lt;span&gt;byte&lt;/span&gt;[] bu=&lt;span&gt;new&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[1024&lt;span&gt;];
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;得到-1表示服务器断开&lt;/span&gt;
+&lt;span&gt;10&lt;/span&gt;           &lt;span&gt;int&lt;/span&gt; conut=inx.read(bu);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设备重启，异常 将会一直停留在这&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;             &lt;span&gt;if&lt;/span&gt;(conut==-1&lt;span&gt;){
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;                 &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送连接失败异常&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt;                 Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;                 message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;                 message.obj=&quot;服务器断开&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;                mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;                 disSocket();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;断开连接&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt;                 System.out.println(&quot;**********服务器异常*********:&quot;+&lt;span&gt;conut);
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;                 &lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; 
+&lt;span&gt;22&lt;/span&gt;           &lt;span&gt;//&lt;/span&gt;&lt;span&gt;必须去掉前后空字符，不然有这个会有1024个字符每次&lt;/span&gt;
+&lt;span&gt;23&lt;/span&gt;           strread=&lt;span&gt;new&lt;/span&gt; String(bu,&quot;GBK&quot;&lt;span&gt;).trim();
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;           &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送出收到的数据&lt;/span&gt;
+&lt;span&gt;25&lt;/span&gt;           Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt;           message.arg1=2&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt;           message.obj=&lt;span&gt;strread;
+&lt;/span&gt;&lt;span&gt;28&lt;/span&gt; &lt;span&gt;          mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt; 
+&lt;span&gt;30&lt;/span&gt;           } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (IOException e) {
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; &lt;span&gt;              System.out.println(e);
+&lt;/span&gt;&lt;span&gt;32&lt;/span&gt; 
+&lt;span&gt;33&lt;/span&gt; &lt;span&gt;           }
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt;  } }}
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;发送字符串函数：&lt;/span&gt;&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;&lt;span&gt;网络编程的最终发送的内容是字节，所以发送字符串需要通过getBytes进行编码&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送字符串&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; sendStrSocket(&lt;span&gt;final&lt;/span&gt;&lt;span&gt; String senddata){
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;new&lt;/span&gt; Thread(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;    @Override
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;       &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;          &lt;span&gt;//&lt;/span&gt;&lt;span&gt;可以经过编码发送字符串&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt;          outx.write(senddata.getBytes(&quot;gbk&quot;));&lt;span&gt;//&lt;/span&gt;&lt;span&gt;&quot;utf-8&quot;&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt; 
+&lt;span&gt;10&lt;/span&gt;       } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;          &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送连接失败异常&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;          Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;          message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;          message.obj=&quot;数据发送异常&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;         mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;   }).start();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;发送十六进制函数：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;通过字节数组，可以实现多个十六进制数据的发送&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送十六进制&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt;  &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; sendByteSocket(&lt;span&gt;final&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;&lt;span&gt;[] senddata){
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;new&lt;/span&gt; Thread(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;      @Override
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;       &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;        &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送十六进制&lt;/span&gt;
+&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;            outx.write(senddata);
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; 
+&lt;span&gt;10&lt;/span&gt;         } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;发送连接失败异常&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;              Message message=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Message();
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;              message.arg1=0&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;              message.obj=&quot;数据发送异常&quot;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;             mainhandler.sendMessage(message);
+&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;           }
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;      }
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;    }).start();
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; }
+&lt;/pre&gt;&lt;/div&gt;
+
+
+&lt;hr/&gt;&lt;p&gt; 参考：&lt;/p&gt;
+&lt;p&gt;https://blog.csdn.net/rabbit_in_android/article/details/50585156&lt;/p&gt;
+&lt;p&gt;https://www.imooc.com/article/25134?block_id=tuijian_wz&lt;/p&gt;
+</description>
+<pubDate>Wed, 16 Jan 2019 17:11:00 +0000</pubDate>
+<dc:creator>东小东</dc:creator>
+<og:description>Socket： 有服务器和客户端之分，其是对TCP/IP的封装，使用IP地址加端口，确定一个唯一的点。在Internet上的主机一般运行了多个服务软件，同时提供几种服务。每种服务都打开一个Socket</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/dongxiaodong/p/10280104.html</dc:identifier>
+</item>
+<item>
+<title>Java运行时环境---ClassLoader类加载机制 - 涛姐涛哥</title>
+<link>http://www.cnblogs.com/taojietaoge/p/10269844.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/taojietaoge/p/10269844.html</guid>
+<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;背景&lt;/strong&gt;：听说ClassLoader类加载机制是进入BAT的必经之路。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;ClassLoader总述&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;      普通的Java开发其实用到ClassLoader的地方并不多，但是理解透彻ClassLoader类的加载机制，无论是对我们编写更高效的代码还是进BAT都大有裨益；而从“黄埔军校”出来的我对ClassLoader的理解都是借鉴了很多书籍和博客，站在了各大博主的肩膀上，感谢你们！上菜，Classloader最主要的作用就是将Java字节码文件(后缀为.class)加载到JVM中，JVM在启动时不会一次性加载所有的class文件，而是根据需要动态加载class文件，毕竟一次性加载太多jar包的class文件JVM吃不消；下面主要研究Bootstrap ClassLoader、Extention ClassLoader和AppClassLoader这三种类加载器。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;  谈到ClassLoader就想到我们安装JDK的时候都会在控制台输入java、javac验证是否安装成功，而这个javac就是Java ClassLoader，测试是否能把Java源文件正确编译成Java字节码文件，下面的截图就是个javac的小例子，javac之后加载器把Java源文件编译成TestClassLoader.class字节码文件。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1580332/201901/1580332-20190115003123942-39533827.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;由于下面要讲到ClassLoader的加载路径，这里顺便把Java的环境变量也复习一遍。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;JAVA_HOME&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;指的是安装JDK的位置，如：JAVA_HOME=&quot;/Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home&quot; 。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;PATH&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;配置PATH(程序的路径)的作用将就是能够在命令行窗口直接键入程序的名字了，而不再需要键入它的全路径，比如上面代码中我用的到&lt;code&gt;javac&lt;/code&gt;和&lt;code&gt;java&lt;/code&gt;两个命令。如：PATH=&quot;.$PATH:$JAVA_HOME/bin&quot; ；就是在&lt;span&gt;JAVA_HOME&lt;/span&gt;路径上添加了JDK下的bin目录即可。&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;CLASSPATH&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;CLASSPATH就是指向jar包的路径，如：PATH=&quot;.$PATH:$JAVA_HOME/bin&quot; ；&quot;&lt;strong&gt;&lt;span&gt;.&lt;/span&gt;&lt;/strong&gt;&quot;表示当前目录。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt; ClassLoader类加载流程&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;三个Class Loader的执行顺序是：&lt;span&gt;Bootstrap CLassloder -&amp;gt; &lt;span&gt;Extention ClassLoader &lt;/span&gt; -&amp;gt; &lt;span&gt;AppClassLoader；&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;1、&lt;span&gt;&lt;span&gt;Bootstrap CLassloder是最顶层的加载类，主要是加载核心类库，也就是&lt;span&gt;%JRE_HOME%\lib下的rt.jar、resources.jar、charsets.jar和class等&lt;/span&gt;资源；并且，可以通过启动JVM时指定-&lt;span&gt;Xbootclasspath&lt;/span&gt;和路径来改变&lt;span&gt;Bootstrap ClassLoader&lt;/span&gt;的加载目录，下面有个小荔子。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;2、&lt;span&gt;Extention ClassLoader是扩展的类加载器，其&lt;span&gt;加载的是目录%JRE_HOME%\lib\ext目录下的jar包和class文件；它同样也可以&lt;span&gt;加载-D java.ext.dirs选项指定的目录&lt;/span&gt;。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;3、&lt;span&gt;Appclass Loader是用于加载当前应用的classpath的所有类，其&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;也称为SystemAppClass&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;另外有兴趣的还可以看下&lt;code class=&quot;language-java hljs has-numbering&quot;&gt;&lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-title&quot;&gt;Launcher&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;类的源码，源码中规定了三个加载器的环境属性分别为&lt;code&gt;B:sun.boot.class.path、E:java.ext.dirs和A:java.class.path;下面通过代码来简单测试写，如图：&lt;/code&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1580332/201901/1580332-20190115232300121-1314416609.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;打印输出结果：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;BootstrapClassLoade&lt;/strong&gt;r:&lt;br/&gt;        /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/resources.jar:&lt;br/&gt;            /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/rt.jar:&lt;br/&gt;                /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/sunrsasign.jar:&lt;br/&gt;                    /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/jsse.jar:&lt;br/&gt;                        /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/jce.jar:&lt;br/&gt;                            /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/charsets.jar:&lt;br/&gt;                                /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/jfr.jar:&lt;br/&gt;                                    /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/classes&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;ExtClassLoader&lt;/strong&gt;:&lt;br/&gt;        /Users/apple/Library/Java/Extensions:&lt;br/&gt;            /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/ext:&lt;br/&gt;                /Library/Java/Extensions:/Network/Library/Java/Extensions:&lt;br/&gt;                    /System/Library/Java/Extensions:/usr/lib/java&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;AppClassLoader&lt;/strong&gt;:&lt;br/&gt;        /TJT/Eclipse/workspace/tjt/bin:&lt;br/&gt;            /Library/Java/JavaVirtualMachines/jdk1.8.0_191.jdk/Contents/Home/jre/lib/rt.jar&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;为了更好的理解三者之间加载的关系，我们来测试一个类的加载器和它的父类加载以及一些不是我们创建的类如String、Double、int等基础类：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1580332/201901/1580332-20190115235913715-310910736.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;从上图中可用看出，自己编写的类Test2.class文件&lt;span&gt;是由AppClassLoader加载的，并且&lt;span&gt;&lt;span&gt;AppClassLoader&lt;/span&gt;&lt;/span&gt;有父加载器ExtClassLoader，但&lt;span&gt;&lt;span&gt;ExtClassLoader&lt;/span&gt;&lt;/span&gt;的父加载器为null；Double.class这个Java基础类的加载器为null，其父加载也为空且程序还会报空指针异常错误；其实呢，Double.class是有Bootstrap CLassLoader加载的，也并不是每个加载器都有父加载器；总的来说就是&lt;span&gt;&lt;span&gt;JVM启动时通过Bootstrap类加载器加载rt.jar等核心jar包中的class文件&lt;/span&gt;&lt;/span&gt;，诸如一些&lt;span&gt;&lt;span&gt;int.class，String.class都是由它加载；&lt;span&gt;&lt;span&gt;JVM初始化sun.misc.Launcher并创建Extension ClassLoader和AppClassLoader实例，且将ExtClassLoader设置为AppClassLoader的父加载器；而&lt;span&gt;&lt;span&gt;Bootstrap虽然没有父加载器，但是它却可以作为一个ClassLoader的父加载器&lt;/span&gt;&lt;/span&gt;；另外，一个ClassLoader创建时如果没有指定parent，那么它的parent默认就是AppClassLoader；&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;strong&gt;双亲委托&lt;/strong&gt;：&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;当一个类加载器查找class和resource时，是通过“委托模式”进行的，它首先会判断这个class是不是已经加载成功，如果没有加载的话它并不是自己进行查找，而是先通过父加载器，然后递归下去，直到Bootstrap ClassLoader，如果Bootstrap classloader找到了，直接返回，如果没有找到，则一级一级返回，最后是由自身去查找这些对象；这种机制就叫做双亲委托。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1580332/201901/1580332-20190117002255328-577091310.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;从上图可用看出ClassLoader的加载序列，委托是从下往上，查找过程则是从上向下的，以下有几个注意事项：&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;1、一个AppClassLoader查找资源时，首先会查看缓存是否有，若有则从缓存中获取，否则委托给父加载器；&lt;br/&gt;2.、重复第一步的递归操作，查询类是否已被加载；&lt;br/&gt;3.、如果ExtClassLoader也没有加载过，则由Bootstrap ClassLoader加载，它首先也会查找缓存，如果没有找到的话，就去找自己的规定的路径下，也就是sun.mic.boot.class下面的路径，找到就返回，找不到就让子加载器自己去找。&lt;br/&gt;4.、Bootstrap ClassLoader如果没有查找成功，则ExtClassLoader自己在java.ext.dirs路径中去查找，查找成功就返回，查找不成功则再向下让子加载器找。&lt;br/&gt;5.、若是ExtClassLoader查找不成功，则由ppClassLoader在java.class.path路径下自己查找查找，找到就返回，如果没有找到就让子类找，如果没有子类则会抛出各种异常。&lt;br/&gt;&lt;strong&gt;自定义CLassLoader&lt;/strong&gt;：&lt;br/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;在ClassLoader中有四个很重要实用的方法loadClass()、findLoadedClass()、findClass()、defineClass()，可以用来创建属于自己的类的加载方式；比如我们需要动态加载一些东西，或者从C盘某个特定的文件夹加载一个class文件，又或者从网络上下载class主内容然后再进行加载等。分三步搞定：&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;1、编写一个类继承ClassLoader抽象类；&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;2、重写findClass()方法；&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;3、在findClass()方法中调用defineClass()方法即可实现自定义ClassLoader；&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;需求：自定义一个classloader其默认加载路径为&quot;/TJT/Code&quot;下的jar包和资源。首先创建一个Test.java，然后javac编译并把生成的Test.class文件放到&quot;/TJT/Code&quot;路径下，然后再编写一个&lt;code class=&quot;hljs java has-numbering&quot;&gt;&lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-title&quot;&gt;DiskClassLoader继承ClassLoader，最后通过&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;FindClassLoader的测试类，调用再Test.class里面的一个find()方法。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;package www.baidu;
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;import java.io.ByteArrayOutputStream;
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;import java.io.File;
+&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;import java.io.FileInputStream;
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;import java.io.IOException;
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; 
+&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DiskClassLoader extends ClassLoader{
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt;自定义classLoader能将class二进制内容转换成Class对象&lt;/span&gt;
+&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String myPath;
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     
+&lt;span&gt;11&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; DiskClassLoader(String path) {
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;         myPath =&lt;span&gt; path;
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;     
+&lt;span&gt;15&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt;findClass()方法中定义了查找class的方法&lt;/span&gt;
+&lt;span&gt;16&lt;/span&gt; &lt;span&gt;    @Override
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;     &lt;span&gt;protected&lt;/span&gt; Class&amp;lt;?&amp;gt;&lt;span&gt; findClass(String name) throws ClassNotFoundException{
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;         String fileName =&lt;span&gt; getFileName(name);
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;         File file = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; File(myPath,fileName);
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;             FileInputStream &lt;span&gt;is&lt;/span&gt; = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; FileInputStream(file);
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;             ByteArrayOutputStream bos = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ByteArrayOutputStream();
+&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;             &lt;span&gt;int&lt;/span&gt; len = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;             &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;                 &lt;span&gt;while&lt;/span&gt;((len = &lt;span&gt;is&lt;/span&gt;.read()) != -&lt;span&gt;1&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;                    bos.write(len);
+&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; &lt;span&gt;                }
+&lt;/span&gt;&lt;span&gt;28&lt;/span&gt;             } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (IOException e) {
+&lt;/span&gt;&lt;span&gt;29&lt;/span&gt; &lt;span&gt;                e.printStackTrace();
+&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;31&lt;/span&gt;             &lt;span&gt;byte&lt;/span&gt;[] data =&lt;span&gt; bos.toByteArray();
+&lt;/span&gt;&lt;span&gt;32&lt;/span&gt;             &lt;span&gt;is&lt;/span&gt;&lt;span&gt;.close();
+&lt;/span&gt;&lt;span&gt;33&lt;/span&gt; &lt;span&gt;            bos.close();
+&lt;/span&gt;&lt;span&gt;34&lt;/span&gt;             &lt;span&gt;//&lt;/span&gt;&lt;span&gt;数据通过defineClass()生成了Class对象&lt;/span&gt;
+&lt;span&gt;35&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; defineClass(name, data,&lt;span&gt;0&lt;/span&gt;&lt;span&gt;,data.length );
+&lt;/span&gt;&lt;span&gt;36&lt;/span&gt;         } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;37&lt;/span&gt; &lt;span&gt;            e.printStackTrace();
+&lt;/span&gt;&lt;span&gt;38&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;39&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; super.findClass(name);
+&lt;/span&gt;&lt;span&gt;40&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;41&lt;/span&gt;     
+&lt;span&gt;42&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String getFileName(String name) {
+&lt;/span&gt;&lt;span&gt;43&lt;/span&gt;         &lt;span&gt;int&lt;/span&gt; lastIndexOf = name.lastIndexOf(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;.&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;44&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (lastIndexOf == -&lt;span&gt;1&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;45&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; name + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;.class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;46&lt;/span&gt;         }&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;47&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; name.substring(lastIndexOf + &lt;span&gt;1&lt;/span&gt;) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;.class&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+&lt;/span&gt;&lt;span&gt;48&lt;/span&gt; &lt;span&gt;        }
+&lt;/span&gt;&lt;span&gt;49&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;50&lt;/span&gt; }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;测试结果如下：找到了自定义的加载路径并且调用了类中的find()方法&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1580332/201901/1580332-20190117000027980-1441265017.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;package&lt;/span&gt;&lt;span&gt; www.baidu;
+&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;import&lt;/span&gt;&lt;span&gt; java.lang.reflect.Method;
+&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; 
+&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; FindClassLoader {
+&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; ClassNotFoundException {
+&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;创建自定义classloader对象&lt;/span&gt;
+&lt;span&gt; 7&lt;/span&gt;         DiskClassLoader diskL = &lt;span&gt;new&lt;/span&gt; DiskClassLoader(&quot;/TJT/Code&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         System.out.println(&quot;classloader is: &quot;+&lt;span&gt;diskL);
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;              &lt;span&gt;//&lt;/span&gt;&lt;span&gt;加载class文件&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;             Class clazz = diskL.loadClass(&quot;www.baidu.Test&quot;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;             &lt;span&gt;if&lt;/span&gt; (clazz != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;                 Object object =&lt;span&gt; clazz.newInstance();
+&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;                 Method declaredMethod = clazz.getDeclaredMethod(&quot;find&quot;, &lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;                 &lt;span&gt;//&lt;/span&gt;&lt;span&gt;通过反射调用Test类的find()方法&lt;/span&gt;
+&lt;span&gt;16&lt;/span&gt;                 declaredMethod.invoke(object, &lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; &lt;span&gt;            }
+&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;         } &lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
+&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;            e.printStackTrace();
+&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; &lt;span&gt;        } 
+&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;    }
+&lt;/span&gt;&lt;span&gt;22&lt;/span&gt; }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;总结：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;除此之外，&lt;span&gt;ClassLoader还可以进行程序加密(比如你写了比较骚的jar包)，这样我们就可以在程序中加载特定了类，并且这个类只能被我们自定义的加载器进行加载，提高了程序的安全性，但是用的不多；反正我们在项目上是不允许用&lt;span&gt;&lt;span&gt;ClassLoader&lt;/span&gt;&lt;/span&gt;加密，宁愿裸奔，了解一下。另外就是tomcat的类加载机制也是遵循双亲委派机制的，并且大部分的加载机制和JVM类加载机制一样，理解了&lt;span&gt;Bootstrap ClassLoader、Extention ClassLoader和AppClassLoader&lt;/span&gt;这三种加载器后再看tomcat类的加载就可以横着走了。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+
+
+
+
+</description>
+<pubDate>Wed, 16 Jan 2019 16:12:00 +0000</pubDate>
+<dc:creator>涛姐涛哥</dc:creator>
+<og:description>背景：听说ClassLoader类加载机制是进入BAT的必经之路。 ClassLoader总述： 普通的Java开发其实用到ClassLoader的地方并不多，但是理解透彻ClassLoader类的加</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/taojietaoge/p/10269844.html</dc:identifier>
+</item>
+<item>
 <title>EF6学习笔记十二：Update操作、批量数据操作 - 张四海</title>
 <link>http://www.cnblogs.com/jinshan-go/p/10280066.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/jinshan-go/p/10280066.html</guid>
@@ -1233,10 +1935,10 @@ PONG
 <title>万物互联之~RPC专栏 - 毒逆天</title>
 <link>http://www.cnblogs.com/dunitian/p/10279946.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/dunitian/p/10279946.html</guid>
-<description>&lt;p&gt;其他专栏最新篇：&lt;a href=&quot;https://mp.weixin.qq.com/s/Alv0Ds9LDvWbWSNgOgG43A&quot;&gt;协程加强之~兼容答疑篇&lt;/a&gt; | &lt;a href=&quot;https://www.cnblogs.com/dotnetcrazy/p/9887708.html&quot;&gt;聊聊数据库~SQL环境篇&lt;/a&gt;&lt;/p&gt;
+<description>&lt;h2 id=&quot;rpc引入&quot;&gt;3.RPC引入&lt;/h2&gt;
 &lt;p&gt;上篇回顾：&lt;a href=&quot;https://mp.weixin.qq.com/s/KbiAz3Z3yyyKRHws1WW6vg&quot;&gt;万物互联之~深入篇&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;rpc引入&quot;&gt;3.RPC引入&lt;/h2&gt;
 &lt;p&gt;Code：&lt;a href=&quot;https://github.com/lotapp/BaseCode/tree/master/python/6.net/6.rpc/&quot; class=&quot;uri&quot;&gt;https://github.com/lotapp/BaseCode/tree/master/python/6.net/6.rpc/&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;其他专栏最新篇：&lt;a href=&quot;https://mp.weixin.qq.com/s/Alv0Ds9LDvWbWSNgOgG43A&quot;&gt;协程加强之~兼容答疑篇&lt;/a&gt; | &lt;a href=&quot;https://www.cnblogs.com/dotnetcrazy/p/9887708.html&quot;&gt;聊聊数据库~SQL环境篇&lt;/a&gt;&lt;/p&gt;
 &lt;h3 id=&quot;概念&quot;&gt;3.1.概念&lt;/h3&gt;
 &lt;p&gt;&lt;code&gt;RPC&lt;/code&gt;(&lt;code&gt;Remote Procedure Call&lt;/code&gt;)：分布式系统常见的一种通信方法（&lt;strong&gt;远程过程调用&lt;/strong&gt;），通俗讲：&lt;strong&gt;可以一台计算机的程序调用另一台计算机的子程序&lt;/strong&gt;（可以把它看成之前我们说的进程间通信，只不过这一次的进程不在同一台PC上了）&lt;/p&gt;
 &lt;p&gt;&lt;strong&gt;PS：&lt;code&gt;RPC&lt;/code&gt;的设计思想是力图使远程调用中的通讯细节对于使用者透明，调用双方无需关心网络通讯的具体实现&lt;/strong&gt;&lt;/p&gt;
@@ -1399,7 +2101,7 @@ if __name__ == &quot;__main__&quot;:
 &lt;p&gt;输出:&lt;/p&gt;
 &lt;pre&gt;
 &lt;code&gt;1+2=3
-1.1+2.2=3.1
+1.1+2=3.1
 Wed Jan 16 22&lt;/code&gt;
 &lt;/pre&gt;
 &lt;p&gt;2.Client Stub，客户端存根：(主要有&lt;code&gt;打包&lt;/code&gt;、&lt;code&gt;解包&lt;/code&gt;、和&lt;code&gt;RPC服务器通信&lt;/code&gt;的方法)&lt;/p&gt;
@@ -1593,13 +2295,13 @@ http://www.dataguru.cn/article-14244-1.html&lt;/code&gt;
 </description>
 <pubDate>Wed, 16 Jan 2019 15:00:00 +0000</pubDate>
 <dc:creator>毒逆天</dc:creator>
-<og:description>其他专栏最新篇：协程加强之~兼容答疑篇 | 聊聊数据库~SQL环境篇 上篇回顾：万物互联之~深入篇 3.RPC引入 Code： 3.1.概念 (`Remote Procedure Call`)：分布式</og:description>
+<og:description>3.RPC引入 上篇回顾：万物互联之~深入篇 Code： 其他专栏最新篇：协程加强之~兼容答疑篇 | 聊聊数据库~SQL环境篇 3.1.概念 (`Remote Procedure Call`)：分布式</og:description>
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/dunitian/p/10279946.html</dc:identifier>
 </item>
 <item>
-<title>探索.NET Core中的IStartupFilter - LamondLu</title>
+<title>探索ASP.NET Core中的IStartupFilter - LamondLu</title>
 <link>http://www.cnblogs.com/lwqlun/p/10279874.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/lwqlun/p/10279874.html</guid>
 <description>&lt;blockquote readability=&quot;2.1348314606742&quot;&gt;
@@ -1778,613 +2480,6 @@ Action&amp;lt;IApplicationBuilder&amp;gt; filter2Configure = filter2.Configure(f
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/lwqlun/p/10279874.html</dc:identifier>
-</item>
-<item>
-<title>🤖️ ANNT：卷积神经网络 - I.am.Conmajia</title>
-<link>http://www.cnblogs.com/conmajia/p/annt-convolutional-neural-networks.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/conmajia/p/annt-convolutional-neural-networks.html</guid>
-<description>&lt;blockquote readability=&quot;10&quot;&gt;
-&lt;p&gt;Andrew Kirillov 著&lt;br/&gt;Conmajia 译&lt;br/&gt;2019 年 1 月 15 日&lt;/p&gt;
-&lt;p&gt;原文发表于 CodeProject（2018 年 10 月 28 日）. 中文版有小幅修改，已获 Kirillov 本人许可.&lt;/p&gt;
-&lt;p&gt;本文介绍了&lt;strong&gt;如何使用 ANNT 神经网络库生成卷积神经网络进行图像分类&lt;/strong&gt;.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;div class=&quot;info important&quot; readability=&quot;9&quot;&gt;
-&lt;p&gt;全文约 11,000 字，建议阅读时间 30 分钟. 本文数学内容较多，如果感到不适，可以放弃.&lt;/p&gt;
-&lt;/div&gt;
-&lt;div class=&quot;info&quot; readability=&quot;10&quot;&gt;
-&lt;div&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190112134441408-1460324434.png&quot; width=&quot;48&quot;/&gt;&lt;/div&gt;
-&lt;strong&gt;ANNT&lt;/strong&gt;（Artificial Neural Networks Technology），是 AForge.NET 科学计算库 &lt;code&gt;AForge.Neuro&lt;/code&gt; 的组成部分. AForge.NET 是 Andrew Kirillov 的杰作之一，主要用于计算机视觉、人工智能、机器学习、图像处理、机器人等领域.&lt;/div&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190112011856517-760355778.png&quot;/&gt;&lt;a href=&quot;https://www.codeproject.com/KB/AI/1264962/ANNT.zip&quot;&gt;源码 491 KB&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;本文继续上一篇《&lt;a href=&quot;https://www.cnblogs.com/conmajia/p/annt-feed-forward-fully-connected-neural-networks.html&quot;&gt;前馈全连接神经网络&lt;/a&gt;》，讨论使用 ANNT 生成&lt;strong&gt;卷积神经网络&lt;/strong&gt;，并应用到图像分类处理任务中. 在《前馈》中，我介绍了&lt;strong&gt;随机梯度下降&lt;/strong&gt;（SGD）、&lt;strong&gt;误差反向传播&lt;/strong&gt;（EBP）等算法，还引入了一个 MNIST 手写文字识别的简单例子. 例子虽然简单，但还是达到了 96.5% 的准确率. 这篇文章里，我打算介绍一个不同的人工神经网络架构：&lt;strong&gt;卷积神经网络&lt;/strong&gt;（convolutional neural networks，CNN）. 这是专为计算机视觉领域设计的架构，适宜处理诸如图像分类、图像识别之类的任务. 文中附带的例子里，我把手写文字分类识别准确率提高到了 99%.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://towardsdatascience.com/convolutional-neural-networks-from-the-ground-up-c67bb41454e1&quot;&gt;卷积神经网络&lt;/a&gt;由 &lt;u&gt;Yann LeCun&lt;/u&gt;&lt;a href=&quot;http://www.cnblogs.com/conmajia/p/annt-convolutional-neural-networks.html#fn1&quot; class=&quot;footnote-ref&quot; id=&quot;fnref1&quot;&gt;&lt;sup&gt;1&lt;/sup&gt;&lt;/a&gt; 在 1998 年提出. 然而那时候公众和业界对人工智能相关领域的关注度很低，他的研究在当时无人问津. 直到 14 年后，在 &lt;a href=&quot;http://image-net.org/&quot;&gt;ImageNet&lt;/a&gt; 比赛中获胜团队使用了这一架构拔得头筹，这才引起了广泛的关注. 随后 CNN 一飞冲天，迅速流行起来，并应用到了大量计算机视觉领域研究中. 如今，最先进的卷积神经网络算法在进行图像识别时，甚至可以超过人类肉眼识别的准确率.&lt;/p&gt;
-
-&lt;p&gt;前馈全连接人工神经网络的思路来源于对生物细胞的生理连接规律的研究. 类似的，卷积网络则是从动物大脑的学习方式获得灵感. 1950 年代至 1960 年代，&lt;u&gt;Hubel&lt;/u&gt; 和 &lt;u&gt;Wiesel&lt;/u&gt; 的研究揭示了猫与猴子的大脑皮层中负责视觉的部分包含了能响应极小视野的神经元. 如果眼睛不动，视觉刺激影响单个神经元放电的视觉空间区域称为&lt;strong&gt;感受野&lt;/strong&gt;（receptive field）. 相邻的细胞有相似和重叠的接收区. 感受野的大小和位置在整个大脑皮层上有系统的变化，从而形成完整的视觉空间图.&lt;/p&gt;
-&lt;div class=&quot;info&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;虽然汉语里&lt;u&gt;野&lt;/u&gt;字有 &lt;em lang=&quot;cmn-latn&quot;&gt;field&lt;/em&gt; 的意思，但是 &lt;em lang=&quot;cmn-latn&quot;&gt;receptive field&lt;/em&gt; 翻译成&lt;u&gt;感受&lt;/u&gt;&lt;u&gt;野&lt;/u&gt;还真是他妈的朗朗上口呢！&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;在 Hubel 等的论文中，他们描述了大脑中两种基本类型的视觉神经细胞，简单细胞和复杂细胞，每种的行为方式都不同. 例如，当识别到某个固定区域里呈某一角度的线条时，简单细胞就会激活. 复杂细胞的感受野更大，其输出对其中的特定位置不敏感. 这些细胞即便在视网膜的位置发生了变化也会继续对某种刺激作出反应.&lt;/p&gt;
-&lt;p&gt;1980 年，日本的&lt;u&gt;福岛邦彦&lt;/u&gt;提出了种层次化的神经网络模型，命名为&lt;strong&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Neocognitron&quot;&gt;新认知机&lt;/a&gt;&lt;/strong&gt;（neocongnitron）. 这个模型受简单和复杂细胞的概念的启发，新认知者能够通过学习物体的形状来识别模式.&lt;/p&gt;
-&lt;div class=&quot;info note&quot; readability=&quot;6.5205479452055&quot;&gt;
-&lt;p&gt;&lt;a href=&quot;http://personalpage.flsi.or.jp/fukushima/index-e.html&quot;&gt;福岛邦彦&lt;/a&gt;这老大爷奔 90 去的人了，对于技术发展还是很关注的. 感兴趣的读者可以通过 [&lt;a href=&quot;mailto:fukushima@m.ieice.org&quot;&gt;〒电子邮件&lt;/a&gt;] 向他请教.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;再后来，1998 年，Yann LeCun 等人引入了卷积神经网络. 第一版的 CNN 叫做 Lenet-5，能够分类手写数字.&lt;/p&gt;
-&lt;h2 id=&quot;卷积网络的架构&quot;&gt;卷积网络的架构&lt;/h2&gt;
-&lt;p&gt;在开始构建卷积神经网络的细节之前，先来看神经网络的组成基础. 正如&lt;a href=&quot;https://www.cnblogs.com/conmajia/p/annt-feed-forward-fully-connected-neural-networks.html&quot;&gt;前一篇文章&lt;/a&gt;提到的，人工神经网络的许多概念&lt;em&gt;可以作为单独的实体来实现&lt;/em&gt;，用于执行推理和训练阶段的计算. 由于核心结构已经在前面的文章中列出，这里我将直接在顶层添加模块，然后把它们粘在一起.&lt;/p&gt;
-&lt;h3 id=&quot;卷积层&quot;&gt;卷积层&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;卷积层&lt;/strong&gt;是卷积神经网络的核心部分. 它假定输入是具有一定宽度、高度和深度的三维形状. 对于第一个卷积层，它&lt;em&gt;通常是一个图像&lt;/em&gt;，最常见的深度是 1（灰度图像）或 3（带 RGB 通道的彩色图像）. 前一层生成一组特征映射（这里的深度是输入特征映射的数量）输入到后一层. 这里假设需要处理深度为 1 的输入，然后转换为二维结构.&lt;/p&gt;
-&lt;p&gt;所以，卷积层所做的，本质上是一个具有&lt;a href=&quot;https://en.wikipedia.org/wiki/Kernel_(image_processing)&quot;&gt;&lt;strong&gt;核&lt;/strong&gt;&lt;/a&gt;的&lt;a href=&quot;http://machinelearninguru.com/computer_vision/basics/convolution/image_convolution_1.html&quot;&gt;&lt;strong&gt;图像卷积&lt;/strong&gt;&lt;/a&gt;，一种非常常见的图像处理操作. 例如，可以用来模糊化或者锐化图像. 但讨论卷积网络时并不关心这些. 根据使用的核，图像卷积可以用来寻找图像中的某些特征，如垂直、水平边缘，角或圆等更复杂的特征. 想想我前面介绍的视觉皮层中简单细胞的概念？&lt;/p&gt;
-&lt;p&gt;数字图像处理里，两个矩阵相乘，如果其中一个保持不变，那么相当于用它代表的&lt;em&gt;操作&lt;/em&gt;对另一个进行某种运算. 所以有时&lt;u&gt;核&lt;/u&gt;也被称作&lt;u&gt;算子&lt;/u&gt;（operator）.&lt;/p&gt;
-&lt;p&gt;现在来计算一下卷积. 假设有 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt;（高度×宽度）、矩阵 &lt;span class=&quot;math inline&quot;&gt;\(\mathbf{K}\)&lt;/span&gt;（核）和 &lt;span class=&quot;math inline&quot;&gt;\(\mathbf{I}\)&lt;/span&gt;（图像），那么卷积可以写成这些矩阵的&lt;strong&gt;点积&lt;/strong&gt;：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \tag{1} \mathbf{K}*\mathbf{I}=\sum_{i=1}^{n}\sum_{j=1}^{m}K_{n-i+1,m-j+1}*I_{i,j} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;举个例子，对于 3×3 的矩阵，可以这么计算它们的卷积：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \begin{bmatrix} a &amp;amp; b &amp;amp; c \\ d &amp;amp; e &amp;amp; f \\ g &amp;amp; h &amp;amp; i \end{bmatrix} * \begin{bmatrix} 1 &amp;amp; 2 &amp;amp; 3 \\ 4 &amp;amp; 5 &amp;amp; 6 \\ 7 &amp;amp; 8 &amp;amp; 9 \end{bmatrix} \\ = i*1+h*2+g*3+f*4+e*5+d*6+c*7+b*8+a*9 \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;式 &lt;span class=&quot;math inline&quot;&gt;\((1)\)&lt;/span&gt; 的卷积定义是从信号处理领域借鉴过来的，核经过了垂直和水平翻转. 更直接的计算方法是 &lt;span class=&quot;math inline&quot;&gt;\(\mathbf{K}\)&lt;/span&gt; 和 &lt;span class=&quot;math inline&quot;&gt;\(\mathbf{I}\)&lt;/span&gt; 不进行翻转，直接进行正常点积. 这种操作称为&lt;strong&gt;互相关&lt;/strong&gt;，定义如下：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \mathbf{K}*\mathbf{I}=\sum_{i=1}^{n}\sum_{j=1}^{m}K_{i,j}*I_{i,j} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;在信号处理里，卷积和互相关具有不同的性质，并且用于不同的目的. 但是在图像处理和神经网络里，这些差异变得很细微，通常使用互相关来计算. &lt;em&gt;对于神经网络来说，这点差异并不重要&lt;/em&gt;. 稍后可以看到，这些“卷积”核实际上是神经网络需要学习的&lt;em&gt;权重&lt;/em&gt;. 所以，&lt;em&gt;由网络决定哪个核需要学习，翻转还是不翻转&lt;/em&gt;.&lt;/p&gt;
-&lt;div class=&quot;info&quot; readability=&quot;7&quot;&gt;
-&lt;p&gt;本文提到的&lt;u&gt;卷积&lt;/u&gt;，是两个矩阵的点积，即&lt;u&gt;互相关&lt;/u&gt;.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;好了，现在知道了如何计算两个相同大小的矩阵的卷积. 但是实际图像处理中这种福利局很少有，一般通常是一个 3×3、5×5、7×7 等大小的正方形矩阵作为核，而图像可以是&lt;em&gt;任意大小&lt;/em&gt;的. 那么怎么计算图像卷积呢？为了计算图像卷积，在整个图像上移动核，并在每个可能位置计算加权和. 图像处理中，这个概念被称为&lt;strong&gt;滑动窗口&lt;/strong&gt;，从图像的左上角开始，计算这一小区域（大小和核相同）的卷积. 然后将核右移一个&lt;em&gt;像素&lt;/em&gt;，计算出另一个卷积. 不断重复，完成第一&lt;em&gt;行&lt;/em&gt;每个位置的计算，然后从第二行开始，继续重复前面的计算. 这样，当整个图像处理后，就能得到一个特征图，其中包含了原图每个位置的卷积值.&lt;/p&gt;
-&lt;p&gt;图 1 说明了图像卷积的计算过程. 对于 8×8 的输入图像（input image）和 3×3 的核（kernel），计算得到 6×6 的特征图（feature map）.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190115233148828-493611213.png&quot;/&gt; 图 1 图像卷积演示
-&lt;div class=&quot;info important&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;注意卷积只在核&lt;em&gt;完全匹配&lt;/em&gt;图像的位置计算，图形边缘无法计算卷积. 于是计算得到的特征图总是&lt;em&gt;小于&lt;/em&gt;原图.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;图 1 的 3×3 卷积核是设计来查找对象的左边缘的（从滑动窗口的中心看，右侧有一条垂直直线）. 特征图中的高正值表示存在要查找的特征，零表示没有特征. 对于这个例子，负值表示存在“反转”特征，也就是对象的右边缘.&lt;/p&gt;
-&lt;p&gt;当计算卷积时，输出特征映射的大小比原图小. 使用的核越大，得到的特征图就越小. 对于 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 大小的核，输入图像的大小将丢失 &lt;span class=&quot;math inline&quot;&gt;\((n-1)\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\((m-1)\)&lt;/span&gt;. 因此，上面的例子如果用 5×5 的核，那特征图将只有 4×4. 多数情况下，需要特征图和原图等大，这时就要&lt;em&gt;填充&lt;/em&gt;特征图，一般用 0 填充. 假设原图大小为 8×8，而核为 5×5，那么需要先把原图填充到 12×12，添加 4 个额外的行和列，每侧各 2 行/列.&lt;/p&gt;
-&lt;p&gt;现在，读者应该已经可以计算卷积了. 接下来要研究这些内容怎样运用到前面定义的卷积层中. 为了保持简单，继续使用图 1 的例子. 在这种情况下，输入层有 64 个节点，卷积层有 36 个神经元. 和全连接层不同的是，卷积层的神经元只与前一层的一小部分神经元相连. 卷积层中的&lt;em&gt;每个神经元的连接数与它所实现的卷积核中的权重数相同&lt;/em&gt;，在上面的例子中是 9 个连接（核大小 3×3）. 因为假定卷积层的输入具有二维形状（一般是三维的，我这里简化一下，便于研究），所以这些连接是对先前神经元的矩形组进行的，该组神经元的形状与使用中的内核相同. 以前连接的神经元组对于卷积层的每个神经元是不同的，但是它确实与相邻的神经元重叠. 使用滑动窗口法计算图像卷积时，这些连接的方式与选择原图像素的方式相同.&lt;/p&gt;
-&lt;p&gt;忽略全连接层和卷积层的神经元与前一层的连接数不同，并且这些连接具有一定的结构这样的事实后，这两个层可以看作基本相同的：计算输入的加权和以产生输出. 不过还有一个区别，就是卷积层的神经元&lt;em&gt;共享权重&lt;/em&gt;. 因此，如果一个层做一个 3×3 的卷积，它只有一组权重，即 9. 每个神经元都共享这个权重，用于计算加权和. 而且，尽管没有提到，卷积层也为加权和&lt;em&gt;增加了偏差值，这也是共享的&lt;/em&gt;. 表 1 总结了全连接层和卷积层之间的区别：&lt;/p&gt;
-表 1 全连接层和卷积层对比
-&lt;table readability=&quot;5.5&quot;&gt;&lt;tr&gt;&lt;th&gt;全连接层&lt;/th&gt;
-&lt;th&gt;卷积层&lt;/th&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;不假设输入结构&lt;/td&gt;
-&lt;td&gt;假设输入为 2D 形状（通常是 3D）&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;5&quot;&gt;&lt;td&gt;每个神经元都连接到前一层所有神经元&lt;br/&gt;每神经元 64 个连接&lt;/td&gt;
-&lt;td&gt;每个神经元连接到前一层的矩形组，连接数等于卷积核的权重数&lt;br/&gt;每神经元 9 个连接&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;每个神经元有自身的权重和偏差值&lt;br/&gt;共 2304 权重，36 偏差值&lt;/td&gt;
-&lt;td&gt;共享权重和偏差值&lt;br/&gt;共 9 权重，1 偏差值&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;p&gt;前面的思考都基于卷积层的&lt;em&gt;输入和输出都是二维&lt;/em&gt;这个假设. 但是实际上通常&lt;em&gt;输入和输出都具有三维形状&lt;/em&gt;. 首先，从输出开始，每个卷积层计算不止一个卷积. 设计人工神经网络时，可以对它所能做的卷积数量进行配置，每个卷积使用自己的一组权重（核）和偏差值，从而生成不同的特征图. 前面提到过，不同的核可以用来寻找不同的特征直线、曲线、角等. 因此，通常会求得一些特征图，以突出不同特征. 这些图的计算方法很简单，只要在卷积层中添加额外的神经元群，这些神经元以单核的方式连接到输入端，就可以完成卷积的计算. 尽管这些神经元具有相同的连接模式，但它们共享不同的权重和偏差值. 还是用上面的例子，假设将卷积层配置为执行 5 个卷积，每个执行 3×3，这种情况下，输出数量（神经元数量）是 36×5=180. 5 组神经元组织成二维形状并重复相同的连接模式，每组都有自己的权重/偏差集，于是可得 45 个权重和 5 个偏差值.&lt;/p&gt;
-&lt;p&gt;来讨论一下输入的&lt;strong&gt;三维性质&lt;/strong&gt;. 对于第一层卷积层，多半都是些图像，要么是灰度图（2D），要么是 RGB 彩图（3D）. 对于后续的卷积层，输入的深度等于前一层计算的特征图的数量（卷积的数量）. 输入深度越大，与前一层连接的数量越多，卷积层中的神经元数量就越少. 此时使用的实际上是 3D 的卷积核，大小为 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt;，&lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt; 是输入&lt;strong&gt;深度&lt;/strong&gt;. 可以认为每个神经元都从各自的输入特征图增加了额外的连接. 2D 输入的情况下，每个神经元连接到输入特征图的 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 矩形区域. 3D 输入的情况下，每个神经元连接的是这些区域同样的位置，只是它们具有来自不同输入特征图的数字 &lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt;.&lt;/p&gt;
-&lt;p&gt;现在已经将卷积层推广到了三维上，也提到了偏差值，针对卷积核每个 &lt;span class=&quot;math inline&quot;&gt;\((x,y)\)&lt;/span&gt;，式 &lt;span class=&quot;math inline&quot;&gt;\((1)\)&lt;/span&gt; 可以表示为：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \tag{2} K^{(f)}*I_{y,x}=\sum_{l=1}^{d}\sum_{i=1}^{n}\sum_{j=1}^{m}\left[K_{l,i,j}^{(f)}*I_{l,y+i-1,x+j-1}+b^{(f)}\right],f=1,2,\cdots,z \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;总结一下卷积层的参数. 在生成全连接层时，只用到输入神经元数量和输出神经元数量两个参数. 生成卷积层时，不需要指定输出的数量，只用指定输入的形状，&lt;span class=&quot;math inline&quot;&gt;\(h\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(w\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt;，以及核的形状 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 和数量 &lt;span class=&quot;math inline&quot;&gt;\(z\)&lt;/span&gt;. 因此，有 6 个数字：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(w\)&lt;/span&gt;：输入特征图的宽度&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(h\)&lt;/span&gt;：输入特征图的高度&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt;：输入深度（特征图的数量）&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt;：卷积核宽度&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;：卷积核高度&lt;/li&gt;
-&lt;li&gt;&lt;span class=&quot;math inline&quot;&gt;\(z\)&lt;/span&gt;：卷积核数量（输出特征图的数量）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;卷积核的实际大小取决于指定的输入，因此可以得到 &lt;span class=&quot;math inline&quot;&gt;\(z\)&lt;/span&gt; 个 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(d\)&lt;/span&gt; 大小的卷积核，假设&lt;em&gt;没有填充&lt;/em&gt;输入，这时输出的大小应为 &lt;span class=&quot;math inline&quot;&gt;\((h-n+1)\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\((w-m+1)\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(z\)&lt;/span&gt;.&lt;/p&gt;
-&lt;p&gt;上面是计算输出的概念性内容，接下来训练卷积层时，还会再次提到.&lt;/p&gt;
-&lt;h3 id=&quot;relu-激活函数&quot;&gt;ReLU 激活函数&lt;/h3&gt;
-&lt;p&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Rectifier_(neural_networks)&quot;&gt;ReLU 激活函数&lt;/a&gt;也就是 rectifier 激活函数，对卷积神经网络来说，它不是什么新东西. 随着更深层次的神经网络的兴起，它得到了广泛的推广.&lt;/p&gt;
-&lt;p&gt;深度神经网络遇到的问题之一就是&lt;a href=&quot;https://en.wikipedia.org/wiki/Vanishing_gradient_problem&quot;&gt;消失梯度问题&lt;/a&gt;. 当使用基于梯度的学习算法和反向传播算法训练人工神经网络时，每个神经网络的权重都与当前权重相关的误差函数偏导数成比例变化. 问题是在某些情况下，&lt;em&gt;梯度值可能小到权重值不会改变&lt;/em&gt;. 这一问题的原因之一是使用传统的激活函数，如 sigmoid 和 &lt;span class=&quot;math inline&quot;&gt;\(\tanh\)&lt;/span&gt;. 这些函数的梯度在 &lt;span class=&quot;math inline&quot;&gt;\((0,1)\)&lt;/span&gt; 范围内，大部分的值接近于 0. 由于误差的偏导数是用链式法则计算出来的，对于一个 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt; 层网络，这些&lt;em&gt;小数字&lt;/em&gt;会乘上 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt; 次，&lt;em&gt;梯度将呈指数递减&lt;/em&gt;. 结果就是，深度神经网络在训练“前面的”层时非常缓慢.&lt;/p&gt;
-&lt;p&gt;ReLU 函数的定义为 &lt;span class=&quot;math inline&quot;&gt;\(f(x)=x^+=max(0,x)\)&lt;/span&gt;. 它最大的优点是，对于 &lt;span class=&quot;math inline&quot;&gt;\(x&amp;gt;0\)&lt;/span&gt; 的值，它的导数总是 1，所以它允许更好的梯度传播，从而加快深度人工神经网络的训练速度. 和 sigmoid 和 &lt;span class=&quot;math inline&quot;&gt;\(\tanh\)&lt;/span&gt; 相比，它的计算效率更高，速度更快.&lt;/p&gt;
-&lt;center&gt;
-&lt;table&gt;&lt;tr&gt;&lt;td&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116163602815-296699171.png&quot;/&gt;&lt;/td&gt;
-&lt;td&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190112173944179-589710150.png&quot;/&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;
-&lt;center&gt;(a) ReLU 函数&lt;/center&gt;
-&lt;/td&gt;
-&lt;td&gt;
-&lt;center&gt;(b) sigmoid 函数&lt;/center&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/center&gt;
-图 2 ReLU 函数和 sigmoid 函数
-&lt;p&gt;虽然 ReLU 函数存在一些&lt;a href=&quot;https://en.wikipedia.org/wiki/Rectifier_(neural_networks)#Potential_problems&quot;&gt;潜在的问题&lt;/a&gt;，但到目前为止，它依然是深度神经网络中最成功最广泛的激活函数之一.&lt;/p&gt;
-&lt;h3 id=&quot;池化层&quot;&gt;池化层&lt;/h3&gt;
-&lt;p&gt;实践中经常会为卷积层生成一个&lt;strong&gt;池化层&lt;/strong&gt;（pooling layer）. &lt;a href=&quot;http://deeplearning.stanford.edu/wiki/index.php/%E6%B1%A0%E5%8C%96&quot;&gt;池化&lt;/a&gt;的目的是减少输入的空间尺寸，减少神经网络中的参数和计算量. 这也有助于控制&lt;strong&gt;过拟合&lt;/strong&gt;（over-fitting）.&lt;/p&gt;
-&lt;p&gt;最常见的池化技术是&lt;strong&gt;平均池化&lt;/strong&gt;和&lt;strong&gt;最大池化&lt;/strong&gt;. 以最大池化为例，使用 2×2 大小过滤器，跨距为 2 的 &lt;code&gt;MAX&lt;/code&gt; 池化. 对于 &lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt;×&lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 的输入，通过将输入中的每个 2×2 区域替换为单个值（该区域中 4 个值的&lt;em&gt;最大值&lt;/em&gt;），得到 &lt;span class=&quot;math inline&quot;&gt;\(\dfrac{n}{2}\times\dfrac{m}{2}\)&lt;/span&gt; 的结果. 通过设置与池化区域大小相等的跨距，可以保证这些区域相邻而不重叠. 图 3 演示了用于 6×6 输入图的过程.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116163900926-976921434.png&quot;/&gt; 图 3 池化
-&lt;p&gt;池化层的过滤器和跨距值. 例如一些应用程序使用具有 2 跨距的 3×3 大小过滤器这样存在部分重叠的池化. 一般来说跨距不会大于过滤器大小，图像里很多内容会完全丢失.&lt;/p&gt;
-&lt;p&gt;池化层使用二维特征图，但并且不影响输入深度. 如果输入包含由前一个卷积层生成的 10 个特征图，那么池化将分别应用于每个图. 所以通过池化，能生成相同数量的特征图，但尺寸更小.&lt;/p&gt;
-&lt;h3 id=&quot;建立卷积神经网络&quot;&gt;建立卷积神经网络&lt;/h3&gt;
-&lt;p&gt;多数情况下，卷积网络从卷积层开始，卷积层执行初始特征的提取，然后是全连接层，后者执行最终的分类.&lt;/p&gt;
-&lt;p&gt;以 &lt;a href=&quot;http://yann.lecun.com/exdb/lenet/index.html&quot;&gt;LeNet-5&lt;/a&gt; 为例. 这是 Yann LeCun 提出的卷积神经网络结构，并应用于手写数字分类. 它输入 32×32 的灰度图像，产生 10 个值的向量，这些值代表数字属于某一类（数字 0 到 9）的概率. 表 2 总结了网络的结构、输出的尺寸和可训练参数（权重+偏差）的数量.&lt;/p&gt;
-表 2 LeNet-5 结构
-&lt;table&gt;&lt;tbody readability=&quot;5&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;strong&gt;层类型&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;可训练参数&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;输出大小&lt;/strong&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;输入图像&lt;/td&gt;
-&lt;td&gt; &lt;/td&gt;
-&lt;td&gt;32×32×1&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;卷积层 1，核大小 5×5，核数量 6&lt;br/&gt;ReLU 激活&lt;/td&gt;
-&lt;td&gt;156&lt;/td&gt;
-&lt;td&gt;28×28×6&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;最大池化 1&lt;/td&gt;
-&lt;td&gt; &lt;/td&gt;
-&lt;td&gt;14×14×6&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;卷积层 2，核大小 5×5，核数量 16&lt;br/&gt;ReLU 激活函数&lt;/td&gt;
-&lt;td&gt;416&lt;/td&gt;
-&lt;td&gt;10×10×16&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;最大池化 2&lt;/td&gt;
-&lt;td&gt; &lt;/td&gt;
-&lt;td&gt;5×5×16&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;卷积层 3，核大小 5×5，核数量 120&lt;/td&gt;
-&lt;td&gt;3120&lt;/td&gt;
-&lt;td&gt;1×1×120&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;全连接层 1，输入 120，输出 84&lt;br/&gt;Sigmoid 激活函数&lt;/td&gt;
-&lt;td&gt;10164&lt;/td&gt;
-&lt;td&gt;84&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;全连接层 2，输入 84，输出 10&lt;br/&gt;SoftMax 激活函数&lt;/td&gt;
-&lt;td&gt;850&lt;/td&gt;
-&lt;td&gt;10&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;这里只有 14706 个可训练参数，算是非常简单的卷积神经网络结构了. 业界实用的更复杂的深度神经网络，包含了超过几百万个训练参数.&lt;/p&gt;
-&lt;h2 id=&quot;训练卷积网络&quot;&gt;训练卷积网络&lt;/h2&gt;
-&lt;p&gt;到目前为止，本文还只局限于推导卷积神经网络，即计算给定输入的输出. 但是要从中得到有意义的东西，需要先对网络进行训练. 对于&lt;em&gt;图像处理中&lt;/em&gt;的卷积算子，卷积核通常是人工设计的，具有特定的用途，比如查找物体边缘，锐化图像或是模糊图像等. 设计正确的卷积核来执行所需的任务是一个耗时的过程. 但是&lt;em&gt;对于卷积神经网络&lt;/em&gt;，情况却完全不同. 在设计这种网络时，只用考虑层数、完成的卷积的数量和大小等，而不会设置这些卷积核. 相反，网络将在训练阶段学习这些内容. 从本质上说，这些核只不过是权重.&lt;/p&gt;
-&lt;p&gt;卷积人工网络的训练使用与全连接网络训练完全相同的算法——随机梯度下降和反向传播. 正如《前馈》中写到的，为了计算神经网络误差的偏导数，可以使用链式法则. 这样可以为任何可训练层的权重变化定义完整的方程. 我将针对神经网络每个构建块（building block），比如全连接和卷积层、激活函数、成本函数等，写一些小点的方程，而不是那种一个式子占半页纸的大玩意儿.&lt;/p&gt;
-&lt;p&gt;通过链式法则，可以发现神经网络的每个构建块都将其误差梯度计算为输出相对于输入的偏导数，并与后面块的误差梯度相乘. 要记住，信息流是向后移动的，所以计算要从最后一个块开始，然后流到前一个块，即第一个块. 训练阶段的最后一个块&lt;em&gt;始终是一个成本函数&lt;/em&gt;，它将误差梯度作为成本（其输出）相对于神经网络输出（成本函数的输入）的导数进行计算. 这可以通过以下方式定义：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(\mathrm{net})}=\frac{\partial\mathrm{Cost}}{\partial\mathrm{net}_i} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;所有其他构建块都从下一个块中获取误差梯度，并乘以其输出相对于输入的偏导数.&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\frac{\partial\mathrm{out}^{(k)}}{\partial\mathrm{in}^{(k)}_i}\delta^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;回忆一下全连接网络的导数. 首先，从 MSE 成本函数相对于网络输出的误差梯度开始（&lt;span class=&quot;math inline&quot;&gt;\(y_i\)&lt;/span&gt; 为网络产生的输出，&lt;span class=&quot;math inline&quot;&gt;\(t_i\)&lt;/span&gt; 为目标输出）：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(\mathrm{net})}=y_i-t_i \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;当误差梯度通过 sigmoid 激活函数后移时，它会以这种方式重新计算（这里的 &lt;span class=&quot;math inline&quot;&gt;\(o_i\)&lt;/span&gt; 是 sigmoid 的输出），这是从下一块（无所谓是什么，也可以是成本函数或多层网络中的另一层）得到的梯度乘以 sigmoid 的导数：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=o_i(1-o_i)\delta_i^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;或者，如果使用 &lt;span class=&quot;math inline&quot;&gt;\(\tanh\)&lt;/span&gt; 作为激活函数，则：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=o_i(1-o_i^2)\delta_i^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;当需要通过一个全连接层向后传播误差梯度时，鉴于每个输入输出都各自相连，可以得到一个偏导数的和：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\sum_{j=1}^{m}\omega_{i,j}*\delta_j^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(n\)&lt;/span&gt; 是全连接层中的神经元数，&lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 分别表示第 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 个输出和第 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 个输入.&lt;/p&gt;
-&lt;p&gt;由于全连接层是一个可训练的层，它不仅需要将误差梯度向后传递给前一个层，还需要计算权重. 使用上述定义的命名约定，权重和偏差的计算规则可以写成（经典SGD）：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \begin{align*} \omega_{i,j}(t+1) &amp;amp;= \omega_{i,j}(t)-\lambda\left(\delta_i^{(k+1)}x_j\right) \\ b_i(t+1) &amp;amp;=b_i(t)-\lambda\delta_i^{(k+1)} \end{align*} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;上面的方程实际上都是《前馈》中反向传播的内容. 为什么我要再写一遍？首先是要提醒一下基础知识，其次，我用了不同的方式重写，其中每个构建块定义自己的误差梯度反向传播方程. 《前馈》里给出的权重方程有助于理解基本知识以及链规则的工作原理，但是作为一个单一的方程，它没法通用. 如果成本函数不是 MSE 呢？如果需要 &lt;span class=&quot;math inline&quot;&gt;\(\tanh\)&lt;/span&gt; 或者 ReLU 激活函数而不是 sigmoid 呢？本文介绍的方法更加灵活，允许以各种方式混合人工神经网络的构建块，并在不假设哪一层之后进行激活，使用哪一个成本函数的情况下进行培训. 此外，这样的写法和我实际的 C++ 代码实现类似，我把不同的构建块实现为单独的类，在训练过程中让它们各自计算前向传递和后向传递.&lt;/p&gt;
-
-&lt;h3 id=&quot;交叉熵成本函数&quot;&gt;交叉熵成本函数&lt;/h3&gt;
-&lt;p&gt;卷积神经网络最常用的用途之一是图像分类. 给定一个图像，网络需要把它分类到相互排斥的类里去. 比如手写数字分类，有 10 个可能的类对应于从 0 到 9 的数字. 或者可以训练一个网络来识别汽车、卡车、轮船、飞机等交通工具. 这种分类的要点是，&lt;em&gt;每个输入图像必须只属于一个类别&lt;/em&gt;.&lt;/p&gt;
-&lt;p&gt;在处理多类分类问题时，人工神经网络输出的类数应当与要区分的类数相同. 在训练阶段，目标输出是&lt;a href=&quot;https://hackernoon.com/what-is-one-hot-encoding-why-and-when-do-you-have-to-use-it-e3c6186d008f&quot;&gt;独热编码&lt;/a&gt;的，也就是用零向量表示，在与类对应的索引处，只有一个元素设置为值“1”。例如，对于 4 类分类的任务，目标输出可能是：第 2 类 &lt;span class=&quot;math inline&quot;&gt;\(\{0、1、0、0\}\)&lt;/span&gt;、第 4 类 &lt;span class=&quot;math inline&quot;&gt;\(\{0、0、0、1\}\)&lt;/span&gt; 等. 任何目标输出都&lt;em&gt;不允许将多个元素设置为“1”或其他非零值&lt;/em&gt;. 这可以看作是目标概率，即 &lt;span class=&quot;math inline&quot;&gt;\(\{0、1、0、0\}\)&lt;/span&gt; 输出意味着输入属于第 2 类的概率为 100%，以及属于其他类的概率为 0%.&lt;/p&gt;
-&lt;p&gt;上面说的是理想情况，实际训练中的神经网络输出不会是非黑即白这么极端，比如它可以输出 0.3、0.35、0.25、0.1 之类的小数. 这些输出对应着不同的实际含义. 这表示神经网络没法十分清楚判断目标应该分到哪一类，它只能根据计算得到的概率分析，第 2 类的概率有0.35，也就是 35% 的可能性，而且这是 4 个输出中最高的，那么它将猜测这&lt;em&gt;很可能&lt;/em&gt;应该属于第 2 类.&lt;/p&gt;
-&lt;p&gt;所以说，需要一个成本函数来量化目标和实际输出之间的差异，并指导神经网络计算其参数. 在处理互斥类的概率模型时，通常需要处理预测概率和真实值（ground-truth）概率. 这种情况下，最常见的选择是&lt;strong&gt;交叉熵成本函数&lt;/strong&gt;（cross-entropy）. &lt;a href=&quot;https://rdipietro.github.io/friendly-intro-to-cross-entropy-loss/&quot;&gt;交叉熵&lt;/a&gt;是&lt;strong&gt;信息论&lt;/strong&gt;当中的概念. 通过最小化交叉熵，通过最小化额外的数据比特量，用&lt;em&gt;估计的&lt;/em&gt;概率 &lt;span class=&quot;math inline&quot;&gt;\(y_i\)&lt;/span&gt; 对出现概率分布 &lt;span class=&quot;math inline&quot;&gt;\(t_i\)&lt;/span&gt;（目标或实际分布）的某些事件进行编码. 为了最小化交叉熵，需要使估计概率与实际概率相同.&lt;/p&gt;
-&lt;p&gt;交叉熵成本函数定义如下：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \mathrm{Cost}=-\sum_{i=1}^{n}t_i\log(y_i) \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(t_i\)&lt;/span&gt; 是目标输出，&lt;span class=&quot;math inline&quot;&gt;\(y_i\)&lt;/span&gt; 是神经网络输出.&lt;/p&gt;
-&lt;p&gt;对上式求导，成本函数对神经网络输出的偏导数为：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(\mathrm{net})}=-\frac{t_i}{y_i} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;这就得到了可以代替 MSE 的交叉熵成本函数. 接下来可以开始处理其他构建块并观察误差梯度是如何反向传播的.&lt;/p&gt;
-&lt;h3 id=&quot;softmax-激活函数&quot;&gt;SoftMax 激活函数&lt;/h3&gt;
-&lt;p&gt;《前馈》中已经介绍过在分类问题中用到的神经网络最后一层使用 sigmoid 作为激活函数. 它的输出值域为 &lt;span class=&quot;math inline&quot;&gt;\((0,1)\)&lt;/span&gt;，可以理解为从 0% 到 100% 表示的概率. 如果神经网络输出层采用 sigmoid，它的确可能得到接近于真实值的概率. 但是现在要处理的是互斥类，很多情况下 sigmoid 的输出是无意义的. 比如上面的 4 类分类例子：一个输出向量是 ${0.6,0.55,0.1,0.1}，这是用 sigmoid 可能得到的结果. 问题在哪？乍一看，这表明应该是第 1 类（60% 概率），但是第 2 类的可能性也很大（55%）. 而且这个输出结果有一个很大的问题，它的各概率和达到了 1.35，也就是目标属于这 4 类之一的可能性是 135%. 这在物理上是&lt;em&gt;毫无意义&lt;/em&gt;的！&lt;/p&gt;
-&lt;p&gt;这里要指出两个问题：第一，各分类概率和应为 100%，不能多，也不能少. 第二，对于难以识别的分类目标，如果目标既像第 1 类，又像第 2 类，那么怎么能确定 60% 这么高的概率一定是可信的？&lt;/p&gt;
-&lt;p&gt;为了解决这两个问题，需要用到另一个激活函数：&lt;strong&gt;SoftMax&lt;/strong&gt;. &lt;a href=&quot;https://en.wikipedia.org/wiki/Softmax_function&quot;&gt;SoftMax&lt;/a&gt; 类似 sigmoid，值域也是 &lt;span class=&quot;math inline&quot;&gt;\((0,1)\)&lt;/span&gt;. 不同的是，它处理整个输入向量而不是其中的单个值，这就保证了输出向量（概率）的和恒为 1. SoftMax 定义为：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ f(x_i)=\frac{e^{x_i}}{\sum_{j=1}^{m}e^{x_j}} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;将上面的例子改用 SoftMax 进行处理后，输出向量变得更合理了：&lt;span class=&quot;math inline&quot;&gt;\(\{0.316,0.3,0.192,0.192\}\)&lt;/span&gt;. 可以看到，向量中各概率的和等于 1，也就是 100%. 最可能的第 1 类，它的概率也不再高得离谱，只有 31.6%.&lt;/p&gt;
-&lt;p&gt;和其他激活函数一样，SoftMax 也需要定义它的梯度反向传播方程：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\sum_{j=1}^{m}\left(\delta_j^{(k+1)}*\left\{ \begin{align*}j &amp;amp;=i,o_i(1-o_j) \\ j &amp;amp;\neq i,-o_io_j \end{align*} \right\}\right) \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;表 2 里可以看到 LeNet-5 神经网络架构中包含了全连接层和 sigmoid 激活函数. 这两者的方程也定义完毕，现在就可以继续讨论其他构建块了.&lt;/p&gt;
-&lt;h3 id=&quot;relu-激活函数-1&quot;&gt;ReLU 激活函数&lt;/h3&gt;
-&lt;p&gt;前面提到过，ReLU 激活函数在深度神经网络经常用到，它对于大于 0 的输入向量梯度恒为 1，所以能保证误差梯度在网络中更好地传播. 现在来定义它的梯度反向传播方程：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\delta_j^{(k+1)}*\left\{ \begin{align*} 1 &amp;amp;, o_i&amp;gt;0 \\ 0 &amp;amp;, o_i\leqslant0 \end{align*} \right\} \]&lt;/span&gt;&lt;/p&gt;
-&lt;h3 id=&quot;池化层-1&quot;&gt;池化层&lt;/h3&gt;
-&lt;p&gt;为了尽量简洁地说明误差梯度如何通过池化层反向传播，假设使用的池化层卷积核大小 2×2，跨度 2，不填充输入（只池化有效位置）. 这个假设意味着每个输出特征图的值都是基于 4 个值计算得到的.&lt;/p&gt;
-&lt;p&gt;尽管池化层假设输入向量是二维数据，但是下面的数学定义也可以处理输入输出是一维向量的情况. 首先定义 &lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2j}(i)\)&lt;/span&gt; 函数，这个函数接受输入向量第 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 个值（作为索引），并返回输出向量对应的第 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 个值（作为索引）. 由于每个输出都是用 4 个输入值计算出来的，所以这意味着有 4 个 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 会让 &lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2j}(i)\)&lt;/span&gt; 函数输出同一个 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt;.&lt;/p&gt;
-&lt;p&gt;先从&lt;strong&gt;最大池化&lt;/strong&gt;开始，定义误差梯度反向传播方程之前，还有一件事要做. 在&lt;em&gt;正向传递&lt;/em&gt;时，计算神经网络的输出也会用与输出向量长度相同的&lt;strong&gt;最大索引值&lt;/strong&gt;（max indices）向量填充池化层. 如果输出向量包含对应输入值的最大值，则最大索引值向量包含最大值的索引. 综上所述，可以定义最大池化层的梯度反向传播方程：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\delta_{\mathrm{i2j}(i)}^{(k+1)}*\left\{ \begin{align*}1 &amp;amp;,i =p_{\mathrm{i2j}(i)} \\ 0 &amp;amp;, i\neq p_{\mathrm{i2j}(i)} \end{align*} \right\} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(p\)&lt;/span&gt; 是最大索引值向量.&lt;/p&gt;
-&lt;p&gt;对&lt;strong&gt;平均池化&lt;/strong&gt;来说，就更简单了：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\frac{\delta_{\mathrm{i2j}(i)}^{(k+1)}}{q} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(q\)&lt;/span&gt; 是卷积核大小，在这个例子里，&lt;span class=&quot;math inline&quot;&gt;\(q=4\)&lt;/span&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;卷积层-1&quot;&gt;卷积层&lt;/h3&gt;
-&lt;p&gt;最后来定义卷积层的反向传播过程. 牢记一点，它和全连接层的区别就在于共享权重和偏差值.&lt;/p&gt;
-&lt;p&gt;从卷积层的权重计算开始. 对于全连接层，误差对权重 &lt;span class=&quot;math inline&quot;&gt;\(\omega_{i,j}\)&lt;/span&gt; 的偏导数等于下一个块的误差梯度乘以相应的输入值 &lt;span class=&quot;math inline&quot;&gt;\(\delta_i^{(k+1)}x_j\)&lt;/span&gt;. 这是因为每个输入／输出连接都在全连接层中分配了自己的权重，而全连接层是不共享的. 但是卷积层和这不一样，图 4 显示了卷积核的每个权重都用于多个输入／输出连接. 图中的例子，突出显示的卷积核权重每个使用了 9 次，对应输入图像中的 9 个不同位置. 因此，与权重有关的误差的偏导数也需要有 9 个.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116212209895-1169388814.png&quot;/&gt; 图 4 卷积层计算
-&lt;p&gt;和处理池化层时类似，这里忽略了卷积层处理的是二维／三维数据这一事实，而假设它们是普通的向量／数组（就像 C++ 编程时用到的那样）. 对于上面的示例，第一个权重（红线框出）应用于输入 &lt;span class=&quot;math inline&quot;&gt;\(\{1,2,3,5,6,7,9,10,11,13,14,15\}\)&lt;/span&gt;，而第四个权重应用于输入 &lt;span class=&quot;math inline&quot;&gt;\(\{6,7,8,10,11,12,14,15,16\}\)&lt;/span&gt;. 用 &lt;span class=&quot;math inline&quot;&gt;\(r_i\)&lt;/span&gt; 表示每个权重使用的&lt;strong&gt;输入索引向量&lt;/strong&gt;. 另外定义 &lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(i,j)\)&lt;/span&gt; 函数，它为第 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 个权重和第 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 个输入提供输出值索引. 上图中有几个例子，&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(1,1)=1\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(4,6)=1\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(1,11)=9\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(4,16)=9\)&lt;/span&gt;. 根据这些约定，可以定义卷积网络的权重：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \tag{3} \omega_i(t+1)=\omega_i(t)-\lambda\sum_{j}^{j\in r_i}\delta_{\mathrm{i2o}(i,j)}^{(k+1)}x_j \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;上面的玩意儿有什么意义？嗯，它的意义很丰富. 你想得越多，意义就越多. 这里的目标是为所有输出取误差梯度（因为每个核的权重用于计算所有的输出），然后将它们乘以相应的输入. 尽管有多个核，但是它们都以相同的模式应用，所以即使需要计算不同核的权重，权重输入向量也&lt;em&gt;保持不变&lt;/em&gt;. 然而，&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2o}(i,j)\)&lt;/span&gt; 是每个核特定的，它可以使用核的索引作为额外的参数进行扩展.&lt;/p&gt;
-&lt;p&gt;更新偏差值要简单得多. 由于每个核／偏差都用于计算输出值，所以只需为当前核生成的特性图的误差梯度求和即可：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \tag{4} b(t+1)=b(t)-\lambda\sum_{j}^{s}\delta_j^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(s\)&lt;/span&gt; 是特性图.&lt;/p&gt;
-&lt;div class=&quot;info important&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;式 $(3)$、式 $(4)$ 都是依据特征图／卷积核来完成的，权重和偏差值没有用核索引参数化.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;现在来求卷积层误差梯度反向传播的最终方程. 这意味要计算与层输入相关的误差偏导数. 每个输入元素可以多次用于生成要素图的输出值，它的使用次数可以与卷积核中的元素数（权重数）相同. 但是，有些输入&lt;em&gt;只能用于一个输出&lt;/em&gt;，比如二维特征图的四角. 还要记住，每个输入特征图都可以用不同的核进行多次处理，从而生成更多的输出图. 假设另一组名为 &lt;span class=&quot;math inline&quot;&gt;\(\gamma_i\)&lt;/span&gt; 的辅助向量，用于保存第 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 个输入所贡献的输出索引. 再定义 &lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2w}(i,j)\)&lt;/span&gt; 函数，它返回连接第 &lt;span class=&quot;math inline&quot;&gt;\(i\)&lt;/span&gt; 个输入到第 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 个输出的权重. 还是以图 4 为例，有：&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2w}(1,1)=1\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2w}(6,1)=4\)&lt;/span&gt;、&lt;span class=&quot;math inline&quot;&gt;\(\mathrm{i2w}(16,9)=4\)&lt;/span&gt;. 利用这些定义，误差梯度通过卷积层后向传播的方程可以写为：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;math display&quot;&gt;\[ \delta_i^{(k)}=\sum_{j}^{j\in\gamma_i}\omega_{\mathrm{i2w}(i,j)}*\delta_j^{(k+1)} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;数学分析到此结束，所有需要计算的内容都已经完成了.&lt;/p&gt;
-
-&lt;p&gt;卷积人工神经网络很大程度上是基于《前馈》所述的全连接网络实现的设计集. 所有核心类都保持原样，只实现了新的构建块，允许将它们构建成卷积神经网络. 新的类关系图如下所示，跟原来的没有什么区别.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116215828894-1027441510.png&quot;/&gt; 图 5 类关系图
-&lt;p&gt;与以前的设置方式类似，新的构建块负责计算正向传递上的输出和反向传递上传播误差梯度（以及在可训练层的情况下计算初始权重）. 因此，所有的神经网络训练代码都可以原样照搬. 和其他代码一样，新的构建块尽可能使用了 SIMD 指令向量化计算，以及 OpenMP 并行计算.&lt;/p&gt;
-&lt;h2 id=&quot;编译源码&quot;&gt;编译源码&lt;/h2&gt;
-&lt;p&gt;源码里附带 MSVC（2015版）文件和 GCC make 文件. 用 MSVC 非常简单，每个例子的解决方案文件都包括例子本身和库的项目，编译也只需点击一下按钮. 如果使用 GCC，则需要运行 make 来编译程序.&lt;/p&gt;
-
-&lt;p&gt;分析了那么久的原理和数学推导，是时候开始实践并实际生成一些用于图像分类任务的网络了，例如分类识别手写数字和汽车、卡车、轮船、飞机之类不同的对象.&lt;/p&gt;
-&lt;p&gt;这些例子唯一的目的是用来演示 ANNT 库的使用方法，并不代表用到的神经网络结构就是最适于它们的. 这些代码片段只是范例的一小部分，要查看示例的完整代码，你需要参阅本文提供的源码.&lt;/p&gt;
-&lt;h2 id=&quot;mnist-手写数字分类&quot;&gt;MNIST 手写数字分类&lt;/h2&gt;
-&lt;p&gt;第一个例子是对 &lt;a href=&quot;http://yann.lecun.com/exdb/mnist/&quot;&gt;MNIST 数据库&lt;/a&gt;里的手写数字进行分类. 这个数据库包含了 60000 个神经网络训练样本和 10000 个测试样本. 图 6 展示了其中的一部分.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116220721381-717850077.png&quot;/&gt; 图 6 MNIST 数据库（部分）
-&lt;p&gt;例子使用的卷积神经网络的结构与 LeNet-5 网络非常相似，只是规模小得多. 它只有一个全连接网络：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;Conv(32x32x1, 5x5x6  ) -&amp;gt; ReLU -&amp;gt; AvgPool(2x2)
-Conv(14x14x6, 5x5x16 ) -&amp;gt; ReLU -&amp;gt; AvgPool(2x2)
-Conv(5x5x16,  5x5x120) -&amp;gt; ReLU
-FC(120, 10) -&amp;gt; SoftMax&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;上面设置了每个卷积层的输入大小以及它们执行的卷积的大小和数量，全连接层的输入／输出数量. 接下来生成卷积神经网络.&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;// 连接表用于指定第一卷积层要使用的由第二层生成的特征图
-vector&amp;lt;bool&amp;gt; connectionTable( {
-    true,  true,  true,  false, false, false,
-    false, true,  true,  true,  false, false,
-    false, false, true,  true,  true,  false,
-    false, false, false, true,  true,  true,
-    true,  false, false, false, true,  true,
-    true,  true,  false, false, false, true,
-    true,  true,  true,  true,  false, false,
-    false, true,  true,  true,  true,  false,
-    false, false, true,  true,  true,  true,
-    true,  false, false, true,  true,  true,
-    true,  true,  false, false, true,  true,
-    true,  true,  true,  false, false, true,
-    true,  true,  false, true,  true,  false,
-    false, true,  true,  false, true,  true,
-    true,  false, true,  true,  false, true,
-    true,  true,  true,  true,  true,  true
-} );
-
-// 准备卷积神经网络
-shared_ptr&amp;lt;XNeuralNetwork&amp;gt; net = make_shared&amp;lt;XNeuralNetwork&amp;gt;( );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 32, 32, 1, 5, 5, 6 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XAveragePooling&amp;gt;( 28, 28, 6, 2 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 14, 14, 6, 5, 5, 16, connectionTable ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XAveragePooling&amp;gt;( 10, 10, 16, 2 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 5, 5, 16, 5, 5, 120 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XFullyConnectedLayer&amp;gt;( 120, 10 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XLogSoftMaxActivation&amp;gt;( ) );&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;从源码可以清楚看到上面的神经网络配置是如何转换成代码的，只是这个连接表是首次出现的. 这很容易理解，从网络结构和代码可以看出，第一层做 6 个卷积，因此生成 6 个特征图；第二层做 16 个卷积. 在某些情况下，需要配置层的卷积只在输入特征映射的子集上操作. 如代码所示，第二层的前 6 个卷积使用第一层生成的 3 个特征图的不同模式，接下来的 9 个卷积使用 4 个特征图的不同模式. 最后一个卷积使用第一层的所有 6 个特征映射. 这样做是为了&lt;em&gt;减少要训练的参数数量&lt;/em&gt;，并确保第二层的不同特征图不会基于相同的输入特征图.&lt;/p&gt;
-&lt;p&gt;当创建卷积网络时，可以像处理全连接网络一样进行操作：创建一个训练内容，指定成本函数和权重的优化器，然后全部传递给一个助手类，由它运行训练／验证循环并测试.&lt;/p&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;// 生成训练内容，用到了 Adam 优化器和负对数似然函数（SoftMax）
-shared_ptr&amp;lt;XNetworkTraining&amp;gt; netTraining = make_shared&amp;lt;XNetworkTraining&amp;gt;( net,
-                                           make_shared&amp;lt;XAdamOptimizer&amp;gt;( 0.002f ),
-                                           make_shared&amp;lt;XNegativeLogLikelihoodCost&amp;gt;( ) );
-
-// 使用助手类训练神经网络分类
-XClassificationTrainingHelper trainingHelper( netTraining, argc, argv );
-trainingHelper.SetValidationSamples( validationImages, encodedValidationLabels, validationLabels );
-trainingHelper.SetTestSamples( testImages, encodedTestLabels, testLabels );
-
-// 20 世代, 每批 50 样本
-trainingHelper.RunTraining( 20, 50, trainImages, encodedTrainLabels, trainLabels );&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;下面是输出，显示了训练进度和测试数据集的最终结果分类精度. 可以看到精度达到了 99.01%，比起《前馈》中 96.55% 的精度更准确了.&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;MNIST handwritten digits classification example with Convolution ANN
-
-Loaded 60000 training data samples
-Loaded 10000 test data samples
-
-Samples usage: training = 50000, validation = 10000, test = 10000
-
-Learning rate: 0.0020, Epochs: 20, Batch Size: 50
-
-Before training: accuracy = 5.00% (2500/50000), cost = 2.3175, 34.324s
-
-Epoch   1 : [==================================================] 123.060s
-Training accuracy = 97.07% (48536/50000), cost = 0.0878, 32.930s
-Validation accuracy = 97.49% (9749/10000), cost = 0.0799, 6.825s
-Epoch   2 : [==================================================] 145.140s
-Training accuracy = 97.87% (48935/50000), cost = 0.0657, 36.821s
-Validation accuracy = 97.94% (9794/10000), cost = 0.0669, 5.939s
-...
-Epoch  19 : [==================================================] 101.305s
-Training accuracy = 99.75% (49877/50000), cost = 0.0077, 26.094s
-Validation accuracy = 98.96% (9896/10000), cost = 0.0684, 6.345s
-Epoch  20 : [==================================================] 104.519s
-Training accuracy = 99.73% (49865/50000), cost = 0.0107, 28.545s
-Validation accuracy = 99.02% (9902/10000), cost = 0.0718, 7.885s
-
-Test accuracy = 99.01% (9901/10000), cost = 0.0542, 5.910s
-
-Total time taken : 3187s (53.12min)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;cifar10-图片分类&quot;&gt;CIFAR10 图片分类&lt;/h2&gt;
-&lt;p&gt;第二个示例对来自 &lt;a href=&quot;https://www.cs.toronto.edu/~kriz/cifar.html&quot;&gt;CIFAR-10 数据集&lt;/a&gt;的 32×32 彩色图像进行分类. 这个数据集包含 60000 个图像，其中 50000 个用于训练，另外 10000 个用于测试. 图像分为 10 类：飞机、汽车、鸟、猫、鹿、狗、青蛙、马、船和卡车. 图 7 展示了部分内容.&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190116222355370-1819170028.jpg&quot;/&gt; 图 7 CIFAR10 数据集（部分）
-&lt;p&gt;可以看到，CIFAR-10 数据集比 MNIST 手写数字复杂得多. 首先，图像是彩色的. 其次，它们不那么明显. 有些图如果不经提醒，我都认不出来. 网络的结构变得更大了，但并不是说它变得更深了，而是执行卷积和训练权重的&lt;em&gt;数量在增加&lt;/em&gt;. 它的网络结构如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;Conv(32x32x3,  5x5x32, BorderMode::Same) -&amp;gt; ReLU -&amp;gt; MaxPool -&amp;gt; BatchNorm
-Conv(16x16x32, 5x5x32, BorderMode::Same) -&amp;gt; ReLU -&amp;gt; MaxPool -&amp;gt; BatchNorm
-Conv(8x8x32,   5x5x64, BorderMode::Same) -&amp;gt; ReLU -&amp;gt; MaxPool -&amp;gt; BatchNorm
-FC(1024, 64) -&amp;gt; ReLU -&amp;gt; BatchNorm
-FC(64, 10) -&amp;gt; SoftMax&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;将上述神经网络结构转化为代码，得到以下结果：&lt;/p&gt;
-&lt;div class=&quot;info note&quot; readability=&quot;8&quot;&gt;
-&lt;p&gt;用 &lt;code&gt;ReLU(MaxPool)&lt;/code&gt; 和 &lt;code&gt;MaxPool(ReLU)&lt;/code&gt; 计算结果相同，但计算量减少 75%，所以这里选用前者.&lt;/p&gt;
-&lt;/div&gt;
-&lt;pre class=&quot;cpp&quot;&gt;
-&lt;code&gt;// 准备卷积神经网络
-shared_ptr&amp;lt;XNeuralNetwork&amp;gt; net = make_shared&amp;lt;XNeuralNetwork&amp;gt;( );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 32, 32, 3, 5, 5, 32, BorderMode::Same ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XMaxPooling&amp;gt;( 32, 32, 32, 2 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XBatchNormalization&amp;gt;( 16, 16, 32 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 16, 16, 32, 5, 5, 32, BorderMode::Same ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XMaxPooling&amp;gt;( 16, 16, 32, 2 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XBatchNormalization&amp;gt;( 8, 8, 32 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XConvolutionLayer&amp;gt;( 8, 8, 32, 5, 5, 64, BorderMode::Same ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XMaxPooling&amp;gt;( 8, 8, 64, 2 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XBatchNormalization&amp;gt;( 4, 4, 64 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XFullyConnectedLayer&amp;gt;( 4 * 4 * 64, 64 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XReLuActivation&amp;gt;( ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XBatchNormalization&amp;gt;( 64, 1, 1 ) );
-
-net-&amp;gt;AddLayer( make_shared&amp;lt;XFullyConnectedLayer&amp;gt;( 64, 10 ) );
-net-&amp;gt;AddLayer( make_shared&amp;lt;XLogSoftMaxActivation&amp;gt;( ) );&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;剩下部分代码和前面的例子类似，也是生成训练内容，传递给助手类执行. 下面是这个例子的输出：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;CIFAR-10 dataset classification example with Convolutional ANN
-
-Loaded 50000 training data samples
-Loaded 10000 test data samples
-
-Samples usage: training = 43750, validation = 6250, test = 10000
-
-Learning rate: 0.0010, Epochs: 20, Batch Size: 50
-
-Before training: accuracy = 9.91% (4336/43750), cost = 2.3293, 844.825s
-
-Epoch   1 : [==================================================] 1725.516s
-Training accuracy = 48.25% (21110/43750), cost = 1.9622, 543.087s
-Validation accuracy = 47.46% (2966/6250), cost = 2.0036, 77.284s
-Epoch   2 : [==================================================] 1742.268s
-Training accuracy = 54.38% (23793/43750), cost = 1.3972, 568.358s
-Validation accuracy = 52.93% (3308/6250), cost = 1.4675, 76.287s
-...
-Epoch  19 : [==================================================] 1642.750s
-Training accuracy = 90.34% (39522/43750), cost = 0.2750, 599.431s
-Validation accuracy = 69.07% (4317/6250), cost = 1.2472, 81.053s
-Epoch  20 : [==================================================] 1708.940s
-Training accuracy = 91.27% (39931/43750), cost = 0.2484, 578.551s
-Validation accuracy = 69.15% (4322/6250), cost = 1.2735, 81.037s
-
-Test accuracy = 68.34% (6834/10000), cost = 1.3218, 122.455s
-
-Total time taken : 48304s (805.07min)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;前面提到了，CIFAR-10 数据集来得更复杂！计算的结果远远达不到 MNIST 那样 99% 的准确度：训练集的准确度约 91%，测试／验证的准确度约 68-69%. 就是这样的精度，&lt;em&gt;区区 20 个世代的计算就花了我 13 个小时&lt;/em&gt;！这也说明了，对于卷积网络来说，（如果不用分布式集群或者超级计算机）普通 PC 仅仅使用 CPU 来计算显然不够看.&lt;/p&gt;
-
-&lt;p&gt;本文中讨论了用 ANNT 库生成卷积神经网络. 在这一点上，它只能生成相对简单的网络，到目前为止，还不支持生产更高级、更流行的架构. 但是正如 CIFAR-10 一例中看到的，一旦神经网络变大，就需要更多的计算能力来进行训练，所以仅仅使用 CPU 是不够的（目前我只实现了用 CPU 计算网络）. 随着学习深入，这个弱点还会不断放大. 所以接下来我会优先研究如何实现 GPU 计算. 至于更复杂的神经网络架构，先往后放一放.&lt;/p&gt;
-&lt;p&gt;现在已经讨论了全连接和卷积的神经网络，在接下来的文章里，我将介绍&lt;strong&gt;递归神经网络&lt;/strong&gt;（recurrent neural networks）架构.&lt;/p&gt;
-&lt;p&gt;如果想关注 ANNT 库的进展，或者挖掘更多的代码，可以在 &lt;a href=&quot;https://github.com/cvsandbox/ANNT&quot;&gt;Github&lt;/a&gt; 上找到这个项目.&lt;/p&gt;
-
-&lt;p&gt;本文以及任何相关的源代码和文件都是根据 &lt;a href=&quot;http://www.opensource.org/licenses/gpl-3.0.html&quot;&gt;GNU通用公共许可证（GPLv3）&lt;/a&gt;授权.&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/407692/201901/407692-20190112131615958-1292771686.jpg&quot;/&gt;&lt;br/&gt;Andrew Kirillov，来自英国🇬🇧，目前就职于 IBM.&lt;/p&gt;
-&lt;section class=&quot;footnotes&quot;&gt;&lt;hr/&gt;&lt;ol readability=&quot;-0.98507462686567&quot;&gt;&lt;li id=&quot;fn1&quot; readability=&quot;0.98507462686567&quot;&gt;
-&lt;p&gt;Yann LeCun，中文名&lt;strong&gt;杨立昆&lt;/strong&gt;，Facebook 首席人工智能专家，人工智能研究院院长，被称为“深度学习三大巨头”之一，另外两位是 Geoffrey Hinton 和 Yoshua Bengio.&lt;a href=&quot;http://www.cnblogs.com/conmajia/p/annt-convolutional-neural-networks.html#fnref1&quot; class=&quot;footnote-back&quot;&gt;↩&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/section&gt;</description>
-<pubDate>Wed, 16 Jan 2019 14:41:00 +0000</pubDate>
-<dc:creator>I.am.Conmajia</dc:creator>
-<og:description>使用 ANNT 库生成卷积神经网络实现图像分类. 全文约 11,000 字，建议阅读时间 30 分钟.</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/conmajia/p/annt-convolutional-neural-networks.html</dc:identifier>
-</item>
-<item>
-<title>设计模式——适配器模式 - NeilZhang</title>
-<link>http://www.cnblogs.com/NeilZhang/p/10279549.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/NeilZhang/p/10279549.html</guid>
-<description>&lt;blockquote readability=&quot;10&quot;&gt;
-&lt;p&gt;适配器模式将某个类的接口转换成客户端期望的另一个接口表示，主的目的是&lt;strong&gt;兼容性&lt;/strong&gt;，让原本因接口不匹配不能一起工作的两个类可以协同工作。其别名为包装器(Wrapper)。&lt;/p&gt;
-&lt;p&gt;简单地说，就是需要的东西就在面前，但却不能使用，而短时间又无法改造它，于是我们就想办法适配它。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;strong&gt;适配器分类：&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;类适配器模式&lt;/li&gt;
-&lt;li&gt;对象的适配器模式&lt;/li&gt;
-&lt;li&gt;接口的适配器模式&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;注： 如果对类图中的箭头有疑惑参考： &lt;a href=&quot;https://www.cnblogs.com/NeilZhang/p/10278995.html&quot;&gt;UML类图中的六种关系(物理设计阶段)&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;1. 类适配器模式&lt;/em&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;在Adapter中实现目标接口同时继承待适配类来完成适配：&lt;/p&gt;
-&lt;p&gt;Target 为目标接口类&lt;/p&gt;
-&lt;p&gt;Adaptee 为待适配类&lt;/p&gt;
-&lt;p&gt;Adapter 适配器类: 将Adaptee适配为Target接口&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdn.net/20170504162754080?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvU0VVX0NhbHZpbg==/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/Center&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;// 已存在的、具有特殊功能，但不符合我们既有的标准接口的类&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; Adaptee {
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; specificRequest() {
-        System.out.println(&quot;&lt;span&gt;被适配的类，该类具有特殊功能&lt;/span&gt;&quot;);
-    }
-}
-
-&lt;span&gt;// 目标接口&lt;/span&gt;
-&lt;span&gt;interface&lt;/span&gt; Target {
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; request();
-}
-
-&lt;span&gt;// 具体目标类，只提供普通功能&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; ConcreteTarget &lt;span&gt;implements&lt;/span&gt; Target {
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; request() {
-        System.out.println(&quot;&lt;span&gt;普通类，该类具有普通功能&lt;/span&gt;&quot;);
-    }
-}
-
-&lt;span&gt;// 适配器类，继承了被适配类，同时实现标准接口&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; Adapter &lt;span&gt;extends&lt;/span&gt; Adaptee &lt;span&gt;implements&lt;/span&gt; Target{
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; request() {
-        &lt;span&gt;super&lt;/span&gt;.specificRequest();
-    }
-}
-
-&lt;span&gt;//测试类&lt;/span&gt;
-&lt;span&gt;// 使用普通功能类&lt;/span&gt;
-Target concreteTarget = &lt;span&gt;new&lt;/span&gt; ConcreteTarget();
-concreteTarget.request();   &lt;span&gt;//输出“普通类，该类具有普通功能”&lt;/span&gt;
-
-&lt;span&gt;// 使用特殊功能类，即适配类&lt;/span&gt;
-Target adapter = &lt;span&gt;new&lt;/span&gt; Adapter();
-adapter.request();     &lt;span&gt;//输出“被适配的类，该类具有特殊功能”&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;em&gt;2. 对象的适配器模式&lt;/em&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;与类适配器不同的是，对象适配器持有Adaptee对象而不需要继承它。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdn.net/20170504162819956?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvU0VVX0NhbHZpbg==/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/Center&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//只需要修改适配器类即可&lt;/span&gt;
-&lt;span&gt;//适配器类，只实现标准接口&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; Adapter &lt;span&gt;implements&lt;/span&gt; Target{
-    &lt;span&gt;private&lt;/span&gt; Adaptee adaptee;
-    &lt;span&gt;public&lt;/span&gt; Adapter (Adaptee adaptee) {
-        &lt;span&gt;this&lt;/span&gt;.adaptee = adaptee;
-    }
-
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; request() {
-        &lt;span&gt;this&lt;/span&gt;.adaptee.specificRequest();
-    }
-}
-
-&lt;span&gt;//测试类&lt;/span&gt;
-Target concreteTarget = &lt;span&gt;new&lt;/span&gt; ConcreteTarget();
-concreteTarget.request();  &lt;span&gt;//输出“普通类，该类具有普通功能”&lt;/span&gt;
-
-
-&lt;span&gt;//Adapter需要先创建一个被适配类的对象作为参数&lt;/span&gt;
-Target adapter = &lt;span&gt;new&lt;/span&gt; Adapter(&lt;span&gt;new&lt;/span&gt; Adaptee());
-adapter.request();  &lt;span&gt;//输出“被适配的类，该类具有特殊功能”&lt;/span&gt;
----------------------
-作者：SEU_Calvin
-来源：CSDN
-原文：https:&lt;span&gt;//blog.csdn.net/SEU_Calvin/article/details/71126649 &lt;/span&gt;
-版权声明：本文为博主原创文章，转载请附上博文链接！
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;em&gt;3. 接口的适配器模式&lt;/em&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;大话设计模式中没有 接口适配模式，但是很多网上文章中还是提到了接口适配，所以这里也讲解一下：&lt;/p&gt;
-&lt;p&gt;目的：减少接口实现，Adaptee类只需要实现接口中的一部分&lt;/p&gt;
-&lt;p&gt;Wrapper：相当于适配器（这里的作用和抽象类功能相同）&lt;/p&gt;
-&lt;p&gt;Adaptee： 待适配的类，只实现了request接口而不需要实现cancel接口。&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://img2018.cnblogs.com/blog/918077/201901/918077-20190116213238481-1088281750.png&quot;&gt;&lt;img title=&quot;image&quot; src=&quot;https://img2018.cnblogs.com/blog/918077/201901/918077-20190116213238850-1125815396.png&quot; alt=&quot;image&quot; width=&quot;370&quot; height=&quot;379&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;总结：&lt;/p&gt;
-&lt;p&gt;Adapter继承自Adaptee和Target的类来完成适配。&lt;/p&gt;
-&lt;p&gt;Adapter持有Adaptee对象并实现Target接口来完成适配（java类是单继承，最多只能继承一个类，对象适配器可以继承其它类）。&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;使用实例&lt;/em&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;&lt;strong&gt;1. Android中ListView通过ListAdapter加载每一条View，而不需要考虑各个view的不同&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://img2018.cnblogs.com/blog/918077/201901/918077-20190116213239777-1025489539.png&quot;&gt;&lt;img title=&quot;image&quot; src=&quot;https://img2018.cnblogs.com/blog/918077/201901/918077-20190116213240593-884428158.png&quot; alt=&quot;image&quot; width=&quot;640&quot; height=&quot;386&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;ListView   是client&lt;/p&gt;
-&lt;p&gt;ListAdapter 是 Target&lt;/p&gt;
-&lt;p&gt;BaseAdapter/ArrayAdapter/CursorAdapter 是 适配类&lt;/p&gt;
-&lt;p&gt;List&amp;lt;T&amp;gt;/Cursor 中保存了列表数据，需要适配成多个view展示到ListView上，它相当于 Adaptee&lt;/p&gt;
-&lt;p&gt;所以这里使用了: &lt;span&gt;类适配模式 + 接口适配模式&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;2.jdk中InputStreamReader/OutputStreamWriter&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://hi.csdn.net/attachment/201101/3/0_1294058999cvJS.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Reader/Writer ： 相当于 Target&lt;/p&gt;
-&lt;p&gt;InputStreamReader 是 Adapter&lt;/p&gt;
-&lt;p&gt;InputStrea 是 Adaptee&lt;/p&gt;
-&lt;p&gt;所以这里使用了: &lt;span&gt;对象适配&lt;/span&gt;&lt;span&gt;&lt;span&gt;模式&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;3. jdk中Arrays.asList(T …a)&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;将 数组适配成List对象，这里好像和上面讲的三种模式都不像，&lt;span&gt;它通过一个接口将一种对象类型数据转换为另一种类型数据：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;输出类型List 作为 Target&lt;/p&gt;
-&lt;p&gt;asList接口  作为 Adapter&lt;/p&gt;
-&lt;p&gt;输入数组 a 是 Adaptee&lt;/p&gt;
-
-&lt;p&gt;参考：&lt;/p&gt;
-&lt;p&gt;《大话设计模式》&lt;/p&gt;
-&lt;p&gt;&lt;a title=&quot;https://blog.csdn.net/SEU_Calvin/article/details/71126649&quot; href=&quot;https://blog.csdn.net/SEU_Calvin/article/details/71126649&quot;&gt;https://blog.csdn.net/SEU_Calvin/article/details/71126649&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a title=&quot;https://www.jianshu.com/p/78f6083ef869&quot; href=&quot;https://www.jianshu.com/p/78f6083ef869&quot;&gt;https://www.jianshu.com/p/78f6083ef869&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 16 Jan 2019 13:34:00 +0000</pubDate>
-<dc:creator>NeilZhang</dc:creator>
-<og:description>适配器模式将某个类的接口转换成客户端期望的另一个接口表示，主的目的是兼容性，让原本因接口不匹配不能一起工作的两个类可以协同工作。其别名为包装器(Wrapper)。 简单地说，就是需要的东西就在面前，但</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/NeilZhang/p/10279549.html</dc:identifier>
-</item>
-<item>
-<title>Salesforce Sales Cloud 零基础学习(三) Lead &amp; Opportunity &amp; Quote - zero.zhang</title>
-<link>http://www.cnblogs.com/zero-zyq/p/10274345.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zero-zyq/p/10274345.html</guid>
-<description>&lt;p&gt;上一篇讲的是Account 和 Contact，本篇主要描述 Lead &amp;amp; Opportunity &amp;amp; Quote.他们的主要的作用如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Lead 用来存储潜在客户。&lt;/li&gt;
-&lt;li&gt;Opportunity 用来track潜在的订单。&lt;/li&gt;
-&lt;li&gt;Quote 用来记录不断和客户进行报价的信息。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;一.Lead&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;我们通过做市场活动，或者用户点击了公司网站，电销，广告等方式，使用户对公司的产品感兴趣，我们可以将这些针对公司产品感兴趣的用户作为潜在用户存储到Lead中，针对优质的Lead，后期可以转换成 Account和 Contact并且争取有Opportunity来建立起潜在的订单。Lead在salesforce中API Name为Lead.&lt;/p&gt;
-&lt;p&gt;Lead 常用功能&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;1. Lead Conversion&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;我们认为优质的Lead，可以将其转换成相对应的 Account / Contact / Opportunity.&lt;/p&gt;
-&lt;p&gt;我们在Lead上可能有自定义的字段，比如想要标记Lead的星级，我们可以在Lead上增加自定义字段 Lead Score，&lt;/p&gt;
-&lt;p&gt;如果我们想要在Account或者Contact上也要这个字段，我们只要在Account以及Contact上创建同样的名字的字段，然后再Lead的Field中点击‘Map Lead Fields’即可设置Mapping关系，当 Lead convert时，便可以不需要自己写代码，自动将这个字段转换过去。&lt;/p&gt;
-&lt;p&gt;Lead Conversion 可以查看此视频： &lt;a href=&quot;http://salesforce.vidyard.com/watch/gKjoNI_n5O9WfYpqE_p3Xg&quot; target=&quot;_blank&quot;&gt;http://salesforce.vidyard.com/watch/gKjoNI_n5O9WfYpqE_p3Xg&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;需要注意两点的是：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;当Lead Conversion 以后，你将在search框中查询不到该lead，除非你拥有 ‘View and Edit Converted Leads’权限&lt;/li&gt;
-&lt;li&gt;当Lead上有Notes &amp;amp; Attachment, 转换后在转换的 Account / Contact / Opportunity 将均拥有这个Notes &amp;amp; Attachment&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;Lead Convert 步骤：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;进入一个想要Convert的lead，点击Convert按钮;&lt;/li&gt;
-&lt;li&gt;如果系统已经有Account，则选择已有的Account，如果没有则新建&lt;/li&gt;
-&lt;li&gt;如果系统已经有Contact，则选择已有的Contact，如果没有则新建&lt;/li&gt;
-&lt;li&gt;如果系统已经有Opportunity，则选择已有的Opportunity，如果没有可以输入Opportunity的名字&lt;/li&gt;
-&lt;li&gt;创建需要后期追踪的task（可选项）&lt;/li&gt;
-&lt;li&gt;点击Convert按钮，实现Lead的Convert.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201901/910966-20190115211451038-517595687.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. Merge Duplicate Lead&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;在系统中难免有重复的数据，针对重复的数据，我们需要对重复的数据进行merge操作以避免后期无用的转换。&lt;/p&gt;
-&lt;p&gt;当我们点击进入一个Lead,点击 Find Duplicates,如果有重复的Lead,会在Matching Leads处有记录，点击Merge Leads,根据你想要的Lead的信息选择即可。&lt;/p&gt;
-&lt;p&gt;除了使用标准的 Duplicate Lead Merge功能，还可以使用第三方的功能， Lightning Data 或者 Data.com。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;二. Opportunity&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Opportunity 可以理解成正在进行中的交易，通过Opportunity可以追踪当前潜在的交易的阶段，金额，客户想要的产品，每一次的报价信息，竞争对手信息等。&lt;/p&gt;
-&lt;p&gt;Sales Cloud 借助销售漏斗模型进行管理和预测销售的业绩，准确的Opportunity关系到 Forcast的准确性，所以Opportunity的真实性以及重要性不言而喻。Opportunity在salesforce标准的API名称为 Opportunity。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;1. 管理 Opportunity Product&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;我们新建了一个Opportunity，选择了要交易的Account或者 Contact 新建以后，我们便针对这个客户或者联系人(可能person account直接维护在Contact中)创建好了Opportunity，使用它来追踪这次交易的状态。客户需要买的是我们的公司的产品或者服务，所以我们需要在Opportunity中关联客户想要的Product信息，包括选择的产品/服务，销售价，数量,折扣等信息，Opportunity Product在Salesforce的API 名字为 OpportunityLineItem.&lt;/p&gt;
-&lt;p&gt;我们在Opportunity上有 Amount字段，这个Amount字段自动汇总了所有你添加的Opportunity Product的sales price * quantity.&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 跟踪竞争对手信息&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;你的企业客户可能找了多家公司报价，你也可以在Opportunity中维护你的竞争对手的信息。竞争对手在Salesforce 中对应的API名字为OpportunityCompetitor。&lt;/p&gt;
-&lt;p&gt;在SetUp -&amp;gt; 搜索 Competitor 即可找到，点击进入维护一下需要维护的竞争对手名称即可。&lt;/p&gt;
-&lt;p&gt;OpportunityCompetitor 常用字段：CompetitorName,OpportunityId,Strengths,Weaknesses ; 可以通过Opportunity.xxxField获取Opportunity的字段&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 维护你的Partner信息&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;在Opportunity中也可以维护你的Partner信息，Partner在Salesforce中对应的API 名字为OpportunityPartner，当新建了一个Opportunity 的partner以后，同时也会在这个Opportunity对应的Account上创建相同信息的Partner,在Account上面的Partner的API 名称为AccountPartner&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;4. 维护你的 Opportunity Team Member&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;在Account中我们有介绍过Account Team Member的概念，在Opportunity中，我们也可以维护一组Opportunity team member去争取更大几率的赢单。Opportunity Team Member在salesforce中的API名称为：OpportunityTeamMember&lt;/p&gt;
-&lt;p&gt;Account Team Member是针对这个Account而言，一个Account可能有多个Opportunity， Opportunity team member针对 当前的Opportunity而言，所以两者还是有本质的区别的。&lt;/p&gt;
-&lt;p&gt;针对 Opportunity Team 可能有两个场景会经常用到：&lt;/p&gt;
-&lt;p&gt;1) 针对系统中的Opportunity，经常会有一组人员会协助跟进，这个时候我们可以设置并且添加 default opportunity team;&lt;/p&gt;
-&lt;p&gt;2) 如果系统中设置了Opportunity访问权限为私有的，我们需要某个专家去协助跟进这个Opportunity,我们可以将这个 专家添加到Opportunity Team 中并且分配他的访问权限。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;5. 管理你的 Sales Process&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;公司可能有不同类型的产品，针对不同类型的产品可能销售阶段也不同，这里就要针对不同的销售阶段引出来Sales Process概念。&lt;/p&gt;
-&lt;p&gt;Sales Process通常需要和 Record Type 以及 Opportunity Layout共同使用，以确保不同的record type进来，可以有不同的Sales Process.&lt;/p&gt;
-&lt;p&gt;Why you need Sales Process链接：&lt;a href=&quot;https://www.salesforce.com/blog/2013/06/sales-process.html&quot; target=&quot;_blank&quot;&gt;https://www.salesforce.com/blog/2013/06/sales-process.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Trailhead：&lt;a href=&quot;https://trailhead.salesforce.com/content/learn/modules/admin_intro_opptys_leads/admin_intro_opptys_leads_opportunities&quot; target=&quot;_blank&quot;&gt;https://trailhead.salesforce.com/content/learn/modules/admin_intro_opptys_leads/admin_intro_opptys_leads_opportunities&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;三.Quote&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;报价代表着贵公司产品和服务的建议销售价格，针对一个Opportunity，我们可能需要做多次报价操作，报价也是一个议价的过程，我们可以针对客户选择的产品和服务进行折扣以争取最大可能的赢单。Quote在salesforce的标准的API名称为Quote。&lt;/p&gt;
-&lt;p&gt;使用 Quote时我们需要先在 Quote Setting中 enable quote，操作为 Setup -&amp;gt; 搜索 Quotes Settings 然后选择在哪个 opportunity page layout显示quote related list后 enable即可&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1 Quote Template&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;当我们针对客户进行报价时，我们可以定义好生成的模板，这样当我们生成PDF，选择指定模板以后就可以生成基于当前报价单的PDF信息供给客户查看。&lt;/p&gt;
-&lt;p&gt;在 SetUp -&amp;gt; 搜索 Template后在Quotes下面有Template，点击New 即可新建 Template。 Template通常包括以下几部分信息：&lt;/p&gt;
-&lt;p&gt;Header / Body / Footer。 可以添加的类型为： Image / Rich Test / List / Total Section。当然一定要注意创建的 Template默认都是 inactive的，如果使用的话需要将其active&lt;/p&gt;
-&lt;p&gt;配置好PDF以后，在 Quote详情页，点击 Create PDF即可生成我们要求的指定 Template的报价单。&lt;/p&gt;
-&lt;p&gt;Quote Template 可以参看这个视频：&lt;a href=&quot;http://salesforce.vidyard.com/watch/_U4ePtDJHuot9OMHSZTLEA&quot; target=&quot;_blank&quot;&gt;http://salesforce.vidyard.com/watch/_U4ePtDJHuot9OMHSZTLEA&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. Quote Sync&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;当我们 New Quote时，我们会生成一个新的 Quote 及其对应的 Quote Line Item, Quote Line Item 会将 Opportunity Line Item的内容同步过来，当然对应的表不同， Quote Line Item 在salesforce 的API名字为：QuoteLineItem,主要字段有：LineNumber、ListPrice、PricebookEntryId、Product2Id、Quantity、QuoteId、UnitPrice、Subtotal、TotalPrice。&lt;/p&gt;
-&lt;p&gt;我们在做报价时，一个Opportunity会有多个 Quote，当客户对某个Quote很满意时，我们可以将 Quote信息同步到 Opportunity,同步以后，会将Quote的字段同步到Opportunity的相关字段， Quote Line Item的价格折扣等信息同步到 Opportunity Line Item。 需要注意的是：在一个时间，只允许有一个Quote可以Sync到Opportunity，如果后面的Quote sync到了 Opportunity，则前面的会自动解除 Sync。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201901/910966-20190116114124738-177558086.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt; 总结：&lt;/strong&gt;篇中只是简单的描述一下这三个标准的对象的业务含义以及简单的功能介绍，如果要详细了解sales cloud知识，自行查看sales cloud文档。篇中有问题地方欢迎指出，有不懂的欢迎留言。&lt;/p&gt;
-</description>
-<pubDate>Wed, 16 Jan 2019 12:34:00 +0000</pubDate>
-<dc:creator>zero.zhang</dc:creator>
-<og:description>上一篇讲的是Account 和 Contact，本篇主要描述 Lead &amp; Opportunity &amp; Quote.他们的主要的作用如下： Lead 用来存储潜在客户。 Opportu</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zero-zyq/p/10274345.html</dc:identifier>
 </item>
 </channel>
 </rss>
