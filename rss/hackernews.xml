@@ -9,6 +9,137 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>C++ Modules Might Be Dead-On-Arrival</title>
+<link>https://vector-of-bool.github.io/2019/01/27/modules-doa.html</link>
+<guid isPermaLink="true" >https://vector-of-bool.github.io/2019/01/27/modules-doa.html</guid>
+<description>&lt;p&gt;C++ modules are slated to be the biggest change in C++ since its inception. The design of modules has several essential goals in mind:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;Top-down isolation&lt;/strong&gt; - The “importer” of a module cannot affect the content of the module being imported. The state of the compiler (preprocessor) in the importing source has no bearing on the processing of the imported code.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Bottom-up isolation&lt;/strong&gt; - The content of a module does not affect the state of the preprocessor in the importing code.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Lateral isolation&lt;/strong&gt; - If two modules are imported by the same file, there is no “cross-talk” between them. The ordering of the import statements is insignificant.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Physical encapsulation&lt;/strong&gt; - Only entities which are explicitly declared as exported by a module will be visible to consumers. Non-exported entities within a module will not affect name lookup in other modules (barring some possible strangeness with ADL. Long story…)&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Modular interfaces&lt;/strong&gt; - The current module design enforces that for any given module, the entire public interface of that module is declared in a single TU called the “module-interface unit” (MIU). The implementation of subsets of the module interface may be defined in different TUs called “partitions.”&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;If you’ve been hoping for modules for as long as many have, you’ll note that “compilation speed” is missing from this list. Nevertheless, this is one of the biggest promises of modules. The possible speedup from modules is merely a consequence of the above design aspects.&lt;/p&gt;
+&lt;p&gt;This author can identify several aspects of C++ compilation that can greatly benefit from the design of modules. In order of most-to-least-obvious:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;Tokenization caching&lt;/strong&gt; - Because of TU isolation, tokenizing a TU can be cached when the module is later imported into another TU.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Parse-tree caching&lt;/strong&gt; - Same as above. Tokenization and parsing are some of the most expensive operations in compiling C++. In my own tests, parsing can consume up to 30% of compilation time for files with a large preprocessed output.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Lazy re-generation&lt;/strong&gt; - If &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt; imports &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt;, and we later make changes to the &lt;em&gt;implementation&lt;/em&gt; of &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt;, we may be able to omit recompilation of &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt;. Only changes to &lt;em&gt;the interface&lt;/em&gt; of &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt; necessitate recompilation of &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Template specialization memoization&lt;/strong&gt; - This one is a bit more subtle and may take more work to implement, but the potential speedups are &lt;em&gt;enormous&lt;/em&gt;. In short: A specialization of a class or function template appearing in the module interface unit can be cached and loaded from disk later.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Inline function codegen caching&lt;/strong&gt; - Codegen results for inline functions (including function templates and member functions of class templates) can be cached and later re-loaded by the compiler backend.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Inline function codegen elision&lt;/strong&gt; - &lt;code class=&quot;highlighter-rouge&quot;&gt;extern template&lt;/code&gt; allows the compiler to omit performing codegen for function and class templates. This is hugely beneficial for the &lt;em&gt;linker&lt;/em&gt; when it performs de-dup. Modules may allow the compiler to perform more &lt;code class=&quot;highlighter-rouge&quot;&gt;extern template&lt;/code&gt;-style optimizations implicitly.&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;All in all, it’s looking pretty good, yeah?&lt;/p&gt;
+&lt;p&gt;But there’s something missing. A horrible, terrible, no-good, very bad flaw.&lt;/p&gt;
+
+&lt;p&gt;Fortran implemented a module system that bears a slight resemblance to the design proposed for C++. A few short months ago, a paper &lt;a href=&quot;http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1300r0.pdf&quot;&gt;p1300&lt;/a&gt; was written by the SG15 group for review in San Diego. As far as I can tell, the paper was not discussed nor reviewed by any relevant eyes.&lt;/p&gt;
+&lt;p&gt;The gist of it is this:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;We have module &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt; and module &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt;, defined by &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.cpp&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt; respectively.&lt;/li&gt;
+&lt;li&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt; has an &lt;code class=&quot;highlighter-rouge&quot;&gt;import foo;&lt;/code&gt; statement.&lt;/li&gt;
+&lt;li&gt;How do we make sure that &lt;code class=&quot;highlighter-rouge&quot;&gt;import foo&lt;/code&gt; will resolve when compiling &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt;? The current design and implementations require there to exist what is known as the “binary module interface” (abbreviated as BMI) defined for &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt;. The BMI is a file on the filesystem that describes the exported interface of the module &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt;. I’ll call that BMI &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.bmi&lt;/code&gt; for now. The extension isn’t important.&lt;/li&gt;
+&lt;li&gt;Creation of &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.bmi&lt;/code&gt; is a byproduct of the compilation of &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.cpp&lt;/code&gt;. When compiling &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.cpp&lt;/code&gt;, the compiler will emit a &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.o&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.bmi&lt;/code&gt;. As a consequence of this design, &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.cpp&lt;/code&gt; &lt;strong&gt;must&lt;/strong&gt; be compiled &lt;em&gt;before&lt;/em&gt; &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt;!&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;If alarm bells aren’t ringing already, let me discuss the way we currently work using header files:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;We have a “module” &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt; defined by &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.cpp&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.hpp&lt;/code&gt;, and a “module” &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt; defined by &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.hpp&lt;/code&gt;. Easy to understand.&lt;/li&gt;
+&lt;li&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt; contains an &lt;code class=&quot;highlighter-rouge&quot;&gt;#include &amp;lt;foo.hpp&amp;gt;&lt;/code&gt; preprocessor statement.&lt;/li&gt;
+&lt;li&gt;How do we make sure that &lt;code class=&quot;highlighter-rouge&quot;&gt;#include &amp;lt;foo.hpp&amp;gt;&lt;/code&gt; resolves when compiling &lt;code class=&quot;highlighter-rouge&quot;&gt;bar.cpp&lt;/code&gt;? It’s simple: Make sure &lt;code class=&quot;highlighter-rouge&quot;&gt;foo.hpp&lt;/code&gt; is present in a directory on the header search path list. We do not need to do any additional pre-processing.&lt;/li&gt;
+&lt;li&gt;There is no ordering requirement between the compilation of the “modules” &lt;code class=&quot;highlighter-rouge&quot;&gt;foo&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;bar&lt;/code&gt;. They can be processed in parallel.&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;Parallelization is probably the single most important aspect of increasing build performance. At this point, it isn’t even something you think about when you are optimizing your build because &lt;em&gt;it is already there&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;Modules change that. The importing of a module creates a “happens-before” dependency where &lt;code class=&quot;highlighter-rouge&quot;&gt;#include&lt;/code&gt; did not. (I discuss this ordering in my &lt;a href=&quot;https://vector-of-bool.github.io/2018/12/20/build-like-ninja-1.html&quot;&gt;Building Like (a) Ninja post&lt;/a&gt;).&lt;/p&gt;
+&lt;p&gt;The consequences of this design were explored very recently by Rene Rivera in &lt;a href=&quot;https://bfgroup.github.io/cpp_tooling_stats/modules/modules_perf_D1441R1.html&quot;&gt;&lt;em&gt;Are modules fast?&lt;/em&gt;&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Spoiler alert: No. Or, more accurately: It’s subtle, but mostly &lt;em&gt;no&lt;/em&gt;. The current module implementation used in that paper is extremely primitive but is still a valuable benchmark to understand what modules may look like performance-wise. Expectedly, as hardware parallelism increases, headers’ lead over modules becomes more and more pronounced. There is also a relationship between the DAG-depth (i.e. The length of the chain of modules that &lt;code class=&quot;highlighter-rouge&quot;&gt;import&lt;/code&gt; each other). As this depth increases, modules grow slower and slower, while headers remain fairly constant for even “extreme” depths approaching 300).&lt;/p&gt;
+
+&lt;p&gt;Suppose I have this source file:&lt;/p&gt;
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;
+&lt;div class=&quot;highlight&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;n&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;greetings&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;std&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;iostream&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+
+&lt;span class=&quot;kt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;std&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cout&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;greeting&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;english&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;sc&quot;&gt;'\n'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;This is pretty simple. Since we import some modules, we will need to compile &lt;code class=&quot;highlighter-rouge&quot;&gt;greetings&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;std.iostream&lt;/code&gt; &lt;em&gt;before&lt;/em&gt; we can compile this file.&lt;/p&gt;
+&lt;p&gt;So, let’s do that…&lt;/p&gt;
+&lt;p&gt;…&lt;/p&gt;
+&lt;p&gt;Uh…&lt;/p&gt;
+&lt;p&gt;How?&lt;/p&gt;
+&lt;p&gt;We’ve been given a source file with two imports. That’s it. We don’t have anything else. Where is &lt;code class=&quot;highlighter-rouge&quot;&gt;greetings&lt;/code&gt; defined? We need to find a file that contains a &lt;code class=&quot;highlighter-rouge&quot;&gt;module greetings;&lt;/code&gt; statement.&lt;/p&gt;
+&lt;p&gt;This file located on the other side of the galaxy, &lt;code class=&quot;highlighter-rouge&quot;&gt;talk.cpp&lt;/code&gt;, looks promising:&lt;/p&gt;
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;
+&lt;div class=&quot;highlight&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;n&quot;&gt;module&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+
+&lt;span class=&quot;cp&quot;&gt;#ifdef FROMBULATE
+#include &amp;lt;hello.h&amp;gt;
+#endif
+&lt;/span&gt;
+&lt;span class=&quot;cp&quot;&gt;#ifndef ABSYNTH
+&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;module&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;something&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;pie&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;cp&quot;&gt;#endif
+&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;std&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;string&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;namespace&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;greeting&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;std&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;::&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;string&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;english&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
+
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;It defines that &lt;code class=&quot;highlighter-rouge&quot;&gt;greeting::english&lt;/code&gt; function that we want. But how do we know that this is the right file? It doesn’t contain a &lt;code class=&quot;highlighter-rouge&quot;&gt;module greetings;&lt;/code&gt; line!&lt;/p&gt;
+&lt;p&gt;But it does. Sometimes. It turns out when we compile with &lt;code class=&quot;highlighter-rouge&quot;&gt;-DFROMBULATE&lt;/code&gt;, then the file &lt;code class=&quot;highlighter-rouge&quot;&gt;hello.h&lt;/code&gt; is pasted into the source file. What’s in there?&lt;/p&gt;
+&lt;div class=&quot;language-c++ highlighter-rouge&quot;&gt;
+&lt;div class=&quot;highlight&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;cp&quot;&gt;#ifdef __SOME_BUILTIN_MACRO__
+# define MODULE_NAME greetings
+#else // Legacy module name
+# define MODULE_NAME salutations
+#endif
+&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;module&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;MODULE_NAME&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;Oh.&lt;/p&gt;
+&lt;p&gt;Oh no.&lt;/p&gt;
+&lt;p&gt;This is fine. This is fine… Don’t worry. All we need to do is… &lt;em&gt;run the preprocessor&lt;/em&gt; to check if the file comes out as &lt;code class=&quot;highlighter-rouge&quot;&gt;module salutations&lt;/code&gt; or &lt;code class=&quot;highlighter-rouge&quot;&gt;module greetings&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;This is okay, but… There are 4,201 files that could define modules that can be imported, and any one of them could be &lt;code class=&quot;highlighter-rouge&quot;&gt;module greetings;&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;Also, we can’t use our own implementation of the preprocessor: We need to run &lt;em&gt;exactly&lt;/em&gt; the preprocessor that will be compiling this code. See that &lt;code class=&quot;highlighter-rouge&quot;&gt;__SOME_BUILTIN_MACRO__&lt;/code&gt;? We have no clue what that is. If we don’t get it &lt;em&gt;exactly&lt;/em&gt; right, the compilation will fail, or, even worse, we may &lt;em&gt;miscompile&lt;/em&gt; the file.&lt;/p&gt;
+&lt;p&gt;So what can we do? We could cache the names of all the modules after preprocessing all the files, right? Well, where do we store that mapping? And what happens when we want to compile with a different compiler that results in a different mapping? What if we add new files that need to be scanned? Do we need to search every directory that contains these thousands of source files every time we build, just to check if any modules were added, removed, or renamed? On systems where process startup and/or filesystem access is not cheap, these costs will add up.&lt;/p&gt;
+
+&lt;p&gt;These two problems are distinct but related in that I (and many others) believe that one change to the modules design will fix them both: &lt;strong&gt;Module interface unit locations must be deterministic&lt;/strong&gt;.&lt;/p&gt;
+&lt;p&gt;There are two alternative ideas to enforce this:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Force MIU filenames to derive from the module’s name. This mimics the design of header filenames being directly related to how they are found from an &lt;code class=&quot;highlighter-rouge&quot;&gt;#include&lt;/code&gt; directive.&lt;/li&gt;
+&lt;li&gt;Provide a “manifest” or “mapping” file that describes the filepath to an MIU based on the module name. This file will need to be user-provided, or we are back in the scanning problem.&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;With MIU lookup deterministic and easily defined, we can then go to the next essential step: The BMI of a module must be lazily generated.&lt;/p&gt;
+&lt;p&gt;The compilation ordering between TUs will kill module adoption dead in its tracks. Even relatively shallow DAG depths are much slower than the equivalent with header files. The only answer is that TU compilation &lt;em&gt;must&lt;/em&gt; be parallelizable, even in the face of importing other TUs.&lt;/p&gt;
+&lt;p&gt;In this respect, C++ would be best to mimic Python’s &lt;code class=&quot;highlighter-rouge&quot;&gt;import&lt;/code&gt; implementation: When a new &lt;code class=&quot;highlighter-rouge&quot;&gt;import&lt;/code&gt; statement is encountered, Python will first find a source file corresponding to that module, and then look for a pre-compiled version in a deterministic fashion. If the pre-compiled version already exists and is up-to-date, it will be used. If no pre-compiled version exists, the source file will be compiled and the resulting bytecode will be written to disk. The bytecode is then loaded. If two interpreter instances encounter the same un-compiled source file at the same time, they will race to write the bytecode. The race doesn’t matter, though: They will both come to the same conclusion and write the same file to disk.&lt;/p&gt;
+&lt;p&gt;In order to facilitate parallel compilation of TUs in the DAG, C++ modules must be implemented in the same way. Ahead-of-time BMI compilation is a non-starter. Instead, a compiler should lazily generate the BMI when it first encounters an &lt;code class=&quot;highlighter-rouge&quot;&gt;import&lt;/code&gt; statement for the module in question. The build system should not concern itself with BMIs at all.&lt;/p&gt;
+&lt;p&gt;All of this can only work if the location of an MIU is deterministic for the compiler.&lt;/p&gt;
+
+&lt;p&gt;There was a recent upset on the Twitter-verse. The Pre-Kona mailing was posted on January 25th. Amongst the many papers posted you will find &lt;a href=&quot;http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1427r0.pdf&quot;&gt;p1427, &lt;em&gt;Concerns about module toolability&lt;/em&gt;&lt;/a&gt;. Amongst its authors and contributors are names of build system and tooling engineers from around the industry. Am I appealing to authority here? Yes I am, but I feel that these are some of the most qualified people to provide feedback on module toolability.&lt;/p&gt;
+&lt;p&gt;This paper was born from the concerns of many tool authors and collaborators (more than what is named on the paper itself, including myself) who have felt that their concerns about modules have been ignored for months and years.&lt;/p&gt;
+&lt;p&gt;People outside of SG15 have been keen to &lt;a href=&quot;http://www.open-std.org/pipermail/tooling/2019-January/000269.html&quot;&gt;shoot down discussion&lt;/a&gt; on the issues with module toolability, claiming that SG15 does not have the necessary implementation experience to make useful statements regarding modules.&lt;/p&gt;
+&lt;p&gt;SG15 has only had face-to-face meetings. The last meeting, in San Diego, was useless as the chair was absent and people were too busy getting caught up since the prior meetings to have any useful discussions. With no SG15 meetings outside of those at the official WG21 convenings, the members thereof have difficulty staying up-to-date and collaborating on work. In addition, many times that SG15 has attempted to raise issues they have been shot down as their work is considered “out-of-scope” for the C++ language.&lt;/p&gt;
+&lt;p&gt;A Tweet about the pre-Kona mailings spawned discussion of C++ modules and p1427. &lt;a href=&quot;https://twitter.com/horenmar_ctu/status/1089542882783084549&quot;&gt;Questions were raised about who to trust&lt;/a&gt; regarding module toolability.&lt;/p&gt;
+&lt;p&gt;This discussion culminated in an eventual call for SG15 to &lt;a href=&quot;https://twitter.com/rodgertq/status/1089580076729982976?s=19&quot;&gt;“STFU”&lt;/a&gt; unless they can provide code samples that prove the problems they outline. This is a request for code that cannot be implemented in any current compiler and cannot be implemented in any current build system. Even if these were to exist, the request is for proving a negative: A task which cannot be done empirically. As such, this request for code is a goal that cannot be met.&lt;/p&gt;
+&lt;p&gt;The issues were not discussed. The issues were not disproven. No one even mentioned the problems outlined in p1427. We are told to simply &lt;a href=&quot;https://twitter.com/jfbastien/status/1089536692288024576&quot;&gt;trust some big names&lt;/a&gt; to know better than we do (an appeal to authority).&lt;/p&gt;
+&lt;p&gt;People backing the current modules design have not proven that modules work at scale, yet also demand proof from SG15 that they &lt;em&gt;do not&lt;/em&gt; work at scale. Existing “modules” deployments do not use the current design, and do not use the automated module scanning that would be required for use with real build systems in the wild.&lt;/p&gt;
+&lt;p&gt;If modules are merged and it turns out that they cannot be implemented in a well-performing and flexible fashion, people will not use modules. If a broken modules proposal is merged into C++, it may be irrecoverable and C++ will never see the promises of modules realized.&lt;/p&gt;
+&lt;p&gt;Is it possible for the current modules proposal to be implemented successfully? I can’t answer with a definitive “no”, but me and many others feel that there are significant issues that need to be addressed.&lt;/p&gt;
+&lt;p&gt;But, judging by the behavior of others, it may seem that it doesn’t matter what SG15 thinks: They are being shot down at every turn by people with very little experience in C++ tooling, and the SG15 chair is completely absent through this entire discussion. Anything SG15 does is declared “unsubstantiated” and “out-of-scope.”&lt;/p&gt;
+&lt;p&gt;I was afraid to call out this behavior: I’m not keen on interpersonal conflict. Nevertheless, I’m more afraid that C++ will end up with a permanently useless modules design.&lt;/p&gt;
+</description>
+<pubDate>Mon, 28 Jan 2019 02:47:11 +0000</pubDate>
+<dc:creator>pplonski86</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://vector-of-bool.github.io/2019/01/27/modules-doa.html</dc:identifier>
+</item>
+<item>
 <title>Linear Algebra by Jim Hefferon – free textbook</title>
 <link>http://joshua.smcvt.edu/linearalgebra/</link>
 <guid isPermaLink="true" >http://joshua.smcvt.edu/linearalgebra/</guid>
@@ -82,7 +213,8 @@
 &lt;p&gt;As always, we only have a bare compiler at our disposal, no third-party libraries are allowed. I don't want to bother with window managers, mouse/keyboard processing and so on. The result of our program will be a simple picture saved on the disk. I do not pursue speed/optimization at all, my goal is to show the underlying principles.&lt;/p&gt;
 &lt;p&gt;So, how to draw such a picture in 180 lines of code under such restrictions?&lt;/p&gt;
 &lt;img src=&quot;https://raw.githubusercontent.com/ssloy/tinykaboom/master/out.jpg&quot;/&gt;&lt;p&gt;Here is how an animation would look like:&lt;/p&gt;
-&lt;img src=&quot;https://github.com/ssloy/tinykaboom/raw/master/kaboom.gif&quot;/&gt;&lt;p&gt;Let us split the task into simple steps. As in the raytracing article, to ease the reading flow I adopt the rule &lt;strong&gt;1 step = 1 commit&lt;/strong&gt;. This way the built-in github diff visualization tool comes extremely handy.&lt;/p&gt;
+&lt;img src=&quot;https://github.com/ssloy/tinykaboom/raw/master/kaboom.gif&quot;/&gt;&lt;p&gt;Note that this code is a loose port from a shader available on &lt;a href=&quot;https://www.shadertoy.com/view/XdfGz8&quot; rel=&quot;nofollow&quot;&gt;shadertoy.com&lt;/a&gt;. The main idea is to better explain how it works.&lt;/p&gt;
+&lt;p&gt;Let us split the task into simple steps. As in the raytracing article, to ease the reading flow I adopt the rule &lt;strong&gt;1 step = 1 commit&lt;/strong&gt;. This way the built-in github diff visualization tool comes extremely handy.&lt;/p&gt;
 
 Well, for the step 0 there is no commit. Yup, that's right. The first thing you need to do is to read &lt;a href=&quot;https://github.com/ssloy/tinyraytracer/wiki&quot;&gt;the previous chapter&lt;/a&gt;, which describes the basics of ray tracing. It is very short, in fact, you can skip the reflections and refractions, but I recommend to read at least up to the diffuse lighting stage. The code is quite simple, people even launch it on microcontrollers:
 &lt;p&gt;&lt;img src=&quot;https://user-images.githubusercontent.com/1893754/51790311-aabe0600-2193-11e9-8a06-4f7101b1af59.gif&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
@@ -660,7 +792,33 @@ assert.equal(m.size, &lt;span class=&quot;hljs-number&quot;&gt;2&lt;/span&gt;);
 &lt;li readability=&quot;1&quot;&gt;
 &lt;p&gt;Map via sorted tree: requires an operation for comparing two values, to manage the values it stores.&lt;/p&gt;
 &lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;decimal-computations&quot;&gt;Decimal computations  &lt;/h3&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;large-integers&quot;&gt;Large integers  &lt;/h3&gt;
+&lt;p&gt;JavaScript numbers are always 64-bit (double), which gives you 53 bits plus sign for integers. That means that beyond 53 bits, you can’t represent every number, anymore:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-repl&quot;&gt;&amp;gt; 2 ** 53
+9007199254740992
+&amp;gt; (2 ** 53) + 1  // can’t be represented
+9007199254740992
+&amp;gt; (2 ** 53) + 2
+9007199254740994
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;This is a considerable restriction for some use cases. There is now &lt;a href=&quot;http://2ality.com/2017/03/es-integer.html&quot;&gt;a proposal for BigInts&lt;/a&gt;, real integers whose precision grows as necessary:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-repl&quot;&gt;&amp;gt; 2n ** 53n
+9007199254740992n
+&amp;gt; (2n ** 53n) + 1n
+9007199254740993n
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;BigInts also support &lt;em&gt;casting&lt;/em&gt;, which gives you values with a fixed number of bits:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; int64a = BigInt.asUintN(&lt;span class=&quot;hljs-number&quot;&gt;64&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;12345&lt;/span&gt;n);
+&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; int64b = BigInt.asUintN(&lt;span class=&quot;hljs-number&quot;&gt;64&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;67890&lt;/span&gt;n);
+&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; result = BigInt.asUintN(&lt;span class=&quot;hljs-number&quot;&gt;64&lt;/span&gt;, int64a * int64b);
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;decimal-computations&quot;&gt;Decimal computations  &lt;/h3&gt;
 &lt;p&gt;JavaScript’s numbers are 64-bit floating point numbers (doubles), based on the IEEE 754 standard. Given that their representation is base-2, you can get rounding errors when dealing with decimal fractions:&lt;/p&gt;
 &lt;pre&gt;
 &lt;code class=&quot;language-repl&quot;&gt;&amp;gt; 0.1 + 0.2
@@ -897,7 +1055,15 @@ assert.deepEqual(
 &lt;p&gt;It would be nice to have more support for non-destructively transforming data. Two relevant libraries are:&lt;/p&gt;
 &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://github.com/mweststrate/immer&quot;&gt;Immer&lt;/a&gt; is relatively lightweight and works with normal objects and Arrays.&lt;/li&gt;
 &lt;li&gt;&lt;a href=&quot;https://github.com/facebook/immutable-js/&quot;&gt;Immutable.js&lt;/a&gt; is more powerful and heavyweight and comes with its own data structures.&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;features-that-may-not-be-needed&quot;&gt;Features that may not be needed  &lt;/h2&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;better-support-for-date-times&quot;&gt;Better support for date times  &lt;/h3&gt;
+&lt;p&gt;JavaScript’s built-in support for date times has many quirks. That’s why the current recommendation is to use libraries for all but the most basic tasks.&lt;/p&gt;
+&lt;p&gt;Thankfully, work on &lt;a href=&quot;https://github.com/tc39/proposal-temporal&quot;&gt;&lt;code&gt;temporal&lt;/code&gt;&lt;/a&gt;, a better date time API, is ongoing:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; dateTime = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; CivilDateTime(&lt;span class=&quot;hljs-number&quot;&gt;2000&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;12&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;31&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;23&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;59&lt;/span&gt;);
+&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; instantInChicago = dateTime.withZone(&lt;span class=&quot;hljs-string&quot;&gt;'America/Chicago'&lt;/span&gt;);
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;features-that-may-not-be-needed&quot;&gt;Features that may not be needed  &lt;/h2&gt;
 &lt;h3 id=&quot;the-pros-and-cons-of-optional-chaining&quot;&gt;The pros and cons of optional chaining  &lt;/h3&gt;
 &lt;p&gt;One proposed feature that is relatively popular is &lt;a href=&quot;https://github.com/tc39/proposal-optional-chaining&quot;&gt;optional chaining&lt;/a&gt;. The following two expressions are equivalent.&lt;/p&gt;
 &lt;pre&gt;
@@ -919,7 +1085,7 @@ assert.deepEqual(
 &lt;/ul&gt;&lt;p&gt;With either approach, it is possible to perform checks and to fail early if there are problems.&lt;/p&gt;
 &lt;p&gt;Further reading:&lt;/p&gt;
 &lt;h3 id=&quot;do-we-need-operator-overloading&quot;&gt;Do we need operator overloading?  &lt;/h3&gt;
-&lt;p&gt;Early work is currently being done for &lt;a href=&quot;https://github.com/littledan/proposal-operator-overloading/&quot;&gt;operator overloading&lt;/a&gt;, but infix function application may be enough:&lt;/p&gt;
+&lt;p&gt;Early work is currently being done for &lt;a href=&quot;https://github.com/littledan/proposal-operator-overloading/&quot;&gt;operator overloading&lt;/a&gt;, but infix function application may be enough (there currently is no proposal for it, though):&lt;/p&gt;
 &lt;pre&gt;
 &lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;import&lt;/span&gt; {BigDecimal, plus} &lt;span class=&quot;hljs-keyword&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;hljs-string&quot;&gt;'big-decimal'&lt;/span&gt;;
 &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; bd1 = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; BigDecimal(&lt;span class=&quot;hljs-string&quot;&gt;'0.1'&lt;/span&gt;);
@@ -1013,7 +1179,16 @@ assert.equal(
   
 &lt;/code&gt;
 &lt;/pre&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;language-design&quot;&gt;Thoughts on language design  &lt;/h2&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;faq-future-javascript&quot;&gt;FAQ: future JavaScript  &lt;/h2&gt;
+&lt;h3 id=&quot;will-javascript-ever-support-static-typing&quot;&gt;Will JavaScript ever support static typing?  &lt;/h3&gt;
+&lt;p&gt;Not anytime soon! The current separation between static typing at development time (via TypeScript or Flow) and pure JavaScript at runtime, works well. So there is no immediate reason to change anything.&lt;/p&gt;
+&lt;h3 id=&quot;why-cant-we-clean-up-javascript-by-removing-quirks-and-outdated-features&quot;&gt;Why can’t we clean up JavaScript, by removing quirks and outdated features?  &lt;/h3&gt;
+&lt;p&gt;A key requirement for the web is to never break backward compatibility:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;The downside is that the language has many legacy features.&lt;/li&gt;
+&lt;li&gt;But the upsides outweigh this downside: Large code bases remain homogeneous; migrating to a new version is simple; engines remain smaller (no need to support multiple versions); etc.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;It is still possible to fix some mistakes, by introducing better versions of existing features.&lt;/p&gt;
+&lt;p&gt;For more information on this topic, consult “&lt;a href=&quot;http://exploringjs.com/impatient-js/ch_history.html#backward-compatibility&quot;&gt;JavaScript for impatient programmers&lt;/a&gt;”.&lt;/p&gt;
+&lt;h2 id=&quot;language-design&quot;&gt;Thoughts on language design  &lt;/h2&gt;
 &lt;p&gt;As a language designer, no matter what you do, you will always make some people happy and some people sad. Therefore, the main challenge for designing future JavaScript features is not to make everyone happy, but to keep the language as consistent as possible.&lt;/p&gt;
 &lt;p&gt;However, there is also disagreement on what “consistent” means. So, the best we can probably do is to establish a consistent “style”, conceived and enforced by a small group of people (up to three). That does not preclude them being advised and helped by many others, but they should set the general tone.&lt;/p&gt;
 &lt;p&gt;Quoting &lt;a href=&quot;https://en.wikiquote.org/wiki/Fred_Brooks#No_Silver_Bullet_(1986)&quot;&gt;Fred Brooks&lt;/a&gt;:&lt;/p&gt;
@@ -1187,295 +1362,6 @@ irun (Cadence)
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://github.com/westerndigitalcorporation/swerv_eh1</dc:identifier>
-</item>
-<item>
-<title>Game Loop</title>
-<link>http://gameprogrammingpatterns.com/game-loop.html</link>
-<guid isPermaLink="true" >http://gameprogrammingpatterns.com/game-loop.html</guid>
-<description>&lt;nav class=&quot;top&quot;/&gt;
-
-
-&lt;p&gt;&lt;em&gt;Decouple the progression of game time from user input and processor speed.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;If there is one pattern this book couldn’t live without, this is it. Game loops are the quintessential example of a “game programming pattern”. Almost every game has one, no two are exactly alike, and relatively few programs outside of games use them.&lt;/p&gt;
-&lt;p&gt;To see how they’re useful, let’s take a quick trip down memory lane. In the olden days of computer programming when everyone had &lt;span name=&quot;beard&quot;&gt;beards&lt;/span&gt;, programs worked like your dishwasher. You dumped a load of code in, pushed a button, waited, and got results out. Done. These were &lt;em&gt;batch mode&lt;/em&gt; programs — once the work was done, the program stopped.&lt;/p&gt;
-&lt;aside name=&quot;beard&quot; readability=&quot;2&quot;&gt;&lt;p&gt;Ada Lovelace and Rear Admiral Grace Hopper had honorary beards.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;You still see these today, though thankfully we don’t have to write them on punch cards anymore. Shell scripts, command line programs, and even the little Python script that turns a pile of Markdown into this book are all batch mode programs.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#interview-with-a-cpu&quot; name=&quot;interview-with-a-cpu&quot;&gt;Interview with a CPU&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;Eventually, programmers realized having to drop off a batch of code at the computing office and come back a few hours later for the results was a terribly slow way to get the bugs out of a program. They wanted immediate feedback. &lt;em&gt;Interactive&lt;/em&gt; programs were born. Some of the first interactive programs were games:&lt;/p&gt;
-
-&lt;div class=&quot;codehilite&quot; readability=&quot;10&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;n&quot;&gt;YOU&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ARE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;STANDING&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;AT&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;THE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;END&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;OF&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ROAD&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;BEFORE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SMALL&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;BRICK&lt;/span&gt;
-&lt;span class=&quot;n&quot;&gt;BUILDING&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;.&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;AROUND&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;YOU&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;IS&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;FOREST&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SMALL&lt;/span&gt;
-&lt;span class=&quot;n&quot;&gt;STREAM&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;FLOWS&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;OUT&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;OF&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;THE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;BUILDING&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;AND&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;DOWN&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;GULLY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;
-
-&lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;GO&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;IN&lt;/span&gt;
-&lt;span class=&quot;n&quot;&gt;YOU&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ARE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;INSIDE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;BUILDING&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;WELL&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;HOUSE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;FOR&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;A&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;LARGE&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;SPRING&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;.&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;aside name=&quot;cave&quot; readability=&quot;1.8103448275862&quot;&gt;&lt;p&gt;This is &lt;a href=&quot;http://en.wikipedia.org/wiki/Colossal_Cave_Adventure&quot;&gt;Colossal Cave Adventure&lt;/a&gt;, the first adventure game.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;You could have a live conversation with the program. It waited for your input, then it would respond to you. You would reply back, taking turns just like you learned to do in kindergarten. When it was your turn, it sat there doing nothing. Something like:&lt;/p&gt;
-
-&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;char&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;command&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;readCommand&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;handleCommand&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;command&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;aside name=&quot;exit&quot; readability=&quot;4&quot;&gt;&lt;p&gt;This loops forever, so there’s no way to quit the game. A real game would do something like &lt;code&gt;while (!done)&lt;/code&gt; and set &lt;code&gt;done&lt;/code&gt; to exit. I’ve omitted that to keep things simple.&lt;/p&gt;
-&lt;/aside&gt;&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#event-loops&quot; name=&quot;event-loops&quot;&gt;Event loops&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;Modern graphic UI applications are surprisingly similar to old adventure games once you shuck their skin off. Your word processor usually just sits there doing nothing until you press a key or click something:&lt;/p&gt;
-&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;Event&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;waitForEvent&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;dispatchEvent&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;The main difference is that instead of &lt;em&gt;text commands&lt;/em&gt;, the program is waiting for &lt;em&gt;user input events&lt;/em&gt; — mouse clicks and key presses. It still works basically like the old text adventures where the program &lt;span name=&quot;idle&quot;&gt;&lt;em&gt;blocks&lt;/em&gt;&lt;/span&gt; waiting for user input, which is a problem.&lt;/p&gt;
-&lt;p&gt;Unlike most other software, games keep moving even when the user isn’t providing input. If you sit staring at the screen, the game doesn’t freeze. Animations keep animating. Visual effects dance and sparkle. If you’re unlucky, that monster keeps chomping on your hero.&lt;/p&gt;
-&lt;aside name=&quot;idle&quot; readability=&quot;4&quot;&gt;&lt;p&gt;Most event loops do have “idle” events so you can intermittently do stuff without user input. That’s good enough for a blinking cursor or a progress bar, but too rudimentary for games.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;This is the first key part of a real game loop: &lt;em&gt;it processes user input, but doesn’t wait for it&lt;/em&gt;. The loop always keeps spinning:&lt;/p&gt;
-&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;processInput&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;update&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;We’ll refine this later, but the basic pieces are here. &lt;code&gt;processInput()&lt;/code&gt; handles any user input that has happened since the last call. Then, &lt;span name=&quot;update&quot;&gt;&lt;code&gt;update()&lt;/code&gt;&lt;/span&gt; advances the game simulation one step. It runs AI and physics (usually in that order). Finally, &lt;code&gt;render()&lt;/code&gt; draws the game so the player can see what happened.&lt;/p&gt;
-&lt;aside name=&quot;update&quot; readability=&quot;2.5760869565217&quot;&gt;&lt;p&gt;As you might guess from the name, &lt;code&gt;update()&lt;/code&gt; is a good place to use the &lt;a href=&quot;http://gameprogrammingpatterns.com/update-method.html&quot; class=&quot;pattern&quot;&gt;Update Method&lt;/a&gt; pattern.&lt;/p&gt;
-&lt;/aside&gt;&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#a-world-out-of-time&quot; name=&quot;a-world-out-of-time&quot;&gt;A world out of time&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;If this loop isn’t blocking on input, that leads to the obvious question: how &lt;em&gt;fast&lt;/em&gt; does it spin? Each turn through the game loop advances the state of the game by some amount. From the perspective of an inhabitant of the game world, the hand of their clock has &lt;span name=&quot;tick&quot;&gt;ticked&lt;/span&gt; forward.&lt;/p&gt;
-&lt;aside name=&quot;tick&quot; readability=&quot;2&quot;&gt;&lt;p&gt;The common terms for one crank of the game loop are “tick” and “frame”.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;Meanwhile, the &lt;em&gt;player’s&lt;/em&gt; actual clock is ticking. If we measure how quickly the game loop cycles in terms of real time, we get the game’s “frames per second”. If the game loop cycles quickly, the FPS is high and the game moves smoothly and quickly. If it’s slow, the game jerks along like a stop motion movie.&lt;/p&gt;
-&lt;p&gt;With the crude loop we have now where it just cycles as quickly as it can, two factors determine the frame rate. The first is &lt;em&gt;how much work it has to do each frame&lt;/em&gt;. Complex physics, a bunch of game objects, and lots of graphic detail all will keep your CPU and GPU busy, and it will take longer to complete a frame.&lt;/p&gt;
-&lt;p&gt;The second is &lt;em&gt;the speed of the underlying platform.&lt;/em&gt; Faster chips churn through more code in the same amount of time. Multiple cores, GPUs, dedicated audio hardware, and the OS’s scheduler all affect how much you get done in one tick.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#seconds-per-second&quot; name=&quot;seconds-per-second&quot;&gt;Seconds per second&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;In early video games, that second factor was fixed. If you wrote a game for the NES or Apple IIe, you knew &lt;em&gt;exactly&lt;/em&gt; what CPU your game was running on and you could (and did) code specifically for that. All you had to worry about was how much work you did each tick.&lt;/p&gt;
-&lt;p&gt;Older games were carefully coded to do just enough work each frame so that the game ran at the speed the developers wanted. But if you tried to play that same game on a faster or slower &lt;span name=&quot;turbo&quot;&gt;machine&lt;/span&gt;, then the game itself would speed up or slow down.&lt;/p&gt;
-&lt;aside name=&quot;turbo&quot; readability=&quot;3.9118942731278&quot;&gt;&lt;p&gt;This is why old PCs used to have “&lt;a href=&quot;http://en.wikipedia.org/wiki/Turbo_button&quot;&gt;turbo&lt;/a&gt;” buttons. New PCs were faster and couldn’t play old games because the games would run too fast. Turning the turbo button &lt;em&gt;off&lt;/em&gt; would slow the machine down and make old games playable.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;These days, though, few developers have the luxury of knowing exactly what hardware their game will run on. Instead, our games must intelligently adapt to a variety of devices.&lt;/p&gt;
-&lt;p&gt;This is the other key job of a game loop: &lt;em&gt;it runs the game at a consistent speed despite differences in the underlying hardware.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;A &lt;strong&gt;game loop&lt;/strong&gt; runs continuously during gameplay. Each turn of the loop, it &lt;strong&gt;processes user input&lt;/strong&gt; without blocking, &lt;strong&gt;updates the game state&lt;/strong&gt;, and &lt;strong&gt;renders the game&lt;/strong&gt;. It tracks the passage of time to &lt;strong&gt;control the rate of gameplay&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;Using the wrong pattern can be worse than using no pattern at all, so this section is normally here to caution against over-enthusiasm. The goal of design patterns isn’t to cram as many into your codebase as you can.&lt;/p&gt;
-&lt;p&gt;But this pattern is a bit different. I can say with pretty good confidence that you &lt;em&gt;will&lt;/em&gt; use this pattern. If you’re using a game &lt;span name=&quot;engine&quot;&gt;engine&lt;/span&gt;, you won’t write it yourself, but it’s still there.&lt;/p&gt;
-&lt;aside name=&quot;engine&quot; readability=&quot;5&quot;&gt;&lt;p&gt;For me, this is the difference between an “engine” and a “library”. With libraries, you own the main game loop and call into the library. An engine owns the loop and calls into &lt;em&gt;your&lt;/em&gt; code.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;You might think you won’t need this if you’re making a turn-based game. But even there, though the &lt;em&gt;game state&lt;/em&gt; won’t advance until the user takes their turn, the &lt;em&gt;visual&lt;/em&gt; and &lt;em&gt;audible&lt;/em&gt; states of the game usually do. Animation and music keep running even when the game is “waiting” for you to take your turn.&lt;/p&gt;
-
-&lt;p&gt;The loop we’re talking about here is some of the most important code in your game. They say a program spends &lt;span name=&quot;percent&quot;&gt;90%&lt;/span&gt; of its time in 10% of the code. Your game loop will be firmly in that 10%. Take care with this code, and be mindful of its efficiency.&lt;/p&gt;
-&lt;aside name=&quot;percent&quot; readability=&quot;3&quot;&gt;&lt;p&gt;Made up statistics like this are why “real” engineers like mechanical and electrical engineers don’t take us seriously.&lt;/p&gt;
-&lt;/aside&gt;&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#you-may-need-to-coordinate-with-the-platform's-event-loop&quot; name=&quot;you-may-need-to-coordinate-with-the-platform's-event-loop&quot;&gt;You may need to coordinate with the platform’s event loop&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;If you’re building your game on top of an OS or platform that has a graphic UI and an event loop built in, then you have &lt;em&gt;two&lt;/em&gt; application loops in play. They’ll need to play nice together.&lt;/p&gt;
-&lt;p&gt;Sometimes, you can take control and make your loop the only one. For example, if you’re writing a game against the venerable Windows API, your &lt;code&gt;main()&lt;/code&gt; can just have a game loop. Inside, you can call &lt;code&gt;PeekMessage()&lt;/code&gt; to handle and dispatch events from the OS. Unlike &lt;code&gt;GetMessage()&lt;/code&gt;, &lt;code&gt;PeekMessage()&lt;/code&gt; doesn’t block waiting for user input, so your game loop will keep cranking.&lt;/p&gt;
-&lt;p&gt;Other platforms don’t let you opt out of the event loop so easily. If you’re targeting a web browser, the event loop is deeply built into browser’s execution model. There, the event loop will run the show, and you’ll use it as your game loop too. You’ll call something like &lt;code&gt;requestAnimationFrame()&lt;/code&gt; and it will call back into your code to keep the game running.&lt;/p&gt;
-
-&lt;p&gt;For such a long introduction, the code for a game loop is actually pretty straightforward. We’ll walk through a couple of variations and go over their good and bad points.&lt;/p&gt;
-&lt;p&gt;The game loop drives AI, rendering, and other game systems, but those aren’t the point of the pattern itself, so we’ll just call into fictitious methods here. Actually implementing &lt;code&gt;render()&lt;/code&gt;, &lt;code&gt;update()&lt;/code&gt; and others is left as a (challenging!) exercise for the reader.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#run,-run-as-fast-as-you-can&quot; name=&quot;run,-run-as-fast-as-you-can&quot;&gt;Run, run as fast as you can&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;We’ve already seen the simplest possible game loop:&lt;/p&gt;
-&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;processInput&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;update&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;The problem with it is you have no control over how fast the game runs. On a fast machine, that loop will spin so fast users won’t be able to see what’s going on. On a slow machine, the game will crawl. If you have a part of the game that’s content-heavy or does more AI or physics, the game will actually play slower there.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#take-a-little-nap&quot; name=&quot;take-a-little-nap&quot;&gt;Take a little nap&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;The first variation we’ll look at adds a simple fix. Say you want your game to run at 60 FPS. That gives you about &lt;span name=&quot;16&quot;&gt;16&lt;/span&gt; milliseconds per frame. As long as you can reliably do all of your game processing and rendering in less than that time, you can run at a steady frame rate. All you do is process the frame and then &lt;em&gt;wait&lt;/em&gt; until it’s time for the next one, like so:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://gameprogrammingpatterns.com/images/game-loop-simple.png&quot; alt=&quot;A simple game loop flowchart. Process Input → Update Game → Render → Wait, then loop back to the beginning.&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;The code looks a bit like this:&lt;/p&gt;
-&lt;aside name=&quot;16&quot; readability=&quot;2&quot;&gt;&lt;p&gt;&lt;em&gt;1000 ms / FPS = ms per frame&lt;/em&gt;.&lt;/p&gt;
-&lt;/aside&gt;&lt;div class=&quot;codehilite&quot; readability=&quot;8&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;start&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;processInput&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;update&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-
-  &lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;start&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;MS_PER_FRAME&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;());&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;The &lt;code&gt;sleep()&lt;/code&gt; here makes sure the game doesn’t run too &lt;em&gt;fast&lt;/em&gt; if it processes a frame quickly. It &lt;em&gt;doesn’t&lt;/em&gt; help if your game runs too &lt;em&gt;slowly&lt;/em&gt;. If it takes longer than 16ms to update and render the frame, your sleep time goes &lt;em&gt;negative&lt;/em&gt;. If we had computers that could travel back in time, lots of things would be easier, but we don’t.&lt;/p&gt;
-&lt;p&gt;Instead, the game slows down. You can work around this by doing less work each frame — cut down on the graphics and razzle dazzle or dumb down the AI. But that impacts the quality of gameplay for all users, even ones on fast machines.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#one-small-step,-one-giant-step&quot; name=&quot;one-small-step,-one-giant-step&quot;&gt;One small step, one giant step&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;Let’s try something a bit more sophisticated. The problem we have basically boils down to:&lt;/p&gt;
-&lt;ol readability=&quot;-1&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;Each update advances game time by a certain amount.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;It takes a certain amount of &lt;em&gt;real&lt;/em&gt; time to process that.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;If step two takes longer than step one, the game slows down. If it takes more than 16 ms of processing to advance game time by 16ms, it can’t possibly keep up. But if we can advance the game by &lt;em&gt;more&lt;/em&gt; than 16ms of game time in a single step, then we can update the game less frequently and still keep up.&lt;/p&gt;
-&lt;p&gt;The idea then is to choose a time step to advance based on how much &lt;em&gt;real&lt;/em&gt; time passed since the last frame. The longer the frame takes, the bigger steps the game takes. It always keeps up with real time because it will take bigger and bigger steps to get there. They call this a &lt;em&gt;variable&lt;/em&gt; or &lt;em&gt;fluid&lt;/em&gt; time step. It looks like:&lt;/p&gt;
-&lt;div class=&quot;codehilite&quot; readability=&quot;8&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;lastTime&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;elapsed&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;lastTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;processInput&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;update&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;elapsed&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;lastTime&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;Each frame, we determine how much &lt;em&gt;real&lt;/em&gt; time passed since the last game update (&lt;code&gt;elapsed&lt;/code&gt;). When we update the game state, we pass that in. The engine is then responsible for advancing the game world forward by that amount of time.&lt;/p&gt;
-&lt;p&gt;Say you’ve got a bullet shooting across the screen. With a fixed time step, in each frame, you’ll move it according to its velocity. With a variable time step, you &lt;em&gt;scale that velocity by the elapsed time&lt;/em&gt;. As the time step gets bigger, the bullet moves farther in each frame. That bullet will get across the screen in the &lt;em&gt;same&lt;/em&gt; amount of &lt;em&gt;real&lt;/em&gt; time whether it’s twenty small fast steps or four big slow ones. This looks like a winner:&lt;/p&gt;
-&lt;p&gt;But, alas, there’s a serious problem lurking ahead: we’ve made the game &lt;span name=&quot;deterministic&quot;&gt;non-deterministic&lt;/span&gt; and unstable. Here’s one example of the trap we’ve set for ourselves:&lt;/p&gt;
-&lt;aside name=&quot;deterministic&quot; readability=&quot;16&quot;&gt;&lt;p&gt;“Deterministic” means that every time you run the program, if you give it the same inputs, you get the exact same outputs back. As you can imagine, it’s much easier to track down bugs in deterministic programs — find the inputs that caused the bug the first time, and you can cause it every time.&lt;/p&gt;
-&lt;p&gt;Computers are naturally deterministic; they follow programs mechanically. Non-determinism appears when the messy real world creeps in. For example, networking, the system clock, and thread scheduling all rely on bits of the external world outside of the program’s control.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;Say we’ve got a two-player networked game and Fred has some beast of a gaming machine while George is using his grandmother’s antique PC. That aforementioned bullet is flying across both of their screens. On Fred’s machine, the game is running super fast, so each time step is tiny. We cram, like, 50 frames in the second it takes the bullet to cross the screen. Poor George’s machine can only fit in about five frames.&lt;/p&gt;
-&lt;p&gt;This means that on Fred’s machine, the physics engine updates the bullet’s position 50 times, but George’s only does it five times. Most games use floating point numbers, and those are subject to &lt;em&gt;rounding error&lt;/em&gt;. Each time you add two floating point numbers, the answer you get back can be a bit off. Fred’s machine is doing ten times as many operations, so he’ll accumulate a bigger error than George. The &lt;em&gt;same&lt;/em&gt; bullet will end up in &lt;em&gt;different places&lt;/em&gt; on their machines.&lt;/p&gt;
-&lt;p&gt;This is just one nasty problem a variable time step can cause, but there are more. In order to run in real time, game physics engines are approximations of the real laws of mechanics. To keep those approximations from &lt;span name=&quot;blowup&quot;&gt;blowing up&lt;/span&gt;, damping is applied. That damping is carefully tuned to a certain time step. Vary that, and the physics gets unstable.&lt;/p&gt;
-&lt;aside name=&quot;blowup&quot; readability=&quot;4&quot;&gt;&lt;p&gt;“Blowing up” is literal here. When a physics engine flakes out, objects can get completely wrong velocities and launch themselves into the air.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;This instability is bad enough that this example is only here as a cautionary tale and to lead us to something better…&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#play-catch-up&quot; name=&quot;play-catch-up&quot;&gt;Play catch up&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;One part of the engine that usually &lt;em&gt;isn’t&lt;/em&gt; affected by a variable time step is &lt;span name=&quot;render&quot;&gt;rendering&lt;/span&gt;. Since the rendering engine captures an instant in time, it doesn’t care how much time advanced since the last one. It renders things wherever they happen to be right then.&lt;/p&gt;
-&lt;aside name=&quot;render&quot; readability=&quot;5&quot;&gt;&lt;p&gt;This is more or less true. Things like motion blur can be affected by time step, but if they’re a bit off, the player doesn’t usually notice.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;We can use this fact to our advantage. We’ll &lt;em&gt;update&lt;/em&gt; the game using a fixed time step because that makes everything simpler and more stable for physics and AI. But we’ll allow flexibility in when we &lt;em&gt;render&lt;/em&gt; in order to free up some processor time.&lt;/p&gt;
-&lt;p&gt;It goes like this: A certain amount of real time has elapsed since the last turn of the game loop. This is how much game time we need to simulate for the game’s “now” to catch up with the player’s. We do that using a &lt;em&gt;series&lt;/em&gt; of &lt;em&gt;fixed&lt;/em&gt; time steps. The code looks a bit like:&lt;/p&gt;
-&lt;div class=&quot;codehilite&quot; readability=&quot;9&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;previous&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-&lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;lag&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-&lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;true&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;getCurrentTime&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-  &lt;span class=&quot;kt&quot;&gt;double&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;elapsed&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;previous&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;previous&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;current&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-  &lt;span class=&quot;n&quot;&gt;lag&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;elapsed&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-
-  &lt;span class=&quot;n&quot;&gt;processInput&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-
-  &lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;lag&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;MS_PER_UPDATE&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
-  &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
-    &lt;span class=&quot;n&quot;&gt;update&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-    &lt;span class=&quot;n&quot;&gt;lag&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;MS_PER_UPDATE&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
-  &lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-
-  &lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;();&lt;/span&gt;
-&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;There’s a few pieces here. At the beginning of each frame, we update &lt;code&gt;lag&lt;/code&gt; based on how much real time passed. This measures how far the game’s clock is behind compared to the real world. We then have an inner loop to update the game, one fixed step at a time, until it’s caught up. Once we’re caught up, we render and start over again. You can visualize it sort of like this:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://gameprogrammingpatterns.com/images/game-loop-fixed.png&quot; alt=&quot;A modified flowchart. Process Input → Update Game → Wait, then loop back to this step then → Render → Loop back to the beginning.&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Note that the time step here isn’t the &lt;em&gt;visible&lt;/em&gt; frame rate anymore. &lt;code&gt;MS_PER_UPDATE&lt;/code&gt; is just the &lt;em&gt;granularity&lt;/em&gt; we use to update the game. The shorter this step is, the more processing time it takes to catch up to real time. The longer it is, the choppier the gameplay is. Ideally, you want it pretty short, often faster than 60 FPS, so that the game simulates with high fidelity on fast machines.&lt;/p&gt;
-&lt;p&gt;But be careful not to make it &lt;em&gt;too&lt;/em&gt; short. You need to make sure the time step is greater than the time it takes to process an &lt;code&gt;update()&lt;/code&gt;, even on the &lt;span name=&quot;bail&quot;&gt;slowest&lt;/span&gt; hardware. Otherwise, your game simply can’t catch up.&lt;/p&gt;
-&lt;aside name=&quot;bail&quot; readability=&quot;5&quot;&gt;&lt;p&gt;I left it out here, but you can safeguard this by having the inner update loop bail after a maximum number of iterations. The game will slow down then, but that’s better than locking up completely.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;Fortunately, we’ve bought ourselves some breathing room here. The trick is that we’ve &lt;em&gt;yanked rendering out of the update loop&lt;/em&gt;. That frees up a bunch of CPU time. The end result is the game &lt;em&gt;simulates&lt;/em&gt; at a constant rate using safe fixed time steps across a range of hardware. It’s just that the player’s &lt;em&gt;visible window&lt;/em&gt; into the game gets choppier on a slower machine.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#stuck-in-the-middle&quot; name=&quot;stuck-in-the-middle&quot;&gt;Stuck in the middle&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;There’s one issue we’re left with, and that’s residual lag. We update the game at a fixed time step, but we render at arbitrary points in time. This means that from the user’s perspective, the game will often display at a point in time between two updates.&lt;/p&gt;
-&lt;p&gt;Here’s a timeline:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://gameprogrammingpatterns.com/images/game-loop-timeline.png&quot; alt=&quot;A timeline containing evenly spaced Updates and intermittent Renders.&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;As you can see, we update at a nice tight, fixed interval. Meanwhile, we render whenever we can. It’s less frequent than updating, and it isn’t steady either. Both of those are OK. The lame part is that we don’t always render right at the point of updating. Look at the third render time. It’s right between two updates:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;http://gameprogrammingpatterns.com/images/game-loop-timeline-close.png&quot; alt=&quot;Close-up of the timeline showing Renders falling between Update steps.&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Imagine a bullet is flying across the screen. On the first update, it’s on the left side. The second update moves it to the right side. The game is rendered at a point in time between those two updates, so the user expects to see that bullet in the center of the screen. With our current implementation, it will still be on the left side. This means motion looks jagged or stuttery.&lt;/p&gt;
-&lt;p&gt;Conveniently, we actually know &lt;em&gt;exactly&lt;/em&gt; how far between update frames we are when we render: it’s stored in &lt;code&gt;lag&lt;/code&gt;. We bail out of the update loop when it’s less than the update time step, not when it’s &lt;em&gt;zero&lt;/em&gt;. That leftover amount? That’s how far into the next frame we are.&lt;/p&gt;
-&lt;p&gt;When we go to render, we’ll pass that in:&lt;/p&gt;
-
-&lt;div class=&quot;codehilite&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;n&quot;&gt;render&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;lag&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;/&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;MS_PER_UPDATE&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;aside name=&quot;normal&quot; readability=&quot;7&quot;&gt;&lt;p&gt;We divide by &lt;code&gt;MS_PER_UPDATE&lt;/code&gt; here to &lt;em&gt;normalize&lt;/em&gt; the value. The value passed to &lt;code&gt;render()&lt;/code&gt; will vary from 0 (right at the previous frame) to just under 1.0 (right at the next frame), regardless of the update time step. This way, the renderer doesn’t have to worry about the frame rate. It just deals in values from 0 to 1.&lt;/p&gt;
-&lt;/aside&gt;&lt;p&gt;The renderer knows each game object &lt;em&gt;and its current velocity&lt;/em&gt;. Say that bullet is 20 pixels from the left side of the screen and is moving right 400 pixels per frame. If we are halfway between frames, then we’ll end up passing 0.5 to &lt;code&gt;render()&lt;/code&gt;. So it draws the bullet half a frame ahead, at 220 pixels. Ta-da, smooth motion.&lt;/p&gt;
-&lt;p&gt;Of course, it may turn out that that extrapolation is wrong. When we calculate the next frame, we may discover the bullet hit an obstacle or slowed down or something. We rendered its position interpolated between where it was on the last frame and where we &lt;em&gt;think&lt;/em&gt; it will be on the next frame. But we don’t know that until we’ve actually done the full update with physics and AI.&lt;/p&gt;
-&lt;p&gt;So the extrapolation is a bit of a guess and sometimes ends up wrong. Fortunately, though, those kinds of corrections usually aren’t noticeable. At least, they’re less noticeable than the stuttering you get if you don’t extrapolate at all.&lt;/p&gt;
-
-&lt;p&gt;Despite the length of this chapter, I’ve left out more than I’ve included. Once you throw in things like synchronizing with the display’s refresh rate, multithreading, and GPUs, a real game loop can get pretty hairy. At a high level, though, here are a few questions you’ll likely answer:&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#do-you-own-the-game-loop,-or-does-the-platform&quot; name=&quot;do-you-own-the-game-loop,-or-does-the-platform&quot;&gt;Do you own the game loop, or does the platform?&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;This is less a choice you make and more one that’s made for you. If you’re making a game that runs in a web browser, you pretty much &lt;em&gt;can’t&lt;/em&gt; write your own classic game loop. The browser’s event-based nature precludes it. Likewise, if you’re using an existing game engine, you will probably rely on its game loop instead of rolling your own.&lt;/p&gt;
-&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#how-do-you-manage-power-consumption&quot; name=&quot;how-do-you-manage-power-consumption&quot;&gt;How do you manage power consumption?&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;This wasn’t an issue five years ago. Games ran on things plugged into walls or on dedicated handheld devices. But with the advent of smartphones, laptops, and mobile gaming, the odds are good that you do care about this now. A game that runs beautifully but turns players’ phones into space heaters before running out of juice thirty minutes later is not a game that makes people happy.&lt;/p&gt;
-&lt;p&gt;Now, you may need to think not only about making your game look great, but also use as little CPU as possible. There will likely be an &lt;em&gt;upper&lt;/em&gt; bound to performance where you let the CPU sleep if you’ve done all the work you need to do in a frame.&lt;/p&gt;
-&lt;ul readability=&quot;6.5&quot;&gt;&lt;li readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Run as fast as it can:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;This is what you’re likely to do for PC games (though even those are increasingly being played on laptops). Your game loop will never explicitly tell the OS to sleep. Instead, any spare cycles will be spent cranking up the FPS or graphic fidelity.&lt;/p&gt;
-&lt;p&gt;This gives you the best possible gameplay experience but, it will use as much power as it can. If the player is on a laptop, they’ll have a nice lap warmer.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;6&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Clamp the frame rate:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Mobile games are often more focused on the quality of gameplay than they are on maximizing the detail of the graphics. Many of these games will set an upper limit on the frame rate (usually 30 or 60 FPS). If the game loop is done processing before that slice of time is spent, it will just sleep for the rest.&lt;/p&gt;
-&lt;p&gt;This gives the player a “good enough” experience and then goes easy on their battery beyond that.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h3&gt;&lt;a href=&quot;http://gameprogrammingpatterns.com/game-loop.html#how-do-you-control-gameplay-speed&quot; name=&quot;how-do-you-control-gameplay-speed&quot;&gt;How do you control gameplay speed?&lt;/a&gt;&lt;/h3&gt;
-&lt;p&gt;A game loop has two key pieces: non-blocking user input and adapting to the passage of time. Input is straightforward. The magic is in how you deal with time. There are a &lt;span name=&quot;platform&quot;&gt;near-infinite&lt;/span&gt; number of platforms that games can run on, and any single game may run on quite a few. How it accommodates that variation is key.&lt;/p&gt;
-&lt;aside name=&quot;platform&quot; readability=&quot;8&quot;&gt;&lt;p&gt;Game-making seems to be part of human nature, because every time we’ve built a machine that can do computing, one of the first things we’ve done is made games on it. The PDP-1 was a 2 kHz machine with only 4,096 words of memory, yet Steve Russell and friends managed to create Spacewar! on it.&lt;/p&gt;
-&lt;/aside&gt;&lt;ul readability=&quot;7.9627906976744&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Fixed time step with no synchronization:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;This was our first sample code. You just run the game loop as fast as you can.&lt;/p&gt;
-&lt;ul readability=&quot;0.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;em&gt;It’s simple&lt;/em&gt;. This is its main (well, only) virtue.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;em&gt;Game speed is directly affected by hardware and game complexity.&lt;/em&gt; And its main vice is that if there’s any variation, it will directly affect the game speed. It’s the fixie of game loops.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li readability=&quot;1.9780960404381&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Fixed time step with synchronization:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The next step up on the complexity ladder is running the game at a fixed time step but adding a delay or synchronization point at the end of the loop to keep the game from running too fast.&lt;/p&gt;
-&lt;ul readability=&quot;6.9051094890511&quot;&gt;&lt;li readability=&quot;1.9087719298246&quot;&gt;
-&lt;p&gt;&lt;em&gt;Still quite simple.&lt;/em&gt; It’s only one line of code more than the probably-too-simple-to-actually-work example. In most game loops, you will likely do synchronization &lt;em&gt;anyway&lt;/em&gt;. You will probably &lt;a href=&quot;http://gameprogrammingpatterns.com/double-buffer.html&quot;&gt;double buffer&lt;/a&gt; your graphics and synchronize the buffer flip to the refresh rate of the display.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;em&gt;It’s power-friendly.&lt;/em&gt; This is a surprisingly important consideration for mobile games. You don’t want to kill the user’s battery unnecessarily. By simply sleeping for a few milliseconds instead of trying to cram ever more processing into each tick, you save power.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;em&gt;The game doesn’t play too fast.&lt;/em&gt; This fixes half of the speed concerns of a fixed loop.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;5&quot;&gt;
-&lt;p&gt;&lt;em&gt;The game can play too slowly.&lt;/em&gt; If it takes too long to update and render a game frame, playback will slow down. Because this style doesn’t separate updating from rendering, it’s likely to hit this sooner than more advanced options. Instead of just dropping &lt;em&gt;rendering&lt;/em&gt; frames to catch up, gameplay will slow down.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Variable time step:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;I’ll put this in here as an option in the solution space with the caveat that most game developers I know recommend against it. It’s good to remember &lt;em&gt;why&lt;/em&gt; it’s a bad idea, though.&lt;/p&gt;
-&lt;ul readability=&quot;1&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;em&gt;It adapts to playing both too slowly and too fast.&lt;/em&gt; If the game can’t keep up with real time, it will just take larger and larger time steps until it does.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;em&gt;It makes gameplay non-deterministic and unstable.&lt;/em&gt; And this is the real problem, of course. Physics and networking in particular become much harder with a variable time step.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li readability=&quot;6&quot;&gt;
-&lt;p&gt;&lt;strong&gt;Fixed update time step, variable rendering:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The last option we covered in the sample code is the most complex, but also the most adaptable. It updates with a fixed time step, but it can drop &lt;em&gt;rendering&lt;/em&gt; frames if it needs to to catch up to the player’s clock.&lt;/p&gt;
-&lt;ul readability=&quot;2.5&quot;&gt;&lt;li readability=&quot;3&quot;&gt;
-&lt;p&gt;&lt;em&gt;It adapts to playing both too slowly and too fast.&lt;/em&gt; As long as the game can &lt;em&gt;update&lt;/em&gt; in real time, the game won’t fall behind. If the player’s machine is top-of-the-line, it will respond with a smoother gameplay experience.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;em&gt;It’s more complex.&lt;/em&gt; The main downside is there is a bit more going on in the implementation. You have to tune the update time step to be both as small as possible for the high-end, while not being too slow on the low end.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;ul readability=&quot;0.43308550185874&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;The classic article on game loops is Glenn Fiedler’s “&lt;a href=&quot;http://gafferongames.com/game-physics/fix-your-timestep/&quot;&gt;Fix Your Timestep&lt;/a&gt;“. This chapter wouldn’t be the same without it.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-0.81481481481481&quot;&gt;
-&lt;p&gt;Witters’ article on &lt;a href=&quot;http://www.koonsolo.com/news/dewitters-gameloop/&quot;&gt;game loops&lt;/a&gt; is a close runner-up.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-0.8953488372093&quot;&gt;
-&lt;p&gt;The &lt;a href=&quot;http://unity3d.com/&quot;&gt;Unity&lt;/a&gt; framework has a complex game loop detailed in a wonderful illustration &lt;a href=&quot;http://www.richardfine.co.uk/2012/10/unity3d-monobehaviour-lifecycle/&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;nav/&gt;</description>
-<pubDate>Sat, 26 Jan 2019 23:17:50 +0000</pubDate>
-<dc:creator>tosh</dc:creator>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://gameprogrammingpatterns.com/game-loop.html</dc:identifier>
 </item>
 </channel>
 </rss>
