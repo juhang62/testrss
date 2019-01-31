@@ -9,6 +9,1469 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>关于Oracle的44951事件 - AlfredZhao</title>
+<link>http://www.cnblogs.com/jyzhao/p/10340237.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jyzhao/p/10340237.html</guid>
+<description>&lt;p&gt;最近有同事遇到某客户数据库产生大量阻塞，等待事件为：enq HW - contention，最开始采用不断杀会话的方式，效果不好，问题一直高频反复。进一步确认SQL是大量的insert，且插入的表中含有LOB字段，根据经验最终采用设置44951 event缓解了该问题。&lt;/p&gt;
+&lt;p&gt;具体关于Oracle的44951事件，可参考Maclean的文章：&lt;/p&gt;
+&lt;p&gt;这篇文章中采用的设置方法是：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;alter system set events '44951 trace name context forever, level 1024';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;需要注意的是，这种设置方法在重启数据库后就会失效，若需要重启后永久生效，需设置event：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;alter system set event='44951 trace name context forever, level 1024' scope=spfile;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;但说到这里就需要深入了解下event和events的区别，这里大概测试总结有如下区别：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1.events立即生效，重启数据库后消失&lt;/li&gt;
+&lt;li&gt;2.events无法直接通过show parameter event查看&lt;/li&gt;
+&lt;li&gt;3.event后面必须有等号，重启数据库后生效，可通过show parameter event查看&lt;/li&gt;
+&lt;li&gt;4.event需要注意不要覆盖掉之前的event设置，如果这个知识点不理解很容易产生误操作，需要特别注意&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;补充说明：&lt;/strong&gt;&lt;br/&gt;比如在11g的最佳实践中，通常已经设置10949和28401event：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;alter system set event='28401 trace name context forever,level 1','10949 trace name context forever,level 1' sid='*' scope=spfile;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;所以如果有需求额外设置44951 event，就需要将之前的也写上（否则就会覆盖）：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;alter system set event='28401 trace name context forever,level 1','10949 trace name context forever,level 1','44951 trace name context forever,level 1024' sid='*' scope=spfile;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;events设置的值如何查看？使用下面的脚本（注意循环的范围要包含要查询的events）：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;set serveroutput on
+
+declare
+event_level number;
+begin
+for i in 10000..50000 loop
+sys.dbms_system.read_ev(i,event_level);
+if (event_level &amp;gt; 0) then
+dbms_output.put_line('Event '||to_char(i)||' set at level '||
+to_char(event_level));
+end if;
+end loop;
+end;
+/&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;查询结果类似如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Event 10949 set at level 1
+Event 28401 set at level 1
+Event 44951 set at level 1024&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;附:Maclean使用的测试用例：&lt;/strong&gt;&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;create user maclean identified by maclean;
+grant resource, connect, dba to maclean;
+conn maclean/maclean
+
+CREATE TABLE &quot;MACLEAN_LOB&quot; ( &quot;T1&quot; VARCHAR2(200) NOT NULL , &quot;T2&quot; CLOB, &quot;T3&quot; CLOB)  tablespace users
+    LOB (&quot;T2&quot;) 
+    STORE AS  ( TABLESPACE &quot;USERS&quot; CHUNK 16K PCTVERSION 50 CACHE ) 
+    LOB (&quot;T3&quot;) 
+    STORE AS  ( TABLESPACE &quot;USERS&quot; CHUNK 16K PCTVERSION 50 CACHE );
+
+select segment_space_management from dba_tablespaces where tablespace_name='USERS';
+
+exec dbms_workload_repository.create_snapshot;
+
+--开3个进程并发插入LOB表
+begin
+for i in 1..10000 loop
+ insert into maclean.maclean_lob values ('ABC',rpad('Z',32000,'L'),rpad('Z',32000,'L'));
+ end loop;
+ commit;
+ end;
+ /
+
+exec dbms_workload_repository.create_snapshot;
+select bytes/1024,segment_name from dba_segments where segment_name in (select segment_name from dba_lobs where table_name='MACLEAN_LOB' and owner='MACLEAN');
+truncate table maclean.maclean_lob;
+select bytes/1024,segment_name from dba_segments where segment_name in (select segment_name from dba_lobs where table_name='MACLEAN_LOB' and owner='MACLEAN');
+
+alter system flush buffer_cache;
+alter system flush shared_pool;
+
+alter system set events '44951 trace name context forever, level 1024';
+
+exec dbms_workload_repository.create_snapshot;
+
+--开3个进程并发插入LOB表
+begin
+for i in 1..10000 loop
+ insert into maclean.maclean_lob values ('ABC',rpad('Z',32000,'L'),rpad('Z',32000,'L'));
+ end loop;
+ commit;
+ end;
+ /  
+
+exec dbms_workload_repository.create_snapshot;
+
+select bytes/1024,segment_name from dba_segments where segment_name in (select segment_name from dba_lobs where table_name='MACLEAN_LOB' and owner='MACLEAN');
+
+以上可以看到虽然设置了44951 level 1024，但并不会因为单次bump hwm的chunks数增加而导致大量空间的浪费。 
+
+对比AWR可以发现设置44961 level 1024后 enq HW - contention消耗的DB TIME明显减少：
+此外在10.2.0.3之前还有一种方案即设置LOB的PCTVERSION 为0/100，但是该方案会导致LOB占用的SPACE大幅上升，所以不推荐，你有大量的理由至少升级DB到10.2.0.5.9。 &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通过这个测试用例实验效果，确实设置前后的效果明显：&lt;br/&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/jyzhao/846011/o_44951event_effect.png&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/jyzhao/846011/o_44951event_effect2.png&quot;/&gt;&lt;br/&gt;&lt;strong&gt;注意：&lt;/strong&gt;这里主要看enq HW - contention的优化效果，其他event也有调整优化空间，但不在本文讨论范围。&lt;/p&gt;
+</description>
+<pubDate>Wed, 30 Jan 2019 23:39:00 +0000</pubDate>
+<dc:creator>AlfredZhao</dc:creator>
+<og:description>最近有同事遇到某客户数据库产生大量阻塞，等待事件为：enq HW contention，最开始采用不断杀会话的方式，效果不好，问题一直高频反复。进一步确认SQL是大量的insert，且插入的表中含有L</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jyzhao/p/10340237.html</dc:identifier>
+</item>
+<item>
+<title>asp.net core microservices 架构之分布式自动计算（三）-kafka日志同步至elasticsearch和kibana展示 - 无为有道</title>
+<link>http://www.cnblogs.com/ck0074451665/p/10340387.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ck0074451665/p/10340387.html</guid>
+<description>
+&lt;p&gt;&lt;span&gt;一 kafka consumer准备                       &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　前面的章节进行了分布式job的自动计算的概念讲解以及实践。上次分布式日志说过日志写进kafka，是需要进行处理，以便合理的进行展示，分布式日志的量和我们对日志的重视程度，决定了我们必须要有一个大数据检索，和友好展示的需求。那么自然就是elasticsearch和kibana，elasticsearch是可以检索TB级别数据的一个分布式NOSQL数据库，而kibana，不仅仅可以展示详情，而且有针对不同展示需求的功能，并且定制了很多很多日志格式的模板和采集数据的插件，这里不多介绍了，我自己感觉是比percona的pmm强大很多。&lt;/p&gt;
+&lt;p&gt;　　书归正传，我们这一节是要做同步前的准备工作。第一，对kafka的consumer进行封装。第二,读取kafka数据是需要一个后台程序去处理，但是不需要job，我们上次做的框架是基于zookeeper的分布式job，而kafka的分布式是在服务器端的，当然将job分布式设计方案用在轮询或者阻塞方式的后台程序，也是可以的，但是这次就不讲解了。下面我们就将kafka分布式的原理分析下，kafka的客户端有一个组的概念，borker端有一个topic的概念，product在发送消息的时候，会有一个key值。因为kafka存数据就是以key-value的方式存储数据的，所以broker就是用product传递过来的这个key进行运算，合理的将数据存储到某个topic的某个分区。而consumer端订阅topic，可以订阅多个topic,它的分派是这样的，每一个topic下的分区会有多个consuer，但是这些consumer必须属于不同的组，而每一个consumer可以订阅多个topic下的分区，但是不能重复。下面看图吧，以我们这次实际的日志为例，在kafka中mylog topic有5个分区。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/46403/201901/46403-20190131013327062-1247547222.png&quot; alt=&quot;&quot; width=&quot;1235&quot; height=&quot;763&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　那么如果我们有三个程序需要用这个mylog topic怎么办？而且我们需要很快的处理完这个数据，所以有可能这三个程序每一个程序都要两台服务器。想着都很头大，对吧？当然如果有我们前面讲解的分布式job也可以处理，但是要把分布式的功能迁移到这个后台程序，避免不了又大动干戈，开发，调试，测试，修改bug，直到程序稳定，那又是一场苦功。但是在kafka这里，不用担心，三个程序，比如订单，库存，顾客，我们为这三个程序的kafka客户端对应的设置为三个组，每一个组中consumer数量只要不超过5个，假如订单需要用到名为mylog的topic的消息，只要订单处理这个topic的实例数量，必须不能超过5个，当然可以少于5个，也可以等于0个。而同时一个consumer又可以去订阅多个topic，这也是kafka可以媲美rabbit的重要的一个原因，先天支持并发和扩展。我们看图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/46403/201901/46403-20190131020029215-2124566158.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;如果一个组的consumer数量没有topic的分区多，kafka会自动分派给这个组的consumer，如果某一个consumer失败，kafka也会自动的将这个consumer的offset记录并且分派给另外一个consumer。&lt;/p&gt;
+&lt;p&gt;下面看看我们封装的kafka客户端方法：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Collections.Generic;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading.Tasks;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Confluent.Kafka;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Options;
+
+&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt;  Walt.Framework.Service.Kafka
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; KafkaService : IKafkaService
+    {
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; KafkaOptions _kafkaOptions;
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Producer _producer;
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; Consumer _consumer;
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Action&amp;lt;Message&amp;gt; GetMessageDele{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Action&amp;lt;Error&amp;gt; ErrorDele{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Action&amp;lt;LogMessage&amp;gt; LogDele{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; KafkaService(IOptionsMonitor&amp;lt;KafkaOptions&amp;gt;&lt;span&gt;  kafkaOptions)
+        {
+            _kafkaOptions&lt;/span&gt;=&lt;span&gt;kafkaOptions.CurrentValue; 
+            kafkaOptions.OnChange((kafkaOpt,s)&lt;/span&gt;=&amp;gt;&lt;span&gt;{
+                _kafkaOptions&lt;/span&gt;=&lt;span&gt;kafkaOpt; 
+                    System.Diagnostics.Debug
+                    .WriteLine(Newtonsoft.Json.JsonConvert.SerializeObject(kafkaOpt)&lt;/span&gt;+&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;---&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+&lt;span&gt;s);
+            });
+             _producer&lt;/span&gt;=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Producer(_kafkaOptions.Properties);
+
+            _consumer&lt;/span&gt;=&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Consumer(_kafkaOptions.Properties);
+        }
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;byte&lt;/span&gt;[] ConvertToByte(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; str)
+        {
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; System.Text.Encoding.Default.GetBytes(str);
+        }
+ 
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;  &lt;span&gt;async&lt;/span&gt; Task&amp;lt;Message&amp;gt; Producer&amp;lt;T&amp;gt;(&lt;span&gt;string&lt;/span&gt; topic,&lt;span&gt;string&lt;/span&gt;&lt;span&gt; key,T t)
+        {  
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;.IsNullOrEmpty(topic)
+            &lt;/span&gt;|| t==&lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; ArgumentNullException(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;topic或者value不能为null.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            }
+            &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; data =&lt;span&gt; Newtonsoft.Json.JsonConvert.SerializeObject(t);
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; task=  &lt;span&gt;await&lt;/span&gt;&lt;span&gt; _producer.ProduceAsync(topic,ConvertToByte(key),ConvertToByte(data)); 
+           &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; task;
+        }
+
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; AddProductEvent()
+        {
+            _producer.OnError&lt;/span&gt;+=&lt;span&gt;new&lt;/span&gt; EventHandler&amp;lt;Error&amp;gt;&lt;span&gt;(Error);
+            _producer.OnLog&lt;/span&gt;+=&lt;span&gt;new&lt;/span&gt; EventHandler&amp;lt;LogMessage&amp;gt;&lt;span&gt;(Log);
+        }
+　　　　&lt;span&gt;　　///以事件的方式获取message
+        &lt;/span&gt;&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; AddConsumerEvent(IEnumerable&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt;&lt;span&gt; topics)
+        {
+            _consumer.Subscribe(topics);
+            _consumer.OnMessage &lt;/span&gt;+= &lt;span&gt;new&lt;/span&gt; EventHandler&amp;lt;Message&amp;gt;&lt;span&gt;(GetMessage);
+            _consumer.OnError &lt;/span&gt;+= &lt;span&gt;new&lt;/span&gt; EventHandler&amp;lt;Error&amp;gt;&lt;span&gt;(Error);
+            _consumer.OnLog &lt;/span&gt;+= &lt;span&gt;new&lt;/span&gt; EventHandler&amp;lt;LogMessage&amp;gt;&lt;span&gt;(Log);
+        }
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; GetMessage(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, Message mess)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(GetMessageDele!=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                GetMessageDele(mess);
+            }
+        }
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Error(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, Error mess)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(ErrorDele!=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                ErrorDele(mess);
+            }
+        }
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Log(&lt;span&gt;object&lt;/span&gt;&lt;span&gt; sender, LogMessage mess)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(LogDele!=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                LogDele(mess);
+            }
+        }
+　　　　　&lt;span&gt;//以轮询的方式获取message
+        &lt;/span&gt;&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; Message Poll(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; timeoutMilliseconds)
+        {
+            Message message &lt;/span&gt;=&lt;span&gt;default&lt;/span&gt;&lt;span&gt;(Message);
+            _consumer.Consume(&lt;/span&gt;&lt;span&gt;out&lt;/span&gt;&lt;span&gt; message, timeoutMilliseconds);
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; message;
+        }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;以事件激发的方式，因为是线程安全的方式调用，而本实例是后台方式执行，少不了多线程，所以还是以轮询的方式。以轮询的方式，这样的程序需要放那块尼？就是我们的后台程序框架。&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;span&gt;二 后台程序管理框架开发                                            &lt;/span&gt;      &lt;/span&gt;  &lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/46403/201901/46403-20190131020901311-184945455.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;他的原理和job几乎差不多，比job要简单多了。看入口程序：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;59&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Collections.Generic;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Collections.ObjectModel;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.IO;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Linq;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Reflection;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading.Tasks;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.AspNetCore;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.AspNetCore.Hosting;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Configuration;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.DependencyInjection;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Hosting;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Logging;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt; EnvironmentName =&lt;span&gt; Microsoft.Extensions.Hosting.EnvironmentName;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Log;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Service;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Service.Kafka;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Configuration;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; MySql.Data.EntityFrameworkCore;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.EntityFrameworkCore;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt; IApplicationLife =&lt;span&gt;Microsoft.Extensions.Hosting;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt; IApplicationLifetime =&lt;span&gt; Microsoft.Extensions.Hosting.IApplicationLifetime;
+
+&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt; Walt.Framework.Console
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Program
+    {
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Main(&lt;span&gt;string&lt;/span&gt;&lt;span&gt;[] args)
+        {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里获取程序及和工作线程配置信息&lt;/span&gt;
+            Dictionary&amp;lt;&lt;span&gt;string&lt;/span&gt;, Assembly&amp;gt; assmblyColl = &lt;span&gt;new&lt;/span&gt; Dictionary&amp;lt;&lt;span&gt;string&lt;/span&gt;, Assembly&amp;gt;&lt;span&gt;();
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; host = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; HostBuilder()
+                    .UseEnvironment(EnvironmentName.Development)
+                
+                    .ConfigureAppConfiguration((hostContext, configApp) &lt;/span&gt;=&amp;gt;&lt;span&gt;
+                    {
+                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里netcore支持多数据源，所以可以扩展到数据库或者redis，集中进行配置。
+                        &lt;/span&gt;&lt;span&gt;//
+&lt;/span&gt;&lt;span&gt;                        configApp.SetBasePath(Directory.GetCurrentDirectory());
+                        configApp.AddJsonFile(
+                              $&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;appsettings.{hostContext.HostingEnvironment.EnvironmentName}.json&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+                                 optional: &lt;/span&gt;&lt;span&gt;true&lt;/span&gt;&lt;span&gt;);
+                        configApp.AddEnvironmentVariables(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;PREFIX_&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+                        configApp.AddCommandLine(args);
+                    }).ConfigureLogging((hostContext, configBuild) &lt;/span&gt;=&amp;gt;&lt;span&gt;
+                    {
+                        configBuild.AddConfiguration(hostContext.Configuration.GetSection(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Logging&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
+                        configBuild.AddConsole();
+                        configBuild.AddCustomizationLogger();
+                    })
+                    .ConfigureServices((hostContext, service) &lt;/span&gt;=&amp;gt;&lt;span&gt;
+                    {
+                        service.Configure&lt;/span&gt;&amp;lt;HostOptions&amp;gt;(option =&amp;gt;&lt;span&gt;
+                        {
+                            option.ShutdownTimeout &lt;/span&gt;= System.TimeSpan.FromSeconds(&lt;span&gt;10&lt;/span&gt;&lt;span&gt;);
+                        });
+
+                        service.AddKafka(KafkaBuilder &lt;/span&gt;=&amp;gt;&lt;span&gt;
+                        {
+                            KafkaBuilder.AddConfiguration(hostContext.Configuration.GetSection(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;KafkaService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
+                        });
+                        service.AddElasticsearchClient(config&lt;/span&gt;=&amp;gt;&lt;span&gt;{
+                            config.AddConfiguration(hostContext.Configuration.GetSection(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ElasticsearchService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
+                        });
+
+                        service.AddDbContext&lt;/span&gt;&amp;lt;ConsoleDbContext&amp;gt;(option =&amp;gt;&lt;span&gt;
+                        option.UseMySQL(hostContext.Configuration.GetConnectionString(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ConsoleDatabase&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)), ServiceLifetime.Transient, ServiceLifetime.Transient);
+                        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt;&lt;span&gt;TODO 待实现从数据库中pull数据，再将任务添加进DI&lt;/span&gt;
+                        service.AddSingleton&amp;lt;IConsole,KafkaToElasticsearch&amp;gt;&lt;span&gt;();
+                    })
+                    .Build();
+             CancellationTokenSource source &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; CancellationTokenSource();
+            CancellationToken token &lt;/span&gt;=&lt;span&gt; source.Token;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; task=Task.Run(&lt;span&gt;async&lt;/span&gt; () =&amp;gt;&lt;span&gt;{
+                IConsole console &lt;/span&gt;= host.Services.GetService&amp;lt;IConsole&amp;gt;&lt;span&gt;();
+                &lt;/span&gt;&lt;span&gt;await&lt;/span&gt;&lt;span&gt; console.AsyncExcute(source.Token);
+            },source.Token);
+            Dictionary&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;, Task&amp;gt; dictTask = &lt;span&gt;new&lt;/span&gt; Dictionary&amp;lt;&lt;span&gt;string&lt;/span&gt;, Task&amp;gt;&lt;span&gt;();
+            dictTask.Add(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;kafkatoelasticsearch&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, task);
+
+            &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; recordRunCount = &lt;span&gt;0&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; fact = host.Services.GetService&amp;lt;ILoggerFactory&amp;gt;&lt;span&gt;();
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; log = fact.CreateLogger&amp;lt;Program&amp;gt;&lt;span&gt;();
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; disp = Task.Run(() =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;while&lt;/span&gt; (&lt;span&gt;true&lt;/span&gt;&lt;span&gt;)
+                {
+                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;token.IsCancellationRequested)
+                    {
+                        &lt;/span&gt;++&lt;span&gt;recordRunCount;
+                        &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt; (KeyValuePair&amp;lt;&lt;span&gt;string&lt;/span&gt;, Task&amp;gt; item &lt;span&gt;in&lt;/span&gt;&lt;span&gt; dictTask)
+                        {
+                            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (item.Value.IsCanceled
+                            &lt;/span&gt;||&lt;span&gt; item.Value.IsCompleted
+                            &lt;/span&gt;||&lt;span&gt; item.Value.IsCompletedSuccessfully
+                            &lt;/span&gt;||&lt;span&gt; item.Value.IsFaulted)
+                            {
+                                log.LogWarning(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;console任务：{0}，参数：{1}，执行异常,task状态：{2}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, item.Key, &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;, item.Value.Status);
+                                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (item.Value.Exception != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+                                {
+                                    log.LogError(item.Value.Exception, &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;task:{0},参数：{1}，执行错误.&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, item.Key, &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;);
+                                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;TODO 根据参数更新数据库状态，以便被监控到。&lt;/span&gt;
+&lt;span&gt;                                }
+                                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;更新数据库状态。&lt;/span&gt;
+&lt;span&gt;                            }
+                        }
+                    }
+                    System.Threading.Thread.Sleep(&lt;/span&gt;&lt;span&gt;2000&lt;/span&gt;&lt;span&gt;);
+                    log.LogInformation(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;循环：{0}次，接下来等待2秒。&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, recordRunCount);
+                }
+            },source.Token);
+            
+            IApplicationLifetime appLiftTime &lt;/span&gt;= host.Services.GetService&amp;lt;IApplicationLifetime&amp;gt;&lt;span&gt;();
+            appLiftTime.ApplicationStopping.Register(()&lt;/span&gt;=&amp;gt;&lt;span&gt;{
+                log.LogInformation(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;程序停止中。&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+                source.Cancel();
+                log.LogInformation(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;程序停止完成。&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            });
+            host.RunAsync().GetAwaiter().GetResult();
+        }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;因为分布式job有quartz，是有自己的设计理念，但是这个console后台框架不需要，是自己开发，所以完全和Host通用主机兼容，所有的部件都可以DI。设计原理就是以数据库的配置，构造Task，然后使用&lt;/p&gt;
+&lt;pre&gt;
+&lt;span&gt;CancellationTokenSource和TaskCompletionSource去管理Task。运行结果根据状态去更新数据库，以便监控。当然咱们这个例子功能没实现全，后面可以完善&lt;br/&gt;，感兴趣的可以去我的github上pull代码。咱们看任务中的例子代码：&lt;br/&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;61&quot;&gt;
+&lt;pre readability=&quot;5&quot;&gt;
+&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Collections.Generic;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading.Tasks;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Confluent.Kafka;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Configuration;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Logging;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Nest;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Log;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Service.Elasticsearch;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Walt.Framework.Service.Kafka;
+
+&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt; Walt.Framework.Console
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; KafkaToElasticsearch : IConsole
+    {
+        ILoggerFactory _logFact;
+
+        IConfiguration _config;
+
+        IElasticsearchService _elasticsearch;
+
+        IKafkaService _kafkaService;
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; KafkaToElasticsearch(ILoggerFactory logFact,IConfiguration config
+        ,IElasticsearchService elasticsearch
+        ,IKafkaService kafkaService)
+        {
+            _logFact &lt;/span&gt;=&lt;span&gt; logFact;
+            _config &lt;/span&gt;=&lt;span&gt; config;
+            _elasticsearch &lt;/span&gt;=&lt;span&gt; elasticsearch;
+            _kafkaService &lt;/span&gt;=&lt;span&gt; kafkaService;
+        }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task AsyncExcute(CancellationToken cancel=&lt;span&gt;default&lt;/span&gt;&lt;span&gt;(CancellationToken))
+        {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; log = _logFact.CreateLogger&amp;lt;KafkaToElasticsearch&amp;gt;&lt;span&gt;();
+            _kafkaService.AddConsumerEvent(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; List&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt;(){&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;mylog&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span readability=&quot;2&quot;&gt;});&lt;p&gt;　　　　　　　　&lt;span&gt;//以事件方式获取message不工作，因为跨线程
+            &lt;/span&gt;&lt;/p&gt;&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; _kafkaService.GetMessageDele = (message) =&amp;gt; {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     var id = message.Key;
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     var offset = string.Format(&quot;{0}---{2}&quot;,message.Offset.IsSpecial,message.Offset.Value);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     var topic = message.Topic;
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     var topicPartition = message.TopicPartition.Partition.ToString();
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     var topicPartitionOffsetValue = message.TopicPartitionOffset.Offset.Value;
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt; log.LogInformation(&quot;id:{0},offset:{1},topic:{2},topicpatiton:{3},topicPartitionOffsetValue:{4}&quot;
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;     &lt;span&gt;//&lt;/span&gt;&lt;span&gt; ,id,offset,topic,topicPartition,topicPartitionOffsetValue);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; };
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;  _kafkaService.ErrorDele = (message) =&amp;gt; {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;      log.LogError(message.ToString());
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;  };
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;  _kafkaService.LogDele = (message) =&amp;gt; { 
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;      log.LogInformation(message.ToString());
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; };
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; log.LogInformation(&quot;事件添加完毕&quot;);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; var waitForStop = 
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; new TaskCompletionSource&amp;lt;object&amp;gt;(TaskCreationOptions.RunContinuationsAsynchronously);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; cancel.Register(()=&amp;gt;{
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     log.LogInformation(&quot;task执行被取消回掉函数&quot;);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;     waitForStop.SetResult(null);
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; });
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; waitForStop.Task.Wait();
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; log.LogInformation(&quot;任务已经被取消。&quot;);&lt;/span&gt;
+&lt;br/&gt;　　　　　　　&lt;span&gt;　//下面以轮询方式。&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt;(!&lt;span&gt;cancel.IsCancellationRequested)
+            {
+                &lt;/span&gt;&lt;span&gt;while&lt;/span&gt; (&lt;span&gt;true&lt;/span&gt;&lt;span&gt;)
+                {
+                    Message message &lt;/span&gt;= _kafkaService.Poll(&lt;span&gt;2000&lt;/span&gt;&lt;span&gt;);
+                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (message != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+                    {
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(message.Error!=&lt;span&gt;null&lt;/span&gt;&amp;amp;&amp;amp;message.Error.Code!=&lt;span&gt;ErrorCode.NoError)
+                        {
+                            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;log.LogError(&quot;consumer获取message出错,详细信息：{0}&quot;,message.Error);&lt;/span&gt;
+                            System.Console.WriteLine(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer获取message出错,详细信息：{0}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,message.Error);
+                            System.Threading.Thread.Sleep(&lt;/span&gt;&lt;span&gt;200&lt;/span&gt;&lt;span&gt;);
+                            &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
+                        }
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; id =message.Key==&lt;span&gt;null&lt;/span&gt;?&lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;:System.Text.Encoding.Default.GetString(message.Key);
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; offset = &lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{0}---{1}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, message.Offset.IsSpecial, message.Offset.Value);
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; topic =&lt;span&gt; message.Topic;
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; topicPartition =&lt;span&gt; message.TopicPartition.Partition.ToString();
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; topicPartitionOffsetValue =&lt;span&gt; message.TopicPartitionOffset.Offset.Value;
+                        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; val =&lt;span&gt;System.Text.Encoding.Default.GetString( message.Value);
+                        EntityMessages entityMess &lt;/span&gt;=&lt;span&gt; 
+                        Newtonsoft.Json.JsonConvert.DeserializeObject&lt;/span&gt;&amp;lt;EntityMessages&amp;gt;&lt;span&gt;(val);
+                        &lt;/span&gt;&lt;span&gt;await&lt;/span&gt;  _elasticsearch.CreateIndexIfNoExists&amp;lt;LogElasticsearch&amp;gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;mylog&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+&lt;span&gt;entityMess.OtherFlag);
+                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; _elasticsearch.CreateMappingIfNoExists&amp;lt;LogElasticsearch&amp;gt;(&quot;mylog&quot;+entityMess.OtherFlag
+                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span readability=&quot;2&quot;&gt;                 ,&quot;mylog&quot;+entityMess.OtherFlag+&quot;type&quot;,null);&lt;p&gt;　　　　　　　　　　　　　　&lt;span&gt;//为elasticsearch添加document&lt;/span&gt;&lt;/p&gt;&lt;/span&gt;
+                        &lt;span&gt;var&lt;/span&gt; addDocumentResponse = &lt;span&gt;await&lt;/span&gt; _elasticsearch.CreateDocument&amp;lt;LogElasticsearch&amp;gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;mylog&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; entityMess.OtherFlag
+                                , &lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; LogElasticsearch()
+                                {
+                                    Id &lt;/span&gt;=&lt;span&gt; entityMess.Id,
+                                    Time &lt;/span&gt;=&lt;span&gt; entityMess.DateTime,
+                                    LogLevel &lt;/span&gt;=&lt;span&gt; entityMess.LogLevel,
+                                    Exception &lt;/span&gt;=&lt;span&gt; entityMess.Message
+                                }
+                        );
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (addDocumentResponse != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+                        {
+                            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;addDocumentResponse.ApiCall.Success)
+                            {
+
+                            }
+                        }
+                    }
+                }
+            }
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; ;
+        }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;
+&lt;span&gt; &lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;span&gt; 三 elasticsearch 服务开发                             &lt;/span&gt;            &lt;/p&gt;
+&lt;p&gt;　　服务已经开发很多了，主要就是构建和配置的设计，还有就是对组件的封装，看程序结构：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/46403/201901/46403-20190131022131227-2106150948.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;配置：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;47&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;{
+  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Logging&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
+    &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LogLevel&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Default&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Information&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;System&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Information&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Microsoft&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;: &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Information&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+    },
+    &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;KafkaLog&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;:{
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Prix&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;console&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, &lt;span&gt;//目前这个属性，可以放程序类别，比如用户中心，商品等。
+      &lt;/span&gt;&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LogStoreTopic&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;mylog&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+    }
+  },
+  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;KafkaService&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;:{
+    &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Properties&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;:{
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;bootstrap.servers&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;192.168.249.106:9092&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+      &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;group.id&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;group2&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+    }
+  },
+  &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ConnectionStrings&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;: {
+    &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;ConsoleDatabase&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;:&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Server=192.168.249.106;Database=quartz;Uid=quartz;Pwd=quartz&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+  },
+  &lt;/span&gt;&lt;span&gt;&quot;ElasticsearchService&quot;:{
+    &quot;Host&quot;:[&quot;http://192.168.249.105:9200&quot;,&quot;http://localhost:9200&quot;],
+    &quot;TimeOut&quot;:&quot;10000&quot;,
+    &quot;User&quot;:&quot;&quot;,
+    &quot;Pass&quot;:&quot;&quot;&lt;/span&gt;&lt;span&gt;&lt;span&gt;
+  }&lt;/span&gt;
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;服务类：这里有必要说下，elasticsearch是基于api的接口，最底层就是http请求，在接口上，实现了一个高级的接口和一个低级别的接口，当然低级别的接口需要熟悉elasticsearch的协议，&lt;/p&gt;
+&lt;p&gt;而高级别的api，使用强类型去使用，对开发很有帮助。下面是封装elasticsearch的服务类：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;52&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Net.Http;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Elasticsearch.Net;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Options;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System.Threading.Tasks;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Microsoft.Extensions.Logging;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Nest;
+
+&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt; Walt.Framework.Service.Elasticsearch
+{
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ElasticsearchService:IElasticsearchService
+    {
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;  ElasticsearchOptions _elasticsearchOptions=&lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; ElasticClient _elasticClient = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; ILoggerFactory _loggerFac;
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; ElasticsearchService(IOptionsMonitor&amp;lt;ElasticsearchOptions&amp;gt;&lt;span&gt;  options
+        ,ILoggerFactory loggerFac)
+        {
+            _elasticsearchOptions &lt;/span&gt;=&lt;span&gt; options.CurrentValue;
+             options.OnChange((elasticsearchOpt,s)&lt;/span&gt;=&amp;gt;&lt;span&gt;{
+                _elasticsearchOptions&lt;/span&gt;=&lt;span&gt;elasticsearchOpt; 
+                    System.Diagnostics.Debug
+                    .WriteLine(Newtonsoft.Json.JsonConvert.SerializeObject(elasticsearchOpt)&lt;/span&gt;+&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;---&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;+&lt;span&gt;s);
+            });
+　　　　　　　&lt;span&gt;//连接客户端需，支持多个节点，防止单点故障
+            &lt;/span&gt;&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; lowlevelClient = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ElasticLowLevelClient();
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; urlColl = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Uri[_elasticsearchOptions.Host.Length];
+            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = &lt;span&gt;0&lt;/span&gt;; i &amp;lt; _elasticsearchOptions.Host.Length;i++&lt;span&gt;)
+            {
+                urlColl[i] &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Uri(_elasticsearchOptions.Host[i]);
+            }
+            _loggerFac &lt;/span&gt;=&lt;span&gt; loggerFac;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; connectionPool = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; SniffingConnectionPool(urlColl);
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; settings = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ConnectionSettings(connectionPool)
+            .RequestTimeout(TimeSpan.FromMinutes(_elasticsearchOptions.TimeOut))
+            .DefaultIndex(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;mylogjob&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);&lt;span&gt;//设置默认的index&lt;/span&gt;
+            _elasticClient &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ElasticClient(settings);
+        }&lt;br/&gt;　　　　　&lt;span&gt;//如果index存在，则返回，如果不存在，则创建，type的创建方式是为文档类型打标签&lt;/span&gt;&lt;/span&gt;&lt;span&gt;ElasticsearchTypeAttribute&lt;/span&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task&amp;lt;&lt;span&gt;bool&lt;/span&gt;&amp;gt; CreateIndexIfNoExists&amp;lt;T&amp;gt;(&lt;span&gt;string&lt;/span&gt; indexName) &lt;span&gt;where&lt;/span&gt; T : &lt;span&gt;class&lt;/span&gt;&lt;span&gt;
+        {
+
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; log = _loggerFac.CreateLogger&amp;lt;ElasticsearchService&amp;gt;&lt;span&gt;();
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; exists = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; _elasticClient.IndexExistsAsync(Indices.Index(indexName));
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (exists.Exists)
+            {
+                log.LogWarning(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;index:{0}已经存在&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, indexName.ToString());
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;await&lt;/span&gt; Task.FromResult(&lt;span&gt;true&lt;/span&gt;&lt;span&gt;);
+            }
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; response = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; _elasticClient.CreateIndexAsync(indexName
+                ,c&lt;/span&gt;=&amp;gt;c.Mappings(mm=&amp;gt;mm.Map&amp;lt;T&amp;gt;(m=&amp;gt;&lt;span&gt;m.AutoMap())));&lt;span&gt;//将类型的属性自动映射到index的type上，也可以打标签控制那个可以映射，那些不可以&lt;/span&gt;
+            log.LogInformation(response.DebugInformation);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (response.Acknowledged)
+            {
+                log.LogInformation(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;index:{0},创建成功&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, indexName.ToString());
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;await&lt;/span&gt; Task.FromResult(&lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
+            }
+            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
+            {
+                log.LogError(response.ServerError.ToString());
+                log.LogError(response.OriginalException.ToString());
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;await&lt;/span&gt; Task.FromResult(&lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
+            }
+        }
+
+&lt;/span&gt;
+
+　　　　　&lt;span&gt;//创建document&lt;/span&gt;
+        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task&amp;lt;ICreateResponse&amp;gt; CreateDocument&amp;lt;T&amp;gt;(&lt;span&gt;string&lt;/span&gt; indexName,T  t) &lt;span&gt;where&lt;/span&gt; T:&lt;span&gt;class&lt;/span&gt;&lt;span&gt;
+        {
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; log=_loggerFac.CreateLogger&amp;lt;ElasticsearchService&amp;gt;&lt;span&gt;(); 
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(t==&lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                log.LogError(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;bulk 参数不能为空。&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+            }
+            IndexRequest&lt;/span&gt;&amp;lt;T&amp;gt; request = &lt;span&gt;new&lt;/span&gt; IndexRequest&amp;lt;T&amp;gt;(indexName, TypeName.From&amp;lt;T&amp;gt;()) { Document =&lt;span&gt; t };
+             
+             &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; createResponse = &lt;span&gt;await&lt;/span&gt; _elasticClient.CreateDocumentAsync&amp;lt;T&amp;gt;&lt;span&gt;(t);
+             log.LogInformation(createResponse.DebugInformation);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (createResponse.ApiCall.Success)
+            {
+                log.LogInformation(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;index:{0},type:{1},创建成功&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, createResponse.Index, createResponse.Type);
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; createResponse;
+            }
+            &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
+            {
+                log.LogError(createResponse.ServerError.ToString());
+                log.LogError(createResponse.OriginalException.ToString());
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+            }
+        }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;poco类型，这个类会和index的typ相关联的：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;using&lt;/span&gt;&lt;span&gt; System;
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt;&lt;span&gt; Nest;
+
+&lt;/span&gt;&lt;span&gt;namespace&lt;/span&gt;&lt;span&gt; Walt.Framework.Console
+{
+    [ElasticsearchTypeAttribute(Name&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;LogElasticsearchDefaultType&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)] &lt;span&gt;//可以使用类型生成和查找type
+    &lt;/span&gt;&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; LogElasticsearch
+    {
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Id { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; DateTime Time { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; LogLevel{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Exception{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Mess{ &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;然后就是执行我们console后台程序，就可以在kibana看到日志被同步的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/46403/201901/46403-20190131023110418-1625994217.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 所有程序都提交到github，如果调试代码，再看这篇文章，或许理解能更快。&lt;/p&gt;
+
+</description>
+<pubDate>Wed, 30 Jan 2019 18:33:00 +0000</pubDate>
+<dc:creator>无为有道</dc:creator>
+<og:description>一 kafka consumer准备 前面的章节进行了分布式job的自动计算的概念讲解以及实践。上次分布式日志说过日志写进kafka，是需要进行处理，以便合理的进行展示，分布式日志的量和我们对日志的重</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ck0074451665/p/10340387.html</dc:identifier>
+</item>
+<item>
+<title>[IOT] 自制蓝牙工牌办公室定位系统 （二）—— 基于ESP32的蓝牙信号扫描系统 - beautifulzzzz</title>
+<link>http://www.cnblogs.com/zjutlitao/p/10328544.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zjutlitao/p/10328544.html</guid>
+<description>&lt;p&gt; &lt;br/&gt;&lt;strong&gt;前面章节：&lt;/strong&gt;&lt;/p&gt;
+
+&lt;hr/&gt;&lt;p&gt; &lt;br/&gt;&lt;strong&gt;目录：&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1、蓝牙广播简介&lt;/li&gt;
+&lt;li&gt;2、蓝牙扫描简介&lt;/li&gt;
+&lt;li&gt;3、基于蓝牙广播和蓝牙扫描常见应用&lt;/li&gt;
+&lt;li&gt;4、ESP32简介&lt;/li&gt;
+&lt;li&gt;5、ESP32开发环境搭建&lt;/li&gt;
+&lt;li&gt;6、基于ESP32的蓝牙扫描实现&lt;/li&gt;
+&lt;li&gt;7、效果展示&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt; &lt;br/&gt;&lt;strong&gt;前言：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;我们整个基于蓝牙beacon的办公室定位系统主要有两部分组成：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1）蓝牙信号扫描器（蓝牙扫描+数据上云）&lt;/li&gt;
+&lt;li&gt;2）基于beacon的低功耗工牌&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;上一节我们讲解了如何将数据通过ESP32上传到云端，本节主要讲如何用ESP32扫描周边蓝牙设备。&lt;/p&gt;
+
+&lt;h4 id=&quot;蓝牙广播简介&quot;&gt;1、蓝牙广播简介&lt;/h4&gt;
+&lt;p&gt;蓝牙就在我们身边：电子信标引导消防员穿过建筑物; 可穿戴医疗设备将患者的生物数据发送给医生的平板电脑; 40万平方英尺仓库的设备监控等。蓝牙技术正在蓬勃发展，预计到2021年将有超过480亿的安装基数（per ABI Internet of Everything Market Tracker）。&lt;/p&gt;
+&lt;p&gt;那么蓝牙是如何工作的呢？BLE（蓝牙低功耗） 在2.4GHz的ISM频段中有40个物理信道，每个信道之间相隔2MHz。蓝牙定义了两种传输类型：数据传输和广播传输。因此，这40个频道中有3个专门用于广播，37个专门用于数据。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/0f/aecb22c8e8f062276aedd17339ebaa.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;广播主要会涉及下面几个参数：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Advertising Interval&lt;/td&gt;
+&lt;td&gt;Time between the start of two consecutive advertising events&lt;/td&gt;
+&lt;td&gt;20ms to 10.24s&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Advertising Types&lt;/td&gt;
+&lt;td&gt;Different PDUs are sent for different types of advertising&lt;/td&gt;
+&lt;td&gt;See following&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;5&quot;&gt;&lt;td&gt;Advertising Channels&lt;/td&gt;
+&lt;td&gt;Legacy advertising packets are sent on three channels&lt;/td&gt;
+&lt;td&gt;Different combinations of channels 37, 38 and 39.&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt; &lt;br/&gt;一般情况下，广播信道有channel 37 (2402 MHz), channel 38 (2426 MHz), and channel 39 (2480 MHz)。设备可以在其中一个、两个或三个上进行广播，下图展示了在所有三个频道上进行广播的事件：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/2f/e258048ae0c7aa6d360cbc7affe271.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;注意，上列中是在所有通道上都发送了相同的数据（ADV_IND）。由于数据包非常小（广播数据不超过31字节），发送它所需的时间不到10毫秒。设备可以修改为仅在选定的频道上进行广播。在较少的频道上进行广播将节省电力，但是使用更多的频道将增加对等设备接收数据包的可能性。用户可以根据应用程序用例配置广播间隔。例如，如果门锁以较慢的间隔进行广播，则对等设备连接到门锁将需要更长的时间，这将对用户体验产生不利影响。&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;无论是beacon（传输位置、天气或其他数据）还是与主机（平板电脑或手机）建立长期连接的健身手表，所有外围设备，至少在最初都是以广播模式开始的。&lt;/p&gt;
+&lt;p&gt;Advertising允许设备去广播有意图的信息。&lt;/p&gt;
+&lt;p&gt;那么，蓝牙的广播是怎样的呢？&lt;/p&gt;
+&lt;p&gt;为了便于使用，蓝牙为广播和数据传输定义了一种单一的数据包格式。这个包由四个部分组成：前导码（1字节）、访问地址（4字节）、协议数据单元（2-257字节）和循环冗余校验（3字节）；见下图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/b2/79dad0c57d2544ab863fd654eb356a.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;PDU部分比较重要，因为它定义了该数据包是广播包还是数据包。在我们解析来的讨论中，将重点讨论广播PUD包。&lt;/p&gt;
+&lt;p&gt;广播PUD包包含16 bits 的头和不定长度的payload：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/ae/2d698cce777a49dd4821576e9dd644.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;广播的头部包含6部分，我们主要关注Length和PUD Type两部分。Length长6bits，定义了payload的长度。Length的取值范围是6-27字节（取决于PUD Type）。&lt;/p&gt;
+&lt;p&gt;OK，现在我们知道了广播的时候会有几字节的16进制数据在payload中，但是为什么广播呢？这就要提到PUD Type了。在蓝牙低功耗中，有两个原因需要广播：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;在设备（如智能手表和电话）之间建立双向连接。&lt;/li&gt;
+&lt;li&gt;或者在不与其他设备连接的情况下广播信息，例如在博物馆里一个信标发送数据，告诉你身后5英尺处有一具500年前的木乃伊尸体。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt; &lt;br/&gt;因此，无论是智能手表还是木乃伊都在争夺关注，我们开发人员则需要关注4种PDU类型：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;ADV_IND
+&lt;ul&gt;&lt;li&gt;广播指示：设备请求连接中心设备（不是针对特殊的指定的中心设备）&lt;/li&gt;
+&lt;li&gt;例如：智能手表请求连接任何中心设备&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;ADV_DIRECT_IND
+&lt;ul&gt;&lt;li&gt;类似ADV_IND，只是是针对特殊中心设备&lt;/li&gt;
+&lt;li&gt;例如：智能手表请求连接特殊中心设备&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;ADV_NONCONN_IND
+&lt;ul&gt;&lt;li&gt;不可连接的设备，广播信息到任何收听设备&lt;/li&gt;
+&lt;li&gt;例如：博物馆的信标定义了临近的特定展品的信息&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;li&gt;ADV_SCAN_IND
+&lt;ul&gt;&lt;li&gt;类似ADV_SCAN_IND，是响应扫描的附加可选信息&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt; &lt;br/&gt;所以，当需要维持长期连接时，PDU的类型应设置为ADV_IND或ADV_DIRECT_IND；当只是广播一些信息，不需要维持长期连接时，ADV_NONCONN_IND和ADV_SCAN_IND将会被用上，beacon常用ADV_NONCONN_IND，当需要广播更多信息的时候，可以把信息放在scan回复中，选用ADV_SCAN_IND。&lt;/p&gt;
+&lt;p&gt;无论是请求长期连接还是作为beacon，这一切都始于广播。&lt;/p&gt;
+
+&lt;h4 id=&quot;蓝牙扫描简介&quot;&gt;2、蓝牙扫描简介&lt;/h4&gt;
+&lt;p&gt;当BLE设备未被连接时，可以通过发送广播包来宣传它们的存在，或者扫描附近正在广播的设备。扫描设备的过程被成为设备发现。扫描有两种类型：主动扫描和被动扫描。区别在于：主动扫描器可以主动发送一个扫描请求，请求广播设备进行广播回复；而被动扫描器只能被动扫描广播信息。下图显示了扫描器在广播事件期间向广广播客户发送扫描请求的时序：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/cd/f9e46d0a55a8f5c878ab80e27ff2af.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当涉及到扫描时间时，您需要熟悉一些参数。每个参数都有一个由蓝牙核心规范指定的范围。帧间时隙（T_IFS）是同一信道上两个连续数据包之间的时间间隔，由BLE规范设置为150us。&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;3&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Scan Interval&lt;/td&gt;
+&lt;td&gt;The interval between the start of two consecutive scan windows&lt;/td&gt;
+&lt;td&gt;10ms to 10.24s&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Scan Window&lt;/td&gt;
+&lt;td&gt;The duration in which the Link Layer scans on one channel&lt;/td&gt;
+&lt;td&gt;10ms to 10.24s&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;Scan Duration&lt;/td&gt;
+&lt;td&gt;The duration in which the device stays in the scanning state&lt;/td&gt;
+&lt;td&gt;10ms to infinity&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt; &lt;br/&gt;下图展示了这些参数的关系：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/7b/b876b75ab85ac26275f2bfcd12e76a.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;请注意，扫描通道的顺序是固定的。设备将分别在通道37（2402MHz）、通道38（2426MHz）和通道39（2480MHz）上进行扫描，并按照扫描窗口定义的时间长度在每个扫描间隔上进行扫描。&lt;/p&gt;
+&lt;p&gt;二级广播信道上的可扫描广播包也可以引发扫描请求和扫描响应。这些被称为AUX_SCAN_REQ and AUX_SCAN_RSP。下表总结了所有与扫描相关的数据包：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;SCAN_REQ&lt;/td&gt;
+&lt;td&gt;Scanner&lt;/td&gt;
+&lt;td&gt;Scanner's address + advertiser's address&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;SCAN_RSP&lt;/td&gt;
+&lt;td&gt;Advertiser&lt;/td&gt;
+&lt;td&gt;Advertiser's address + 0-31 bytes scan response data&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;AUX_SCAN_REQ&lt;/td&gt;
+&lt;td&gt;Scanner&lt;/td&gt;
+&lt;td&gt;Scanner's address + advertiser's address&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;AUX_SCAN_RSP&lt;/td&gt;
+&lt;td&gt;Advertiser&lt;/td&gt;
+&lt;td&gt;Header + 0-254 bytes data&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+&lt;h4 id=&quot;基于蓝牙广播和蓝牙扫描常见应用&quot;&gt;3、基于蓝牙广播和蓝牙扫描常见应用&lt;/h4&gt;
+&lt;p&gt;蓝牙广播常见的应用有：beacon、室内定位、靠近开门、广播小数据信息等，维基百科&lt;sup&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Bluetooth_advertising&quot;&gt;[3]&lt;/a&gt;&lt;/sup&gt;上的总结有如下场景：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Broadcast location-based coupons.&lt;/li&gt;
+&lt;li&gt;Contextual advertising.&lt;/li&gt;
+&lt;li&gt;Localized information.&lt;/li&gt;
+&lt;li&gt;Gaming and music.&lt;/li&gt;
+&lt;li&gt;Content on demand.&lt;/li&gt;
+&lt;li&gt;Specific and targeted campaign.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;注：蓝牙5的定位、广播将更具诱人特性。&lt;/p&gt;
+
+&lt;h4 id=&quot;esp32简介&quot;&gt;4、ESP32简介&lt;/h4&gt;
+&lt;p&gt;ESP32是一款2.4 GHz Wi-Fi和蓝牙组合芯片，采用TSMC超低功耗40纳米技术设计。它的设计是为了获得最佳的功率和射频性能，在各种应用和电源方案中显示出鲁棒性、通用性和可靠性。&lt;/p&gt;
+&lt;p&gt;ESP32 系列芯片包括：ESP32-D0WDQ6, ESP32-D0WD, ESP32-D2WD, and ESP32-S0WD。其架构图如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/7b/a358d52270490fbae356fbc5180899.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;我们实验用了乐鑫官方的一个开发板：ESP32-WROOM-32。该开发板是一款功能强大的通用Wi-Fi+BT+BLE MCU模块，面向各种应用，从低功耗传感器网络到最苛刻的任务，如语音编码、音乐流和MP3解码。&lt;/p&gt;
+&lt;p&gt;该模块采用EP32-D0WDQ6芯片，该芯片是双核芯片、可独立控制，时钟频率可以从80MHz ~ 240MHz。用户还可以关闭CPU电源，并利用低功耗协处理器持续监控外围设备的变化或是否超过阈值。ESP32集成了一套丰富的外围设备，包括电容式触摸传感器、霍尔传感器、SD卡接口、以太网、高速SPI、UART、I2s和I2c。&lt;/p&gt;
+&lt;p&gt;集成了蓝牙、BLE和Wi-Fi，代表着未来：使用WIFI可通过路由器连接到互联网，而使用蓝牙则方便用户连接到手机和低功耗。ESP32芯片的休眠电流小于5uA，因此适用于电池供电和可穿戴电子设备应用。ESP32支持高达150 Mbps的数据速率和20.5 dBm的输出功率，以确保最宽的物理范围。因此，该芯片确实为电子集成、范围、功耗和连接性提供了行业领先的规格和最佳性能。&lt;/p&gt;
+&lt;p&gt;ESP32可选的操作系统是freeRTOS with LwIP + TLS 1.2 + 硬件内部加速 + 加密的OTA技术。下表是ESP32-WROOM-32的资源总览：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/ea/54217a64d7ad0a0fc1ee0d084fc113.png&quot;/&gt;&lt;/p&gt;
+
+&lt;h4 id=&quot;esp32开发环境搭建&quot;&gt;5、ESP32开发环境搭建&lt;/h4&gt;
+&lt;p&gt;通过下面两个资料，大家可以自行搭建环境：&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;&lt;strong&gt;不过！&lt;/strong&gt;作为系统洁癖和拒绝重复造轮子的博主，已经写了一个全自动构建环境的脚本、并把该工具在github上开源了：esp32_linux_tool &lt;sup&gt;&lt;a href=&quot;https://github.com/nbtool/esp32_linux_tool&quot;&gt;[13]&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
+&lt;p&gt;&lt;sub&gt;&lt;strong&gt;注：&lt;/strong&gt;nbtool是博主专门放自己造的或收集到的牛逼轮子的github组&lt;/sub&gt;&lt;/p&gt;
+&lt;p&gt; &lt;br/&gt;博主造的这个轮子比较好用，基于&lt;strong&gt;all-in-one思想&lt;/strong&gt;(所有相关文件在一个文件夹下；所有相关环境变量不需要额外配置）：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#!/bin/bash
+
+set -e
+
+PROJECT_ROOT=..
+TOOLS_PATH=$PROJECT_ROOT/tool
+SDK_PATH=$PROJECT_ROOT/sdk
+APP_PATH=$PROJECT_ROOT/app
+
+XTENSA_ESP32_ELF_PATH=$TOOLS_PATH/xtensa-esp32-elf
+ESP_IDF_PATH=$SDK_PATH/esp-idf
+
+XTENSA_ESP32_ELF_LINK=https://dl.espressif.com/dl/xtensa-esp32-elf-linux64-1.22.0-80-g6c4433a-5.2.0.tar.gz
+ESP_IDF_LINK=https://github.com/espressif/esp-idf.git   
+
+#--------------------------------------------------------------------------
+function install_tool_chain(){
+    echo &quot;&amp;gt; install tool chain ...&quot;
+    echo &quot;&amp;gt; web page: https://docs.espressif.com/projects/esp-idf/zh_CN/v3.1.1/get-started/linux-setup.html&quot;
+    if [ ! -d $XTENSA_ESP32_ELF_PATH ]; then
+        wget $XTENSA_ESP32_ELF_LINK 
+        tar -xzf xtensa-esp32-elf*.tar.gz
+        rm xtensa-esp32-elf*.tar.gz
+    fi
+}
+
+function install_esp_idf(){
+    echo &quot;&amp;gt; install esp idf ...&quot;
+    echo &quot;&amp;gt; web page: https://github.com/espressif/esp-idf&quot;
+    if [ ! -d $ESP_IDF_PATH ]; then
+        git clone $ESP_IDF_LINK 
+        mv esp-idf $SDK_PATH/
+    fi
+}
+
+function create_project(){
+    if [ &quot;$1&quot; == &quot;&quot; ] || [ &quot;$2&quot; == &quot;&quot; ]; then
+        echo &quot;input error&quot;
+    elif [ -d $1 ] &amp;amp;&amp;amp; [ ! -d &quot;$APP_PATH/$2&quot; ]; then
+        cp -r $1 $APP_PATH/$2
+       
+
+        file=$APP_PATH/$2/run.sh
+        the_sdk_path=`cd $ESP_IDF_PATH; pwd`
+        the_tool_chain_path=`cd $XTENSA_ESP32_ELF_PATH/bin; pwd`
+
+cat &amp;gt; $file &amp;lt;&amp;lt;EOF
+#!/bin/bash
+#I don't like to set environment variables in the system, 
+#so I put the environment variables in run.sh.
+#Every time I use run.sh, the enviroment variables will be set, after use that will be unsetted.
+PROJECT_ROOT=../..
+TOOLS_PATH=\$PROJECT_ROOT/tool
+SDK_PATH=\$PROJECT_ROOT/sdk
+APP_PATH=\$PROJECT_ROOT/app
+XTENSA_ESP32_ELF_PATH=\$TOOLS_PATH/xtensa-esp32-elf
+ESP_IDF_PATH=\$SDK_PATH/esp-idf
+the_sdk_path=\`cd \$ESP_IDF_PATH; pwd\`
+the_tool_chain_path=\`cd \$XTENSA_ESP32_ELF_PATH/bin; pwd\`
+export PATH=&quot;\$PATH:\$the_tool_chain_path&quot;
+export IDF_PATH=&quot;\$the_sdk_path&quot;
+if [ &quot;\$1&quot; == &quot;config&quot; ]; then
+    make menuconfig
+elif [ &quot;\$1&quot; == &quot;build&quot; ]; then
+    make all
+elif [ &quot;\$1&quot; == &quot;flash&quot; ]; then
+    make flash   
+elif [ &quot;\$1&quot; == &quot;build-app&quot; ]; then
+    make app   
+elif [ &quot;\$1&quot; == &quot;flash-app&quot; ]; then
+    make app-flash
+elif [ &quot;\$1&quot; == &quot;monitor&quot; ]; then
+    make monitor   
+elif [ &quot;\$1&quot; == &quot;clean&quot; ]; then
+    make clean
+elif [ &quot;\$1&quot; == &quot;help&quot; ]; then
+    echo &quot;bash run.sh config&quot;
+    echo &quot;      |- basic configuration by GUI, if we use -j4 to build and flash, we must first config then build or flash!!!&quot;
+    echo &quot;bash run.sh build&quot;
+    echo &quot;      |- build all&quot;
+    echo &quot;bash run.sh flash&quot;
+    echo &quot;      |- build all and flash the program&quot;
+    echo &quot;bash run.sh build-app&quot;
+    echo &quot;      |- just build app, not build bootloader and partition table&quot;
+    echo &quot;bash run.sh flash-app&quot;
+    echo &quot;      |- just flash app, when bootloader and partition table have not changed, no need to flash&quot;
+    echo &quot;      |- more infomation:https://docs.espressif.com/projects/esp-idf/zh_CN/v3.1.1/get-started/make-project.html&quot;
+    echo &quot;bash run.sh monitor&quot;
+    echo &quot;      |- monitor the program, 'Ctrl+]' to stop&quot;
+    echo &quot;      |- IDF Monitor:https://docs.espressif.com/projects/esp-idf/zh_CN/v3.1.1/get-started/idf-monitor.html&quot;
+else
+    echo &quot;error, try bash run.sh help&quot;
+fi
+EOF
+
+        chmod +x $file
+        ls -all $APP_PATH/$2
+    fi
+}
+#--------------------------------------------------------------------------
+
+function tool(){
+    if [ ! -d $SDK_PATH ]; then
+        mkdir $SDK_PATH
+    fi
+    if [ ! -d $APP_PATH ]; then
+        mkdir $APP_PATH
+    fi
+
+    install_tool_chain
+    install_esp_idf
+}
+
+function clean(){
+    echo &quot;cleaning ....&quot;
+    rm -rf $XTENSA_ESP32_ELF_PATH
+    rm -rf $ESP_IDF_PATH
+    rm -rf $SDK_PATH
+}
+
+if [ &quot;$1&quot; == &quot;clean&quot; ]; then
+    clean
+elif [ &quot;$1&quot; == &quot;tool&quot; ]; then
+    tool
+elif [ &quot;$1&quot; == &quot;create&quot; ]; then
+    create_project $2 $3
+elif [ &quot;$1&quot; == &quot;help&quot; ]; then
+    echo &quot;bash run.sh tool&quot;
+    echo &quot;      |- create the build enviroment, including sdk and tool chain&quot;
+    echo &quot;bash run.sh clean&quot;
+    echo &quot;      |- clean all the sdk and tools, thats download form web-page when 'bash run.sh tool'&quot;
+    echo &quot;bash run.sh create path_of_example_in_sdk new_name_project&quot;
+    echo &quot;      |- copy the example in the sdk to app directory, and rename it new_name_project&quot;
+else
+    echo &quot;error, try bash run.sh help&quot;
+fi&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt; &lt;br/&gt;上面的run.sh脚本就是完成开发环境构建、工程创建、编译、烧写、跟踪LOG等复杂功能，大家可以慢慢理解。下面先谈谈如何用该开源项目：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#克隆项目到本地
+&amp;gt; git clone git@github.com:nbtool/esp32_linux_tool.git
+
+#构建esp32开发环境
+&amp;gt; cd ./esp32_linux_tool/tool
+&amp;gt; ./run.sh help
+&amp;gt; ./run.sh tool
+
+#从SDK的example中复制一个DEMO到APP层(例如:hello_world)
+&amp;gt; bash run.sh create ../sdk/esp-idf/examples/get-started/hello_world hello_world
+&amp;gt; cd ../app/hello_world
+&amp;gt; ./run.sh help
+
+#烧写固件
+&amp;gt; ./run.sh flash
+
+#查看LOG
+&amp;gt; ./run.sh monitor
+
+#清空工程
+&amp;gt; ./run.sh clean&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h4 id=&quot;基于esp32的蓝牙扫描实现&quot;&gt;6、基于ESP32的蓝牙扫描实现&lt;/h4&gt;
+&lt;p&gt;由于ESP32的IDF中已经有蓝牙扫描的DEMO，因此我们用下面命令直接从DEMO创建工程：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;bash run.sh create ../sdk/esp-idf/examples/bluetooth/bt_discovery bt_discovery&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt; &lt;br/&gt;之后将 ./app/bt_discovery/main/bt_discovery.c 修改为：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#include &amp;lt;stdint.h&amp;gt;
+#include &amp;lt;string.h&amp;gt;
+#include &quot;freertos/FreeRTOS.h&quot;
+#include &quot;freertos/task.h&quot;
+#include &quot;nvs.h&quot;
+#include &quot;nvs_flash.h&quot;
+#include &quot;esp_system.h&quot;
+#include &quot;esp_log.h&quot;
+#include &quot;esp_bt.h&quot;
+#include &quot;esp_bt_main.h&quot;
+#include &quot;esp_bt_device.h&quot;
+#include &quot;esp_gap_bt_api.h&quot;
+
+#define GAP_TAG          &quot;GAP&quot;
+
+typedef enum {
+    APP_GAP_STATE_IDLE = 0,
+    APP_GAP_STATE_DEVICE_DISCOVERING,
+    APP_GAP_STATE_DEVICE_DISCOVER_COMPLETE,
+} app_gap_state_t;
+
+typedef struct {
+    bool dev_found;
+    uint8_t bdname_len;
+    uint8_t eir_len;
+    uint8_t rssi;
+    uint32_t cod;
+    uint8_t eir[ESP_BT_GAP_EIR_DATA_LEN];
+    uint8_t bdname[ESP_BT_GAP_MAX_BDNAME_LEN + 1];
+    esp_bd_addr_t bda;
+    app_gap_state_t state;
+} app_gap_cb_t;
+
+static app_gap_cb_t m_dev_info;
+
+static char *bda2str(esp_bd_addr_t bda, char *str, size_t size)
+{
+    if (bda == NULL || str == NULL || size &amp;lt; 18) {
+        return NULL;
+    }
+
+    uint8_t *p = bda;
+    sprintf(str, &quot;%02x:%02x:%02x:%02x:%02x:%02x&quot;,
+            p[0], p[1], p[2], p[3], p[4], p[5]);
+    return str;
+}
+
+static void update_device_info(esp_bt_gap_cb_param_t *param)
+{
+    char bda_str[18];
+    uint32_t cod = 0;
+    int32_t rssi = -129; /* invalid value */
+    esp_bt_gap_dev_prop_t *p;
+
+    ESP_LOGI(GAP_TAG, &quot;Device found: %s&quot;, bda2str(param-&amp;gt;disc_res.bda, bda_str, 18));
+    for (int i = 0; i &amp;lt; param-&amp;gt;disc_res.num_prop; i++) {
+        p = param-&amp;gt;disc_res.prop + i;
+        switch (p-&amp;gt;type) {
+        case ESP_BT_GAP_DEV_PROP_COD:
+            cod = *(uint32_t *)(p-&amp;gt;val);
+            ESP_LOGI(GAP_TAG, &quot;--Class of Device: 0x%x&quot;, cod);
+            break;
+        case ESP_BT_GAP_DEV_PROP_RSSI:
+            rssi = *(int8_t *)(p-&amp;gt;val);
+            ESP_LOGI(GAP_TAG, &quot;--RSSI: %d&quot;, rssi);
+            break;
+        case ESP_BT_GAP_DEV_PROP_BDNAME:
+        default:
+            break;
+        }
+    }
+
+    /* search for device with MAJOR service class as &quot;rendering&quot; in COD */
+    app_gap_cb_t *p_dev = &amp;amp;m_dev_info;
+    if (p_dev-&amp;gt;dev_found &amp;amp;&amp;amp; 0 != memcmp(param-&amp;gt;disc_res.bda, p_dev-&amp;gt;bda, ESP_BD_ADDR_LEN)) {
+        return;
+    }
+
+    if (!esp_bt_gap_is_valid_cod(cod) ||
+            !(esp_bt_gap_get_cod_major_dev(cod) == ESP_BT_COD_MAJOR_DEV_PHONE)) {
+        return;
+    }
+
+    memcpy(p_dev-&amp;gt;bda, param-&amp;gt;disc_res.bda, ESP_BD_ADDR_LEN);
+    p_dev-&amp;gt;dev_found = true;
+    for (int i = 0; i &amp;lt; param-&amp;gt;disc_res.num_prop; i++) {
+        p = param-&amp;gt;disc_res.prop + i;
+        switch (p-&amp;gt;type) {
+        case ESP_BT_GAP_DEV_PROP_COD:
+            p_dev-&amp;gt;cod = *(uint32_t *)(p-&amp;gt;val);
+            break;
+        case ESP_BT_GAP_DEV_PROP_RSSI:
+            p_dev-&amp;gt;rssi = *(int8_t *)(p-&amp;gt;val);
+            break;
+        case ESP_BT_GAP_DEV_PROP_BDNAME: {
+            uint8_t len = (p-&amp;gt;len &amp;gt; ESP_BT_GAP_MAX_BDNAME_LEN) ? ESP_BT_GAP_MAX_BDNAME_LEN :
+                          (uint8_t)p-&amp;gt;len;
+            memcpy(p_dev-&amp;gt;bdname, (uint8_t *)(p-&amp;gt;val), len);
+            p_dev-&amp;gt;bdname[len] = '\0';
+            p_dev-&amp;gt;bdname_len = len;
+            break;
+        }
+        case ESP_BT_GAP_DEV_PROP_EIR: {
+            memcpy(p_dev-&amp;gt;eir, (uint8_t *)(p-&amp;gt;val), p-&amp;gt;len);
+            p_dev-&amp;gt;eir_len = p-&amp;gt;len;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+}
+
+void bt_app_gap_init(void)
+{
+    app_gap_cb_t *p_dev = &amp;amp;m_dev_info;
+    memset(p_dev, 0, sizeof(app_gap_cb_t));
+}
+
+void bt_app_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
+{
+    app_gap_cb_t *p_dev = &amp;amp;m_dev_info;
+    switch (event) {
+    case ESP_BT_GAP_DISC_RES_EVT: {
+        update_device_info(param);
+        break;
+    }
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
+        ESP_LOGE(GAP_TAG, &quot;%d&quot;, p_dev-&amp;gt;state);
+        if(p_dev-&amp;gt;state == APP_GAP_STATE_IDLE){
+            ESP_LOGE(GAP_TAG, &quot;discovery start ...&quot;);
+            p_dev-&amp;gt;state = APP_GAP_STATE_DEVICE_DISCOVERING; 
+        }else if(p_dev-&amp;gt;state == APP_GAP_STATE_DEVICE_DISCOVERING){
+            ESP_LOGE(GAP_TAG, &quot;discovery timeout ...&quot;);
+            p_dev-&amp;gt;state = APP_GAP_STATE_DEVICE_DISCOVER_COMPLETE;
+            esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+        }else{
+            ESP_LOGE(GAP_TAG, &quot;discovery again ...&quot;);
+            p_dev-&amp;gt;state = APP_GAP_STATE_IDLE;
+        }
+        break;
+    }
+    case ESP_BT_GAP_RMT_SRVCS_EVT: {
+        break;
+    }
+    case ESP_BT_GAP_RMT_SRVC_REC_EVT:
+    default: {
+        break;
+    }
+    }
+    return;
+}
+
+void bt_app_gap_start_up(void)
+{
+    char *dev_name = &quot;ESP_GAP_INQRUIY&quot;;
+    esp_bt_dev_set_device_name(dev_name);
+
+    /* set discoverable and connectable mode, wait to be connected */
+    esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE);
+
+    /* register GAP callback function */
+    esp_bt_gap_register_callback(bt_app_gap_cb);
+
+    /* inititialize device information and status */
+    app_gap_cb_t *p_dev = &amp;amp;m_dev_info;
+    memset(p_dev, 0, sizeof(app_gap_cb_t));
+
+    /* start to discover nearby Bluetooth devices */
+    p_dev-&amp;gt;state = APP_GAP_STATE_IDLE;
+    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+}
+
+void app_main()
+{
+    /* Initialize NVS — it is used to store PHY calibration data */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( ret );
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    if ((ret = esp_bt_controller_init(&amp;amp;bt_cfg)) != ESP_OK) {
+        ESP_LOGE(GAP_TAG, &quot;%s initialize controller failed: %s\n&quot;, __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT)) != ESP_OK) {
+        ESP_LOGE(GAP_TAG, &quot;%s enable controller failed: %s\n&quot;, __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_bluedroid_init()) != ESP_OK) {
+        ESP_LOGE(GAP_TAG, &quot;%s initialize bluedroid failed: %s\n&quot;, __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    if ((ret = esp_bluedroid_enable()) != ESP_OK) {
+        ESP_LOGE(GAP_TAG, &quot;%s enable bluedroid failed: %s\n&quot;, __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    bt_app_gap_start_up();
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt; &lt;br/&gt;逐层调用关系：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;4.5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;app_main&lt;/td&gt;
+&lt;td&gt;-&amp;gt;&lt;/td&gt;
+&lt;td&gt;各种初始化，最后调用 bt_app_gap_start_up&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;bt_app_gap_start_up&lt;/td&gt;
+&lt;td&gt;-o&lt;/td&gt;
+&lt;td&gt;初始化蓝牙并启动搜索，超时10S，回调事件会被 bt_app_gap_cb 捕捉&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;bt_app_gap_cb&lt;/td&gt;
+&lt;td&gt;o-&amp;gt;&lt;/td&gt;
+&lt;td&gt;开始搜索/搜索超时/再次搜索+搜索到设备事件，超时会再次启动10S搜索，搜到设备会调用update_device_info 打印&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;update_device_info&lt;/td&gt;
+&lt;td&gt;-o&lt;/td&gt;
+&lt;td&gt;将搜索结果打印下来&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;sub&gt;&lt;strong&gt;注：&lt;/strong&gt;-&amp;gt; 会继续调用其他函数；-o 停止调用其他函数；o-&amp;gt; 回调函数；&lt;/sub&gt;&lt;/p&gt;
+
+&lt;h4 id=&quot;效果展示&quot;&gt;7、效果展示&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;http://tuchuang.beautifulzzzz.com:3000/?path=/91/9e7b0638f90f70ba43dfcfb61db895.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;sub&gt;&lt;strong&gt;注：&lt;/strong&gt;周期性扫描，10S超时后继续扫描，扫到之后打印MAC和RSSI&lt;/sub&gt;&lt;/p&gt;
+&lt;p&gt;: &lt;span&gt;&lt;strong&gt;完～&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;: &lt;span&gt;&lt;strong&gt;大家觉得不错，可以点推荐给更多人～&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;: &lt;span&gt;&lt;strong&gt;最近一段时间准备将这个系列写完，做一套可演示的系统（笑）～&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;h3 id=&quot;links&quot;&gt;LINKS&lt;/h3&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/zjutlitao/p/10269835.html&quot;&gt;[1]. BLOG - 自制蓝牙工牌办公室定位系统 （一）&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.bluetooth.com/specifications/bluetooth-core-specification&quot;&gt;[2]. SIG - Bluetooth core specification&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Bluetooth_advertising&quot;&gt;[3]. WiKi - Bluetooth advertising&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://blog.bluetooth.com/bluetooth-low-energy-it-starts-with-advertising&quot;&gt;[4]. SIG - Bluetooth Low Energy - It starts with Advertising&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://dev.ti.com/tirex/content/simplelink_academy_cc26x2sdk_1_15_03_10/modules/ble5stack/ble_scan_adv_basic/ble_scan_adv_basic.html&quot;&gt;[5]. TI - Bluetooth Low Energy Scanning and Advertising&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;http://dev.ti.com/tirex/content/simplelink_academy_cc2640r2sdk_1_12_01_16/modules/ble_scan_adv_basic/ble_scan_adv_basic.html&quot;&gt;[6]. TI - Bluetooth Low Energy Scanning and Advertising&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://source.android.com/devices/bluetooth/ble_advertising&quot;&gt;[7]. Android - Bluetooth Low Energy Advertising&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://sites.google.com/a/gclue.jp/ble-docs/advertising-1/advertising&quot;&gt;[8]. BLOG - Advertising(解説)&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.espressif.com/sites/default/files/documentation/esp32_datasheet_en.pdf&quot;&gt;[9]. PDF - ESP32 datasheet&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.mouser.com/ds/2/891/esp-wroom-32_datasheet_en-1223836.pdf&quot;&gt;[10]. PDF - ESP32-WROOM-32 datasheet&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://github.com/espressif/esp-idf&quot;&gt;[11]. ESP32-IDF GITHUB地址&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://docs.espressif.com/projects/esp-idf/en/v3.1.1/index.html&quot;&gt;[12]. ESP-IDF Program Guide&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://github.com/nbtool/esp32_linux_tool&quot;&gt;[13]. esp32_linux_tool GITHUB地址&lt;/a&gt;&lt;/p&gt;
+
+&lt;pre&gt;
+&lt;code&gt;@beautifulzzzz
+以蓝牙技术为基础的的末梢无线网络系统架构及创新型应用探索！
+领域：智能硬件、物联网、自动化、前沿软硬件
+博客：https://www.cnblogs.com/zjutlitao/
+园友交流群|微信交流群：414948975|园友交流群&lt;/code&gt;
+&lt;/pre&gt;</description>
+<pubDate>Wed, 30 Jan 2019 17:38:00 +0000</pubDate>
+<dc:creator>beautifulzzzz</dc:creator>
+<og:description>  前面章节： [自制蓝牙工牌办公室定位系统 （一）—— 阿里物联网平台概览及打通端到云（硬核·干货）][ 1]   目录： 1、蓝牙广播简介 2、蓝牙扫描简介 3、基于蓝牙广播和</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zjutlitao/p/10328544.html</dc:identifier>
+</item>
+<item>
+<title>Kernel 内核调试 - int80</title>
+<link>http://www.cnblogs.com/int80/p/10340282.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/int80/p/10340282.html</guid>
+<description>&lt;p&gt;本机环境 Win7 + VMware 14 Pro&lt;/p&gt;
+&lt;p&gt;1.安装Qemu，Ubuntu包管理器中的二进制版本比较老了，这里选择源码安装&lt;a href=&quot;https://download.qemu.org/qemu-2.12.0.tar.xz&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;2.12.0版本&lt;/a&gt;。&lt;/p&gt;
+&lt;p&gt;具体的安装教程可以参考这篇文章《&lt;a href=&quot;https://blog.csdn.net/candcplusplus/article/details/78320602&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;QEMU 2.10.1 编译安装&lt;/a&gt;》，写的非常详细。&lt;/p&gt;
+&lt;p&gt;2.下载、编译目标的内核版本&lt;/p&gt;
+&lt;p&gt;这里下载的是4.4.1版本的Linux内核  &lt;a href=&quot;https://mirrors.edge.kernel.org/pub/linux/kernel/v4.x/linux-4.4.1.tar.xz&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;linux-4.4.1.tar.xz&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;解压 编译&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+xz - d   linux-&lt;span&gt;4.4&lt;/span&gt;.&lt;span&gt;1&lt;/span&gt;.&lt;span&gt;tar&lt;/span&gt;&lt;span&gt;.xz
+
+&lt;/span&gt;&lt;span&gt;tar&lt;/span&gt; -xvf  linux-&lt;span&gt;4.4&lt;/span&gt;.&lt;span&gt;1&lt;/span&gt;.&lt;span&gt;tar&lt;/span&gt;&lt;span&gt;
+
+cd linux&lt;/span&gt;-&lt;span&gt;4.4&lt;/span&gt;.&lt;span&gt;1&lt;/span&gt;
+
+&lt;span&gt;make&lt;/span&gt; menuconfig
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 确保以下三个选项是勾选上的：&lt;/p&gt;
+&lt;div readability=&quot;7&quot;&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+kernel hacking –&amp;gt; Kernel debugging
+kernel hacking –&amp;gt; Compile-time checks and compiler options –&amp;gt; compile the kernel with debug info
+kernel hacking –&amp;gt; Compile-time checks and compiler options -&amp;gt; compile the kernel with frame pointers
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt; 在多核平台上使用-j 参数来加快编译&lt;/p&gt;
+
+&lt;p&gt;3.制作根文件系统&lt;/p&gt;
+&lt;p&gt;先了解以下几个文件的区别，参考这篇&lt;a href=&quot;https://blog.csdn.net/geekcome/article/details/6558754&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;文章&lt;/a&gt;&lt;/p&gt;
+&lt;div readability=&quot;10&quot;&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+vmlinux 是ELF文件，即编译出来的最原始的文件。 
+
+vmlinuz 应该是由ELF文件vmlinux经过OBJCOPY后，并经过压缩后的文件 
+
+zImage 是vmlinuz经过gzip压缩后的文件，适用于小内核
+
+bzImage 是vmlinuz经过gzip压缩后的文件，适用于大内核
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;新建一个目录用于存放生成的内核文件,以及根文件系统：&lt;/p&gt;
+&lt;/div&gt;
+&lt;div readability=&quot;10.252268602541&quot;&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+mkdir ~/Desktop/kernel-debug
+
+cp   ./arch/x86/boot/bzImage  ~/Desktop/kernel-debug
+
+cd  ~/Desktop/kernel-debug
+
+dd if=/dev/zero of=rootfs.img bs=1M count=20  #新建一个20M的文件
+
+mkfs -t ext3 rootfs.img #将其格式化为ext3文件系统格式
+
+#将其mount 到新创建到目录rootfs上 
+
+mkdir rootfs 
+
+sudo mount -t ext3 -o loop rootfs.img rootfs 
+
+#将挂载后的根文件系统中建立基本的目录结构
+
+sudo mkdir rootfs/dev rootfs/proc rootfs/sys
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;给系统安装基本的命令行工具，比如ls，这里选择了BusyBox，下载的&lt;a href=&quot;https://busybox.net/downloads/busybox-1.28.3.tar.bz2&quot; rel=&quot;noopener noreferrer&quot; target=&quot;_blank&quot;&gt;BusyBox源码&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;div readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+cd ~/Desktop/kernel-debug&lt;br/&gt;tar -jxvf busybox-1.28.3.tar.bz2&lt;br/&gt;cd busybox-1.28.3&lt;br/&gt;#进行配置，注意这里选择静态连接的方式生成可执行文件，避免对外部lib有依赖
+make menuconfig&lt;br/&gt;#勾选Settings-&amp;gt;Build Busybox as a static binary
+make -j
+#编译完成后，安装到目标的根文件系统中去，然后unmount掉根文件系统
+make install CONFIG_PREFIX=~/Desktop/kernel-debug/rootfs&lt;br/&gt;sudo umount ~/Desktop/kernel-debug/rootfs
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;p&gt;4.启动Qemu虚拟机&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+sudo qemu-system-x86_64  -S -kernel ~/Desktop/kernel-debug/bzImage -hda ~/Desktop/kernel-debug/rootfs.img -append &quot;root=/dev/sda init=/bin/ash&quot;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;此时启动的Qemu处于Pasued状态，单机黑色区域，让Qemu接收输入，按下ctrl+ alt + 2，切换到控制台。&lt;/p&gt;
+&lt;p&gt;注意之后可以通过ctrl + alt + G 来让qemu释放鼠标以及键盘输入。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000421499-1290927327.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;启动gdbserver，监听到8888端口，便于用GDB来远程调试。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000437591-1215807349.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;5.使用GDB连接到gdbserver进行调试&lt;/p&gt;
+&lt;p&gt;由于GDB用的不太熟悉，这里使用图形化的调试工具DDD，可以通过以下命令安装：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
+&lt;pre class=&quot;brush:bash;gutter:true;&quot;&gt;
+sudo apt-get install ddd
+#切换到之前linux编译的目录
+cd linux-4.4.1
+#选择未压缩的内核文件，读入符号表
+ddd vmlinux
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在GDB命令处，连接到Qemu中的GDB server：target remote 127.0.0.1:8888，这个时候Qemu中的Linux系统是处于Paused状态的。&lt;/p&gt;
+&lt;p&gt;连接之后可以在菜单栏Status--&amp;gt;BackTrace...中看到堆栈信息。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000524449-2075547412.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;输入continue，让Qemu中的Linux系统运行起来，可以在Qemu中按下ctrl+Alt+1,切换到虚拟机的命令行界面，可以看到这个时候虚拟机已经正常运行起来了。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000558399-875489922.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这里对Linux创建进程的系统调用下断点，观察调用栈：&lt;/p&gt;
+&lt;p&gt;在fork.c文件中的_do_fork函数处下断点：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000611975-1106182526.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;切换到Qemu，使用ctrl+Alt+1回到Linux的控制台，运行ls，这时候shell会创建ls进程，这个时候ddd就会断下来了：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/771012/201901/771012-20190131000640200-1780637066.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Wed, 30 Jan 2019 16:00:00 +0000</pubDate>
+<dc:creator>int80</dc:creator>
+<og:description>本文总结了在Ubuntu16.04上通过GDB+Qemu双击调试Linux 4.4.1内核的方法。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/int80/p/10340282.html</dc:identifier>
+</item>
+<item>
+<title>你不知道的 docker 命令的奇淫怪巧 - WeihanLi</title>
+<link>http://www.cnblogs.com/weihanli/p/docker-tricks.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/weihanli/p/docker-tricks.html</guid>
+<description>&lt;h2 id=&quot;intro&quot;&gt;Intro&lt;/h2&gt;
+&lt;p&gt;介绍并收录一些可能会用到的一些简单实用却很少有人用的 docker 命令&lt;/p&gt;
+&lt;h2 id=&quot;dangling-images&quot;&gt;dangling images&lt;/h2&gt;
+&lt;p&gt;build 自己的 docker 镜像的时候，有时会遇到用一个甚至多个中间层镜像，这会一定程度上减少最终打包出来 docker 镜像的大小，但是会产生一些tag 为 none 的无用镜像，也称为悬挂镜像 (&lt;code&gt;dangling images&lt;/code&gt;)&lt;/p&gt;
+&lt;p&gt;列出所有的 dangling images:&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker images -f &quot;dangling=true&quot;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;删除所有的 dangling images：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker rmi $(docker images -f &quot;dangling=true&quot; -q)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;批量操作&quot;&gt;批量操作&lt;/h2&gt;
+&lt;p&gt;当服务器重启或者因故关机时，docker 容器可能需要全部重新启动，启动所有 docker 容器&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;注：如果有依赖关系，如 link 等，应该先启动这些被依赖的容器&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker start $(docker ps -aq)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;停止所有 docker 容器&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker stop $(docker ps -aq)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;删除所有 docker 容器&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker rm $(docker ps -aq)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;删除所有 docker 镜像&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker rmi $(docker images -q)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;docker-资源清理&quot;&gt;docker 资源清理&lt;/h2&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;docker container prune # 删除所有退出状态的容器
+docker volume prune # 删除未被使用的数据卷
+docker image prune # 删除 dangling 或所有未被使用的镜像
+
+docker system prune #删除已停止的容器、dangling 镜像、未被容器引用的 network 和构建过程中的 cache
+# 安全起见，这个命令默认不会删除那些未被任何容器引用的数据卷，如果需要同时删除这些数据卷，你需要显式的指定 --volumns 参数
+docker system prune --all --force --volumns #这次不仅会删除数据卷，而且连确认的过程都没有了！注意，使用 --all 参数后会删除所有未被引用的镜像而不仅仅是 dangling 镜像&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;reference&quot;&gt;Reference&lt;/h2&gt;
+</description>
+<pubDate>Wed, 30 Jan 2019 15:54:00 +0000</pubDate>
+<dc:creator>WeihanLi</dc:creator>
+<og:description>你不知道的 docker 命令的奇淫怪巧 Intro 介绍并收录一些可能会用到的一些简单实用却很少有人用的 docker 命令 dangling images build 自己的 docker 镜像的</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/weihanli/p/docker-tricks.html</dc:identifier>
+</item>
+<item>
+<title>Jmeter干货 不常用却极其有用的几个地方 - 夏天里的Jasmine</title>
+<link>http://www.cnblogs.com/qianjinyan/p/10340269.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/qianjinyan/p/10340269.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;1. Jmeter测试计划下Run Thread Groups consecutively 表示序列化执行测试计划下所有线程组中的各个请求&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;如下图配置，新建的测试计划中，不默认勾选此项，&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;而享用Jmeter做接口自动化测试的同学们，会发现一个问题是，可能多个接口使用的变量是同一个，同个接口一起执行，会影响数据检查和断言，导致自动化误报。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1064427/201901/1064427-20190130233910622-1394520070.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;2. Jmeter的HTTP请求中，设置响应时间超过N，将请求标记为失败，不再继续等待&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;strong&gt;如下图配置，HTTP请求中点击高级Advance项，在Timeouts下填写设置的响应超时时间，注意单位是毫秒&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1064427/201901/1064427-20190130234445065-1294206036.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;3. Jmeter的快捷键&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1064427/201901/1064427-20190130235253878-558704726.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;span&gt;欢迎各位亲们进行补充~~~&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 30 Jan 2019 15:53:00 +0000</pubDate>
+<dc:creator>夏天里的Jasmine</dc:creator>
+<og:description>1. Jmeter测试计划下Run Thread Groups consecutively 表示序列化执行测试计划下所有线程组中的各个请求 如下图配置，新建的测试计划中，不默认勾选此项， 而享用Jme</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/qianjinyan/p/10340269.html</dc:identifier>
+</item>
+<item>
+<title>【原创】谈谈服务雪崩、降级与熔断 - 孤独烟</title>
+<link>http://www.cnblogs.com/rjzheng/p/10340176.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/rjzheng/p/10340176.html</guid>
+<description>&lt;h2 id=&quot;引言&quot;&gt;引言&lt;/h2&gt;
+&lt;p&gt;首先，之所以谈这个话题呢，是发现现在很多人对微服务的设计缺乏认识，所以写一篇扫盲文。当然，考虑到目前大多微服务的文章都是口水文，烟哥争取将实现方式讲透，点清楚，让大家有所收获！&lt;br/&gt;OK，我要先说明一下，我有很长一段时间将&lt;strong&gt;服务降级&lt;/strong&gt;和&lt;strong&gt;服务熔断&lt;/strong&gt;混在一起，认为是一回事！&lt;br/&gt;为什么我会有这样的误解呢？&lt;br/&gt;针对下面的情形，如图所示&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/725429/201901/725429-20190130225813653-676264554.png&quot;/&gt;&lt;br/&gt;当&lt;code&gt;Service A&lt;/code&gt;调用&lt;code&gt;Service B&lt;/code&gt;，失败多次达到一定阀值，&lt;code&gt;Service A&lt;/code&gt;不会再去调&lt;code&gt;Service B&lt;/code&gt;，而会去执行本地的降级方法！&lt;br/&gt;对于这么一套机制:在Spring cloud中结合Hystrix,将其称为熔断降级!&lt;/p&gt;
+&lt;p&gt;所以我当时就以为是一回事了，毕竟熔断和降级是一起发生的，而且这二者的概念太相近了！后面接触了多了，发现自己理解的还是太狭隘了，因此本文中带着点我自己的见解，大家如果有不同意见，请轻喷！毕竟还有很多人认为两者是一致的！&lt;/p&gt;
+&lt;h2 id=&quot;正文&quot;&gt;正文&lt;/h2&gt;
+&lt;h3 id=&quot;服务雪崩&quot;&gt;服务雪崩&lt;/h3&gt;
+&lt;p&gt;OK，我们从服务雪崩开始讲起！假设存在如下调用链&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/725429/201901/725429-20190130225819816-259073605.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;而此时，&lt;code&gt;Service A&lt;/code&gt;的流量波动很大，流量经常会突然性增加！那么在这种情况下，就算&lt;code&gt;Service A&lt;/code&gt;能扛得住请求，&lt;code&gt;Service B&lt;/code&gt;和&lt;code&gt;Service C&lt;/code&gt;未必能扛得住这突发的请求。&lt;br/&gt;此时，如果&lt;code&gt;Service C&lt;/code&gt;因为抗不住请求，变得不可用。那么&lt;code&gt;Service B&lt;/code&gt;的请求也会阻塞，慢慢耗尽&lt;code&gt;Service B&lt;/code&gt;的线程资源，&lt;code&gt;Service B&lt;/code&gt;就会变得不可用。紧接着，&lt;code&gt;Service A&lt;/code&gt;也会不可用，这一过程如下图所示&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/725429/201901/725429-20190130225824355-156743654.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如上图所示，一个服务失败，导致整条链路的服务都失败的情形，我们称之为服务雪崩。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;ps：&lt;/code&gt;谁发明的这个词，真是面试装13必备！&lt;/p&gt;
+&lt;p&gt;那么，服务熔断和服务降级就可以视为解决服务雪崩的手段之一。&lt;/p&gt;
+&lt;h3 id=&quot;服务熔断&quot;&gt;服务熔断&lt;/h3&gt;
+&lt;p&gt;那么，什么是服务熔断呢？&lt;br/&gt;服务熔断：当下游的服务因为某种原因突然&lt;strong&gt;变得不可用&lt;/strong&gt;或&lt;strong&gt;响应过慢&lt;/strong&gt;，上游服务为了保证自己整体服务的可用性，不再继续调用目标服务，直接返回，快速释放资源。如果目标服务情况好转则恢复调用。&lt;br/&gt;需要说明的是熔断其实是一个框架级的处理，那么这套熔断机制的设计，基本上业内用的是&lt;code&gt;断路器模式&lt;/code&gt;，如&lt;code&gt;Martin Fowler&lt;/code&gt;提供的状态转换图如下所示&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/725429/201901/725429-20190130230717121-435467568.jpg&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;最开始处于&lt;code&gt;closed&lt;/code&gt;状态，一旦检测到错误到达一定阈值，便转为&lt;code&gt;open&lt;/code&gt;状态；&lt;/li&gt;
+&lt;li&gt;这时候会有个 reset timeout，到了这个时间了，会转移到&lt;code&gt;half open&lt;/code&gt;状态；&lt;/li&gt;
+&lt;li&gt;尝试放行一部分请求到后端，一旦检测成功便回归到&lt;code&gt;closed&lt;/code&gt;状态，即恢复服务；&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;业内目前流行的熔断器很多，例如阿里出的Sentinel,以及最多人使用的Hystrix&lt;br/&gt;在Hystrix中，对应配置如下&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;//滑动窗口的大小，默认为20
+circuitBreaker.requestVolumeThreshold 
+//过多长时间，熔断器再次检测是否开启，默认为5000，即5s钟
+circuitBreaker.sleepWindowInMilliseconds 
+//错误率，默认50%
+circuitBreaker.errorThresholdPercentage&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;每当20个请求中，有50%失败时，熔断器就会打开，此时再调用此服务，将会直接返回失败，不再调远程服务。直到5s钟之后，重新检测该触发条件，判断是否把熔断器关闭，或者继续打开。&lt;/p&gt;
+&lt;p&gt;这些属于框架层级的实现，我们只要实现对应接口就好！&lt;/p&gt;
+&lt;h3 id=&quot;服务降级&quot;&gt;服务降级&lt;/h3&gt;
+&lt;p&gt;那么，什么是服务降级呢？&lt;br/&gt;这里有两种场景:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;当下游的服务因为某种原因&lt;strong&gt;响应过慢&lt;/strong&gt;，下游服务主动停掉一些不太重要的业务，释放出服务器资源，增加响应速度！&lt;/li&gt;
+&lt;li&gt;当下游的服务因为某种原因&lt;strong&gt;不可用&lt;/strong&gt;，上游主动调用本地的一些降级逻辑，避免卡顿，迅速返回给用户！&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;其实乍看之下，很多人还是不懂熔断和降级的区别!&lt;/p&gt;
+&lt;p&gt;其实应该要这么理解:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;服务降级有很多种降级方式！如开关降级、限流降级、熔断降级!&lt;/li&gt;
+&lt;li&gt;服务熔断属于降级方式的一种！&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;可能有的人不服，觉得熔断是熔断、降级是降级，分明是两回事啊！其实不然，因为从实现上来说，熔断和降级必定是一起出现。因为当发生&lt;strong&gt;下游服务不可用&lt;/strong&gt;的情况，这个时候为了对最终用户负责，就需要&lt;strong&gt;进入上游的降级逻辑&lt;/strong&gt;了。因此，将熔断降级视为降级方式的一种，也是可以说的通的！&lt;/p&gt;
+&lt;p&gt;我撇开框架，以最简单的代码来说明！上游代码如下&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;try{
+    //调用下游的helloWorld服务
+    xxRpc.helloWorld();
+}catch(Exception e){
+    //因为熔断，所以调不通
+    doSomething();
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;注意看，下游的helloWorld服务因为熔断而调不通。此时上游服务就会进入catch里头的代码块，那么catch里头执行的逻辑，你就可以理解为降级逻辑!&lt;br/&gt;&lt;strong&gt;什么，你跟我说你不捕捉异常，直接丢页面？&lt;/strong&gt;&lt;br/&gt;OK，那我甘拜下风，当我理解错误!&lt;/p&gt;
+&lt;p&gt;服务降级大多是属于一种业务级别的处理，&lt;br/&gt;当然，我这里要讲的是另一种降级方式，也就是&lt;em&gt;&lt;span&gt;开关降级&lt;/span&gt;&lt;/em&gt;!这也是我们生产上常用的另一种降级方式！&lt;/p&gt;
+&lt;p&gt;做法很简单，做个开关，然后将开关放配置中心！在配置中心更改开关，决定哪些服务进行降级。至于配置变动后，应用怎么监控到配置发生了变动，这就不是本文该讨论的范围。&lt;br/&gt;那么，在应用程序中部下开关的这个过程，业内也有一个名词，称为&lt;strong&gt;埋点&lt;/strong&gt;！&lt;/p&gt;
+&lt;p&gt;那接下来最关键的一个问题，哪些业务需要埋点？&lt;br/&gt;一般有以下方法&lt;br/&gt;&lt;strong&gt;(1)简化执行流程&lt;/strong&gt;&lt;br/&gt;自己梳理出核心业务流程和非核心业务流程。然后在非核心业务流程上加上开关，一旦发现系统扛不住，关掉开关，结束这些次要流程。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;(2)关闭次要功能&lt;/strong&gt;&lt;br/&gt;一个微服务下肯定有很多功能，那自己区分出主要功能和次要功能。然后次要功能加上开关，需要降级的时候，把次要功能关了吧！&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;(3)降低一致性&lt;/strong&gt;&lt;br/&gt;假设，你在业务上发现执行流程没法简化了，愁啊！也没啥次要功能可以关了，桑心啊！那只能降低一致性了，即将核心业务流程的同步改异步，将强一致性改最终一致性！&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;可是这些都是手动降级，有办法自动降级么？&lt;/strong&gt;&lt;br/&gt;这里我摸着良心说，我们在生产上没弄自动降级！因为一般需要降级的场景，都是可以预见的，例如某某活动。假设，平时真的有突发事件，流量异常，也有监控系统发邮件通知，提醒我们去降级！&lt;br/&gt;当然，这并不代表自动降级不能做，因此以下内容可以认为我在胡说八道，因为我在生产上没实践过，只是头脑大概想了下，如果让我来做自动降级我会怎么实现：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;(1)自己设一个阈值，例如几秒内失败多少次，就启动降级&lt;/li&gt;
+&lt;li&gt;(2)自己做接口监控(有兴趣的可以了解一下Rxjava)，达到阈值就走推送逻辑。怎么推呢？比如你配置是放在git上，就用jgit去改配置中心的配置。如果配置放数据库，就用jdbc去改。&lt;/li&gt;
+&lt;li&gt;(3)改完配置中心的配置后，应用就可以自动检测到配置的变化，进行降级！(这句不了解的，了解一下配置中心的热刷新功能)&lt;/li&gt;
+&lt;/ul&gt;</description>
+<pubDate>Wed, 30 Jan 2019 15:51:00 +0000</pubDate>
+<dc:creator>孤独烟</dc:creator>
+<og:description>引言 首先，之所以谈这个话题呢，是发现现在很多人对微服务的设计缺乏认识，所以写一篇扫盲文。当然，考虑到目前大多微服务的文章都是口水文，烟哥争取将实现方式讲透，点清楚，让大家有所收获！ OK，我要先说明</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/rjzheng/p/10340176.html</dc:identifier>
+</item>
+<item>
 <title>意识科学初步：David Chalmers的简单问题与困难问题 - 毛利小九郎</title>
 <link>http://www.cnblogs.com/morikokyuro/p/10335713.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/morikokyuro/p/10335713.html</guid>
@@ -313,1012 +1776,6 @@ wbadmin delete systemstatebackup -keepVersions:3
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/wenzhongxiang/p/10340173.html</dc:identifier>
-</item>
-<item>
-<title>程序员如何科学地记日志 - owenandhisfriends</title>
-<link>http://www.cnblogs.com/owenandhisfriends/p/10339952.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/owenandhisfriends/p/10339952.html</guid>
-<description>&lt;div class=&quot;markdown-here-wrapper&quot; data-md-url=&quot;https://i.cnblogs.com/EditPosts.aspx?opt=1&quot; readability=&quot;69&quot;&gt;
-&lt;p&gt;无论是哪种程序员，日常开发中都离不开记日志。但是通过最近的review会，发现很多程序员在记日志的时候，还是会有些问题。那么如何科学地记录日志呢？&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;为什么要记日志&lt;/h2&gt;
-&lt;p&gt;在寻求方法前，我们先看看我们记日志的目标。&lt;br/&gt;日志是程序运行时的x光，能够追踪到程序运行的状态，通过日志，程序员能够加速调试速度，还原异常情况出现的场景。&lt;br/&gt;也有通过日志记录处理数据，方便后面统计和审计。&lt;br/&gt;还有通过日志进行备份，当数据有问题时，通过日志恢复数据。&lt;br/&gt;总之，我们记日志，是为了给人看，来了解程序运行的状态。今天我们只讲日常调试和发现异常的场景。&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;日志记录什么内容&lt;/h2&gt;
-&lt;p&gt;既然日志是给人看的，就要让人能读懂，给出足够的信息。要带有上下文，4w都要清晰。把日志记录时刻的时间when、地点where（发生的函数，代码行）、什么数据或请求导致（who）。通过这些我们推出why，和how。知道为什么会记录成这样，有什么影响。&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;日志的级别&lt;/h2&gt;
-&lt;p&gt;在程序中，日志也是分级别的，不同的级别表示日志的不同场景和用途。&lt;br/&gt;通常有如下级别：&lt;br/&gt;TRACE：打印最详尽，在开发过程中使用此级别。类似于单步调试，在发不到运营环境后应该屏蔽掉这个级别。&lt;br/&gt;DEBUG：指出细粒度信息事件对调试应用程序是非常有帮助的，主要用于开发过程中打印一些运行信息。&lt;br/&gt;INFO：消息在粗粒度级别上突出强调应用程序的运行过程。打印一些你感兴趣的或者重要的信息，这个可以用于生产环境中输出程序运行的一些重要信息，但是不能滥用，避免打印过多的日志。&lt;br/&gt;WARN： 表明会出现潜在错误的情形，有些信息不是错误信息，但是也要给程序员的一些提示。&lt;br/&gt;ERROR： 发生了错误事件，但仍然不影响系统的继续运行。打印错误和异常信息，需要记录后处理。&lt;br/&gt;FATAL： 指出每个严重的错误事件将会导致应用程序的退出。严重错误，直接停止程序。&lt;br/&gt;每一条日志都是以上级别中的一种，程序中通过配置默认打印的级别，控制哪些语句打印，哪些不打印。&lt;br/&gt;一般开发阶段使用DEBUG级别，线上运营阶段使用INFO或WARN级别。&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;注意事项&lt;/h2&gt;
-&lt;h3 id=&quot;-&quot;&gt;控制好日志的量&lt;/h3&gt;
-&lt;p&gt;记录日志是旁路逻辑，和给用户使用的逻辑是互不影响的。但是日志会消耗程序性能，抢占给用户的计算机资源。所以在记录日志时，要控制好日志的量，不要因为记录日志而导致性能下降。&lt;br/&gt;有些同学会觉得，我的业务现在量也不大，多记些日志也没什么。勿以善小而不为。要养成好的习惯，如果没有这种意识，是没有机会做大业务量的程序的。即使有，也会出问题。&lt;br/&gt;即使量少，用户少，但是不保证程序运行的次数少。如果有个循环频繁调用，触发记录日志，也会导致出问题的。我就见过日志记录太多，把cpu给占满，机器连ssh都连不上。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;日志中出现太多的特殊字符&lt;/h3&gt;
-&lt;p&gt;看到有的同学在日志里，会写些特殊的字符串，例如「XXXXXXXXXX」。原因是为了好搜索。如果是为了解决号搜索的问题，使用有规则的格式，和有意义的名字是不是更好，把代码行号打进去是不是更容易搜索？而且大家还知道是什么意思。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;注意日志级别&lt;/h3&gt;
-&lt;p&gt;一种是把DEBUG级别设置到生产环境。还有一种是在代码中没有日志级别的概念，都用一种级别，DEBUG或者ERROR。要么所有的日志在生产环境都打不出来，要么一下子全打出来了。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;注意日志安全&lt;/h3&gt;
-&lt;p&gt;既然日志记录了这么多信息，要注意日志中的内容，不能什么都打。和用户隐私相关的要避免打印到日志中去。因为这些信息如果不影响查找bug，记录后容易泄露用户隐私。例如：用户的聊天记录、用户的密钥、用户的电话号码邮箱等。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;日志可读性&lt;/h3&gt;
-&lt;p&gt;尽量用英文，尽量少用中文，防止机器或网页有字符问题，造成不必要的查找麻烦。&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;几种有效的日志形式&lt;/h2&gt;
-&lt;p&gt;以下这几种记录日志的形式都各有所长，值得大家学习。但是切记，都有好用的日志库，千万别自己实现，里面的水很深。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;内存日志&lt;/h3&gt;
-&lt;p&gt;既然日志打印很耗费性能，一般是磁盘IO是瓶颈。但是在程序遇到问题时，还想把从程序开始，到出问题这段时间的日志都记录下来，怎么办呢？就用内存日志。&lt;br/&gt;申请一个共享内存变量，在程序的各个运行节点，都把要记录的日志信息存储在这个变量中。当程序出错，或者要crash后。用工具把这段内存dump下来，相当于一些栈信息打印出来。如果程序运行正常，当新的请求再开始执行时，重新清空变量，再继续记录。&lt;br/&gt;既记录了很多信息，有没有造成IO的花销，在寻找C++后台程序core的原因时是非常有用的一种方式。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;远程日志&lt;/h3&gt;
-&lt;p&gt;既然打本机日志耗费IO性能，导致cpu使用率飙升。那么通过网络包，把信息发送给远端，尽量减轻本地记录日志负担。这也是一种好方法。远端有专门处理日志的程序，负责给日志入库，进行分析和索引。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;染色日志&lt;/h3&gt;
-&lt;p&gt;当有用户反馈遇到问题时，但发现只是个例，其他用户并没有此问题时。可以给反馈问题的用户「染色」。日志程序在写日志时，只对染色的用户进行记录，其他的不记。&lt;/p&gt;
-&lt;h3 id=&quot;-&quot;&gt;流水日志&lt;/h3&gt;
-&lt;p&gt;一般用于写接口，把每次写的原始参数给记下来。通过这些流水日志，能够恢复出记录的数据，用于备份或对账最终数据，或者提供给其他系统重写数据。&lt;/p&gt;
-&lt;h2 id=&quot;-&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;日志是给人看的，要注意可读性。&lt;br/&gt;写日志时要注意不要影响程序性能，按需而记。&lt;br/&gt;日志在软件维护期间使用的最多，不要日志用时方恨少。&lt;/p&gt;
-&lt;p&gt;​&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Wed, 30 Jan 2019 13:55:00 +0000</pubDate>
-<dc:creator>owenandhisfriends</dc:creator>
-<og:description>无论是哪种程序员，日常开发中都离不开记日志。但是通过最近的review会，发现很多程序员在记日志的时候，还是会有些问题。那么如何科学地记录日志呢？ 为什么要记日志 在寻求方法前，我们先看看我们记日志的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/owenandhisfriends/p/10339952.html</dc:identifier>
-</item>
-<item>
-<title>记录下diagwait的问题 - AlfredZhao</title>
-<link>http://www.cnblogs.com/jyzhao/p/10339816.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/jyzhao/p/10339816.html</guid>
-<description>&lt;p&gt;对于Oracle集群，有关diagwait的解释可以很容易在网上搜到：&lt;/p&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;该问题只会出现在ORACLE 11.2 以前版本中，在 11G R2版本中，diagwait的值默认配置为13。&lt;br/&gt;而针对11.2以前的版本，需要手工将diagwait修改为13，以推迟重启的时间便于将缓存中的日志信息有足够的时间写入到磁盘文件中，以及减少因为与OS交互允许时间太短而造成的重启可能。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;diagwait算是一个小知识点，但具有普遍性。因为现实中很多客户生产数据库版本低于11.2，同时diagwait没有正确设置（默认配置不合理），轻则导致一些节点驱逐的案例缺少相关日志无法准确分析原因，重则由于oporcd默认的1.5s（1000ms+500ms）过短过于敏感，比如瞬时压力过大都很容易导致节点主机重启，这显然不是我们所期望的。&lt;/p&gt;
-&lt;p&gt;diagwait设置方法（使用root用户）：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;crsctl set css diagwait 13&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;diagwait查询方法：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;crsctl get css diagwait 
-ps -ef|grep oproc&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;需要重启集群才能生效修改。&lt;/p&gt;
-&lt;p&gt;下面在测试环境验证下这个过程：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;[oracle@rac1-server ~]$ ps -ef|grep oproc
-oracle   12527  6205  0 11:44 pts/4    00:00:00 grep oproc
-root     21426 20189  0 Jan24 ?        00:00:00 /bin/sh /etc/init.d/init.cssd oprocd
-root     21799 21426  0 Jan24 ?        00:00:15 /s01/oracle/product/10.2.0/crs_1/bin/oprocd.bin run -t 1000 -m 500 -f
-[oracle@rac1-server ~]$ crsctl get css diagwait
-Configuration parameter diagwait is not defined.
-
-[root@rac1-server ~]# /s01/oracle/product/10.2.0/crs_1/bin/crsctl set css diagwait 13
-Configuration parameter diagwait is now set to 13.
-[root@rac1-server ~]# /s01/oracle/product/10.2.0/crs_1/bin/crsctl get css diagwait 
-13[oracle@rac1-server ~]$ ps -ef|grep oproc
-oracle   15375 14082  0 12:56 pts/4    00:00:00 grep oproc
-root     21426 20189  0 Jan24 ?        00:00:00 /bin/sh /etc/init.d/init.cssd oprocd
-root     21799 21426  0 Jan24 ?        00:00:15 /s01/oracle/product/10.2.0/crs_1/bin/oprocd.bin run -t 1000 -m 500 -f
-此时可以看到oprocd的设置并未修改。
-
---需要重启crs（所有节点都需要重启）：
-[root@rac1-server ~]# /s01/oracle/product/10.2.0/crs_1/bin/crsctl stop crs
-[root@rac1-server ~]# /s01/oracle/product/10.2.0/crs_1/bin/crsctl start crs
-
---再次查看oprocd进程，看到-m后面的值已经成为由默认的500改为10000，单位是ms：
-[oracle@rac1-server ~]$ ps -ef|grep oprocd
-root     17520 16659  0 12:58 ?        00:00:00 /bin/sh /etc/init.d/init.cssd oprocd
-root     17916 17520  0 12:58 ?        00:00:00 /s01/oracle/product/10.2.0/crs_1/bin/oprocd.bin run -t 1000 -m 10000 -hsi 5:10:50:75:90 -f
-oracle   18504 16764  0 12:59 pts/4    00:00:00 grep oprocd&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Wed, 30 Jan 2019 13:10:00 +0000</pubDate>
-<dc:creator>AlfredZhao</dc:creator>
-<og:description>对于Oracle集群，有关diagwait的解释可以很容易在网上搜到： 该问题只会出现在ORACLE 11.2 以前版本中，在 11G R2版本中，diagwait的值默认配置为13。 而针对11.2</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/jyzhao/p/10339816.html</dc:identifier>
-</item>
-<item>
-<title>ES6学习笔记（一）-变量的解构赋值 - JoeJoan</title>
-<link>http://www.cnblogs.com/Joe-and-Joan/p/10339820.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Joe-and-Joan/p/10339820.html</guid>
-<description>&lt;h2 id=&quot;用途&quot; class=&quot;用途&quot;&gt;变量的解构赋值种类&lt;/h2&gt;
-&lt;p&gt;解构（Destructuring）：ES6 允许按照一定模式，从数组和对象中提取值，对变量进行赋值。&lt;/p&gt;
-&lt;p&gt;只有当一个数组成员严格等于（===）&lt;code&gt;undefined&lt;/code&gt;，包括空“ ” ，默认值才会生效，null不全等于undefined，默认值不会生效。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;第一种：数组的解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210426675-1636179145.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;数组的元素是按次序排列的，变量的取值由它的位置决定；&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;第二种：对象的解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210245902-876843799.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;先找到同名属性，然后再赋给对应的变量。真正被赋值的是后者，而不是前者。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;第三种：字符串的解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210521803-1817832098.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210528040-344843081.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;字符串被转换成了一个类似数组的对象。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;第四种：数值和布尔值的解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;解构赋值时，如果等号右边是数值和布尔值，则会先转为对象。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210641572-1629013470.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;第五种：函数参数的解构赋值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1486391/201901/1486391-20190130210743947-698477769.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;函数&lt;code&gt;add&lt;/code&gt;的参数表面上是一个数组，但在传入参数时，数组参数就被解构成变量&lt;code&gt;x&lt;/code&gt;和&lt;code&gt;y&lt;/code&gt;。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;注意点：只要有可能，就不要在模式中放置圆括号（）,否则可能导致解构的歧义。&lt;/span&gt;&lt;/p&gt;
-&lt;h2 id=&quot;用途&quot; class=&quot;用途&quot;&gt;变量的解构赋值用途&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;变量的解构赋值用途很多&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;（1）交换变量的值&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-let x = 1&lt;span&gt;;
-let y &lt;/span&gt;= 2&lt;span&gt;;
-
-[x, y] &lt;/span&gt;= [y, x];
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面代码交换变量&lt;code&gt;x&lt;/code&gt;和&lt;code&gt;y&lt;/code&gt;的值，这样的写法不仅简洁，而且易读，语义非常清晰。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;（2）从函数返回多个值&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;函数只能返回一个值，如果要返回多个值，只能将它们放在数组或对象里返回。有了解构赋值，取出这些值就非常方便。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 返回一个数组&lt;/span&gt;
-
-&lt;span&gt;function&lt;/span&gt;&lt;span&gt; example() {
-  &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; [1, 2, 3&lt;span&gt;];
-}
-let [a, b, c] &lt;/span&gt;=&lt;span&gt; example();
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 返回一个对象&lt;/span&gt;
-
-&lt;span&gt;function&lt;/span&gt;&lt;span&gt; example() {
-  &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; {
-    foo: &lt;/span&gt;1&lt;span&gt;,
-    bar: &lt;/span&gt;2&lt;span&gt;
-  };
-}
-let { foo, bar } &lt;/span&gt;= example();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;（3）函数参数的定义&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;解构赋值可以方便地将一组参数与变量名对应起来。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 参数是一组有次序的值&lt;/span&gt;
-&lt;span&gt;function&lt;/span&gt;&lt;span&gt; f([x, y, z]) { ... }
-f([&lt;/span&gt;1, 2, 3&lt;span&gt;]);
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 参数是一组无次序的值&lt;/span&gt;
-&lt;span&gt;function&lt;/span&gt;&lt;span&gt; f({x, y, z}) { ... }
-f({z: &lt;/span&gt;3, y: 2, x: 1});
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;（4）提取 JSON 数据&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;解构赋值对提取 JSON 对象中的数据，尤其有用。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
-&lt;pre&gt;
-let jsonData =&lt;span&gt; {
-  id: &lt;/span&gt;42&lt;span&gt;,
-  status: &lt;/span&gt;&quot;OK&quot;&lt;span&gt;,
-  data: [&lt;/span&gt;867, 5309&lt;span&gt;]
-};
-
-let { id, status, data: number } &lt;/span&gt;=&lt;span&gt; jsonData;
-
-console.log(id, status, number);
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 42, &quot;OK&quot;, [867, 5309]&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面代码可以快速提取 JSON 数据的值。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;（5）函数参数的默认值&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-jQuery.ajax = &lt;span&gt;function&lt;/span&gt;&lt;span&gt; (url, {
-  async &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;,
-  beforeSend &lt;/span&gt;= &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {},
-  cache &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;,
-  complete &lt;/span&gt;= &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {},
-  crossDomain &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;,
-  global &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;,
-  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ... more config&lt;/span&gt;
-} =&lt;span&gt; {}) {
-  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ... do stuff&lt;/span&gt;
-};
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;指定参数的默认值，就避免了在函数体内部再写&lt;code&gt;var foo = config.foo || 'default foo';&lt;/code&gt;这样的语句。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;（6）遍历 Map 结构&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;任何部署了 Iterator 接口的对象，都可以用&lt;code&gt;for...of&lt;/code&gt;循环遍历。Map 结构原生支持 Iterator 接口，配合变量的解构赋值，获取键名和键值就非常方便。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-const map = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Map();
-map.set(&lt;/span&gt;'first', 'hello'&lt;span&gt;);
-map.set(&lt;/span&gt;'second', 'world'&lt;span&gt;);
-
-&lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (let [key, value] of map) {
-  console.log(key &lt;/span&gt;+ &quot; is &quot; +&lt;span&gt; value);
-}
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; first is hello&lt;/span&gt;&lt;span&gt;
-//&lt;/span&gt;&lt;span&gt; second is world&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;如果只想获取键名，或者只想获取键值，可以写成下面这样。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 获取键名&lt;/span&gt;
-&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (let [key] of map) {
-  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ...&lt;/span&gt;
-&lt;span&gt;}
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 获取键值&lt;/span&gt;
-&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (let [,value] of map) {
-  &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ...&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;（7）输入模块的指定方法&lt;/strong&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;加载模块时，往往需要指定输入哪些方法。解构赋值使得输入语句非常清晰。
-
-const { SourceMapConsumer, SourceNode } &lt;/span&gt;= require(&quot;source-map&quot;);
-&lt;/pre&gt;&lt;/div&gt;
-</description>
-<pubDate>Wed, 30 Jan 2019 13:09:00 +0000</pubDate>
-<dc:creator>JoeJoan</dc:creator>
-<og:description>变量的解构赋值种类 解构（Destructuring）：ES6 允许按照一定模式，从数组和对象中提取值，对变量进行赋值。 只有当一个数组成员严格等于（ ）undefined，包括空“ ” ，默认值才会</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Joe-and-Joan/p/10339820.html</dc:identifier>
-</item>
-<item>
-<title>应对复杂软件的思考 - whthomas</title>
-<link>http://www.cnblogs.com/whthomas/p/10339817.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/whthomas/p/10339817.html</guid>
-<description>&lt;p&gt;由于自己身处SAAS行业，在经历了几轮复杂需求的蹂躏之后，我一直试图寻找一种解法，可以尽量cover住复杂多变的需求。在过去的一年中，通过反复阅读和实践，似乎让我对此有了一些清晰的思路，所以我想写一点东西总结一下自己的这一年里的思考。&lt;/p&gt;
-&lt;p&gt;在我们的项目初期，项目的规模可能比较小，代码量很少，我们的代码或许还能整理的比较干净，就像这几组交换机的网线一样，比较有条理。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210322413-1999097446.png&quot; alt=&quot;整齐的网线&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;但是随着功能复杂之后，项目也随之变得庞大，整个代码就可能会和这个机房一样，非常的混乱。在经历几次这种状况之后，于是我便在想，究竟是什么问题导致了这种混乱。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210353770-1591014552.png&quot; alt=&quot;凌乱的机房&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;首先来看一段代码（&lt;code&gt;Kotlin Code&lt;/code&gt;）：&lt;/p&gt;
-&lt;pre class=&quot;kotlin&quot;&gt;
-&lt;code&gt;
-fun executeRequest(request: Request) : String {
-    // 校验身份
-    val isValidate = validateRequest(request)
-    if( isValidate ) {
-        return &quot;Request is not valid&quot;
-    }
-    // 处理业务
-   dealBiz(request)
-    try {
-        // 存储数据
-        saveToDB(request)
-    } catch (exception:Exception) {
-        return &quot;Occur error when save results to DB&quot;
-    }
-    // 发送消息
-    val isSendSuccess = sendMessage(request)
-    if (isSendSuccess == false) {
-         return &quot;message send unsuccessfully.&quot;
-    }
-    return &quot;success&quot;
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这是我们比较常见的一些代码结构，其实看起来问题也不算很大，但是随着业务复杂，&lt;strong&gt;业务逻辑&lt;/strong&gt;的控制和&lt;strong&gt;控制逻辑&lt;/strong&gt;耦合的很厉害，阅读这种&quot;&lt;strong&gt;面条代码&lt;/strong&gt;&quot;的成本越来越高。每一位新进入项目的伙伴犹如进入了一个“代码迷宫”。来来回回去寻找自己需要的那一段代码，实际上这个时候已经形成了：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;只有上帝和我能看得懂的“上帝代码”了。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;这显然是我们不愿见到的代码，在&lt;a href=&quot;https://time.geekbang.org/column/48&quot;&gt;左耳听风专栏&lt;/a&gt;里有一篇《编程的本质》里讲到：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;有效地分离 Logic、Control 和 Data 是写出好程序的关键所在。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;那什么又是&lt;code&gt;Logic&lt;/code&gt;,&lt;code&gt;Control&lt;/code&gt;,&lt;code&gt;Data&lt;/code&gt; 呢？&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Logic : 就是一般的业务代码，类似上面代码中的&lt;code&gt;dealBiz()&lt;/code&gt;,&lt;code&gt;sendMessage()&lt;/code&gt;等等&lt;/li&gt;
-&lt;li&gt;Control : 对业务逻辑的流程控制，比如遍历数据、查找数据、多线程、并发、异步等等&lt;/li&gt;
-&lt;li&gt;Data ：函数和程序之间传递的这部分信息&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;如果有效地将这几种代码分离，代码可读性将会大大提升。通过这种拆分，我们也降低除了&lt;strong&gt;自己之外的维护者&lt;/strong&gt;阅读代码&lt;strong&gt;翻译业务&lt;/strong&gt;内容的成本。通过分离，我们可以将代码写成这样：&lt;/p&gt;
-&lt;pre class=&quot;kotlin&quot;&gt;
-&lt;code&gt;fun executeRequest(request: Request) : String {
-    return Result
-            .of(request)
-            .flatMap { validateRequest(request) }
-            .flatMap { dealBiz(request) }
-            .flatMap { saveToDB(request) }
-            .flatMap { sendMessage(request) }
-            .fold(
-                success = { return &quot;success&quot; },
-                failure = { return it.message }
-            )
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;当然这里说了如何写细节的代码，那么代码架构又如何去做才可能保证可以应对这么多的变化？&lt;/p&gt;
-&lt;p&gt;一般的项目中我们把一个软件系统进行分层，这是我们目前做工程项目的一个共识，我们最初学习的分层架构就是经典的三层架构了。它自顶向下分成三层：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;用户界面层（User Interface Layer）&lt;/li&gt;
-&lt;li&gt;业务逻辑层（Business Logic Layer）&lt;/li&gt;
-&lt;li&gt;数据访问层（Data Access Layer）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;到&lt;strong&gt;数据访问层&lt;/strong&gt;这块，其实很多系统已经变成了&lt;strong&gt;面向数据编程&lt;/strong&gt;，最终做成了“数据库管理系统”。按照传统的三层模型，用户界面的开发依赖Service层，而Service层又依赖着DAO，DAO对应着数据库。大家相互依赖，业务逻辑一旦修改，就意味着要从DAO层开始修改，数据库也跟着被修改，而往往随着我们开发的深入，业务的模型会被不断调整，这样数据库可能就要频繁的变动。代码也开始变得复杂... ...&lt;/p&gt;
-&lt;p&gt;而在领域驱动设计中提出了另外一种&lt;strong&gt;四层架构&lt;/strong&gt;，在此之前，我想先分享《实现领域驱动设计》一书讲的六边形模型。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210435213-1790154051.png&quot; alt=&quot;六边形架构&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;我们在设计系统的时候，往往过于关注数据库，Http接口等基础设施的设计，而忽略了我们需要关注的业务。在复杂系统中，最容易变化的也是业务形态，产品经常会要求改来改去，因为业务本身就在不断地演进，如果我们一开始就基于数据库作所有的设计，那么势必一旦遇上业务的修改，库表肯定也需要对应先进行变化。假如我们融入六边形架构，将数据库和暴露的&lt;code&gt;Controller&lt;/code&gt;都视为是基础设施，先去关注业务的模型和代码，&lt;code&gt;Class&lt;/code&gt;的修改比要数据库改起来要简单的多。另外一方面，也大大提高了程序的可测试性：在没有准备一堆基础设施(数据库，接口，异步通知等等)情况下，可以先测试逻辑的完整性。&lt;/p&gt;
-&lt;p&gt;另外，有时候随着业务增长有的基础设施是会需要进行替换的，采用六边形架构之后，这种更换的成本就会降低。另外如果出现需要使用Web Service的客户，我们也不必纠结于之前的HTTP接口，直接开出一套新的协议代码供客户使用，而不会纠结领域部分代码有逻辑上的缺失。&lt;/p&gt;
-&lt;p&gt;采用六边形架构之后，我们的领域模型也会更加独立，更精简，在适应新的需求时修改也会更容易。在《架构整洁之道》之中提到的“整洁架构”也与“六边形架构”大同小异。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210514304-1859240163.png&quot; alt=&quot;Bob大叔的Clean Architecture&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;其实这两种架构也是&lt;strong&gt;依赖倒置原则&lt;/strong&gt;很好的实现：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;高层模块不应该依赖低层模块，两者都应该依赖其抽象&lt;/li&gt;
-&lt;li&gt;抽象不应该依赖细节&lt;/li&gt;
-&lt;li&gt;细节应该依赖抽象&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;此时再回顾原来定义的四层架构：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;用户展示层&lt;/li&gt;
-&lt;li&gt;应用服务层&lt;/li&gt;
-&lt;li&gt;领域层&lt;/li&gt;
-&lt;li&gt;基础设施层&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;他们的依赖关系如图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210535562-100711042.png&quot; alt=&quot;四层架构&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;这样我们可以将业务核心代码放入&lt;code&gt;领域层&lt;/code&gt;之中，要应对的各个场景代码放入应用服务层中。将协议转换、中间件和数据库的适配都放入基础设施层里。在应用层与&lt;code&gt;Controller&lt;/code&gt;之间的那些&lt;code&gt;VO&lt;/code&gt;作为用户展示层，以做出整洁架构。&lt;/p&gt;
-&lt;p&gt;当我们开始学习Java的时候，都知道Java是一门面向对象的语言，我们本可以将现实世界翻译到代码的世界之中，但实际上我们往往在项目中只会将对象定义成&lt;strong&gt;贫血模型&lt;/strong&gt;，最终写成面向过程的代码。如何做才能让这个复杂的世界反应到代码里呢？&lt;/p&gt;
-&lt;p&gt;让我们再从需求说起，对于一个复杂的软件，任何一个项目的参与者（包括初创的成员），都很难靠自己就看清整个项目的全貌，我们犹如图中的盲人，大家可能最后对项目的理解都是不一致的。此时每一位参与者都犹如“盲人摸象”中的“盲人”，对需求(大象)只有片面的理解，于是乎，有的人觉得大象是水管的形状，有的人觉得大象是扇子一样的形状，有的人说大象长得跟柱子一样... ...&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210607896-285144989.png&quot; alt=&quot;盲人摸象&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;通过讨论，我们会对自我的认知进行一些修正，最终大致得出一个需求的全貌。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210623755-2013718568.png&quot; alt=&quot;讨论的价值&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;比如我们要去识别一些系统边界，在DDD的战略设计中非常强调划分&lt;strong&gt;界限上下文&lt;/strong&gt;。比如我作为一个个体，在不同的场景中，我的身份、角色都不大相同。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210736123-373402660.png&quot; alt=&quot;对自我身份的识别&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;犹如在上图中，在“地铁”、“家庭”和“公司”中，我的身份是不一样的，但是我依旧是我，找出业务的场景，也就意味着我找到了系统的边界。通过分析场景识别边界来找出系统的核心领域和支撑领域，以此来最终确定系统的数量，降低系统的耦合。&lt;/p&gt;
-&lt;p&gt;我们还可以用&lt;a href=&quot;https://www.infoq.cn/articles/xh-four-color-modeling&quot;&gt;四色建模方法&lt;/a&gt;来识别出我们系统中发生的整个流程，发现究竟是谁通过什么方式触发了什么事情，最终又影响了哪些对象。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210714588-612839442.jpg&quot; alt=&quot;四色建模(图片来自infoq.cn)&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;最终通过我们找出的事件，整理出一个能够让我们进行沟通的模型。在我们的模型被构建得相对完善之时，其实代码也差不多已经被构建出来了，因为这个时候再去回想&lt;strong&gt;面向对象&lt;/strong&gt;的设计，我们发现模型即代码，代码即模型。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/475531/201901/475531-20190130210650333-153286060.png&quot; alt=&quot;四色建模的要点&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;一直以来我都希望通过一些好的“工程实践”来提高团队的效率以及我们的代码质量，我想这也是思考这些架构的意义吧。我想用《架构整洁之道》中的一句话来做本文的总结：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;软件架构的最终目标是，用&lt;strong&gt;最小&lt;/strong&gt;的人力成本来满足&lt;strong&gt;构建和维护&lt;/strong&gt;系统的需求。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;正如《人月神话》里说的一样，软件工程里没有“银弹”，即使做了整洁架构也无法避免需求的变化和延期，只是希望当我们身处需求的困境中时，仍能给自己以更多的选择。&lt;/p&gt;
-&lt;h6 id=&quot;参考资料活动&quot;&gt;参考资料&amp;amp;活动 ：&lt;/h6&gt;
-</description>
-<pubDate>Wed, 30 Jan 2019 13:08:00 +0000</pubDate>
-<dc:creator>whthomas</dc:creator>
-<og:description>由于自己身处SAAS行业，在经历了几轮复杂需求的蹂躏之后，我一直试图寻找一种解法，可以尽量cover住复杂多变的需求。在过去的一年中，通过反复阅读和实践，似乎让我对此有了一些清晰的思路，所以我想写一点</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/whthomas/p/10339817.html</dc:identifier>
-</item>
-<item>
-<title>Egg中使用egg-mongoose和常用的Mongoose 方法 - wxw婉</title>
-<link>http://www.cnblogs.com/wxw1314/p/10339775.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wxw1314/p/10339775.html</guid>
-<description>&lt;h2 class=&quot;heading&quot;&gt;Mongoose&lt;/h2&gt;
-&lt;p&gt;Mongoose就是一套操作MongoDB数据库的接口，而Egg中有对应的插件egg-mongoose。&lt;/p&gt;
-&lt;h2 class=&quot;heading&quot;&gt;安装&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;$ npm install egg-mongoose --save
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 class=&quot;heading&quot;&gt;配置&lt;/h2&gt;
-&lt;p&gt;改变Egg项目中的配置文件{workplace}/config/plugin.js中来启用 egg-mongoose 插件:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;exports.mongoose = {
-  &lt;span class=&quot;hljs-built_in&quot;&gt;enable: &lt;span class=&quot;hljs-literal&quot;&gt;true,
-  package: &lt;span class=&quot;hljs-string&quot;&gt;'egg-mongoose',
-};
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 class=&quot;heading&quot;&gt;Egg连接mongoose&lt;/h2&gt;
-&lt;p&gt;在Egg项目中的配置文件{workplace}/config/default.js配置项config添加属性&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;config.mongoose = {
-    url: process.env.EGG_MONGODB_URL || &lt;span class=&quot;hljs-string&quot;&gt;'mongodb://127.0.0.1/website',
-    options: {
-      server: {
-        poolSize: 40,
-      },
-    },
-  };
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 class=&quot;heading&quot;&gt;定义数据表&lt;/h2&gt;
-&lt;p&gt;在{workplace}/app/model/article.js定义数据表&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;&lt;span class=&quot;hljs-string&quot;&gt;'use strict';
-module.exports = app =&amp;gt; {
-  const mongoose = app.mongoose;
-  const Schema = mongoose.Schema;
-  const PostSchema = new Schema({
-    wid: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    release: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Boolean,
-    },
-    sort: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Number,
-    },
-    img: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    abstract: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    text: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    isSetTop: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Number,
-    },
-    title: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    keywords: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    describe: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    updateTime: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Date,
-    },
-    num: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Number,
-    },
-    uid: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    editors: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: String,
-    },
-    &lt;span class=&quot;hljs-built_in&quot;&gt;disable: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Boolean,
-    },
-    columnId: {
-      &lt;span class=&quot;hljs-built_in&quot;&gt;type: Schema.Types.ObjectId,
-    },
-  });
-  &lt;span class=&quot;hljs-built_in&quot;&gt;return mongoose.model(&lt;span class=&quot;hljs-string&quot;&gt;'Article', PostSchema);
-};
-
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;备注：其中type表示字段类型，Mongoose 有以下几种类型Number（数字），String（字符串），Boolean（布尔值），ObjectId（对象ID），Array（数组），Object（对象），Date（日期）。。。&lt;/p&gt;
-&lt;h2 class=&quot;heading&quot;&gt;常用的Mongoose 方法&lt;/h2&gt;
-&lt;h3 class=&quot;heading&quot;&gt;一，增加数据&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.create(post,callback);
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;备注：其中post为json数据结构，callback为操作后的回调函数&lt;/p&gt;
-&lt;h3 class=&quot;heading&quot;&gt;二，查询数据&lt;/h3&gt;
-&lt;h4 class=&quot;heading&quot;&gt;1，获取所有数据，返回是一个数组&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find()
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 class=&quot;heading&quot;&gt;2，获取一个数据，返回是一个对象&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.findOne()
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 class=&quot;heading&quot;&gt;3，条件查询&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find(conditions,callback);
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;condition有以下几种类型&lt;/p&gt;
-&lt;h4 class=&quot;heading&quot;&gt;1），根据具体数据进行查询&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({_id：5c4a819fb87ba4002a47bc4f,title:&lt;span class=&quot;hljs-string&quot;&gt;&quot;123&quot;},callback);
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回_id为5c4a819fb87ba4002a47bc4f，title为123的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;2），条件查询&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$lt&quot;    小于
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$lte&quot;    小于等于
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$gt&quot;     大于
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$gte&quot;    大于等于
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$ne&quot;     不等于
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({“sort”:{ &lt;span class=&quot;hljs-variable&quot;&gt;$get:18 , &lt;span class=&quot;hljs-variable&quot;&gt;$lte:30 });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中sort 大于等于18并小于等于30的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;3），或查询 OR&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$in&quot; 一个键对应多个值
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$nin&quot; 同上取反, 一个键不对应指定值
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$or&quot; 多个条件匹配, 可以嵌套 &lt;span class=&quot;hljs-variable&quot;&gt;$in 使用
-&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$not&quot;    同上取反, 查询与特定模式不匹配的文档
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;title&quot;:{ &lt;span class=&quot;hljs-variable&quot;&gt;$in:[20,21,22.&lt;span class=&quot;hljs-string&quot;&gt;&quot;haha&quot;]} );
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中title等于20或21或21或&quot;haha&quot;的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$or&quot; :  [ {&lt;span class=&quot;hljs-string&quot;&gt;&quot;age&quot;:18} , {&lt;span class=&quot;hljs-string&quot;&gt;&quot;name&quot;:&lt;span class=&quot;hljs-string&quot;&gt;&quot;wxw&quot;} ] });
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中age等于18或 name等于&quot;wxw&quot;的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;4），类型查询（&lt;code&gt;&quot;$exists&quot;&lt;/code&gt;条件判定）&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({name: {&lt;span class=&quot;hljs-variable&quot;&gt;$exists: &lt;span class=&quot;hljs-literal&quot;&gt;true}},&lt;span class=&quot;hljs-keyword&quot;&gt;function(error,docs){
-  //返回Article表中所有存在name属性的结果
-});
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({telephone: {&lt;span class=&quot;hljs-variable&quot;&gt;$exists: &lt;span class=&quot;hljs-literal&quot;&gt;false}},&lt;span class=&quot;hljs-keyword&quot;&gt;function(error,docs){
-  //返回Article表中所有不存在telephone属性的结果
-});
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 class=&quot;heading&quot;&gt;5），匹配正则表达式查询&lt;/h4&gt;
-&lt;p&gt;MongoDb 是使用 Prel兼容的正则表达式库来匹配正则表达式&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find( {&lt;span class=&quot;hljs-string&quot;&gt;&quot;name&quot; : /joe/i } );
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为 joe 的结果, 并忽略大小写&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;6），查询数组&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array&quot;:10} );
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中array(数组类型)键中有10的文档, array : [1,2,3,4,5,10] 会匹配到&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array[5]&quot;:10}  );
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中array(数组类型)键中下标5对应的值是10, array : [1,2,3,4,5,10] 会匹配到&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array&quot;:[5,10]});
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中查询匹配array数组中既有5又有10的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array&quot;:{&lt;span class=&quot;hljs-variable&quot;&gt;$size : 3} });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中查询匹配array数组长度为3 的的结果&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array&quot;:{&lt;span class=&quot;hljs-variable&quot;&gt;$slice : 10} });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中查询匹配array数组的前10个元素&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({&lt;span class=&quot;hljs-string&quot;&gt;&quot;array&quot;:{&lt;span class=&quot;hljs-variable&quot;&gt;$slice :  [5,10]} });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中查询匹配array数组的第5个到第10个元素&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;7)，where&lt;/h4&gt;
-&lt;p&gt;用它可以执行任意javacript语句作为查询的一部分,如果回调函数返回 true 文档就作为结果的一部分返回&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find( {&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$where&quot; :  &lt;span class=&quot;hljs-string&quot;&gt;&quot;this.x + this.y === 10&quot; } );
-this.ctx.model.Article.find( {&lt;span class=&quot;hljs-string&quot;&gt;&quot;&lt;span class=&quot;hljs-variable&quot;&gt;$where&quot; : &lt;span class=&quot;hljs-string&quot;&gt;&quot; function(){ return this.x + this.y ===10; } &quot; } )
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;其中this为数据表中的数据，上述返回Article表中属性x+属性y=10的所有数据&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 class=&quot;heading&quot;&gt;三，删除数据&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.remove(conditions,callback);
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;备注：conditions为查询条件，与查询数据介绍的一样，eg：{ _id：5c4a819fb87ba4002a47bc4f }，找到_id为5c4a819fb87ba4002a47bc4f的数据，callback为操作成功后的回调函数&lt;/p&gt;
-&lt;h3 class=&quot;heading&quot;&gt;四，更新数据&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update(conditions, update, callback)
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;参数1:查询条件, 参数2:更新对象,可以使用MondoDB的更新修改器&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;备注：conditions与查询数据中介绍的一样&lt;/p&gt;
-&lt;h4 class=&quot;heading&quot;&gt;1，update为更新对象&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;&lt;span class=&quot;hljs-built_in&quot;&gt;let post = {
-    wid: &lt;span class=&quot;hljs-string&quot;&gt;'5c492c57acbe363fd4824446',
-    column: [ &lt;span class=&quot;hljs-string&quot;&gt;'新闻' ],
-    titleHead: &lt;span class=&quot;hljs-string&quot;&gt;'',
-    img: &lt;span class=&quot;hljs-string&quot;&gt;'',
-    isAbstract: &lt;span class=&quot;hljs-string&quot;&gt;'false',
-}
-this.ctx.model.Article.update({ _id: &lt;span class=&quot;hljs-string&quot;&gt;'5c4a819fb87ba4002a47bc4f ' }, post)
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;查询Article表中特定_id，并对post中所包含的属性进行更新。&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;2，update使用MondoDB的更新修改器，有以下几种使用场景&lt;/h4&gt;
-&lt;h4 class=&quot;heading&quot;&gt;1），&lt;code&gt;&quot;$inc&quot;&lt;/code&gt;增减修改器,只对数字有效&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({&lt;span class=&quot;hljs-string&quot;&gt;&quot;age&quot;:22}, {&lt;span class=&quot;hljs-variable&quot;&gt;$inc:{&lt;span class=&quot;hljs-string&quot;&gt;&quot;age&quot;:1} }  );
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;找到age=22的文档,修改文档的age值自增1&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;2），&lt;code&gt;'$set'&lt;/code&gt; 指定一个键的值,这个键不存在就创建它.可以是任何MondoDB支持的类型.&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({ _id：5c4a819fb87ba4002a47bc4f }, { &lt;span class=&quot;hljs-variable&quot;&gt;$set: { isDelete: &lt;span class=&quot;hljs-literal&quot;&gt;true } });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;对5c4a819fb87ba4002a47bc4f 表进行软删除，找到特定_id数据，增加或者修改isDelete属性&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;3），&lt;code&gt;&quot;$unset&quot;&lt;/code&gt;同上取反,删除一个键&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({age:22}, {&lt;span class=&quot;hljs-variable&quot;&gt;$unset:{age:18} } );
-&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;执行后age键不存在&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;4），&lt;code&gt;'$push'&lt;/code&gt;给一个键push一个数组成员,键不存在会创建,对数组有效&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({name:&lt;span class=&quot;hljs-string&quot;&gt;'wxw'}, {&lt;span class=&quot;hljs-variable&quot;&gt;$push:{array:10} } );
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为wxw的数据，增加一个array键,类型为数组,有一个成员 10&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;5），&lt;code&gt;'$addToSet'&lt;/code&gt;向数组中添加一个元素,如果存在就不添加&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({name:&lt;span class=&quot;hljs-string&quot;&gt;'wxw'},{&lt;span class=&quot;hljs-variable&quot;&gt;$addToSet:{array:10} } );
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为wxw的数据，array中有10所以不会添加&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;6），&lt;code&gt;'$each'&lt;/code&gt;遍历数组和 $push 修改器配合可以插入多个值&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({name:&lt;span class=&quot;hljs-string&quot;&gt;'wxw'}, {&lt;span class=&quot;hljs-variable&quot;&gt;$push:{array:{&lt;span class=&quot;hljs-variable&quot;&gt;$each: [1,2,3,4,5]}} } );
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为wxw的数据，执行后array : [10,1,2,3,4,5]&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;7），&lt;code&gt;'$pop'&lt;/code&gt; 向数组中尾部删除一个元素&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({name:&lt;span class=&quot;hljs-string&quot;&gt;'wxw'}, {&lt;span class=&quot;hljs-variable&quot;&gt;$pop:{array:1} } );
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为wxw的数据，其中array : [10,1,2,3,4,5]，执行后 array : [10,1,2,3,4]&lt;/li&gt;
-&lt;li&gt;tip:将1改成-1可以删除数组首部元素&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 class=&quot;heading&quot;&gt;8），&lt;code&gt;'$pull'&lt;/code&gt; 向数组中删除指定元素&lt;/h4&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.update({name:&lt;span class=&quot;hljs-string&quot;&gt;'wxw'}, {&lt;span class=&quot;hljs-variable&quot;&gt;$pull:{array:10} });
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;返回Article表中name为wxw的数据，匹配到array中的10后将其删除。&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 class=&quot;heading&quot;&gt;五，排序（sort）&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.sort({ isSetTop: -1, sort: 1, editTime: -1 });
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;对Article表中的数据进行排序，先按“isSetTop”降序，再按“sort”升序，最后按“editTime”降序&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;备注：键对应数据中的键名，值代表排序方向，1 升序, -1降序。&lt;/p&gt;
-&lt;h3 class=&quot;heading&quot;&gt;六，限制返回结果的数量（limit）&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.limit(3);
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;对Article表中的数据进行返回，返回为前面3条数据&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 class=&quot;heading&quot;&gt;七，跳过前3个文档,返回其余的（skip）&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.skip(3);
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;对Article表中的数据进行返回，跳过前面3条数据，返回其余数据&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;附：综合使用最后三个方法进行分页查询&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot; lang=&quot;bash&quot;&gt;this.ctx.model.Article.find({ _id：5c4a819fb87ba4002a47bc4f }).skip(pageSize * (pageNum - 1)).limit(parseInt(pageSize)).sort({ isSetTop: -1, sort: 1, editTime: -1 });
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;其中pageSize和pageNum为动态传递数据，返回Article表中特定_id在每页数据为pageSize条件下的第pageNum页中的数据，并按照“isSetTop”降序，再按“sort”升序，最后按“editTime”降序进行排序。&lt;/li&gt;
-&lt;/ul&gt;</description>
-<pubDate>Wed, 30 Jan 2019 12:57:00 +0000</pubDate>
-<dc:creator>wxw婉</dc:creator>
-<og:description>Mongoose Mongoose就是一套操作MongoDB数据库的接口，而Egg中有对应的插件egg-mongoose。 安装 配置 改变Egg项目中的配置文件{workplace}/config/</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wxw1314/p/10339775.html</dc:identifier>
-</item>
-<item>
-<title>[翻译]各个类型的IO -  阻塞, 非阻塞,多路复用和异步 - fairjm</title>
-<link>http://www.cnblogs.com/fairjm/p/translate-the-various-kinds-of-io-blocking-non.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/fairjm/p/translate-the-various-kinds-of-io-blocking-non.html</guid>
-<description>&lt;p&gt;同事推荐,感觉写的不错就试着翻译了下.&lt;br/&gt;原文链接: &lt;a href=&quot;https://www.rubberducking.com/2018/05/the-various-kinds-of-io-blocking-non.html&quot; class=&quot;uri&quot;&gt;https://www.rubberducking.com/2018/05/the-various-kinds-of-io-blocking-non.html&lt;/a&gt;&lt;br/&gt;作者: &lt;a href=&quot;https://www.blogger.com/profile/15503004383957399868&quot;&gt;Rubber Ducking&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;我发现对于软件程序员来说很难分清楚各种类型的IO.对于阻塞,非阻塞,多路复用和异步IO有很多的混淆点.&lt;br/&gt;所以我想尝试解释清楚各种IO类型意味着什么&lt;/p&gt;
-
-&lt;p&gt;在现代操作系统中,IO(输入/输出)是一种和外围设备交换数据的方式.包括读写磁盘或SSD,通过网络发送和接受数据,在显示器上显示,接入键盘和鼠标输入,等等.&lt;/p&gt;
-&lt;p&gt;现代操作系统和外围设备的交流取决于外围设备的特定类型以及他们的固件版本和硬件能力.&lt;br/&gt;通常来说,你可以认为外围设备是很高级的,他们可以同时处理多个并发的读写数据请求.也就是说,串行交流的日子一去不返了.&lt;br/&gt;在这些场景中,外围设备和CPU间的交流在硬件层面都是异步的.&lt;/p&gt;
-&lt;p&gt;这个异步机制被称为硬件中断.&lt;br/&gt;想想一个简单的场景,CPU请求外围设备去读取一些数据,接着CPU会进入一个无限循环,每一次都会检查外围设备的数据是否可用,直到获得了数据为止.&lt;br/&gt;这种方法被称为拉取(&lt;code&gt;polling&lt;/code&gt;),因为CPU需要保持检查外围设备.&lt;br/&gt;在现代硬件中,取而代之发生的是CPU请求外围硬件执行操作,然后就忘了这件事,继续处理其他的CPU指令.只要外围设备做完了,他会通过电路中断来通知CPU.&lt;br/&gt;这发生在硬件中,CPU因此不需要停下来或者检查这个外围设备,可以继续执行其他的工作,直到周边设备说已经做完了.&lt;/p&gt;
-
-&lt;p&gt;现在我们了解了硬件中发生的事,我们可以移动到软件这一侧了.&lt;br/&gt;在这一层IO通过多种方式被暴露:阻塞,非阻塞,多路复用和异步.让我们一个个来仔细解释.&lt;/p&gt;
-&lt;h2 id=&quot;阻塞&quot;&gt;阻塞&lt;/h2&gt;
-&lt;p&gt;还记得用户程序如何在一个进程内运行，代码是在线程的上下文中执行的吗？&lt;br/&gt;你总是会遇到需要编写一个需要从文件中读取数据的程序的情况.&lt;br/&gt;使用阻塞IO,你所做的是从你的线程中请求操作系统,将线程置于休眠(sleep),当数据可用于被消费时操作系统会唤醒线程.&lt;/p&gt;
-&lt;p&gt;也就是说,阻塞IO之所以被称为阻塞是因为使用他的线程会被阻塞直到IO完成.&lt;/p&gt;
-&lt;h2 id=&quot;非阻塞&quot;&gt;非阻塞&lt;/h2&gt;
-&lt;p&gt;阻塞IO的问题是当你的线程在休眠时,他除了等IO完成不能干其他事.&lt;br/&gt;有时候,你的程序可能没有其他事可做了.&lt;br/&gt;但如果还有其他事需要做的话,能在等待IO的时候并发做可是极好的.&lt;/p&gt;
-&lt;p&gt;其中一种实现方式被称为非阻塞IO.&lt;br/&gt;他的思想是当你读取一个文件时,OS只是简单返回给你文件的内容或者一个等待状态告诉你IO还未完成,而不是将线程休眠.&lt;br/&gt;他不会阻塞你的线程,但之后检查IO是否完成的工作还是交给了你.&lt;br/&gt;这意味着当处于等待状态时,你可以去做一些工作,当你再次需要IO时,可以再读取一次,那时候IO可能已经完成了,文件的内容会返回,如果还是处于等待状态的话,你可以选择继续做其他事.&lt;/p&gt;
-&lt;h2 id=&quot;多路复用&quot;&gt;多路复用&lt;/h2&gt;
-&lt;p&gt;非阻塞IO的问题是如果你在等待IO的过程中要做的其他事情就是另外的IO的话,事情会变得很奇怪.&lt;/p&gt;
-&lt;p&gt;在一个好的场景下,你请求OS去读取文件A的内容,然后去做一些重计算的工作,做完之后再去检查文件A是否完成读取,如果完成了,你再做一些关于这个文件内容的操作,不然就继续做其他的工作,循环往复.&lt;br/&gt;但在一个坏的场景中,你没有重计算的工作要去做,而是需要去读取另一个文件B.&lt;br/&gt;那除了等待他们还有什么事要做呢?&lt;br/&gt;没有了,你的程序就进入了一个死循环,判断文件A是否被读取完毕,接着再去判断文件B,一遍又一遍.&lt;br/&gt;要么你使用简单的状态轮询,这会导致过多消耗CPU,或者你手动加入一些随意的休眠时间,不过这也意味着你将延迟知道IO完成,这会降低程序的吞吐.&lt;/p&gt;
-&lt;p&gt;为了避免这个问题,你可以使用多路复用IO来代替.&lt;br/&gt;他所做的是你再次阻塞在IO上,但这次不仅仅是一个一个的IO操作,你可以将所有需要的IO操作塞入队列,阻塞在所有的操作上. 当其中有一个IO完成之后OS会唤醒你.&lt;br/&gt;一些多路复用的实现提供了更多的控制,你可以设置在特定一些IO操作完成之后再被唤醒,例如A和C文件或B和D文件完成的时候.&lt;/p&gt;
-&lt;p&gt;所有你可以调用非阻塞读取文件A,然后非阻塞读取文件B,最后告诉操作系统将我的线程置于休眠,当A和B的IO都完成的时候或其中一个完成的时候再唤醒他.&lt;/p&gt;
-&lt;h2 id=&quot;异步&quot;&gt;异步&lt;/h2&gt;
-&lt;p&gt;多路复用IO的问题是在IO完毕前你还是处于休眠状态.&lt;br/&gt;又一次,这对一些程序来说可行,那些除了等待IO操作完成外没有其他操作要去执行的程序.&lt;br/&gt;但有时候,你确实需要去做其他事情.&lt;br/&gt;可能你正在计算PI的数字,同时也在汇总一些文件的值.&lt;br/&gt;你想要进行的操作是将所有的读操作入队列,当等待他们读取完成前,你可以继续计算PI.当一个文件读取完成后,你可以汇总他的值,然后继续进行PI的计算直到另一个文件完成读取.&lt;/p&gt;
-&lt;p&gt;为了让这可行,你需要一种方式当IO完成时中断PI的计算,并且你需要IO来执行这个操作当他完成时.&lt;/p&gt;
-&lt;p&gt;这通过事件回调完成.执行读操作的调用会需要一个回调,并且调用立即返回.当IO完成时,操作系统会挂起你的线程,并执行你的回调.当回调完成时,他会恢复你的线程.&lt;/p&gt;
-
-&lt;p&gt;你可能已经注意到我所描述的所有线程都是关于单个线程的,也就是你的主线程.&lt;br/&gt;真相是,IO的执行不依赖于线程,这我在最开始就已经解释过了,外围设备都是在他们自己的电路里异步执行IO.&lt;br/&gt;所以阻塞,非阻塞,多路复用和异步IO都是可能在单线程模型中被执行的.&lt;br/&gt;这也是为什么并发IO可以不借助于多线程支持来工作.&lt;/p&gt;
-&lt;p&gt;现在,对于处理IO操作完成的结果,或者请求IO操作很明显是可以多线程的,如果你需要的话.这允许你在并发IO之上执行并发计算.所以没有什么东西阻止多线程和这些IO机制结合.&lt;/p&gt;
-&lt;p&gt;事实上,这里也有第五种受欢迎的基于多线程的IO.&lt;br/&gt;他经常被混淆为非阻塞IO或异步IO,因为他对外暴露出的是类似他们的接口.&lt;br/&gt;真相是,他是假装的非阻塞或异步IO.他的工作方式很简单,他使用阻塞IO,但是每个阻塞操作都是在他自己的线程中(注:多线程环境,非主线程中).&lt;br/&gt;现在取决于他的实现机制,他要么接收一个回调,或者使用一种拉取模型,比如返回一个Future对象.&lt;/p&gt;
-
-&lt;p&gt;我希望这篇文章可以帮助你澄清对多种IO的理解.还有很重要的一点需要注意,他们不是被所有的操作系统和所有的外围设备支持的.相似的,不是所有的编程语言都暴露了操作系统支持的所有IO类型的API.&lt;/p&gt;
-&lt;p&gt;这边请,所有类型的IO都解释了.&lt;/p&gt;
-&lt;p&gt;希望能对你有所帮助.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href=&quot;https://stackoverflow.com/a/50205346/172272&quot;&gt;non-blocking IO vs async IO and implementation in Java&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://blog.omega-prime.co.uk/2015/09/03/asynchronous-and-non-blocking-io/&quot;&gt;Asynchronous and non-blocking IO&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://www.linux-mag.com/id/331/&quot;&gt;Multiplexed I/O&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Reactor_pattern&quot;&gt;Reactor pattern&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Proactor_pattern&quot;&gt;Proactor pattern&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://blog.stephencleary.com/2013/11/there-is-no-thread.html&quot;&gt;There is no thread&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://davmac.org/davpage/linux/async-io.html&quot;&gt;Asynchronous I/O and event notification on linux&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://stackoverflow.com/questions/87892/what-is-the-status-of-posix-asynchronous-i-o-aio&quot;&gt;What is the status of POSIX asynchronous I/O (AIO)?&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;http://lse.sourceforge.net/io/aio.html&quot;&gt;Kernel Asynchronous I/O (AIO) Support for Linux&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://msdn.microsoft.com/en-us/library/windows/desktop/aa365198(v=vs.85).aspx&quot;&gt;I/O Completion Ports&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;我不是一个系统层面的程序员,我也不是一个操作系统提供的所有种类IO方面的专家.这篇文章是我尽可能总结我所知的内容,更偏向于中间层面的知识.所以如果你发现有任何问题的话请指正我.&lt;/p&gt;
-</description>
-<pubDate>Wed, 30 Jan 2019 12:38:00 +0000</pubDate>
-<dc:creator>fairjm</dc:creator>
-<og:description>同事推荐,感觉写的不错就试着翻译了下. 原文链接: 'https://www.rubberducking.com/2018/05/the various kinds of io blocking no</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/fairjm/p/translate-the-various-kinds-of-io-blocking-non.html</dc:identifier>
-</item>
-<item>
-<title>数据清洗(二)：岗位职责与要求的分离 - Magic激流</title>
-<link>http://www.cnblogs.com/magicxyx/p/10339702.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/magicxyx/p/10339702.html</guid>
-<description>&lt;p&gt;    在现有的所有互联网招聘网站上，岗位信息里的所有条目都是在同一级标签下。因此，岗位信息作为一个整体，就需要额外的操作把要求与职责分离开。鉴于岗位信息里数据格式的不统一，因此博主放弃了使用正则表达式的方法，而是选择了&lt;strong&gt;模糊匹配+结构化匹配&lt;/strong&gt;，将字符串比较的问题转化成了概率问题。&lt;/p&gt;
-
-
-&lt;p&gt;    在之前写的&lt;a href=&quot;https://www.cnblogs.com/magicxyx/category/1392840.html&quot;&gt;爬虫&lt;/a&gt;里，岗位信息一栏使用Xpath的String()方法抓取，作为一个大的字符串，所有信息都位于一个单元格中。现在计划在爬虫运行时，得到岗位信息后就将其分离，再写入硬盘中。所以，爬取数据时的格式会极大的影响分离的方法，字符串适合使用正则表达式，但是在格式混乱的岗位信息中，这显然不是完美的解法，如'岗位职责'，与之类似的还有'工作内容'，'职位描述'等等，这些词的各种排列组合会极大的增加正则表达式的长度。&lt;/p&gt;
-&lt;p&gt;    所以我决定将每一行信息都转化为数组的一个元素，再通过上下文信息与其自身的词汇信息判断其归属。在我爬取的51job移动端中，岗位信息的条目都在标签&amp;lt;article&amp;gt;下，因此使用&lt;strong&gt;//text()&lt;/strong&gt;方法，将&amp;lt;article&amp;gt;标签下每一行的信息都转化为一个数组元素。&lt;/p&gt;
-&lt;ol readability=&quot;-2&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;info = selector.xpath(&lt;span&gt;'//*[@id=&quot;pageContent&quot;]/div[3]/div[2]/article//text()'&lt;span&gt;)  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202840978-596913594.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;图表&lt;/span&gt; &lt;span&gt;1&lt;/span&gt; &lt;span&gt;数据在源码中的位置&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt;    上图所示的数据格式是最完美的，只需要正则表达式就能匹配成功。每一条数据都含有信息，'岗位职责'与'岗位要求'预示下文的数据与这个主题相关，其余信息则属于某一个主题。所以对这类结构化非常明显的信息，只需要匹配出'职责'与'要求'即可完成数据的分离。&lt;/p&gt;
-&lt;p&gt;    另一种情况如下所示，职位描述里包含了一眼就能看出来的岗位职责与要求，但是职责头信息缺失，通过上下文无法得出该信息的归属。因此，对于这类上下文无关的信息，就需要单独进行处理。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202844437-1826010183.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;图表&lt;/span&gt; &lt;span&gt;2&lt;/span&gt; &lt;span&gt;缺少主题的&lt;/span&gt;&lt;span&gt;jd&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;    通过上述分析，就得出了这样一个处理流程：如果现在处理的信息属于头部信息(职责、要求等)，则进入结构化处理流程，否则单独处理。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202845893-1550866361.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;图表&lt;/span&gt; &lt;span&gt;3&lt;/span&gt; &lt;span&gt;流程图&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt;    由于对相同意思的不同表述，以及输入过程中可能会出现的错误，因此使用模糊匹配来近似地查找与字符串匹配的字串。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;    字符串模糊匹配（ fuzzy string matching）是一种近似地（而不是精确地）查找与模式匹配的字符串的技术。换句话说，字符串模糊匹配是一种搜索，即使用户拼错单词或只输入部分单词进行搜索，也能够找到匹配项。因此，它也被称为字符串近似匹配。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;    先导入第三方库fuzzywuzzy：&lt;/p&gt;
-&lt;ol readability=&quot;-1&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;span&gt;from fuzzywuzzy import fuzz  &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;fuzz有五个常用的函数，先做一个简单的测试来看看区别。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202846258-1633844640.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    函数功能就像它们的名称一样，通俗易懂。再换一个长一点儿的：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202846536-925939268.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    所以我选择partial_token_sort_ratio()的值作为判断的依据。&lt;/p&gt;
-&lt;p&gt;通过分析ratio函数的源码，可以发现ratio()函数的求值公式：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202846896-1812840549.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;M是匹配的元素个数，T是字符串长度。所以针对partial的函数，我们可以用2/(len(thisStr))*100来判断字符串是否满足模糊匹配。&lt;/p&gt;
-&lt;p&gt;另外有一个小问题，&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202847338-248197448.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    后来发现，str2 = 'word1word2word3'时，word1出现在str1中，则匹配失败。所以在str2前加入一个字，取'工作'后一字，则解决问题。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202847660-704433043.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;    正如正则表达式需要自己定义匹配的字符一样，模糊匹配也需要自己定义一个类似的字符集。我们总共需要四个字符集，分别是岗位要求与职责头的字符集，以及具体要求的字符集。&lt;/p&gt;
-&lt;ol readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;str_responsibility = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;作职责描述介绍内容&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;str_requirement = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;能力要求需求资格条件标准&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;str_line_res = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;负责基于构建根据制定规范需求&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;str_line_req = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;经验熟悉熟练掌握精通优先学历专业以上基础知识学习交流年龄编程了解&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;    函数parse()作为信息处理的入口，接收一个含有岗位信息的数组，返回一个数组，数组元素分别是岗位职责与要求。&lt;/p&gt;
-&lt;p&gt;    由于爬取的信息含有大量制表符与空字符，所以需要排除无效的信息，并用一个新的数组'ls_jd'存储岗位信息。&lt;/p&gt;
-&lt;ol readability=&quot;69&quot;&gt;&lt;li&gt;
-&lt;p&gt;&lt;span&gt;def parse(ls):  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; len(ls) == 0:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;return&lt;/strong&gt;&lt;span&gt; [&lt;span&gt;'null'&lt;span&gt;,&lt;span&gt;'null'&lt;span&gt;]  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;span&gt;    ls_jd = []  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    result_res = []  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    result_req = []  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    str_responsibility = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;作职责描述介绍内容&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    str_requirement = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;能力要求需求资格条件标准&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;for&lt;/strong&gt;&lt;span&gt; i in range(len(ls)):  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        str_line = str(ls[i]).strip()  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; len(str_line.strip()) &amp;lt; 2:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;            &lt;span&gt;&lt;strong&gt;continue&lt;/strong&gt;&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;else&lt;/strong&gt;&lt;span&gt;:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;span&gt;            ls_jd.append(str_line)  &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;再声明一个变量Index，用来记录现在读取到数组元素的下标。&lt;/p&gt;
-&lt;p&gt;使用一个循环，从第一个元素开始，依次读取数组元素，并求得其与'岗位职责'字串、'岗位要求'字串的相似度，再分别进行匹配。&lt;/p&gt;
-&lt;p&gt;另外，由于需要对循环元素进行操作，所以不能使用for循环，因此此处使用了while()。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;span&gt;index = 0  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;while&lt;/strong&gt;&lt;span&gt; int(index) &amp;lt; len(ls_jd):  &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    str_line = ls_jd[index]  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; len(str_line) &amp;lt; 10:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;        fuzz_res = fuzz.partial_token_sort_ratio(str_line, str_responsibility)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;        fuzz_req = fuzz.partial_token_sort_ratio(str_line, str_requirement)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;else&lt;/strong&gt;&lt;span&gt;:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        parse_line(str_line,result_res,result_req)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        index += 1  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;continue&lt;/strong&gt;&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; fuzz_res &amp;gt; fuzz_req &lt;span&gt;&lt;strong&gt;and&lt;/strong&gt;&lt;span&gt; fuzz_res &amp;gt;= (2/len(str_responsibility)*100):  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;span&gt;        index = parse_res(index,ls_jd,str_requirement,result_res)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;elif&lt;/strong&gt;&lt;span&gt; fuzz_req &amp;gt; fuzz_res &lt;span&gt;&lt;strong&gt;and&lt;/strong&gt;&lt;span&gt; fuzz_req &amp;gt;= (2/len(str_requirement)*100):  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;span&gt;        index = parse_req(index,ls_jd,str_responsibility,result_req)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;else&lt;/strong&gt;&lt;span&gt;:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;print&lt;/strong&gt;&lt;span&gt;(&lt;span&gt;'warn: '&lt;span&gt;+ str_line)  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    index += 1  &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;基于结构的信息提取会修改当前读取数组的下标，所以需要将当前函数内读取到的下标返回。参数里传列表，实际上传的是地址，所以结果不需要额外操作。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;def&lt;/strong&gt;&lt;span&gt; parse_res(index,ls,str_break,result_res):  &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    &lt;span&gt;# print('&lt;/span&gt;&lt;/span&gt;&lt;span&gt;岗位职责&lt;/span&gt;&lt;span&gt;()Start')&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;while&lt;/strong&gt;&lt;span&gt; index &amp;lt; len(ls)-1:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        index += 1  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;        fuzz_break = fuzz.partial_token_sort_ratio(ls[index], str_break)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; fuzz_break &amp;lt; 49:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;            result_res.append(ls[index])  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;else&lt;/strong&gt;&lt;span&gt;:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;            &lt;span&gt;&lt;strong&gt;return&lt;/strong&gt;&lt;span&gt; index-1  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;return&lt;/strong&gt;&lt;span&gt; index  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;def&lt;/strong&gt;&lt;span&gt; parse_req(index,ls,str_break,result_req):  &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    &lt;span&gt;# print('&lt;/span&gt;&lt;/span&gt;&lt;span&gt;岗位要求&lt;/span&gt;&lt;span&gt;()Start')&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;while&lt;/strong&gt;&lt;span&gt; index &amp;lt; len(ls)-1:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        index += 1  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;        fuzz_break = fuzz.partial_token_sort_ratio(ls[index], str_break)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; fuzz_break &amp;lt; 49:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;            result_req.append(ls[index])  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        &lt;span&gt;&lt;strong&gt;else&lt;/strong&gt;&lt;span&gt;:  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;            &lt;span&gt;&lt;strong&gt;return&lt;/strong&gt;&lt;span&gt; index-1  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;return&lt;/strong&gt;&lt;span&gt; index  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;def&lt;/strong&gt;&lt;span&gt; parse_line(line,result_res,result_req):  &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    str_res = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;负责基于构建根据制定规范需求&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;&lt;span&gt;    str_req = &lt;span&gt;'&lt;/span&gt;&lt;/span&gt;&lt;span&gt;经验熟悉熟练掌握精通优先学历专业以上基础知识学习交流年龄编程了解&lt;/span&gt;&lt;span&gt;'&lt;span&gt;  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;    fuzz_res = fuzz.partial_token_sort_ratio(line, str_res)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;span&gt;    fuzz_req = fuzz.partial_token_sort_ratio(line, str_req)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;if&lt;/strong&gt;&lt;span&gt; fuzz_res-1 &amp;gt;= (2/len(str_res)*100):  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        result_res.append(line)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;    &lt;span&gt;&lt;strong&gt;elif&lt;/strong&gt;&lt;span&gt; fuzz_req-1 &amp;gt;= (2/len(str_req)*100):  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;span&gt;        result_req.append(line)  &lt;/span&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1219242/201901/1219242-20190130202848318-1996556783.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;    可以看出还是有一些小问题的。&lt;/p&gt;
-
-&lt;p&gt;    基于概率匹配的信息分解受制于自定义匹配数据的完整性，尽管目前给出的几个关键词囊括了大部分的情况，不过仍然有相当多的漏网之鱼。&lt;/p&gt;
-&lt;p&gt;    另外，fuzz库的模糊匹配并不能完美适配此次字符匹配，除了第三大点后给出的问题外，对长句中不同词语应该有不同的权重，以避免长居中词太多导致匹配失败。&lt;/p&gt;
-&lt;p&gt;    不过最可喜的应该是，这次有了相对统一的数据，回头可以用这些数据去Spark上跑个模型，亲自操刀一下机器学习了，哈哈哈。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 30 Jan 2019 12:29:00 +0000</pubDate>
-<dc:creator>Magic激流</dc:creator>
-<og:description>在现有的所有互联网招聘网站上，岗位信息里的所有条目都是在同一级标签下。因此，岗位信息作为一个整体，就需要额外的操作把要求与职责分离开。鉴于岗位信息里数据格式的不统一，因此博主放弃了使用正则表达式的方法</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/magicxyx/p/10339702.html</dc:identifier>
 </item>
 </channel>
 </rss>
