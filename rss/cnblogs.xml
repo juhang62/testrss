@@ -9,6 +9,218 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>RabbitMQ (十三) 消息确认机制 - 消费者确认 - 热敷哥</title>
+<link>http://www.cnblogs.com/refuge/p/10356750.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/refuge/p/10356750.html</guid>
+<description>&lt;p&gt;由于生产者和消费者不直接通信,生产者只负责把消息发送到队列,消费者只负责从队列获取消息(不管是push还是pull).&lt;/p&gt;
+&lt;p&gt;消息被&quot;消费&quot;后,是需要从队列中删除的.那怎么确认消息被&quot;成功消费&quot;了呢?&lt;/p&gt;
+&lt;p&gt;是消费者从队列获取到消息后,broker 就从队列中删除该消息?&lt;/p&gt;
+&lt;p&gt;那如果消费者收到消息后,还没来得及&quot;消费&quot;它,或者说还没来得及进行业务逻辑处理时,消费者所在的信道或者连接因某种原因断开了,&lt;/p&gt;
+&lt;p&gt;那这条消息岂不是就被无情的抛弃了...&lt;/p&gt;
+&lt;p&gt;我们更期望的是,消费者从队列获取到消息后,broker 暂时不删除该条消息,&lt;/p&gt;
+&lt;p&gt;等到消费者&quot;成功消费&quot;掉该消息后,再删除它.&lt;/p&gt;
+&lt;p&gt;所以需要一个机制来确认生产者发送的消息被消费者&quot;成功消费&quot;.&lt;/p&gt;
+&lt;p&gt;RabbitMQ 提供了一种叫做&quot;消费者确认&quot;的机制.&lt;/p&gt;
+
+&lt;p&gt;消费者确认分两种:&lt;strong&gt;自动确认&lt;/strong&gt;和&lt;strong&gt;手动确认&lt;/strong&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;在自动确认模式中,消息在发送到消费者后即被认为&quot;成功消费&quot;.&lt;/span&gt;&lt;span&gt;这种模式可以降低吞吐量（只要消费者可以跟上）,以降低交付和消费者处理的安全性.&lt;/span&gt;&lt;span&gt;这种模式通常被称为“即发即忘”.&lt;/span&gt;&lt;span&gt;与手动确认模型不同,如果消费者的TCP连接或通道在真正的&quot;成功消费&quot;之前关闭,则服务器发送的消息将丢失.&lt;/span&gt;&lt;span&gt;因此,自动消息确认&lt;/span&gt;&lt;/span&gt;&lt;strong&gt;应被视为不安全,&lt;/strong&gt;&lt;span&gt;并不适用于所有工作负载.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;使用自动确认模式时需要考虑的另一件事是消费者过载.手动确认模式通常与有界信道预取(BasicQos方法)一起使用,该预取限制了信道上未完成（“进行中”）的消息的数量.但是,自动确认没有这种限制.因此,消费者可能会被消息的发送速度所淹没,可能会导致消息积压并耗尽堆或使操作系统终止其进程.某些客户端库将应用TCP反压(停止从套接字读取,直到未处理的交付积压超过某个限制).因此,仅建议能够以稳定的速度有效处理消息的消费者使用自动确认模式.&lt;/p&gt;
+&lt;h2&gt;1.自动确认 autoAck : true&lt;/h2&gt;
+&lt;p&gt;下面是消费者的部分代码,我们故意每次只推送一条消息,并且让每条消息的处理都超过10秒.&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;43&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;            channel.BasicQos(0, 1, false);&lt;/span&gt;&lt;span&gt;//将Qos预取值设置为1,这表示&lt;/span&gt;&lt;span&gt;设置broker每次只推送队列里面的一条消息到消费者,只有在确认这条消息&quot;成功消费&quot;后,才会继续推送&lt;/span&gt;
+            consumer.Received += (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);&lt;/span&gt;
+                Thread.Sleep(10&lt;span&gt;000&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+                Console.WriteLine(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer1 receive : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);&lt;/span&gt;
+&lt;span&gt;            };
+            channel.BasicConsume(queue: QueueName, &lt;span&gt;autoAck: &lt;/span&gt;&lt;/span&gt;&lt;span&gt;true,&lt;/span&gt; consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;下面是生产者的部分代码&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+                &lt;span&gt;for&lt;/span&gt; (&lt;span&gt;byte&lt;/span&gt; i = &lt;span&gt;0&lt;/span&gt;; i &amp;lt; &lt;span&gt;5&lt;/span&gt;; i++&lt;span&gt;)
+                {
+                    &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; msg = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;hello world &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; i;
+                    channel.BasicPublish(&lt;/span&gt;&lt;span&gt;&quot;&quot;&lt;/span&gt;, QueueName, &lt;span&gt;null&lt;/span&gt;&lt;span&gt;, Encoding.Default.GetBytes(msg));
+                    Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;send {msg}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+                }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行结果:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209005810775-554219177.png&quot; alt=&quot;&quot;/&gt;   &lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190208225006572-2090956003.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;从管理后台可以看到,消费者还没打印&quot;receive&quot;那句话,该队列中就已经没有任何消息了.&lt;/p&gt;
+&lt;h2&gt;2.手动确认 autoAck : false&lt;/h2&gt;
+&lt;p&gt;手动确认又分两种:&lt;strong&gt;肯定确认&lt;/strong&gt;和&lt;strong&gt;否定确认.&lt;/strong&gt;&lt;/p&gt;
+&lt;h4&gt;1)肯定确认 BasicAck&lt;/h4&gt;
+&lt;p&gt;消费者部分代码:&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;45&quot;&gt;
+&lt;pre&gt;
+            channel.BasicQos(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;1&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置broker每次只推送队列里面的一条消息到消费者,只有在确认这条消息&quot;成功消费&quot;后,才会继续推送&lt;/span&gt;
+            consumer.Received += (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);
+                Console.WriteLine(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer1 receive : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);
+                Thread.Sleep(&lt;/span&gt;&lt;span&gt;30000&lt;/span&gt;&lt;span&gt;);
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;deliveryTag 传递标签,ulong 类型.它的范围隶属于每个信道.因此必须在收到消息的相同信道上确认.不同的信道将导致“未知的传递标签”协议异常并关闭通道.
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;multiple 确认一条消息还是多条.false 表示只确认 e.DelivertTag 这条消息,true表示确认 小于等于 e.DelivertTag 的所有消息 &lt;/span&gt;
+                channel.&lt;span&gt;BasicAck&lt;/span&gt;(deliveryTag: e.DeliveryTag, multiple: &lt;span&gt;false&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+                Console.WriteLine(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer1 Ack : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);&lt;/span&gt;
+&lt;span&gt;            };
+            channel.BasicConsume(queue: QueueName, &lt;span&gt;autoAck: &lt;/span&gt;&lt;/span&gt;&lt;span&gt;false,&lt;/span&gt; consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;生产者代码不变.&lt;/p&gt;
+&lt;p&gt;当消费者收到一条消息,但是还没有肯定确认时,从管理后台可以清晰的看到,队列中一共有5条消息,其中4条尚未推送,1条已经推送但尚未确认.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209004632918-1622239646.png&quot; alt=&quot;&quot;/&gt;         &lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209004703732-803264652.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 当消费者确认后(立马又接收了一条),这时候,队列中一共只有4条了,&quot;成功消费&quot;的那条已经被broker从队列中删掉了.剩余3条尚未推送,1条已推送但尚未确认.&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209004826699-709646072.png&quot; alt=&quot;&quot;/&gt;         &lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209004902908-1299539149.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;h4&gt;2)否定确认  BasicNack , BasicReject &lt;/h4&gt;
+&lt;p&gt;否定确认的场景不多,但有时候某个消费者因为某种原因无法立即处理某条消息时,就需要否定确认了.&lt;/p&gt;
+&lt;p&gt;否定确认时,需要&lt;span&gt;&lt;span&gt;指定是&lt;/span&gt;丢弃掉这条消息&lt;/span&gt;,还是&lt;span&gt;让这条消息重新排队,过一会再来&lt;/span&gt;,又或者是&lt;span&gt;让这条消息重新排队,并尽快让另一个消费者接收并处理它.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;i.丢弃  requeue: false&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;消费者部分代码:&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
+&lt;pre&gt;
+            channel.BasicQos(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;1&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;);
+            consumer.Received += (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);
+                Thread.Sleep(&lt;/span&gt;&lt;span&gt;10000&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+                channel.&lt;span&gt;BasicNack&lt;/span&gt;(deliveryTag: e.DeliveryTag, multiple: &lt;span&gt;false&lt;/span&gt;, &lt;span&gt;requeue: false&lt;/span&gt;&lt;span&gt;);
+                Console.WriteLine(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer1 Nack : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);
+            };
+            channel.BasicConsume(queue: QueueName, &lt;span&gt;autoAck: &lt;/span&gt;&lt;/span&gt;&lt;span&gt;false,&lt;/span&gt; consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;strong&gt;ii.重新排队 requeue: true&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;消费者部分代码:&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;44&quot;&gt;
+&lt;pre&gt;
+            channel.BasicQos(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;1&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;);&lt;span&gt;//&lt;/span&gt;&lt;span&gt;设置broker每次只从推送队列里面的一条消息到消费者,只有在确认这条消息&quot;成功消费&quot;后,才会继续推送&lt;/span&gt;
+            consumer.Received += (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);
+                Thread.Sleep(&lt;/span&gt;&lt;span&gt;5000&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+                channel.&lt;span&gt;BasicNack&lt;/span&gt;(deliveryTag: e.DeliveryTag, multiple: &lt;span&gt;false&lt;/span&gt;, &lt;span&gt;requeue: true&lt;/span&gt;&lt;span&gt;);
+                Console.WriteLine(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;consumer1 Nack : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);
+            };
+            channel.BasicConsume(queue: QueueName, &lt;span&gt;autoAck: &lt;/span&gt;&lt;/span&gt;&lt;span&gt;false,&lt;/span&gt; consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 运行结果:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209131958100-1628523026.png&quot; alt=&quot;&quot;/&gt;        &lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209132004393-1252195075.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以看到,消费者收到的一直是&quot;hello world 0&quot;这条消息,而管理后台一直显示 4,1,5.这是为什么呢?&lt;/p&gt;
+&lt;p&gt;首先,我们设置的是每次只推送一条消息给消费者,否定确认中我们选择的是重新排队,所以&quot;hello world 0&quot;这条消息被否定确认后,被broker安排去重新排队了.当消息被重新排队时,如果可能的话,它将被放置在其队列中的原始位置.也就是说&quot;hello world 0&quot;这条消息又被放到了队列头,因为它的原始位置就是队列头.所以结果就变成了消费之一直在消费&quot;hello world 0&quot;,并且一直在否定确认.&lt;/p&gt;
+&lt;p&gt;感觉这种方式的代价是不是有点大...消息重新排队,还要回到之前的位置,还要重新发送一次....感觉代价有点小贵啊...而且其他消息貌似永远只有ready...&lt;/p&gt;
+&lt;p&gt;但,如果多个消费者共享队列时,该消息将被重新排队到更靠近队列头的位置,并且会被聪明的broker从队列中推送到其他队列.&lt;/p&gt;
+&lt;p&gt;测试:&lt;/p&gt;
+&lt;p&gt;我们重新创建两个消费者:consumer1 否定确认,3秒一次;consumer2 肯定确认,1秒一次.两个消费共享一个队列(公平分发)&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
+&lt;pre&gt;
+            channel.BasicQos(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;1&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
+            consumer.Received &lt;/span&gt;+= (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);&lt;/span&gt;
+                Thread.Sleep(&lt;span&gt;3000&lt;/span&gt;&lt;span&gt;);&lt;/span&gt;
+             &lt;span&gt;   channel.BasicNack(e.DeliveryTag, false, true);&lt;/span&gt;
+                Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{DateTime.Now} consumer1 Nack : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);
+            };
+            channel.BasicConsume(queue: QueueName, autoAck: &lt;/span&gt;&lt;span&gt;false&lt;/span&gt;, consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+            channel.BasicQos(&lt;span&gt;0&lt;/span&gt;, &lt;span&gt;1&lt;/span&gt;, &lt;span&gt;false&lt;/span&gt;&lt;span&gt;);
+            consumer.Received &lt;/span&gt;+= (s, e) =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; str =&lt;span&gt; Encoding.Default.GetString(e.Body);&lt;/span&gt;
+                Thread.Sleep(&lt;span&gt;1000&lt;/span&gt;&lt;span&gt;);
+    &lt;span&gt;            channel.BasicAck(deliveryTag: e.DeliveryTag, multiple: &lt;/span&gt;&lt;/span&gt;&lt;span&gt;false&lt;/span&gt;&lt;span&gt;&lt;span&gt;);&lt;/span&gt;
+                Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{DateTime.Now} consumer2 Ack : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; str);
+            };
+            channel.BasicConsume(queue: QueueName, autoAck: &lt;/span&gt;&lt;span&gt;false&lt;/span&gt;, consumer: consumer);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行结果:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209134830304-1192884941.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;一切尽在图中.&lt;/p&gt;
+&lt;p&gt; BasicReject 方法和 BasicNack 方法基本一样,唯一的区别是没有 multiple 这个入参.&lt;/p&gt;
+
+&lt;h3 class=&quot;docHeading&quot;&gt;消费者确认模式,预取和吞吐量&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;确认模式和QoS预取值对消费者吞吐量具有显着影响。&lt;/span&gt;&lt;span&gt;通常，增加预取将提高向消费者传递消息的速率。&lt;/span&gt;&lt;span&gt;自动确认模式可以产生最佳的交付率。&lt;/span&gt;&lt;span&gt;但是，在这两种情况下，已传送但尚未处理的消息的数量也将增加，从而增加了消费者的RAM消耗。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;应谨慎使用具有无限预取功能的自动确认模式或手动确认模式。&lt;/span&gt;&lt;span&gt;在没有确认的情况下消耗大量消息的消费者将导致他们所连接的节点上的内存消耗增长。&lt;/span&gt;&lt;span&gt;找到合适的预取值需要不断试验，并且会因工作负载而异。&lt;/span&gt;&lt;/span&gt;100到300范围内的值通常可提供最佳吞吐量，并且不会面临压倒性消费者的重大风险。较高的价值往往会影响收益递减规律。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;预取值1是最保守的。&lt;/span&gt;&lt;span&gt;它将显着降低吞吐量，特别是在消费者连接延迟较高的环境中。&lt;/span&gt;&lt;span&gt;对于许多应用来说，更高的值是合适的和最佳的。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;h3 class=&quot;docHeading&quot;&gt;当消费者失败或失去连接时：自动重新排队&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;使用手动确认时，除了我们主动让消息重新排队外,任何未确认的消息都将在关闭发生传递的信道（或连接）时自动重新排队。&lt;/span&gt;&lt;span&gt;这包括客户端的TCP连接丢失，消费者应用程序（进程）故障和通道级协议异常.&lt;/span&gt;&lt;/span&gt;请注意，检测不可用的客户端需要一段时间。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;由于这种行为，消费者必须准备好处理重新发送，否则就要&lt;/span&gt;&lt;span&gt;考虑&lt;/span&gt;&lt;span&gt;到&lt;/span&gt;&lt;/span&gt;&lt;span&gt;幂等性&lt;/span&gt;&lt;span&gt;&lt;span&gt;。BasicDeliverEventArgs &lt;/span&gt;&lt;span&gt;有一个特殊的布尔属性 : Redelivered&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;code&quot;&gt;&lt;span&gt;&lt;span&gt;，如果该消息是&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;code&quot;&gt;&lt;span&gt;&lt;span&gt;第一次交付，它将被设置为&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;code&quot;&gt;&lt;span&gt;&lt;span&gt;false.否则为 true.&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;code&quot;&gt;&lt;span class=&quot;code&quot;&gt;&lt;span class=&quot;code&quot;&gt;&lt;span&gt;&lt;span&gt;测试:&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span class=&quot;code&quot;&gt;&lt;span class=&quot;code&quot;&gt;&lt;span class=&quot;code&quot;&gt;&lt;span&gt;&lt;span&gt;还是借用上一个测试的代码,只是分别加了一句话:&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+Console.WriteLine($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;{str} 是否是重复发送 : &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + e.&lt;span&gt;Redelivered&lt;/span&gt;);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行结果:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1189148/201902/1189148-20190209141403566-1871040570.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;这里要特别注意,consumer2 收到 &quot;hello world 0&quot;的时候, Redelivered 的值依然是 true . 因为 Redelivered 属性的维度是消息,不是消费者.&lt;/p&gt;
+
+
+</description>
+<pubDate>Sat, 09 Feb 2019 07:34:00 +0000</pubDate>
+<dc:creator>热敷哥</dc:creator>
+<og:description>由于生产者和消费者不直接通信,生产者只负责把消息发送到队列,消费者只负责从队列获取消息(不管是push还是pull). 消息被&quot;消费&quot;后,是需要从队列中删除的.那怎么确认消息被&amp;q</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/refuge/p/10356750.html</dc:identifier>
+</item>
+<item>
+<title>《.NET和Java之争》一点随想 - Lemon丶</title>
+<link>http://www.cnblogs.com/liuhaoyang/p/10357198.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/liuhaoyang/p/10357198.html</guid>
+<description>&lt;p&gt;最近几天在博客园出现了几篇关于《.NET和Java之争》的文章，事情的起因来源于一篇&lt;a href=&quot;https://mp.weixin.qq.com/s/hfp5y2IlnAp51pFX9qGbhQ&quot;&gt;年后离职跳槽指南&lt;/a&gt;公众号，文章里面提到&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.NET在程序开发中就属于门槛比较低的一类。个中原因我想大家都懂的，就不在这里赘述了。做.NET不需要你科班出身，或许一点兴趣再加上一点时间，或许一个类似某马的培训，都可以让你开始从事.NET开发了。你可以不懂指针、不懂数据结构、不懂算法、不懂汇编、不懂很多东西，但照样可以做出一个.NET程序来。而这些人往往又是对薪资的要求没那么高的，这样无形中就拉低了.NET程序员的“身价”。.NET的易学易会，很大程度上是由于它的封装性比较好。底层的东西都屏蔽掉了，你只要知道学习一下命名空间，然后寻找相关的API去调用就好了。&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后&quot;&lt;a href=&quot;https://www.cnblogs.com/adalovelacer/p/ReActive-GuangZhou-DotNet-Club.html&quot;&gt;广州.NET俱乐部&lt;/a&gt;&quot;的&lt;a href=&quot;https://www.cnblogs.com/adalovelacer&quot;&gt;叶主席&lt;/a&gt;写了第一篇&lt;a href=&quot;https://www.cnblogs.com/adalovelacer/p/dotnet-vs-java.html&quot;&gt;《.NET和Java之争》&lt;/a&gt;，说实话这篇文章里面没有一点技术性对比，提出的论点也模棱两可，所以有了后面的两篇反驳文章&lt;a href=&quot;https://www.cnblogs.com/fnng/p/10356484.html&quot;&gt;《.NET和Java之争》 读后感&lt;/a&gt;、&lt;a href=&quot;https://www.cnblogs.com/hiroshi-cnblogs/p/10357064.html&quot;&gt;虽然不抱希望但也愿.Net和Java之争暂得平息&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;三篇文章各自给出了作者自己的观点，但都没有客观的分析&lt;code&gt;.NET和Java之争&lt;/code&gt; 争的到底是什么。由于笔者本人同时在用.NET，Java，Go，所以这篇文章将从.NET ，Java以及最近流行的Go技术本身和生态进行对比。&lt;/p&gt;
+&lt;p&gt;首先，我们来看看三个语言/平台都可以做什么以及各自的优势。&lt;/p&gt;
+&lt;h3 id=&quot;net-.net-core&quot;&gt;.NET / .NET Core&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;WPF/Winform/UWP技术进行Windows桌面开发&lt;/li&gt;
+&lt;li&gt;ASP.NET/ASP.NET Core/WCF技术进行Web业务层开发&lt;/li&gt;
+&lt;li&gt;Unity3D使用C#进行游戏客户端开发&lt;/li&gt;
+&lt;li&gt;Xamarin进行跨平台App开发，但面临React Native和Flutter的激烈竞争&lt;/li&gt;
+&lt;li&gt;Blazor WebAssembly前端开发&lt;/li&gt;
+&lt;li&gt;ML.NET 机器学习应用开发&lt;/li&gt;
+&lt;li&gt;... 其他未列举&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;javajvm系语言&quot;&gt;Java/JVM系语言&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;Spring boot/Cloud / Dubbo进行Web分布式应用开发&lt;/li&gt;
+&lt;li&gt;分布式系统中间件，如RocketMQ、Kafka、ZooKeeper&lt;/li&gt;
+&lt;li&gt;分布式存储中间件，如ElasticSearch、HBase、Cassandra&lt;/li&gt;
+&lt;li&gt;大数据引擎，Spark、Flink&lt;/li&gt;
+&lt;li&gt;Android App开发&lt;/li&gt;
+&lt;li&gt;TeaVM WebAssembly前端开发&lt;/li&gt;
+&lt;li&gt;机器学习应用和基于大数据引擎的机器学习开发&lt;/li&gt;
+&lt;li&gt;... 其他未列举&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;go&quot;&gt;Go&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;Beego/Echo Web应用开发&lt;/li&gt;
+&lt;li&gt;高性能网络中间件开发，如蚂蚁金服用于替换Istio中Envoy的MOSN&lt;/li&gt;
+&lt;li&gt;分布式存储中间件，如InfluxDb、TiDB的Sql层&lt;/li&gt;
+&lt;li&gt;容器、编排工具和云原生基础设施中间件，如Docker，Kubernetes、ETCD、Prometheus&lt;/li&gt;
+&lt;li&gt;... 其他未列举&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;综上，我们可以看到.NET/.NET Core在桌面开发和游戏客户端开发具有优势，Java系在中间件和大数据方向有无法追赶的优势，go在云原生基础设施生态上有得天独厚的优势。&lt;br/&gt;而在Web应用层，虽然三个平台都可以进行业务开发，但spring boot/cloud/dubbo长期积累的生态组件和同一个平台的中间件加成，使用java在分布式应用开发上稍胜一筹。有人会说&lt;code&gt;Java中间件我们.NET也可以用&lt;/code&gt;，但是大部分java团队开发的中间件优先支持的还是java sdk，.NET /.NET Core的sdk只能等开源爱好者去开发或者提一个不知道要等到什么时候的issue去等中间件开发团队来支持。&lt;/p&gt;
+&lt;h3 id=&quot;语言层面&quot;&gt;语言层面&lt;/h3&gt;
+&lt;p&gt;毫无疑问，C#在语言特性上走在java、go的前面，linq、精细的内存管理、和native交互、异步支持是C#的优势。如今.NET Core已经开源5年，各大云厂商也在加强对.NET Core的支持，&lt;strong&gt;如何扩大C#本身的优势，进而形成生态优势，是每一个C#使用者都应该思考的问题&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;最后，NCC(&lt;a href=&quot;https://github.com/dotnetcore&quot;&gt;.NET Core Community&lt;/a&gt;)从.NET Core开源之初就致力于.NET Core生态建设，如果你有时间精力，想一起来发展.NET Core社区生态，想一起来玩开源，有任何想法欢迎&lt;a href=&quot;https://github.com/dotnetcore/Home/issues/new&quot;&gt;联系我们&lt;/a&gt;。&lt;/p&gt;
+</description>
+<pubDate>Sat, 09 Feb 2019 03:31:00 +0000</pubDate>
+<dc:creator>Lemon丶</dc:creator>
+<og:description>最近几天在博客园出现了几篇关于《.NET和Java之争》的文章，事情的起因来源于一篇 '年后离职跳槽指南' 公众号，文章里面提到 然后' '广州.NET俱乐部' '的 '叶主席' 写了第一篇 '《.N</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/liuhaoyang/p/10357198.html</dc:identifier>
+</item>
+<item>
 <title>虽然不抱希望但也愿.Net和Java之争暂得平息 - hiroshi_cnblogs</title>
 <link>http://www.cnblogs.com/hiroshi-cnblogs/p/10357064.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/hiroshi-cnblogs/p/10357064.html</guid>
@@ -147,7 +359,7 @@
 <dc:identifier>http://www.cnblogs.com/michael703/p/10356918.html</dc:identifier>
 </item>
 <item>
-<title>.Net Core应用程序跨平台应用研究-HelloArm(串口篇) - 赫山老妖</title>
+<title>.Net Core跨平台应用研究-HelloArm(串口篇) - 赫山老妖</title>
 <link>http://www.cnblogs.com/flyfire-cn/p/10356991.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/flyfire-cn/p/10356991.html</guid>
 <description>&lt;p&gt;        为了验证采用dotnet core技术开发的物联网设备数据采集接入服务应用是否能在高性价比的linux嵌入式平台运行，针对dotnet core应用程序进行嵌入式linux环境的发布部署运行验证研究。&lt;/p&gt;
@@ -343,7 +555,7 @@
 &lt;p&gt;sudo apt-get install gcc&lt;/p&gt;
 
 &lt;p&gt;安装cmake&lt;/p&gt;
-&lt;p&gt;sudo apt-get cmake&lt;/p&gt;
+&lt;p&gt;sudo apt-get install cmake&lt;/p&gt;
 &lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1525067/201902/1525067-20190208234159936-1654924093.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
 
 &lt;p&gt;确保gcc和cmake安装正常。可采用命令查看安装情况&lt;/p&gt;
@@ -415,7 +627,7 @@
 </description>
 <pubDate>Fri, 08 Feb 2019 15:49:00 +0000</pubDate>
 <dc:creator>赫山老妖</dc:creator>
-<og:description>引言 为了验证采用dotnet core技术开发的物联网设备数据采集接入服务应用是否能在高性价比的linux嵌入式平台运行，针对dotnet core应用程序进行嵌入式linux环境的发布部署运行验证</og:description>
+<og:description>为了验证采用dotnet core技术开发的物联网设备数据采集接入服务应用是否能在高性价比的linux嵌入式平台运行，针对dotnet core应用程序进行嵌入式linux环境的发布部署运行验证研究。</og:description>
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/flyfire-cn/p/10356991.html</dc:identifier>
@@ -1101,337 +1313,6 @@
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/Java-Starter/p/10356055.html</dc:identifier>
-</item>
-<item>
-<title>前端开发掌握nginx常用功能之server&amp;location匹配规则 - wonyun</title>
-<link>http://www.cnblogs.com/wonyun/p/10309491.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wonyun/p/10309491.html</guid>
-<description>&lt;p&gt;nginx主要是公司运维同学必须掌握的知识，涉及到反向代理、负载均衡等服务器配置。前端开发尤其是纯前端开发来说对nginx接触的并不多，但是在一些情况下，nginx还是需要前端自己来搞；例如我们公司的开发环境和测试环境，虽然qa可以帮助搞定配置，但是每新增一个前端模块或者模块nginx配置经常变更都求着qa搞，麻烦别人还不如自己来搞，这样更能理解自己的需求。这些都需要前端开发对nginx有所理解，下面我们来说说nginx最基础的server和location匹配规则。&lt;/p&gt;
-&lt;h2 id=&quot;server匹配规则&quot;&gt;1. server匹配规则&lt;/h2&gt;
-&lt;p&gt;nginx的&lt;code&gt;server&lt;/code&gt;块可以配置多个，那么一个请求该匹配那个server块呢，这主要是根据server块的&lt;code&gt;server_name&lt;/code&gt;和&lt;code&gt;listen&lt;/code&gt;来决定的。其中&lt;code&gt;server_name&lt;/code&gt;仅仅检查请求的“Host”头以决定该请求应由哪个虚拟主机来处理。&lt;/p&gt;
-&lt;p&gt;先看一个例子：&lt;/p&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;server {
-    listen      8001;
-    server_name *.net;
-}
-
-server {
-    listen      8001;
-    server_name baidu.net;
-}
-
-server {
-    listen      8001;
-    server_name baidu.*;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;通过测试，发现&lt;strong&gt;相同listen端口&lt;/strong&gt;的情况下，多个server的匹配顺序如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;完全匹配优先级最高，匹配则终止&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;通配符在前的优先级其次&lt;/strong&gt;，如*.com&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;通配符在后的优先级次之&lt;/strong&gt;，如baidu.*&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;正则匹配优先级最低&lt;/strong&gt;，如~^.www.test.com$&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;以上若都没有匹配，那么其会走默认的server，即：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;优先选择listen配置项后有default或default_server的server&lt;/strong&gt;，若没有则：&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;找到匹配listen端口的第一个server块&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;一种特殊情况，如果nginx中只为某个listen端口配置一个server块的话，那么nginx是不会根据该端口的server_name进行匹配的。因为只有一个server域，那么根据上面没有匹配的规则的情况下会走第一个匹配listen端口的server块。&lt;/p&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;server {
-    listen    8001;
-    server_name baidu.net;
-}
-server { # server没有配置listen的话，root用户默认是80端口，非root用户默认8080
-    server_name server.com; 
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如上面8001端口只有一个server的情况下，任何server_name访问&lt;code&gt;server_name:8001&lt;/code&gt;都会匹配上面server块（前提是server_name对应域名能请求到该机器上）。&lt;/p&gt;
-&lt;p&gt;另一种特殊情况，server块配置的虚拟主机是&lt;strong&gt;基于域名和IP混合&lt;/strong&gt;的。如下所示：&lt;/p&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;server {
-    listen      192.168.1.1:8001;
-    server_name example.org www.example.org;
-    ...
-}
-server {
-    listen      192.168.1.1:8002;
-    server_name example.com www.example.com;
-    ...
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这种情况下，其匹配顺序是：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;首先，看请求的IP地址和端口是否匹配某个server配置块中的listen指令配置，匹配则命中该server块，否则执行以下&lt;/li&gt;
-&lt;li&gt;其次，看请求的Host头是否匹配这个server块中的某个server_name的值，匹配这命中，否则走默认server。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;第二点需要补充一下，看请求的Host头是否匹配server_name，要满足一个条件，即通过server_name指定的域名可以访问到当前nginx配置所在的机器，因为通过域名访问nginx所在的机器最终还是通过ip的形式来访问的。&lt;/p&gt;
-&lt;p&gt;比如，访问www.example.org，最终通过dns解析出nginx所在的ip地址来进行访问的，又因为该server监听8001端口，所以通过www.example.org:8001也可以命中192.168.1.1:8001所在的server块。&lt;/p&gt;
-&lt;h2 id=&quot;location匹配规则&quot;&gt;2. location匹配规则&lt;/h2&gt;
-&lt;p&gt;一个示例：&lt;/p&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;location  = / {
-  # 精确匹配 / ，主机名后面不能带任何字符串
-  [ configuration A ]
-}
-
-location  / {
-  # 因为所有的地址都以 / 开头，所以这条规则将匹配到所有请求
-  # 但是正则和最长字符串会优先匹配
-  [ configuration B ]
-}
-
-location /documents/ {
-  # 匹配任何以 /documents/ 开头的地址，匹配符合以后，还要继续往下搜索
-  # 只有后面的正则表达式没有匹配到时，这一条才会采用这一条
-  [ configuration C ]
-}
-
-location ~ /documents/Abc {
-  # 匹配任何以 /documents/Abc 开头的地址，匹配符合以后，还要继续往下搜索
-  # 只有后面的正则表达式没有匹配到时，这一条才会采用这一条
-  [ configuration CC ]
-}
-
-location ^~ /images/ {
-  # 匹配任何以 /images/ 开头的地址，匹配符合以后，停止往下搜索正则，采用这一条。
-  [ configuration D ]
-}
-
-location ~* \.(gif|jpg|jpeg)$ {
-  # 匹配所有以 gif,jpg或jpeg 结尾的请求
-  # 然而，所有请求 /images/ 下的图片会被 config D 处理，因为 ^~ 到达不了这一条正则
-  [ configuration E ]
-}
-
-location /images/ {
-  # 字符匹配到 /images/，继续往下，会发现 ^~ 存在
-  [ configuration F ]
-}
-
-location /images/abc {
-  # 最长字符匹配到 /images/abc，继续往下，会发现 ^~ 存在
-  # F与G的放置顺序是没有关系的
-  [ configuration G ]
-}
-
-location ~ /images/abc/ {
-  # 只有去掉 config D 才有效：先最长匹配 config G 开头的地址，继续往下搜索，匹配到这一条正则，采用
-    [ configuration H ]
-}
-
-location ~* /js/.*/\.js {
-  # 不区分大小写匹配
-  [ configuration I ]
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;以&lt;code&gt;=&lt;/code&gt; 开头表示精确匹配，匹配则终止后续查找；如 A 中只匹配根目录结尾的请求，后面不能带任何字符串.&lt;/li&gt;
-&lt;li&gt;以&lt;code&gt;^~&lt;/code&gt; 开头表示uri以某个常规字符串开头，不是正则匹配，匹配则终止后续查找，包括正则匹配，它依然支持最长匹配原则&lt;/li&gt;
-&lt;li&gt;以&lt;code&gt;~&lt;/code&gt; 开头表示区分大小写的正则匹配;&lt;/li&gt;
-&lt;li&gt;以&lt;code&gt;~*&lt;/code&gt; 开头表示不区分大小写的正则匹配&lt;/li&gt;
-&lt;li&gt;以&lt;code&gt;/&lt;/code&gt; 通用匹配, 如果没有其它匹配,任何请求都会匹配到&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;location 顺序 no优先级：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;关于location的优先级需要认知三点：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;先匹配普通location，后匹配正则location&lt;/strong&gt;；因为正则会覆盖普通&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;普通location匹配与顺序无关&lt;/strong&gt;，因为采用&lt;code&gt;最长匹配&lt;/code&gt;原则；&lt;strong&gt;正则location匹配与顺序有关&lt;/strong&gt;，但是正则location依然采用&lt;code&gt;最长匹配&lt;/code&gt;原则&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;普通location指定了&lt;code&gt;^~&lt;/code&gt;则一旦该普通规则匹配上，则不会进行后续匹配了，即使是正则匹配；&lt;code&gt;=&lt;/code&gt;严格匹配一旦匹配，也不会后续正则匹配&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;所以，location的优先级如下：&lt;/p&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;(location =) &amp;gt; (location ^~ 路径) &amp;gt; (location ~,~* 正则顺序) &amp;gt; (location 完整路径)  &amp;gt;  (location 部分起始路径) &amp;gt; (/)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;按照上面的location写法，以下的匹配示例成立：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;/ -&amp;gt; &lt;code&gt;config A&lt;/code&gt;&lt;br/&gt;精确完全匹配，即使/index.html也匹配不了&lt;/li&gt;
-&lt;li&gt;/downloads/download.html -&amp;gt; &lt;code&gt;config B&lt;/code&gt;&lt;br/&gt;匹配B以后，往下没有任何匹配，采用B&lt;br/&gt;&lt;/li&gt;
-&lt;li&gt;/images/1.gif -&amp;gt; &lt;code&gt;configuration D&lt;/code&gt;&lt;br/&gt;匹配到F，往下匹配到D，停止往下&lt;/li&gt;
-&lt;li&gt;/images/abc/def -&amp;gt; &lt;code&gt;config D&lt;/code&gt;&lt;br/&gt;最长匹配到G，往下匹配D，停止往下&lt;br/&gt;你可以看到 任何以/images/开头的都会匹配到D并停止，FG写在这里是没有任何意义的，H是永远轮不到的，这里只是为了说明匹配顺序&lt;/li&gt;
-&lt;li&gt;/documents/document.html -&amp;gt; &lt;code&gt;config C&lt;/code&gt;&lt;br/&gt;匹配到C，往下没有任何匹配，采用C&lt;/li&gt;
-&lt;li&gt;/documents/1.jpg -&amp;gt; &lt;code&gt;configuration E&lt;/code&gt;&lt;br/&gt;匹配到C，往下正则匹配到E&lt;br/&gt;&lt;/li&gt;
-&lt;li&gt;/documents/Abc.jpg -&amp;gt; &lt;code&gt;config CC&lt;/code&gt;&lt;br/&gt;最长匹配到C，往下正则顺序匹配到CC，不会往下到E&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;实际使用建议&quot;&gt;实际使用建议&lt;/h3&gt;
-&lt;pre class=&quot;nginx&quot;&gt;
-&lt;code&gt;所以实际使用中，个人觉得至少有三个匹配规则定义，如下：
-#直接匹配网站根，通过域名访问网站首页比较频繁，使用这个会加速处理，官网如是说。
-#这里是直接转发给后端应用服务器了，也可以是一个静态首页
-# 第一个必选规则
-location = / {
-    proxy_pass http://tomcat:8080/index
-}
-# 第二个必选规则是处理静态文件请求，这是nginx作为http服务器的强项
-# 有两种配置模式，目录匹配或后缀匹配,任选其一或搭配使用
-location ^~ /static/ {
-    root /webroot/static/;
-}
-location ~* \.(gif|jpg|jpeg|png|css|js|ico)$ {
-    root /webroot/res/;
-}
-#第三个规则就是通用规则，用来转发动态请求到后端应用服务器
-#非静态文件请求就默认是动态请求，自己根据实际把握
-#毕竟目前的一些框架的流行，带.php,.jsp后缀的情况很少了
-location / {
-    proxy_pass http://tomcat:8080/
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;参考&quot;&gt;参考&lt;/h2&gt;
-</description>
-<pubDate>Fri, 08 Feb 2019 11:19:00 +0000</pubDate>
-<dc:creator>wonyun</dc:creator>
-<og:description>nginx主要是公司运维同学必须掌握的知识，涉及到反向代理、负载均衡等服务器配置。前端开发尤其是纯前端开发来说对nginx接触的并不多，但是在一些情况下，nginx还是需要前端自己来搞；例如我们公司的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wonyun/p/10309491.html</dc:identifier>
-</item>
-<item>
-<title>ABP大型项目实战(2) - 调试与排错 - 日志 - 查看审计日志 - 叶伟民</title>
-<link>http://www.cnblogs.com/adalovelacer/p/abp-big-project-2-read-auditlog.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/adalovelacer/p/abp-big-project-2-read-auditlog.html</guid>
-<description>
-&lt;p&gt;项目发布到生产环境后难免会有错误。&lt;/p&gt;
-&lt;p&gt;那么如何进行调试和排错呢？&lt;/p&gt;
-
-&lt;p&gt;我看到俱乐部里有人是直接登陆生产服务器把数据库下载到开发机器进行调试排错。&lt;/p&gt;
-&lt;p&gt;这种办法是不适用于大型项目的：&lt;/p&gt;
-&lt;ol readability=&quot;3.5&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;首先，大型项目(特别是全球都有分公司的大型项目)很有可能24小时都有人在使用。所以尽量避免直接登录生产服务器操作，就算部署，也应该用DevOps、蓝绿部署等办法。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;另外，如果大型项目有采用金丝雀发布和A/B测试，那么把数据库下载到开发机器这种方法是很不适用的。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;即使大型项目没有采用金丝雀发布和A/B测试，也不适合把数据库下载到开发机器进行调试排错。因为数据库有可能很大，网络传输需要时间，特别是连VPN的时候，甚至有可能要从欧洲传到中国，又要从中国回传到欧洲。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;生产环境数据库下载后为了安全还需要脱敏，这也需要时间。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;还有其他方法，但是这些方法都存在一个问题，就是时光不能倒流，很多时候你是不可能叫客户回来重现一遍操作流程来复现bug的。&lt;/p&gt;
-
-&lt;p&gt;那么有什么好办法呢？&lt;/p&gt;
-&lt;p&gt;有的，通过查看日志来调试与排错。&lt;/p&gt;
-
-&lt;p&gt;ABP在这方面做得不错，内置了审计日志，提供了详细日志基类。嗯，这是两块内容了，一篇文章是讲不完的，所以我分开多篇文章来讲。&lt;/p&gt;
-&lt;p&gt;先从审计日志开始吧。&lt;/p&gt;
-
-&lt;p&gt;不得不说，ABP在这方面做得很好，审计日志是透明的，你要关闭审计日志反而要写代码控制。当然，这里不建议关闭审计日志。&lt;/p&gt;
-
-&lt;p&gt;然而，ABP的审计日志只提供了写，没有提供读的UI，这样的话，要看审计日志就必须要打开数据库查看了。&lt;/p&gt;
-&lt;p&gt;从前面的描述看到，这种做法在大型项目肯定是行不通的啦。我们必须要提供读取审计日志的UI。这就是这篇文章的主题。&lt;/p&gt;
-
-&lt;p&gt;在我使用的ABP 3.4版本里面，并没有提供审计日志的读取AppService, 但是提供了审计日志的Entity class。（注意： ABP更新很频繁，所以你目前使用的版本有可能新增甚至删除了部分interface或class）&lt;/p&gt;
-&lt;p&gt;所以我们第一步是先围绕ABP提供的审计日志Entity class（AuditLog）来建立AppService class和相关读取Mehtod. 以下是ABP 3.4版本的示例代码：&lt;/p&gt;
-
-&lt;p&gt;IAuditLogAppService.cs&lt;/p&gt;
-&lt;div readability=&quot;12&quot;&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
- public interface IAuditLogAppService : IApplicationService
-    {
-        /// &amp;lt;summary&amp;gt;
-        /// 大型项目的审计日志量会十分大，所以最起码要分页
-        /// &amp;lt;/summary&amp;gt;
-        /// &amp;lt;param name=&quot;input&quot;&amp;gt;&amp;lt;/param&amp;gt;
-        /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
-        Task&amp;lt;PagedResultDto&amp;lt;AuditLogListDto&amp;gt;&amp;gt; GetAuditLogs(GetAuditLogsInput input);
-        /// &amp;lt;summary&amp;gt;
-        /// 一定要提供Excel下载功能，一般建议是按照时间段选取
-        /// &amp;lt;/summary&amp;gt;
-        /// &amp;lt;param name=&quot;input&quot;&amp;gt;&amp;lt;/param&amp;gt;
-        /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
-        Task&amp;lt;FileDto&amp;gt; GetAuditLogsToExcel(GetAuditLogsInput input);
-        /// &amp;lt;summary&amp;gt;
-        /// 提供全部审计日志的Excel下载，因为数据量会比较大，需要在服务器先压缩好，再提供给客户端下载。
-        /// &amp;lt;/summary&amp;gt;
-        /// &amp;lt;returns&amp;gt;&amp;lt;/returns&amp;gt;
-        Task&amp;lt;FileDto&amp;gt; GetAuditLogsToExcel();
-
-        //List&amp;lt;AuditLogListDto&amp;gt; GetAllAuditLogs(); //错误案例示范，大型项目的审计日志量会十分大，所以最起码要分页
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　AuditLogListDto.cs&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
-&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
-using System;
-using Abp.Application.Services.Dto;
-using Abp.Auditing;
-using Abp.AutoMapper;
-
-[AutoMapFrom(typeof(AuditLog))]
-    public class AuditLogListDto : EntityDto&amp;lt;long&amp;gt;
-    {
-        public long? UserId { get; set; }
-
-        public string UserName { get; set; }
-
-        public int? ImpersonatorTenantId { get; set; }
-
-        public long? ImpersonatorUserId { get; set; }
-
-        public string ServiceName { get; set; }
-
-        public string MethodName { get; set; }
-
-        public string Parameters { get; set; }
-
-        public DateTime ExecutionTime { get; set; }
-
-        public int ExecutionDuration { get; set; }
-
-        public string ClientIpAddress { get; set; }
-
-        public string ClientName { get; set; }
-
-        public string BrowserInfo { get; set; }
-
-        public string Exception { get; set; }
-
-        public string CustomData { get; set; }
-    }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　AuditLogAppService.cs&lt;/p&gt;
-&lt;/div&gt;
-&lt;div readability=&quot;11.5&quot;&gt; 
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;43&quot;&gt;
-&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
-[DisableAuditing] //屏蔽这个AppService的审计功能
-    [AbpAuthorize(AppPermissions.Pages_Administration_AuditLogs)]
-    public class AuditLogAppService : GHITAssetAppServiceBase, IAuditLogAppService
-    {
-        private readonly IRepository&amp;lt;AuditLog, long&amp;gt; _auditLogRepository;
-        private readonly IRepository&amp;lt;User, long&amp;gt; _userRepository;
-        private readonly IAuditLogListExcelExporter _auditLogListExcelExporter;
-        private readonly INamespaceStripper _namespaceStripper;
-
-        public AuditLogAppService(
-            IRepository&amp;lt;AuditLog, long&amp;gt; auditLogRepository,
-            IRepository&amp;lt;User, long&amp;gt; userRepository,
-            IAuditLogListExcelExporter auditLogListExcelExporter,
-            INamespaceStripper namespaceStripper)
-        {
-            _auditLogRepository = auditLogRepository;
-            _userRepository = userRepository;
-            _auditLogListExcelExporter = auditLogListExcelExporter;
-            _namespaceStripper = namespaceStripper;
-        }
-
-// 下面视具体业务情况实现接口的方法
-}
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;/div&gt;
-
-&lt;p&gt;第二步就是UI层面，因为审计日志数量会很大，查阅基本要靠搜索，所以要选一个查阅功能强大的Grid组件，根据我个人经验，推荐使用primeng的table组件。具体代码因为没有什么技术难点，我就不贴了。&lt;/p&gt;
-
-&lt;p&gt;对了，前端一定要完成导出Excel格式功能哦，你会发觉这个功能实在是太赞了！&lt;/p&gt;
-
-&lt;p&gt;现在终于可以不用登陆生产服务器就可以查看审计日志了。&lt;/p&gt;
-&lt;p&gt;但是这只是开始！&lt;/p&gt;
-&lt;p&gt;因为一个大型项目里，审计日志的增长速度是惊人的，如果审计日志表和主数据库放在一起，是十分不科学的。&lt;/p&gt;
-&lt;p&gt;那么我们如何解决这个问题呢？敬请期待下一篇文章《ABP大型项目实战(2) - 调试与排错 - 日志 - 单独存储审计日志》&lt;/p&gt;
-
-&lt;p&gt;Q&amp;amp;A：&lt;/p&gt;
-&lt;p&gt;等待大家问问题中。&lt;/p&gt;
-</description>
-<pubDate>Fri, 08 Feb 2019 11:12:00 +0000</pubDate>
-<dc:creator>叶伟民</dc:creator>
-<og:description>ABP的审计日志只提供了写，没有提供读的UI，要看审计日志就必须要打开数据库查看了。 从前面的描述看到，这种做法在大型项目肯定是行不通的啦。我们必须要提供读取审计日志的UI。这就是这篇文章的主题。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/adalovelacer/p/abp-big-project-2-read-auditlog.html</dc:identifier>
 </item>
 </channel>
 </rss>
