@@ -9,6 +9,290 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>如何在ASP.NET Core程序启动时运行异步任务（3） - LamondLu</title>
+<link>http://www.cnblogs.com/lwqlun/p/10363803.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/lwqlun/p/10363803.html</guid>
+<description>&lt;blockquote readability=&quot;2.7222222222222&quot;&gt;
+&lt;p&gt;原文：&lt;a href=&quot;https://andrewlock.net/running-async-tasks-on-app-startup-in-asp-net-core-part-3/&quot;&gt;Running async tasks on app startup in ASP.NET Core (Part 3)&lt;/a&gt;&lt;br/&gt;作者：Andrew Lock&lt;br/&gt;译者：Lamond Lu&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201902/65831-20190212073139366-1114134850.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;之前我写了两篇有关在ASP.NET Core中运行异步任务的博文，本篇博文是对之前两篇博文中演示示例和实现方法的简短跟进。&lt;/p&gt;
+&lt;p&gt;你可以通过以下链接查看之前的博文。&lt;/p&gt;
+
+&lt;p&gt;在之前博客中，我收到的最常见的反馈是关于我在描述问题时使用的例子。在我最初的博客中，我列举了3种可能场景，在这3种场景中，你希望在ASP.NET Core应用启动时运行一些异步任务。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;检查强类型配置是否合法&lt;/li&gt;
+&lt;li&gt;使用数据库或者API填充缓存&lt;/li&gt;
+&lt;li&gt;运行数据库迁移&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;对于前两种场景，没有任何问题，但是对于数据库迁移，一些博友提出了一些疑问。其实在两篇博文中我一直都反复说明，数据库迁移作为启动任务不是一个很好的方案，这里我只是想用它作为一个说明如何在ASP.NET Core程序启动时运行异步任务的例子。现在来看，当时使用这个例子是非常失败的。&lt;/p&gt;
+
+&lt;p&gt;那么为什么在ASP.NET Core应用启动时，运行数据库迁移任务会是一个问题呢？毕竟，在应用程序开始处理请求之前，你肯定要完成数据库迁移！&lt;/p&gt;
+&lt;p&gt;其实这里其实有3个问题：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;数据库迁移是应该是单线程的&lt;/li&gt;
+&lt;li&gt;迁移数据库需要更多的权限&lt;/li&gt;
+&lt;li&gt;开发人员不太喜欢直接运行数据库迁移&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;下面我们依次说明一下。&lt;/p&gt;
+&lt;h2 id=&quot;数据库迁移应该是单线程的&quot;&gt;数据库迁移应该是单线程的&lt;/h2&gt;
+&lt;p&gt;扩展一个Web应用最常用的方式之一是进行横向扩展，启动多个运行实例并使用负载均衡分发请求&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201902/65831-20190212073148438-388345212.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这种Web集群扩展的方案是非常有效的，特别是当当前应用是无状态的（请求被分发到各个应用程序中，如果一个应用程序崩溃，其他的Web应用实例依然可以处理请求）。&lt;/p&gt;
+&lt;p&gt;但是不幸的是，如果尝试将数据库迁移作为应用启动任务，你很可能就会遇到问题。如果有超过1个以上的实例同时启动，多个数据库迁移任务将同时运行。&lt;/p&gt;
+&lt;p&gt;虽然并不能保证你一定会遇到麻烦，但除非你非常小心地确保幂等更新和错误处理，否则你很可能会陷入困境。&lt;/p&gt;
+&lt;p&gt;你肯定不希望使用这种方法，因为它可能产生的数据库完整性问题。 这里一个更好的选择是先启动单个实例完成迁移操作。 这样数据库迁移任务变成一个单线程任务，自然也就避开最严重的危险。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201902/65831-20190212073203768-1053293361.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这种方法比将数据库迁移作为启动任务运行更有意义，但它更安全，更容易实现。&lt;/p&gt;
+&lt;p&gt;当然，这不是唯一的选择。 如果你对启动任务迁移的想法有所了解，那么你可以使用分布式锁来确保只有一个应用程序实例来运行迁移脚本。 然而，这并没有解决第二个问题......&lt;/p&gt;
+&lt;h2 id=&quot;迁移通常需要更多的权限&quot;&gt;迁移通常需要更多的权限&lt;/h2&gt;
+&lt;p&gt;通常来说，最佳实践是你必须限制你的应用程序，以便他们只有权访问和修改所需的资源。 如果报表应用只需要读取销售数据，那么它应该无法修改它们，或者更改数据库表结构！ 为指定的连接字符串配置可操作的权限，可以防止在的的应用出现安全问题时产生大量影响。&lt;/p&gt;
+&lt;p&gt;如果你正在使用Web应用程序本身来运行数据库迁移，那么该Web应用程序自然需要数据库权限才能执行高风险活动，例如修改数据库表结构，更改权限或更新/删除数据。 你真的希望您的Web应用程序能够删除你的学生表吗？&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/65831/201902/65831-20190212073216492-283373394.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;同样，你可以使用一些特定的实现，例如，与正常的数据库访问相比，使用不同的连接字符串进行迁移。 但是，如果使用外部迁移过程，你根本无法锁定Web应用程序进程。&lt;/p&gt;
+&lt;h2 id=&quot;开发人员不习惯直接运行ef-core迁移&quot;&gt;开发人员不习惯直接运行EF Core迁移&lt;/h2&gt;
+&lt;p&gt;这是一个不那么明显的观点，但是很多人表示在生产环境中使用EF Core迁移工具可能不是一个好主意。&lt;/p&gt;
+&lt;p&gt;就个人而言，我已经有1年多没有在生产环境中使用EF Core迁移了，到目前为止迁移工具肯定已经有所改善。 话虽如此，我仍然看到一些问题：&lt;/p&gt;
+&lt;p&gt;就我自己而言，我经常使用DbUp和FluentMigrator，而不会使用EF Core迁移。我发现它们都运行良好。&lt;/p&gt;
+&lt;p&gt;因此，如果数据库迁移任务不适合应用启动任务示例，那么哪些任务才是比较适合的呢？&lt;/p&gt;
+
+&lt;p&gt;虽然在之前的博文中我已经反复提到了一些例子，但我还是将在下面再次描述它们。这里其他博友还给我一些有趣的补充。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;检查强类型配置是否有效。ASP.NET Core 2.2引入了配置验证，但它只在首次访问&lt;code&gt;IOptions&lt;/code&gt; 类时执行此操作。 正如我在之前文章中所描述的那样，你可能希望在应用启动时进行验证，以确保你的环境和配置有效。&lt;/li&gt;
+&lt;li&gt;填充缓存。 你的应用程序可能需要来自文件系统或远程服务的数据，它只需要加载一次，但加载需要耗费相当多的资源，所以在应用程序启动之前加载此数据可减少请求延迟。&lt;/li&gt;
+&lt;li&gt;预连接到数据库和/或外部服务。 以类似的方式，你可以通过连接到数据库或其他外部服务来填充数据库连接池。 这些通常是相对昂贵的操作，因此是很好的用例。&lt;/li&gt;
+&lt;li&gt;预编译加载应用中所有的单例服务。我认为这个一个非常有趣的想法，通过预加载依赖注入容器中注册的单例服务，你可以减少请求的响应时间。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;我完全同意有关数据库迁移的反馈。 当这不是一个好主意时，将它们用作启动任务的示例有点误导，特别是因为我个人不使用我所描述的方法！&lt;/p&gt;
+&lt;p&gt;然而，很多人都同意我所描述的另外一种方法 - 在启动Kestrel服务器和处理请求之前运行启动任务。&lt;/p&gt;
+&lt;p&gt;这里Damian Hickey针对这个方案提出了一个问题，他建议尽快启动Kestrel服务器。 他建议在所有启动任务完成后，使用运行健康检查向负载均衡器发出信号，表明应用程序已准备好开始接收请求。 与此同时，所有非健康检查流量（如果负载均衡器正在执行此任务，则不应该有任何流量）将收到503服务不可用。&lt;/p&gt;
+&lt;p&gt;这种方法的主要好处是它可以避免网络超时。 一般来说，应用程序最好能尽快的针对请求返回错误代码，而不是根本不响应请求，并导致客户端超时。 这减少了客户端所需的资源数量。 通过较早启动Kestrel服务器，应用程序可以更早地开始响应请求，即使响应是“未就绪”响应。&lt;/p&gt;
+&lt;p&gt;这实际上与我在第一篇文章中描述的方法非常相似，但是我没有选用它了，因为它太复杂了，而且没有达到我设定的目标。 从技术上来说，在那篇文章中，我只是关注在Kestrel服务器启动之前运行任务的方法，健康检查方法不能完成这个功能。&lt;/p&gt;
+&lt;p&gt;然而，Damian提出的问题让我再次思考。 在我下一篇博客中，我将描述如何使用ASP.NET Core 2.2的健康检查功能向负载均衡器发送信号，表明应用程序已经完成了所有启动任务。&lt;/p&gt;
+
+&lt;p&gt;在这篇文章中，我分享了我之前关于在ASP.NET Core应用程序启动时运行异步任务的一些反馈。 这里最大的问题是我选择使用EF Core数据库迁移作为启动任务的示例。 数据库迁移不适合在应用程序启动时运行，因为它们通常需要由单个进程运行，并且需要比更多的数据库权限。&lt;/p&gt;
+&lt;p&gt;我提供了一些比较适合作为的启动任务的场景，并且描述了Damian给出的建议 - 尽快启动Kestrel服务器，并使用运行状况检查来指示任务何时完成。 我将在下一篇文章中描述如何实现这一功能。&lt;/p&gt;
+</description>
+<pubDate>Mon, 11 Feb 2019 23:33:00 +0000</pubDate>
+<dc:creator>LamondLu</dc:creator>
+<og:description>原文： 'Running async tasks on app startup in ASP.NET Core (Part 3)' 作者：Andrew Lock 译者：Lamond Lu 之前我写了两</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/lwqlun/p/10363803.html</dc:identifier>
+</item>
+<item>
+<title>《组织行为学》--个体行为整理及个人感悟 - 超大的雪童子</title>
+<link>http://www.cnblogs.com/yangsy0915/p/10363754.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yangsy0915/p/10363754.html</guid>
+<description>&lt;h2&gt;&lt;strong&gt;一、能力&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;　　人的能力各有长短，这是不争的事实。但是，个体能力的发展的不平衡未必就意味着孰优孰劣。人的能力是有差异的，应该善于根据人的能力特点去使用他们，尽量兼收并蓄。而不要有所弃有所取。要不拘一格地使用人才。&lt;/p&gt;
+&lt;p&gt;　　那么从管理的角度出发，了解能力的个别差异，根本目的在于根据每个员工的能力特点安排给他们合适的工作，从而充分发挥人力资源。人能尽其才，才能尽其力。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（1）什么是能力？&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　能力指的是一种心理素质，是顺利完成某种活动的心理条件。人的能力是各种各样的，通常可以分为一般能，特殊能力和创造力。一般能力是指在完成不同种类的活动中都表现出来的能力，如观察力、记忆力、抽象概括力、想象力、创造力等，其中抽象概括力是一般能力的核心，平时我们所说的智力，就是一般能力。特殊能力是指适用于某个特殊领域的能力。创造力是指，创造新概念、新事物、新产品的能力。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（2）智力的结构&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　美国心理学家瑟斯顿提出了基本心智能力构成的七个维度：&lt;/p&gt;
+&lt;p&gt;　　　　1、语文理解，即理解语文含义的能力。&lt;/p&gt;
+&lt;p&gt;　　　　2、语句流畅，能够迅速做出反应的语文能力。&lt;/p&gt;
+&lt;p&gt;　　　　3、数字运算，能够迅速而正确地进行计算的能力。&lt;/p&gt;
+&lt;p&gt;　　　　4、空间关系，方位辨别及空间关系判断能力。&lt;/p&gt;
+&lt;p&gt;　　　　5、联想记忆，有关两个事物之间联系的机械记忆能力。&lt;/p&gt;
+&lt;p&gt;　　　　6、知觉速度，能否凭视觉迅速辨别事物异同的能力。&lt;/p&gt;
+&lt;p&gt;　　　　7、一般推理，能否根据经验做出归纳推理的能力。&lt;/p&gt;
+&lt;p&gt;　　　　英国心理学家提出智力层次是按层次排列的。其中最高层次是普遍因素，即人的基本心理能量，是决定一个人智力高低的主要成分。第二层分为两大群，即言语和教育方面的因素、操作和机械方面的因素，叫大群因素。第三层为小群因素，包括言语理解、数量、教育机械信息、空间信息等内容。第四层次为特殊因素，即完成具体工作时需要的特殊技能。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212000133104-2087241228.jpg&quot; alt=&quot;&quot; width=&quot;712&quot; height=&quot;250&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（3）智力的测量&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　概括来说，当工作中需要进行信息加工越多时，较高的总体智力水平和言语能力是成功完成此项工作的必要保证。然而，高智商并非是所有工作的前提条件。在很多工作中，员工的行为具有高度规范性，很少有机会使他们表现出差异。此时，高智商与工作绩效之间可以说相关性并不大，相反，一些非智力因素的影响更强烈。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（4）新兴的智力理论&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　美国心理学家加德纳提出智力多元论，认为智力应该包括：认知智力、社会智力、情绪智力和文化智力。&lt;/p&gt;
+&lt;p&gt;　　　　认知智力指的是传统智力测验中一直关心的那部分潜能。&lt;/p&gt;
+&lt;p&gt;　　　　社会智力指的是一个人与他人建立有效联系的能力。&lt;/p&gt;
+&lt;p&gt;　　　　情绪智力是一种识别、理解和管理情绪的能力。&lt;/p&gt;
+&lt;p&gt;　　　　文化智力则是对跨文化的差异具有敏感性，并能够在跨文化的情景中成功运作的能力。&lt;/p&gt;
+&lt;p&gt;　　　　美国耶鲁大学教授斯滕伯格也提出智力的三元论：&lt;/p&gt;
+&lt;p&gt;　　　　1、组合性智力：指个体在问题情境中，运用知识分析资料，经由思考、判断、推理以达到问题解决的能力。传统智力测验中测得的智商，代表的就是这副本智力。&lt;/p&gt;
+&lt;p&gt;　　　　2、经验性智力：指个体运用已有经验处理新问题时，整合不同观念二形成的顿悟或创造力的能力。&lt;/p&gt;
+&lt;p&gt;　　　　3、实用性智力：指个体在日常生活中，运用学得的知识经验以处理其日常事务的能力。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（5）特殊能力&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　特殊能力指的是在某种专业活动中表现出来的能力，它是顺利完成专业活动的心理条件。例如：画家需要形象记忆力、色彩鉴别力、视觉想象力等；音乐家需要音质辨别力、音调记忆力以及节奏比较能力等。现代企业家需要决策能力、组织与计划能力、人际协调能力等。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（6）创造力及其测量&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　一个具有创造力的人往往能超脱具体的知觉情景、思维定势、传统观念的束缚，在习以为常的事务和现象中发现新的联系。有关创造力与智力之间的关系，研究大致显示出这样一个趋势，创造力与智力之间存在某种程度的相关，但并无高相关。“对重要的创造行为来说”，个体必须达到某种智慧的阈限--要具备最低限度的智力水平。&lt;/p&gt;
+&lt;p&gt;　　　　那么吉尔福特对创造力进行了较为系统的研究，认为可以通过思维的流畅性、变通性和独特性三方面来衡量创造力的高低。&lt;/p&gt;
+&lt;p&gt;　　　　1、流畅性：指的是单位时间内产生多种反应的数量。高创造力的人，能在短时间内相处数量较多的项目，即反应迅速而且出众。&lt;/p&gt;
+&lt;p&gt;　　　　2、变通性：指的是做出不同反应的范围或维度。范围越大、维度越多，说明变通性越强。变通性强的人，在解决问题时能触类旁通，举一反三，不拘泥于现有的常规模式。&lt;/p&gt;
+&lt;p&gt;　　　　3、独特性：指的是能对问题提出超乎寻常的、角度独特的见解，不受已有观念的束缚和限制。对于创造力的测验，不强调对现成只是的记忆与理解，更强调独特和异乎寻常。&lt;/p&gt;
+&lt;p&gt;　　（7）能力--工作的匹配&lt;/p&gt;
+&lt;p&gt;　　　　当能力与工作彼此匹配时，员工的工作绩效水平就会提高。当员工的能力远远超过工作要求而造成能力与工作要求不匹配时，也会出现问题，它会降低员工的工作满意度。&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;二、人格&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;　　&lt;strong&gt;（1）什么是人格？&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　心理学家使用人格这一概念来描述个体整个心理系统的形成和发展，这个独特的整合系统是个体区别于其他人的稳定而统一的心理品质的综合。特点如下：&lt;/p&gt;
+&lt;p&gt;　　　　1、独特性：一个人的人格是在遗传、环境、教育等先天及后天因素的交互作用下形成的。&lt;/p&gt;
+&lt;p&gt;　　　　2、稳定性：偶然发生的心里特性不能称为人格。强调人格的稳定性也并不意味着它在人的一生中是一成不变的，随着生理的成熟和环境的改变，人格也可能发生或多或少的变化。&lt;/p&gt;
+&lt;p&gt;　　　　3、综合性：人格是由多种成分构成的一个有机整体，具有内在的一致性，受自我意识的调节和控制。&lt;/p&gt;
+&lt;p&gt;　　　　4、功能性：人格决定了一个人的生活方式，甚至决定一个人的命运，因而是人生成百的根源之一。当面对挫折和失败时，坚强者能奋发图强，懦弱者一句不振。这就是人格功能性的表现。&lt;/p&gt;
+&lt;p&gt;　　　　那么人格是如何形成的？现代学者普遍认为，人格是由遗传和环境两方面因素构成的，同时还受到情景条件的调节。人格特点受到环境的一姑娘，它包括我们成长的文化背景，早年的生活条件，家庭，朋友和社会群体的规范等等。这些环境因素对于人格的塑造起着十分重要的作用。&lt;/p&gt;
+&lt;p&gt;　　　　同时，还有情景，个体的人格虽然从总体来说是稳定持久的，但在不同情境下根据需要而有所改变。例如，同是一个外向健谈的人，在参加招聘面试和在咖啡馆里与好友聊天，他的谈话方式、行为特点将会表现出极大差异。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（2）卡特尔的人格特质理论&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　人格是一个复杂的心理结构系统，其中包括多种持久而稳定的人格特质。这些特质是人类共有的，但是特质的数量和组合因人而异，因而导致人格方面的个体差异。采用因素分析的做法，最终确定了16种稳定而持久的人格因素，称之为人格的主要特质或根源特质。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212004032722-766077751.jpg&quot; alt=&quot;&quot; width=&quot;780&quot; height=&quot;427&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（3）大五模型&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　有五项人格维度构成了所有人格因素的基础，并包括了人格当中的大多数明显变异：&lt;/p&gt;
+&lt;p&gt;　　　　1、外倾性：该维度描述的是个体对关系的舒适感程度。外倾性喜欢群居、善于言谈、具有决断性。内倾者倾向于封闭内向、胆小害羞、安静少语。&lt;/p&gt;
+&lt;p&gt;　　　　2、随和性：该维度描述的是个体服从他人的倾向性。随和性较高的人更为合作、激情和信赖他人；随和性较低的人则是冷淡的、敌对的和不受欢迎的。&lt;/p&gt;
+&lt;p&gt;　　　　3、责任心：该维度是对信誉的测量。高度责任心的人是负责的，有条不紊的、值得信赖的、持之以恒的。在该维度上得分低的人容易精力分散、缺乏规划性、且不可信赖。&lt;/p&gt;
+&lt;p&gt;　　　　4、情绪稳定性：该维度刻画的是个体承受压力的能力，积极的情绪是平和、自信、安全的；消极的情绪稳定性者是紧张、焦虑、失望和缺乏安全感的。&lt;/p&gt;
+&lt;p&gt;　　　　5、经验开放性：该维度针对于个体在新奇方面的兴趣和热衷程度。开放性非常高的人富有创造性、凡事好奇、具有艺术的敏感性；开放性维度非常低的人很保守，对熟悉的事务感到舒适和满足。&lt;/p&gt;
+&lt;p&gt;　　　　不少研究表明，大五人格维度与工作绩效之间有着重要的关系。工作绩效使用三个指标进行界定：绩效评估，培训效果，以及人事资料。对于各行各业的人员来说，责任感这一维度都可以预测其工作绩效。“占绝对优势的证据表明”，哪些可以新来的、细致周到的、做事有条不紊的、勤奋刻苦的、持之以恒的、成就取向的个体，在绝大多数职业当中，回去的更高的工作业绩。在责任意识上得分较高的个体，也会在工作相关知识方面水平更高，这可能是由于高责任感的人会在工作中付出更多的努力。二较高的工作知识水平，又会带来较高的工作绩效水平。&lt;/p&gt;
+&lt;p&gt;　　　　大五中其他人各维度的预测力，取决于绩效标准和职业群两项因素。比如，外倾性可以预测管理和销售岗位的工作绩效。同时，经验开放性对于培训效果的预测也非常重要，这一点也合乎逻辑的，在这一方面比较意外的研究结果是：情绪稳定性与工作绩效无明显相关，凭直觉人们都认为，平和而有安全感的人应该比焦虑不安的人工作干得更好。一些研究者表明，可能只有那些在情绪稳定性方面得分相对较高的人们才会保住自己的工作，而研究样本均选择的是在职受聘员工，因此，他们之间的差异非常小。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（4）麦尔斯--布瑞格斯类型指标（MBTI）&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　可以说是目前使用最广泛的人格测验之一。MBTI在四个维度上对他进行区分：外向的或内向的（E或I）、领悟的或直觉的（S或N）、思维的或情感的（T或F）、感知的或判断的（P或J）。&lt;/p&gt;
+&lt;p&gt;　　　　INTJ型是幻想者，他们有创造性思维，并有强大的内驱力实现自己的想法和目标，他们的特点是怀疑、批判、独立、决断，甚至常常有些顽固。&lt;/p&gt;
+&lt;p&gt;　　　　ESTJ型人是组织者，他们现实、理性、果断、实事求是，具有从事商业和机械工作的天生头脑，擅长组织和操控活动。&lt;/p&gt;
+&lt;p&gt;　　　　ENTP型则为抽象思考者，他们喜欢革新、特立独行、多才多艺、对创业想法感兴趣。这种人在解决挑战性任务方面资源丰富，但在处理常规工作方面则较为消极。&lt;/p&gt;
+&lt;p&gt;　　　　但目前对该测验的信度和效度尚缺乏有力的证据，因此，对这一量表的使用应采取审慎的态度。&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;三、与组织行为有关的人格特点&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;　　他们分别是：控制点、权术注意、自尊、自我监控、冒险倾向、A型人格和B型人格&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（1）控制点&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　我们把个体对于自己是否掌握命运的认知，称之为控制点。一些人认为自己是命运的主人，一些人认为自己受命运的操控。前者认为自己可以控制命运，我们称之为内控型，后者认为自己被外界的力量所左右，我们称之为外控型。&lt;/p&gt;
+&lt;p&gt;　　　　大量内控和外控的比较研究一致表明，外控型人相比内控型人对工作更不满意、缺勤率更高、对工作环境更为书院，对工作卷入程度更低。另外，外控型人采取主动行动的可能性更低。&lt;/p&gt;
+&lt;p&gt;　　　　内控者在决策之前积极搜寻信息，对获得成功又更强烈的动机，更倾向于控制自己的环境。因此，内控这在复杂的工作中做的更好，包括绝大多数管理需要进行复杂的信息加工和学习活动。内控者也适于从事要求创造性和独立性的工作活动。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（2）权术主义&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　为了达到目的，可以不择手段，这是高权术主义者一贯的思想准则。更喜欢操控和控制别人，赢得利益更多，更难被别人说服，却更多地说服别人。当然，这些结果也受到情景因素的调节。高权术主义者会是好员工吗？答案取决于他们从事的工作类型，以及在评估绩效时是否考虑其道德内涵。对于需要谈判技能的工作和成功能带来实质效益的工作，高权术主义者会十分出色，但行为需要有绝对的规范标准。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（3）自尊&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　人们喜爱或不喜爱自己的程度各有不同，这一特质成为自尊。自尊心强的人相信自己拥有工作成功所必需的大多数能力。另外，自尊心强的人在工作选择上会更冒险，更可能选择那些非传统性的工作。从管理的角度来看，自尊心弱的人更关注取悦他人，他们很少站在不受欢迎的立场上。人们还发现自尊与工作满意度之间存在正相关，大量研究证实自尊心强者比自尊心弱者对他们的工作更为满意。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（4）自我监控&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　指的是个体根据外部情景因素调整自己行为的能力。高自我监控者更善于根据外部环境的因素来调整自己的行为。他们对环境线索十分敏感，能根据不同情境采取不同行为，并能够使公开的角色与私人的自我之间表现出极大差异。低自我监控者则很难通过这种方式伪装自己，他们倾向于在各种情境下都表现出自己的真实情景和态度。&lt;/p&gt;
+&lt;p&gt;　　　　高自我监控者比低自我监控者更关注他人的活动，行为更符合习俗。另外，高自我监控的管理者在职业中会较为灵活应变，得到更多的晋升机会，更可能在组织中占据核心位置，因为高自我监控者能够在不同的观众面前呈现出不同的“面孔”。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（5）冒险性&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　这种接受或会比风险的倾向性影响到管理者做决策所用的时间以及做决策之前需要的信息量。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（6）A型人格与B型人格&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　A型人格表现为：1、运动、走路、吃饭通常节奏很快；2、对很多事情的进展速度感到不耐烦；3、总是试图同时做两件以上的事情；4、无法打发休闲时光；5、着迷于数字，他们的成功是以每件事中自己获益多少进行定量衡量的。&lt;/p&gt;
+&lt;p&gt;　　　　B型人格表现为很少受到这种欲望的折磨，注入要活的越来越多的东西，或无休止地压缩完成工作的时间。&lt;/p&gt;
+&lt;p&gt;　　　　A型人格常常处于中高度的焦虑状态之中。他们总是体验到一种时间上的紧迫性，有着强烈的竞争意识，不断给自己加压要在最短的时间内干更多的事情。A型人格者常常被评价为工作积极、勤奋努力、能力强、富于进去、成功动机高。但是，在组织中A型人格倾向于放弃对质量的追求，而仅仅追求数量，然而在企业当中晋升“常常授予哪些睿智而非匆忙、机敏而非敌意、有创造性而不仅有好胜心的人”。&lt;/p&gt;
+&lt;p&gt;四、人格与工作的匹配&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212012807937-1139013083.jpg&quot; alt=&quot;&quot; width=&quot;743&quot; height=&quot;392&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212012924522-2147172090.jpg&quot; alt=&quot;&quot; width=&quot;529&quot; height=&quot;399&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　在六边形中两个领域越接近，则两者越具有相容性。对角线上相对的类型最不一致。在现实生活中，单纯属于某一类人格的人极为少见。大多数都是集中类型的结合，但其中必以某种类型为主导。&lt;/p&gt;
+
+&lt;h2&gt;&lt;strong&gt;三、学习&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;　　&lt;strong&gt;（1）什么是学习？&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　学习并不仅仅局限在学校里所从事的活动。实际上我们每个人都活到老，学到老，学习可以发生在任何时间或地点。心理学家对学习的定义是：在经验的作用下而发生的相对持久的行为改变。&lt;/p&gt;
+&lt;p&gt;　　　　1、显然，我们无法看到任何人的学习。如果一个人的行为、活动、反应这些作为经验的结果与过去的方式有所不同时，就意味着学习已经发生了。&lt;/p&gt;
+&lt;p&gt;　　　　2、学习以行为的变化为标志。这种变化可能向着有力的方向，也可能向着不利的方向。&lt;/p&gt;
+&lt;p&gt;　　　　3、这种变化应该是相对持久的。暂时的变化可能仅仅是反射的结果，而不是学习的结果。&lt;/p&gt;
+&lt;p&gt;　　　　4、只有行为活动出现了变化，学习才会发生。如果个体仅仅在思维过程火灾态度上发生了变化，而行为未发生相应变化，则不能称为学习。&lt;/p&gt;
+&lt;p&gt;　　　　5、学习必须包含某种类型的经验。这些经验可以通过直接方式得到，如观察或实践，也可以通过间接方式得到，如阅读书籍。那么这种经验是否导致了相对持久的行为变化？如果回答是，我们可以说学习发生了。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;（2）学习理论&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　人类的行为是在后天环境中通过条件反射的方式建立的，在行为的习得过程中，强化是一项必不可少的因素，它使外界刺激与学习者的反应之间建立起条件反射，并通过不断重复而使两者的联系进一步加强和巩固，从而达到我们所说的“学会了”的地步。 那么条件刺激公国与无条件刺激反复结合，最终会使条件刺激单独存在时也能够引起一定的反应，这样，原来与有机体无关的刺激就具有了一种引起有机体反应的力量。&lt;/p&gt;
+&lt;p&gt;　　　　巴甫洛夫认为，人类一切的培育、学习和训练，一切可能的习惯都是通过很长系列的条件反射而形成的。也就是说，在人类的学习过程中，可以把已形成的条件刺激作为无条件刺激，在此基础上可以建立新的条件反射，从而形成二级或高级条件反射。正是在这种学习过程中，使我们一步步成长，一天天进步。&lt;/p&gt;
+&lt;p&gt;　　　　&lt;strong&gt;1、操作性条件反射说&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　刺激引起反应这一规律。斯金纳认为，操作性条件反射与两个一般性原则相联系：（1）任何反应如果紧随以强化（奖励）刺激，这个反应都有重复出现的趋向。（2）任何能提高操作反应率的刺激都是强化刺激。应用这个道理，我们完全可以塑造和改变人类的行为，只要我们对于所期望的行为提供奖励就可以。当预期行为出现后立即强化，再出现，再强化。这样，我们所期望的这种行为再度发生的比率就上升了。&lt;/p&gt;
+&lt;p&gt;　　　　&lt;strong&gt;2、社会学习理论&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　个体不仅通过直接经验进行学习，还通过观察或聆听发生在他人身上的事情而学习。如，我们观察的榜样，父母、教师、同伴、上司等。学会了很多东西。这种人为我们可以通过观察和直接经验两种途径进行学习的观点，称为社会学习理论。榜样对个体的影响包括四个过程：&lt;/p&gt;
+&lt;p&gt;　　　　　　注意过程：只有当人们认识并注意到榜样的重要特点时，才会向榜样学习。最容易受到影响的榜样具有这些特点：有吸引力的，反复出现的，对我们重要的，与我们相似的。&lt;/p&gt;
+&lt;p&gt;　　　　　　保持过程：榜样的影响取决于当榜样不再真正出现时，个体对榜样活动的记忆程度。&lt;/p&gt;
+&lt;p&gt;　　　　　　动力复制过程：个体通过观察榜样而看到一种新行为之后，观察必须要把“看到过程”转化成“做的过程”。&lt;/p&gt;
+&lt;p&gt;　　　　　　强化过程：如果提供了积极的诱因或奖励，将会激发个体从事榜样行为。人们对受到强化的行为将会给予更多关注，学习的效果更好，表现的更频繁。&lt;/p&gt;
+&lt;p&gt;　　　　&lt;strong&gt;3、行为塑造：强化的运用&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　学习不但发生于工作之前还发生于工作过程当中，作为管理者应该利用学习规律指导员工的行为，使他们的行为对组织最有利。个体的行为之所以能形成或发生变化，其根本原因是强化的作用，因此，对强化的加以控制也就意味着对行为的控制。管理者通过对强化进行系统控制的方式，从而指导个体学习、塑造个体行为的过程，叫做行为塑造。&lt;/p&gt;
+&lt;p&gt;　　　　　　根据强化的层级，可以把强化分为一级强化和二级强化两类。一级强化物满足的是人与动物的基本生理需要，如食物、水、安全等等。二级强化指的是一个中性刺激在与一级强化物反复联合后，就能获得自身的强化性质。比如尊严、赞赏、认可等。在组织环境中，提供的绝大多数是二级强化物，这些强化物本身并不能满足员工的基本需求。&lt;/p&gt;
+&lt;p&gt;　　　　　　根据强化的程序，又可以把强化划分为两大类：连续强化 和 间断强化。连续强化指的是每次理想行为出现时，都给予强化。间接强化指的是，选取理想行为中的一部分进行强化，间断强化是我们日常生活中更为常用的强化方式。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212021322380-538874332.jpg&quot; alt=&quot;&quot; width=&quot;880&quot; height=&quot;271&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　　　　　在日常生活中，强化并不总是连续的，大多数情况下只是间接强化，这种强化对人的行为仍然起到极大的促进作用。斯金纳进一步对间接强化进行了探讨，并总结出了一些强化的规律。间接强化又可以根据两个维度划分为四种方式。&lt;/p&gt;
+&lt;p&gt;　　　　　　1、定时距强化方式：每隔一定的固定时间段给予一次强化，这种类型的强化关键变量在于时间，而且必须持续进行。例如我们每月定期拿到的功罪就属于这种强化方式。&lt;/p&gt;
+&lt;p&gt;　　　　　　2、变时距强化方式：根据时间分配，但具体时间却是不可预测的。例如老师在新学期开始告诉学生，学期中间将进行5次小测验作为平时成绩，但什么时候却不得而知。&lt;/p&gt;
+&lt;p&gt;　　　　　　3、定比率强化方式：强化过程中，个体反应达到了一定数目之后，就给予奖励。&lt;/p&gt;
+&lt;p&gt;　　　　　　4、变比率强化方式：以次数不定的间隔来进行强化。例如，赌场中的老虎游戏机的设计原理也是如此，你不断给机器输入钱币，有时好运连连、财运如流水，有时血本无归。在行为塑造方面，通常这种方式的强化效果最好，因为行为反应最不容易因为不强化而消退，而且反应重复出现的频率也最高。&lt;/p&gt;
+&lt;p&gt;　　　　　　可变方式的强化会禅城更高的反应几率和更稳定一致的行为，因为这种方式中，包含着相当多的不确定和难以预料的因素，个体为了得到奖励，就必须时刻保持着警觉性。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212022333234-1853846141.jpg&quot; alt=&quot;&quot; width=&quot;826&quot; height=&quot;254&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/820234/201902/820234-20190212022404096-107428182.jpg&quot; alt=&quot;&quot; width=&quot;823&quot; height=&quot;214&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;strong&gt;个人感悟&lt;/strong&gt;&lt;/h2&gt;
+&lt;p&gt;　　我们通过本章，可以以第三视角来审视自己，找出属于自己的特质，顺着自身的特质发展与学习强化，达到自己想要成为的那样的人。&lt;/p&gt;
+&lt;p&gt;　　与此同时现实中我们通过对于不同人的特质的洞察与把握，能够用对方所能接收的方式，进行沟通交流，从而促进合作的达成。&lt;/p&gt;
+&lt;p&gt;　　如果是管理者，可对不同特质的人进行规范及行为强化，增强组织生产率及组织机制。&lt;/p&gt;
+&lt;p&gt;　　那么再扩展一下会发现，其实很多的APP产品都是在利用人性的特点，来对定向人群的营销，因为人的内心总归是渴望被认同、被关注以及获得奖励。&lt;/p&gt;
+</description>
+<pubDate>Mon, 11 Feb 2019 18:25:00 +0000</pubDate>
+<dc:creator>超大的雪童子</dc:creator>
+<og:description>一、能力 人的能力各有长短，这是不争的事实。但是，个体能力的发展的不平衡未必就意味着孰优孰劣。人的能力是有差异的，应该善于根据人的能力特点去使用他们，尽量兼收并蓄。而不要有所弃有所取。要不拘一格地使用</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/yangsy0915/p/10363754.html</dc:identifier>
+</item>
+<item>
+<title>JVM平台上的响应式流（Reactive Streams）规范 - 李新杰</title>
+<link>http://www.cnblogs.com/lixinjie/p/a-reactive-streams-specification-on-jvm.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/lixinjie/p/a-reactive-streams-specification-on-jvm.html</guid>
+<description>&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Reactive Streams&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;
+&lt;p&gt;&lt;br/&gt;&lt;span&gt;响应式流是一个倡议，用来为具有非阻塞后压的异步流处理提供一个标准。大家努力的目标集中在运行时环境（JVM和JavaScript）和网络协议上。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;注：响应式流其实就是一个规范，本文讲解的正是这个规范，且这个规范已经被引入到JDK9里了。&lt;br/&gt;&lt;/p&gt;
+
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;94007&quot;&gt;&lt;section&gt;&lt;section/&gt;&lt;section&gt;&lt;section/&gt;&lt;section/&gt;&lt;section/&gt;&lt;/section&gt;&lt;section readability=&quot;3&quot;&gt;&lt;section data-autoskip=&quot;1&quot; class=&quot;&quot; readability=&quot;6&quot;&gt;&lt;p&gt;&lt;span&gt;后压：就是下游出现了问题，得不到解决时，这个问题就会逆流而上，继而影响上游。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;如果一个路口红绿灯坏了造成堵车，如果不管的话，用不了太长时间，车就会堵到上一个路口，如果再不管的话，整条路都会被赌满。&lt;/p&gt;
+&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;JDK9里的java.util.concurrent.Flow&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;本规范里的这些接口在JDK9的java.util.concurrent.Flow里都已经可用，它们在语义上与响应式流的各接口基本上一比一相等。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;这意味着将有一个迁移周期，直至第三方库都采用JDK里的新类型，这个周期自然希望短一些。&lt;/p&gt;&lt;p&gt;这取决于第三方库的完整语义相等，和Reactive Streams和JDK的Flow之间的适配器库和一个与JDK的Flow类型可直接兼容的TCK。&lt;/p&gt;
+
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;94007&quot;&gt;&lt;section&gt;&lt;section/&gt;&lt;section&gt;&lt;section/&gt;&lt;section/&gt;&lt;section/&gt;&lt;/section&gt;&lt;section readability=&quot;2.5&quot;&gt;&lt;section data-autoskip=&quot;1&quot; class=&quot;&quot; readability=&quot;5&quot;&gt;&lt;p&gt;&lt;span&gt;因为这个标准在JDK9才引入，在此之前一些第三方库都已经存在，所以需要一个过渡阶段，让第三方库慢慢采用JDK的标准。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;TCK是一个工具，下文有介绍。&lt;/span&gt;&lt;/p&gt;
+&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Goals, Design and Scope&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;处理流数据，尤其是在线数据，它们的量是无法预知的，在一个异步系统中要求格外小心。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;最重要的问题是资源的消耗需要被小心地控制，以便一个快速的数据源不会淹没流的目的地（下游）。&lt;/p&gt;&lt;p&gt;需要异步的目的是为了并行地使用计算资源，如协调网络上多个主机，或一个机器的多个CPU核。&lt;/p&gt;&lt;p&gt;响应式流的主要目标是控制横穿一个异步边界的流数据的交换。&lt;/p&gt;&lt;p&gt;考虑到向另一个线程或线程池传递元素，同时确保接收端不被强迫缓冲任意数量的数据。&lt;/p&gt;&lt;p&gt;换句话说，后压是这个模型的一个必须部分，目的是允许队列在被界定的线程之间进行调节（斡旋）。&lt;/p&gt;&lt;p&gt;如果后压信号是同步的，异步处理的好处将被否定，因此对一个响应式流实现的所有方面的完全非阻塞和异步行为的授权需要小心一些。&lt;/p&gt;&lt;p&gt;这个规范的意图就是允许创建许多种一致的实现，它们凭借遵守规则将能够平滑地互操作，在一个流应用的整个处理图中保留前文提到的好处和特征。&lt;/p&gt;&lt;p&gt;需要注意的是流操作的精确特性（转化，分割，合并等）并没有被这个规范包括。响应式流只关心在不同的API组件间调节流数据。在他们的开发中，已经非常细心地确保所有组合流的基本方式都能够被表达。&lt;/p&gt;&lt;p&gt;总之，响应式流是JVM上面向流的库的一个标准和规范：&lt;/p&gt;&lt;p&gt;处理一个潜在的无限数目元素，&lt;br/&gt;依次地，&lt;br/&gt;异步地在组件间传递元素，&lt;br/&gt;带有强制的非阻塞后压。&lt;/p&gt;&lt;p&gt;响应式流规范由以下部分组成：&lt;/p&gt;&lt;p&gt;1、API规定了需要实现的响应式流类型，并且在不同的实现间完成互操作性。&lt;/p&gt;&lt;p&gt;2、技术兼容性工具（TCK）是一个标准的测试套件，用于各种实现的一致性测试。&lt;/p&gt;&lt;p&gt;各种实现可以自由地实现规范中没有提到的额外特性，只要它们遵从API要求和在TCK中通过测试。&lt;/p&gt;
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;API Components&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;API由以下组件组成，响应式流的实现必须提供它们：&lt;/span&gt;&lt;/p&gt;&lt;p&gt;1、Publisher，发布者（生产者）&lt;br/&gt;2、Subscriber，订阅者（消费者）&lt;br/&gt;3、Subscription，订阅&lt;br/&gt;4、Processor，处理者&lt;/p&gt;&lt;p&gt;它们其实是4个接口，先睹为快：&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;7&quot;&gt;&lt;pre readability=&quot;7.5&quot;&gt;
+&lt;code class=&quot;&quot; readability=&quot;9&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Publisher&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;subscribe&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Subscriber&amp;lt;? &lt;span class=&quot;&quot;&gt;super&lt;/span&gt; T&amp;gt; s)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;}&lt;p&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscriber&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onSubscribe&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Subscription s)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onNext&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(T t)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onError&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Throwable t)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onComplete&lt;/span&gt;&lt;span class=&quot;&quot;&gt;()&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;}&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscription&lt;/span&gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;request&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(&lt;span class=&quot;&quot;&gt;long&lt;/span&gt; n)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;cancel&lt;/span&gt;&lt;span class=&quot;&quot;&gt;()&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;}&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Processor&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;, &lt;span class=&quot;&quot;&gt;R&lt;/span&gt;&amp;gt; &lt;span class=&quot;&quot;&gt;extends&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscriber&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt;, &lt;span class=&quot;&quot;&gt;Publisher&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;R&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;/p&gt;&lt;p&gt;}&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;一个发布者是一个潜在的无限数量的序列元素的一个提供者，按照收到的来自于它的订阅者的需要来发布这些元素。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;作为对发布者的subscribe(Subscriber)方法调用的响应，对于订阅者上的方法的可能调用顺序按下面的协议给出：&lt;/p&gt;&lt;p&gt;&lt;span&gt;onSubscribe onNext* (onError | onComplete)?&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这意味着onSubscribe方法总是被调用，后面跟着一个可能的无限数量onNext方法调用（因为订阅者的请求）。如果失败的话，后跟一个onError方法调用，或当没有更多的元素可用时，是一个onComplete方法调用，只要这个Subscription（订阅关系）没有被取消。&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Glossary&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;
+&lt;p&gt;&lt;span&gt;术语，释义&lt;br/&gt;Signal，本义是信号。作为一个名词，指的是这些方法onSubscribe，onNext，onComplete，onError，request(n)或cancel中的一个。作为一个动词，指的是调用这些方法中的一个。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;表面上可以理解为发信号进行通知，本质上也是通过方法调用来实现的。&lt;/p&gt;&lt;p&gt;Demand，本义是需求。作为一个名词，指的是一个订阅者（向发布者）请求的一定数量的元素，它还没有被发布者分发。作为一个动词，指的是请求更多元素的行为动作。&lt;/p&gt;&lt;p&gt;可以看作是订阅者向发布者发出的需求/动作，想要获取更多的元素。发布者暂时还没有回应。&lt;/p&gt;&lt;p&gt;Synchronous(ly)，本义是同步的。指的是在调用线程上执行（没有新开线程）。&lt;/p&gt;&lt;p&gt;Return normally，本义是正常返回。指的是仅返回已声明过的类型的值给调用者。如果想发送一个失败给订阅者，唯一合法的方式是通过onError（回调）方法。&lt;/p&gt;&lt;p&gt;Responsivity，本义是响应度。指的是已准备就绪有能力来做出响应。在这个文档里用来指示不同的组件不应该互相削弱响应的能力。&lt;/p&gt;&lt;p&gt;Non-obstructing（堵塞），本义是不堵塞。指的是描述一个方法的质量（品质），即在调用线程上尽可能快地执行完。这意味着，例如，避免重的计算和其它将拖住调用者线程执行的事情（因为没有新开线程）。&lt;/p&gt;&lt;p&gt;Terminal state，本义是终止状态。对于一个发布者，指的是当onComplete或者onError已经被调用。对于一个订阅者，指的是当一个onComplete或onError（回调方法）已经收到。&lt;/p&gt;&lt;p&gt;NOP，指的是执行对于调用线程来说没有可检测到的影响，能够像这样安全地被调用任意次。&lt;/p&gt;&lt;p&gt;External synchronization，本义是外部同步。为了线程安全的目的，协调访问在这个规范里定义的结构之外被实现，使用的技术像但不限于atomics，monitors或locks。&lt;/p&gt;&lt;p&gt;Thread-safe，能够安全地被同步或异步调用，不需要外部的同步来确保程序的正确性。&lt;/p&gt;
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;SPECIFICATION&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;Publisher&lt;/span&gt;&lt;/p&gt;
+&lt;section class=&quot;&quot; readability=&quot;2&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Publisher&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;subscribe&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Subscriber&amp;lt;? &lt;span class=&quot;&quot;&gt;super&lt;/span&gt; T&amp;gt; s)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;}&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;1、一个发布者对一个订阅者的onNext调用总次数必须总是小于或等于订阅者的Subscription请求的元素总数。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;2、一个发布者可能调用的onNext次数比要求的少，然后通过调用onComplete或onError来终止Subscription。&lt;/p&gt;&lt;p&gt;3、对一个订阅者的onSubscribe，onNext，onError和onComplete调用必须以一个线程安全的方式进行，如果被多个线程执行，使用external synchronization。&lt;/p&gt;&lt;p&gt;4、如果一个发布者失败，它必须调用一个onError。&lt;/p&gt;&lt;p&gt;5、如果一个发布者成功地终止（对于有限流），它必须调用一个onComplete。&lt;/p&gt;&lt;p&gt;6、如果一个发布者调用一个订阅者上的onError或onComplete方法，那个订阅者的Subscription必须认为已被取消。&lt;/p&gt;&lt;p&gt;7、一旦一个terminal state已经被调用（onError，onComplete），它要求没有进一步的调用发生。&lt;/p&gt;&lt;p&gt;8、如果一个订阅被取消，它的订阅者必须最终停止被调用。&lt;/p&gt;&lt;p&gt;9、发布者的subscribe方法里必须在早于对订阅者上的任何方法调用之前先调用onSubscribe方法，且必须return normally。当订阅者是null的时候，此时必须向调用者抛出java.lang.NullPointerException异常。对于其它任何情况，通知失败（或拒绝订阅者）的唯一合法方式是调用onError。&lt;/p&gt;&lt;p&gt;10、发布者的subscribe方法可能被调用任意多次，但是每次必须使用一个不同的订阅者。&lt;/p&gt;&lt;p&gt;11、一个发布者可以支持多个订阅者，并决定每一个订阅是单播或多播。&lt;/p&gt;&lt;p&gt;&lt;span&gt;Subscriber&lt;/span&gt;&lt;/p&gt;
+&lt;section class=&quot;&quot; readability=&quot;3&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscriber&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onSubscribe&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Subscription s)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onNext&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(T t)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onError&lt;/span&gt;&lt;span class=&quot;&quot;&gt;(Throwable t)&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;onComplete&lt;/span&gt;&lt;span class=&quot;&quot;&gt;()&lt;/span&gt;&lt;/span&gt;;&lt;br/&gt;}&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;1、一个订阅者必须通过订阅（Subscription）的request(long n)方法声明需求，然后接收onNext调用。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;2、如果一个订阅者怀疑它的调用处理将消极地影响它的发布者的响应度，建议异步地分发它的调用。&lt;/p&gt;&lt;p&gt;3、订阅者的onComplete()和onError(Throwable t)这两个方法里禁止调用订阅或发布者上的任何方法。&lt;/p&gt;&lt;p&gt;4、订阅者的onComplete()和onError(Throwable t)这两个方法在接收到调用后必须认为订阅已经被取消。&lt;/p&gt;&lt;p&gt;5、一个订阅者必须在收到onSubscriber之后调用指定订阅上的cancel()方法取消该订阅，如果它已经有一个活动的订阅。&lt;/p&gt;&lt;p&gt;6、一个订阅者必须调用订阅的cancel()方法，如果这个订阅不再需要的话。&lt;/p&gt;&lt;p&gt;7、一个订阅者必须确保所有对订阅发生的调用都来自于同一个线程或为它们各自提供external synchronization。&lt;/p&gt;&lt;p&gt;8、一个订阅者必须准备好接收一到多个onNext调用，在已经调用过订阅的cancel()方法之后如果还有请求的元素即将发送。订阅的cancel()方法并不保证立即执行底层的清理操作。&lt;/p&gt;&lt;p&gt;9、一个订阅者必须准备好接收一个onComplete调用，不管之前有或没有调用过订阅的request(long n)方法。&lt;/p&gt;&lt;p&gt;10、一个订阅者必须准备好接收一个onError调用，不管之前有或没有调用过订阅的request(long n)方法。&lt;/p&gt;&lt;p&gt;11、一个订阅者必须确保它的所有的方法调用发生在它们各自的处理之前。该订阅者必须小心合适地发布调用到它的处理逻辑。&lt;/p&gt;&lt;p&gt;12、订阅者的onSubscribe方法必须最多被调用一次，对于一个给定的订阅者。&lt;/p&gt;&lt;p&gt;13、对onSubscribe，onNext，onError或onComplete的调用必须return normally，除了当提供的任何参数是null时，这种情况必须向调用者抛出一个java.lang.NullPointerException异常。对于其它情况，对于一个订阅者来说，去通知一个失败的唯一合法的方式是取消它的订阅。在这个规则被违反的情况下，任何与该订阅者关联的订阅必须被认为是取消的，调用者必须激发这个错误条件，以一种对于运行环境来说是足够的方式。&lt;/p&gt;&lt;p&gt;&lt;span&gt;Subscription&lt;/span&gt;&lt;/p&gt;
+&lt;section class=&quot;&quot; readability=&quot;2&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscription&lt;/span&gt; {&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;request&lt;/span&gt;(&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;long&lt;/span&gt; n&lt;/span&gt;)&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;&quot;&gt;cancel&lt;/span&gt;()&lt;/span&gt;;&lt;br/&gt;}&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;
+
+&lt;p&gt;&lt;span&gt;1、订阅的request和cancel方法必须在它的订阅者上下文里被调用。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;2、订阅必须允许订阅者在onNext或onComplete方法里同步地调用订阅的request方法。&lt;/p&gt;&lt;p&gt;3、订阅的request方法必须放置一个关于发布者和订阅者间的同步递归调用的上界。&lt;/p&gt;&lt;p&gt;4、订阅的request方法应该尊重它的调用者的响应度，通过以一个适时的方式返回。&lt;/p&gt;&lt;p&gt;5、调用的cancel方法必须尊重它的调用者的响应度，通过以一个适时的方式返回，必须是幂等的和线程安全的。&lt;/p&gt;&lt;p&gt;6、在订阅取消之后，额外的request(long n)调用必须是NOP。&lt;/p&gt;&lt;p&gt;7、在订阅取消之后，额外的cancel()调用必须时NOP。&lt;/p&gt;&lt;p&gt;8、当订阅没有被取消时，request(long n)方法必须注册给定数目的额外元素，这些元素将被生产并分发给各自的订阅者。&lt;/p&gt;&lt;p&gt;9、当订阅没有被取消时，request(long n)必须使用一个java.lang.IllegalArgumentException异常来调用onError，如果参数小于等于0。引起的原因应该解释为不是正数的调用是非法的。&lt;/p&gt;&lt;p&gt;10、当订阅没有被取消，request(long n)可以同步地调用这个（或其它）订阅者上的onNext。&lt;/p&gt;&lt;p&gt;11、当订阅没有被取消，request(long n)可以同步地调用这个（或其它）订阅者上的onComplete或onError。&lt;/p&gt;&lt;p&gt;12、当订阅没有被取消，cancel()必须请求发布者最终停止调用它的订阅者上的方法。这个操作不要求立即影响订阅。&lt;/p&gt;&lt;p&gt;13、当订阅没有被取消，cancel()必须请求发布者最终删除对相关订阅者的任何引用。&lt;/p&gt;&lt;p&gt;14、当订阅没有被取消，调用cancel()可以引起发布者（如果是有状态的）进入关闭状态，如果在此刻没有其它的订阅存在。&lt;/p&gt;&lt;p&gt;15、调用订阅的cancel方法必须是return normally。&lt;/p&gt;&lt;p&gt;16、调用订阅的request方法必须是return normally。&lt;/p&gt;&lt;p&gt;17、一个订阅必须支持无数次地调用request方法，必须支持到2^63 - 1（Long.MAX_VALUE）次。如果一个需求等于或大于2^63 - 1（Long.MAX_VALUE），或许被发布者认为是真正的无界。&lt;/p&gt;&lt;p&gt;一个订阅被一个发布者和一个订阅者共享，目的是为了在它们之间调节数据交换。这也是为什么subscribe()方法并没有返回创建的那个订阅而是返回void的原因。这个订阅只能通过onSubscriber回调方法传给订阅者。&lt;/p&gt;&lt;p&gt;&lt;span&gt;Processor&lt;/span&gt;&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;4&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;interface&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Processor&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;, &lt;span class=&quot;&quot;&gt;R&lt;/span&gt;&amp;gt; &lt;span class=&quot;&quot;&gt;extends&lt;/span&gt; &lt;span class=&quot;&quot;&gt;Subscriber&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;T&lt;/span&gt;&amp;gt;, &lt;span class=&quot;&quot;&gt;Publisher&lt;/span&gt;&amp;lt;&lt;span class=&quot;&quot;&gt;R&lt;/span&gt;&amp;gt; &lt;/span&gt;{&lt;p&gt;}&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;1、一个处理器表示一个处理阶段，它既是一个订阅者又是一个发布者，必须遵守它们两者的契约。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;2、一个处理器可以选择恢复一个onError调用。如果它选择这样做，必须认为订阅被取消，否则必须立即传播onError调用到它的订阅者。&lt;/p&gt;&lt;p&gt;在不被强制时，当最后一个订阅者取消它的订阅时，取消一个处理器的上游订阅是一个好主意，可以让这个取消调用往上游传播。&lt;/p&gt;
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Asynchronous vs Synchronous Processing&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;响应式流API要求所有的元素处理（onNext调用）或终止调用（onError，onComplete）禁止阻塞发布者。然而，每一个on*（以on开头的方法）处理器可以同步地处理事件，也可以异步地处理。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;看下面这个示例：&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;2&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;&lt;span class=&quot;&quot;&gt;nioSelectorThreadOrigin&lt;/span&gt; map(f) filter(p) consumeTo(toNioSelectorOutput)&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;&lt;br/&gt;它有一个异步的来源和异步的目的地。让我们假设来源和目的地都是selector事件循环。Subscription.request(n)必须是一个链接从目的地到来源。这就是现在每一个实现都能选择如何做这些的地方。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;下面使用管道操作符（|）来调用异步边界（队列和调度器），R#表示资源（可能是线程）。&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;3&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;nioSelectorThreadOrigin &lt;span class=&quot;&quot;&gt;| map(f) |&lt;/span&gt; filter(p) &lt;span class=&quot;&quot;&gt;| consumeTo(toNioSelectorOutput)&lt;br/&gt;-------------- R1 ----  |&lt;/span&gt; - R2 - &lt;span class=&quot;&quot;&gt;| -- R3 --- |&lt;/span&gt; ---------- R4 ----------------&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;&lt;br/&gt;在这个示例中，这3个消费者中的每一个，map，filter和consumeTo异步地调度work。它们可能在同一个事件循环上，也可能是分离的线程。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;看下面这个示例&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;3&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;nioSelectorThreadOrigin map(f) filter(p) | consumeTo(toNioSelectorOutput)&lt;br/&gt;&lt;span class=&quot;&quot;&gt;------------------- R1 ----------------- | ---------- R2 ----------------&lt;/span&gt;&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;
+&lt;p&gt;&lt;span&gt;&lt;br/&gt;这里只有最后一步是异步地调度，通过把work添加到NioSelectorOutput事件循环。map和filter步骤都在来源线程上同步地执行。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;或者另一种实现把这些操作都安装到最终消费者那里：&lt;br/&gt;&lt;/p&gt;
+
+&lt;section class=&quot;&quot; readability=&quot;3&quot;&gt;&lt;pre&gt;
+&lt;code class=&quot;&quot;&gt;nioSelectorThreadOrigin | &lt;span class=&quot;&quot;&gt;map&lt;/span&gt;(f) filter(p) consumeTo(toNioSelectorOutput)&lt;br/&gt;--------- R1 ---------- | ------------------ R2 -------------------------&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;&lt;/section&gt;&lt;p&gt;所有这些变体都是“异步流”。它们都有自己的位置，每一个有不同的权衡包括性能和实现复杂度。&lt;/p&gt;&lt;p&gt;响应式流允许实现灵活性来管理资源和调度，混合异步和同步处理，在一个非阻塞，异步，动态的推拉式流的限制内。&lt;/p&gt;&lt;p&gt;为了允许所有参与API元素（Publisher/Subscription/Subscriber/Processor）的完全的异步实现，这些接口定义的所有方法都返回void。&lt;/p&gt;
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Subscriber controlled queue bounds&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;p&gt;&lt;span&gt;其中一个底层设计原则是，所有缓冲区大小都是有界的，这些界限必须是知道的，且由订阅者控制。这些界限用元素数目（它依次转化为onNext的调用次数）这样的术语来表达。任何实现的目标都是为了支持无限流（尤其是高输出速率流），一般需要强迫界限都沿着避免OOM错误和限制资源使用的方式。&lt;/span&gt;&lt;/p&gt;&lt;p&gt;因为后压是强制的，使用无界缓冲区能够被避免。一般来说，只有在当一个队列可能无界增长时，此时也是发布者端比订阅者端保持一个更高的速率，且持续了一段较大的时间，但是这种情形是被后压来处理的。&lt;/p&gt;&lt;p&gt;队列界限能够被控制通过一个订阅者为了适合数目的元素而调用需求。在任何时候订阅者都知道：&lt;/p&gt;&lt;p&gt;请求的总元素数目：P&lt;br/&gt;已经处理的元素数目：N&lt;/p&gt;&lt;p&gt;然后最大数量的元素可能达到是P - N，直到更多的需求被发送通知给发布者。这种情况下，订阅者也知道在它的输入缓冲区里的元素数目B，然后这个界限可以被重新精确为P - B - N。&lt;/p&gt;&lt;p&gt;这些界限必须被一个发布者尊重，独立于无论它表示的源是能够被后压的或不能。在这种源的生产速率不能被影响的情形下，例如钟表的滴滴答答或鼠标的移动，发布者必须选择要么缓冲元素或抛弃元素来遵守这个强加的界限。&lt;/p&gt;&lt;p&gt;订阅者在接收一个元素后发一个请求获取另一个元素，可以有效地实现一个停止和等待协议，这里这个需求信号和一个ACK（回应）相等。通过提需求的方式获取多个元素，ACK花销是分期偿还的。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这是值的注意的，订阅者被允许在任何时间点发信号提出需求，允许它是为了避免发布者和订阅者之间不必要的延迟（例如，保持它的输入缓冲区是满的，不需要等待完整的往返时间）。&lt;/span&gt;&lt;/p&gt;
+
+
+&lt;section class=&quot;&quot; data-tools=&quot;135编辑器&quot; data-id=&quot;93802&quot;&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;&lt;section&gt;//&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section class=&quot;&quot; data-brushtype=&quot;text&quot;&gt;&lt;span&gt;Legal&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;section&gt;&lt;section&gt;&lt;span&gt;//&lt;/span&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;&lt;/section&gt;
+
+&lt;p&gt;&lt;span&gt;这个工程是一个协作成果，完成它的工程师来自于Kaazing，Lightbend，Netflix，Pivotal，Red Hat，Twitter和许多其他公司。代码被开放到公共领域是为了允许感兴趣的团体自由地使用，它们想创建一个兼容性的实现。详细内容请查看COPYING。&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Mon, 11 Feb 2019 17:04:00 +0000</pubDate>
+<dc:creator>李新杰</dc:creator>
+<og:description>响应式流是一个倡议，用来为具有非阻塞后压的异步流处理提供一个标准。大家努力的目标集中在运行时环境（JVM和JavaScript）和网络协议上。 注：响应式流其实就是一个规范，本文讲解的正是这个规范，且</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/lixinjie/p/a-reactive-streams-specification-on-jvm.html</dc:identifier>
+</item>
+<item>
 <title>SpringBoot(二十七)整合Redis之分布式锁 - 请叫我头头哥</title>
 <link>http://www.cnblogs.com/toutou/p/redis_lock.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/toutou/p/redis_lock.html</guid>
@@ -1405,414 +1689,6 @@ node index.js
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/shcrk/p/10363369.html</dc:identifier>
-</item>
-<item>
-<title>#20   Python文件 - MinuteSheep</title>
-<link>http://www.cnblogs.com/minutesheep/p/10363370.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/minutesheep/p/10363370.html</guid>
-<description>&lt;h2&gt;前言&lt;/h2&gt;
-&lt;p&gt;前面几节枯燥的模块终于结束了，想要完全掌握前几节的模块需要不断的练习才行，毕竟眼过千遍不如手过一遍嘛。在一些项目需求里，要对文件进行IO操作，毕竟重要数据不可能打印到屏幕上而不去保存，Python对的文件IO操作并不是很复杂，相信你很快就能掌握它！&lt;/p&gt;
-&lt;h3&gt;文件IO操作&lt;/h3&gt;
-&lt;p&gt;对于一个文件的操作，无非不过创建、删除、读、写，创建和删除在OS模块里面已经说过，那只剩下读和写了，也就是IO（Input，Output）操作了。&lt;/p&gt;
-&lt;p&gt;接下来，将以徐志摩的《再别康桥》为例子，深入解读Python中文件IO操作&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;轻轻的我走了，
-正如我轻轻的来；
-我轻轻的招手，
-作别西天的云彩。
-&lt;/span&gt;----&lt;span&gt;
-那河畔的金柳，
-是夕阳中的新娘；
-波光里的艳影，
-在我的心头荡漾。
-&lt;/span&gt;----&lt;span&gt;
-软泥上的青荇，
-油油的在水底招摇；
-在康河的柔波里，
-我甘心做一条水草！
-&lt;/span&gt;----&lt;span&gt;
-那榆荫下的一潭，
-不是清泉，是天上虹；
-揉碎在浮藻间，
-沉淀着彩虹似的梦。
-&lt;/span&gt;----&lt;span&gt;
-寻梦？撑一支长篙，
-向青草更青处漫溯⑷；
-满载一船星辉，
-在星辉斑斓里放歌。
-&lt;/span&gt;----&lt;span&gt;
-但我不能放歌，
-悄悄是别离的笙箫；
-夏虫也为我沉默，
-沉默是今晚的康桥！
-&lt;/span&gt;----&lt;span&gt;
-悄悄的我走了，
-正如我悄悄的来；
-我挥一挥衣袖，
-不带走一片云彩。&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h4&gt;1. 打开文件&lt;/h4&gt;
-&lt;p&gt;Python获得文件句柄的方式与c及其类似，使用内置函数open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None) 「file表示文件名、mode表示打开方式（默认为读）、buffering表示寄存区缓冲大小（负值为系统默认，0为没有寄存区缓存，1为文件会寄存行，大于1的整数为寄存区缓存大小）、encoding表示文件编码、newline表示换行符（默认为\n）」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以默认读的方式打开再别康桥，注意：文件路径（此时程序和再别康桥在同一路径）&lt;/span&gt;
-f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;xxx.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以写的方式打开文件，注意：如果此文件不存在，则创建这个文件；如果存在，则删除原文件所有内容&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;对于不同的文件，有不同的处理方式，常用的mode参数如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;模式                                                描述
- r                                                  读
- w                                                  写
- r&lt;/span&gt;+&lt;span&gt;                                                读写
- w&lt;/span&gt;+&lt;span&gt;                                                写读
- a                                                 追加
- a&lt;/span&gt;+&lt;span&gt;                                               追加读
- rb                                              二进制读
- wb                                              二进制写
- rb&lt;/span&gt;+&lt;span&gt;                                            二进制读写
- wb&lt;/span&gt;+&lt;span&gt;                                            二进制写读
- ab                                             二进制追加
- ab&lt;/span&gt;+                                           二进制追加读
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这些模式看似复杂，其实内部规律很清晰，接下来将用文件的读和写来充分了解这些模式&lt;/p&gt;
-&lt;h4&gt;2. 文件的读&lt;/h4&gt;
-&lt;p&gt;&lt;strong&gt;read()&lt;/strong&gt; 「读取文件指针之后的所有内容，并返回字符串」&lt;/p&gt;
-&lt;p&gt;这里提到了一个新概念：文件指针，想象一下，你在读书，你的手指头指着你正在读的地方，你没读一个字，你的手指头就跟着向后动一下，你的手指头就是文件指针，以上模式中，除了a、a+、ab+文件指针在文件末尾之外，其他的都是在文件开头&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-In [2]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 默认读的方式打开文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;3]: f.read()                  &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 读取文件指针之后的所有内容&lt;/span&gt;
-Out[3]: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;轻轻的我走了，\n正如我轻轻的来；\n我轻轻的招手，\n作别西天的云彩。\n----\n那河畔的金柳，\n是夕阳中的新娘；\n波光里的艳影，\n在我的心头荡漾。\n----\n软泥上的青荇，\n油油的在水底招摇；\n在康河的柔波里，\n我甘心做一条水草！\n----\n那榆荫下的一潭，\n不是清泉，是天上虹；\n揉碎在浮藻间，\n沉淀着彩虹似的梦。\n----\n寻梦？撑一支长篙，\n向青草更青处漫溯；\n满载一船星辉，\n在星辉斑斓里放歌。\n----\n但我不能放歌，\n悄悄是别离的笙箫；\n夏虫也为我沉默，\n沉默是今晚的康桥！\n----\n悄悄的我走了，\n正如我悄悄的来；\n我挥一挥衣袖，\n不带走一片云彩。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-In [9]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以写的模式打开文件，此时这个文件的内容已经被删除了😰&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;10]: f.read()                      &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 可以看到文件是不允许读的&lt;/span&gt;
----------------------------------------------------------------------------&lt;span&gt;
-UnsupportedOperation                      Traceback (most recent call last)
-&lt;/span&gt;&amp;lt;ipython-input-10-571e9fb02258&amp;gt; &lt;span&gt;in&lt;/span&gt; &amp;lt;module&amp;gt;
-----&amp;gt; 1&lt;span&gt; f.read()
-
-UnsupportedOperation: &lt;/span&gt;&lt;span&gt;not&lt;/span&gt; readable
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-In [1]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;test.jpg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;rb&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以二进制方式打开文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;2&lt;span&gt;]: f.read()
-Out[&lt;/span&gt;2]: b&lt;span&gt;'&lt;/span&gt;&lt;span&gt;\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x05\x04\x04\x05\x04\x03\x05\x05\x04\x05\x06\x06\...........&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt; 有许多文件格式是以二进制保存的，最典型的就是图片和视频&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;readline()&lt;/strong&gt;  「读一行」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-In [1]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-In [&lt;/span&gt;2]: f.readline()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 读一行&lt;/span&gt;
-Out[2]: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;轻轻的我走了，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;
-
-In [&lt;/span&gt;3]: f.readline()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 再读一行&lt;/span&gt;
-Out[3]: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;正如我轻轻的来；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;
-
-In [&lt;/span&gt;4&lt;span&gt;]: f.readline()
-Out[&lt;/span&gt;4]: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;我轻轻的招手，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;
-
-In [&lt;/span&gt;5&lt;span&gt;]: f.readline()
-Out[&lt;/span&gt;5]: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;作别西天的云彩。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;readlines()&lt;/strong&gt;  「按行读取文件，将所有的行保存为一个列表」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;68&quot;&gt;
-&lt;pre&gt;
-In [6]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-In [&lt;/span&gt;7&lt;span&gt;]: f.readlines()
-Out[&lt;/span&gt;7&lt;span&gt;]:
-[&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;轻轻的我走了，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;正如我轻轻的来；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;我轻轻的招手，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;作别西天的云彩。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;那河畔的金柳，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;是夕阳中的新娘；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;波光里的艳影，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;在我的心头荡漾。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;软泥上的青荇，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;油油的在水底招摇；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;在康河的柔波里，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;我甘心做一条水草！\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;那榆荫下的一潭，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;不是清泉，是天上虹；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;揉碎在浮藻间，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;沉淀着彩虹似的梦。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;寻梦？撑一支长篙，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;向青草更青处漫溯⑷；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;满载一船星辉，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;在星辉斑斓里放歌。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;但我不能放歌，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;悄悄是别离的笙箫；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;夏虫也为我沉默，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;沉默是今晚的康桥！\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;----\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;悄悄的我走了，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;正如我悄悄的来；\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;我挥一挥衣袖，\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;不带走一片云彩。\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;]
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;文件迭代&lt;/strong&gt;  「open函数打开一个文件后，这个句柄本身是可迭代对象」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-In [8]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;再别康桥.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-In [&lt;/span&gt;9]: &lt;span&gt;for&lt;/span&gt; line &lt;span&gt;in&lt;/span&gt; f:   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 直接迭代文件&lt;/span&gt;
-   ...:     &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(line)
-   ...:
-轻轻的我走了，
-
-正如我轻轻的来；
-
-我轻轻的招手，
-
-作别西天的云彩。
-
-&lt;/span&gt;----&lt;span&gt;
-
-那河畔的金柳，
-（将后面的输出省略了）&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h4&gt;3. 文件的写&lt;/h4&gt;
-&lt;p&gt;&lt;strong&gt;write(text)&lt;/strong&gt;  「text表示要写入文件的内容，并返回写入的字符数」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-In [13]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;new_file.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以写的方式打开文件，如果文件不存在则创建，如果存在则删除原有内容&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;14]: f.write(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;hello&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 写入hello&lt;/span&gt;
-Out[14]: 5&lt;span&gt;
-
-In [&lt;/span&gt;15]: f.write(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;word\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 写入word并换行&lt;/span&gt;
-Out[15]: 5
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;注意：如果这时候去查看文件内容，发现里面还是空荡荡的，为什么呢？因为寄存区缓存的原因，默认是使用系统的寄存区缓存机制，想要立刻写入文件可以改变buffering的值，也可以使用close()方法关闭文件（关闭文件时所有内容都会写入文件）、再或者使用flush()方法立即将寄存区内容写入文件&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-In [23]: f.flush()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 使用flush()方法立即刷入&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;24]: ! cat new_file.txt   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 使用命令查看文件内容，文件内容有两行，一行字，一行空白（因为使用\n换行了），这个是Linux系统命令🤥&lt;/span&gt;
-helloword&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-In [25]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;new_file.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 以追加模式打开，如果文件存在则打开文件，如果不存在则新建文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;27]: f.write(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;i am new\n&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-Out[&lt;/span&gt;27]: 9&lt;span&gt;
-
-In [&lt;/span&gt;28&lt;span&gt;]: f.flush()
-
-In [&lt;/span&gt;30&lt;span&gt;]: ! cat new_file.txt
-helloword
-i am new&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-In [31]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;new_file.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;a&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-In [&lt;/span&gt;32]: f.read()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 追加方式是不允许读的，w、wb、ab也不允许读&lt;/span&gt;
----------------------------------------------------------------------------&lt;span&gt;
-UnsupportedOperation                      Traceback (most recent call last)
-&lt;/span&gt;&amp;lt;ipython-input-32-571e9fb02258&amp;gt; &lt;span&gt;in&lt;/span&gt; &amp;lt;module&amp;gt;
-----&amp;gt; 1&lt;span&gt; f.read()
-
-UnsupportedOperation: &lt;/span&gt;&lt;span&gt;not&lt;/span&gt; readable
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-In [33]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;new_file.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;a+&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 使用追加读的方式打开文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;34]: f.read()    &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 可以读，但为什么是空的？因为文件指针在末尾&lt;/span&gt;
-Out[34]: &lt;span&gt;''&lt;/span&gt;&lt;span&gt;
-
-In [&lt;/span&gt;36]: f.write(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;afd&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 也可以写&lt;/span&gt;
-Out[36]: 3
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;writelines(lines)&lt;/strong&gt;  「将一个列表或元组序列写入文件，需要换行自己加」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-In [39]: f = open(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;new_file.txt&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;w&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
-
-In [&lt;/span&gt;43]: f.writelines([&lt;span&gt;'&lt;/span&gt;&lt;span&gt;hello&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;world&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;])   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 将列表序列写入文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;44]: f.writelines((&lt;span&gt;'&lt;/span&gt;&lt;span&gt;haha&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;hehe&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;))     &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 将元组序列写入文件&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;45]: f.flush()   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 刷入&lt;/span&gt;
-&lt;span&gt;
-In [&lt;/span&gt;46]: ! cat new_file.txt   &lt;span&gt;#&lt;/span&gt;&lt;span&gt; 查看文件内容&lt;/span&gt;
-helloworldhahahehe
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h4&gt;4. 关闭文件&lt;/h4&gt;
-&lt;p&gt;&lt;strong&gt;close()&lt;/strong&gt;   「关闭文件，如果将寄存区有缓存则写入文件」&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-In [48]: f.close()
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h4&gt;5. 文件其他方法&lt;/h4&gt;
-&lt;p&gt;&lt;strong&gt;tell()&lt;/strong&gt;  「返回当前文件指针位置」&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;seek(offset, whence=0)&lt;/strong&gt; 「offset代表要设置的文件指针位置」&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;name&lt;/strong&gt;  「返回当前文件名」&lt;/p&gt;
-</description>
-<pubDate>Mon, 11 Feb 2019 14:15:00 +0000</pubDate>
-<dc:creator>MinuteSheep</dc:creator>
-<og:description>本篇博文主要记录Python中文件的IO操作</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/minutesheep/p/10363370.html</dc:identifier>
-</item>
-<item>
-<title>Ocelot 资源汇总 - 张善友</title>
-<link>http://www.cnblogs.com/shanyou/p/10363360.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/shanyou/p/10363360.html</guid>
-<description>&lt;h4&gt;前言&lt;/h4&gt;
-&lt;p&gt;最近一两年.NET Core的关注度持续上升, 微服务及云原生应用开发上采用.NET Core也越来越多，Ocelot 作为.NET Core平台下一款开源的API 网关开发库越来越得到社区的认可，应用到生产中的案例也有好几百了。春节抽空整理了现有网上公开的Ocelot相关的资源，包括示例项目、扩展插件、博客文章、视频等, 供大家参考。&lt;/p&gt;
-&lt;p&gt;我把整理好的资源放在github：&lt;a title=&quot;https://github.com/geffzhang/awesome-ocelot&quot; href=&quot;https://github.com/geffzhang/awesome-ocelot&quot;&gt;https://github.com/geffzhang/awesome-ocelot&lt;/a&gt;，欢迎大家一起来丰富这个资源，资源来自全世界，所以内容以世界语言英文方式组织。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;系列文章&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;从系列文章中第一篇是Tom 当时所在的公司 的文章，你可以了解到Ocelot的诞生过程，这里面很多文章都是我们身边的同学写的，比如7篇文章虽是英文的，但是你知道他是NCC的项目&lt;a title=&quot;https://github.com/dotnetcore/EasyCaching&quot; href=&quot;https://github.com/dotnetcore/EasyCaching&quot;&gt;https://github.com/dotnetcore/EasyCaching&lt;/a&gt; 作者黄文清同学哦，后面的几篇中文的文章更是把Ocelot如何扩展写的很清楚了。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;图书&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;目前涉及到Ocelot的图书只有一本微软.NET团队写的《.NET 微服务：适用于容器化 .NET 应用程序的体系结构》引用的微服务应用程序 &lt;a href=&quot;https://github.com/dotnet-architecture/eShopOnContainers&quot;&gt;eShopOnContainers&lt;/a&gt; 使用的是 &lt;a href=&quot;https://github.com/ThreeMammals/Ocelot&quot;&gt;Ocelot&lt;/a&gt;，这是一个简单的轻量级 API 网关，可与微服务/容器一起部署到任意位置&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;会议演讲&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;虽然我在社区举办过多次活动介绍Ocelot， 录制有视频的是2017年我和徐玉涛在微软Summit 2017上的演讲，当时.NET Core 2.0 还是刚发布，我们当时线上跑的是1.1版本，其中也涉及到了定制Ocelot的内容都是上面的文章中有详细的文字阐述。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;社区项目&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Ocelot 作为一款扩展性很强的开发库，社区中也涌现了很多非常有价值的项目，这些项目都是在生产环境应用过的，让有定制需求的同学少走很多弯路，这也体现了这个项目的活跃性。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;开源贡献者&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Ocelot 现在一起参与贡献过代码的63位，我这里只列出了在项目中持续活跃的以及对项目有重要贡献，这个列表我还会持续更新。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;示例项目&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;相对于扩展组件，有很多同学在研究学习Ocelot，以及投入生产项目以示例的形式在github上开源，这些项目不仅仅是围绕Ocelot，同时围绕.NET Core的微服务的各个方面都会有涉及，也是大家打造微服务框架的一个参考项目，我这里节选了github上面的一部分项目，发现这些项目都是中文的，肯定都是我们身边的同学贡献的。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;视频&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;有几个视频都需要借助梯子，老外做的几个视频很不错，最后一个视频是微软和我们一起拍摄的3分钟的宣传视频。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;用户&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;欢迎大家 在这里提供你们使用Ocelot的信息 &lt;a href=&quot;https://github.com/geffzhang/awesome-ocelot/issues/1&quot;&gt;https://github.com/geffzhang/awesome-ocelot/issues/1&lt;/a&gt; ，据说所知目前Ocelot的用户案例是很多的，我创建了一个国内的Ocelot用户的微信群，当前只要列了两个大用户。&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;Ocelot项目的Star 增长图&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://img2018.cnblogs.com/blog/510/201902/510-20190211221021348-1211554126.png&quot;&gt;&lt;img width=&quot;900&quot; height=&quot;441&quot; title=&quot;image&quot; alt=&quot;image&quot; src=&quot;https://img2018.cnblogs.com/blog/510/201902/510-20190211221021864-1704508380.png&quot; border=&quot;0&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;截至2019.2.11，Ocelot项目目前有Star 3076个，从上图可以看出从.NET Core 2.0发布以来，增长的曲线是一条笔直上升图，这也侧面反应了.NET Core的采用率也在直线上升。&lt;/p&gt;
-</description>
-<pubDate>Mon, 11 Feb 2019 14:10:00 +0000</pubDate>
-<dc:creator>张善友</dc:creator>
-<og:description>前言最近一两年.NET Core的关注度持续上升, 微服务及云原生应用开发上采用.NET Core也越来越多，Ocelot 作为.NET Core平台下一款开源的API 网关开发库越来越得到社区的认可</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/shanyou/p/10363360.html</dc:identifier>
-</item>
-<item>
-<title>Android通过DeepLink方式跳转其他App传递参数 - MoMask</title>
-<link>http://www.cnblogs.com/lovelyYakir/p/10363007.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/lovelyYakir/p/10363007.html</guid>
-<description>&lt;p&gt;  网上对于安卓DeepLink方式跳转传递参数的例子较少，说的也不客观，实践之后发现还是有一些坑。其实为什么要用DeepLink方式跳转，有些是因为引流的原因，他们希望通过网页就能直接跳转到App的界面。还有其实就是某些业务的需要，需要统一跳转方式，方便维护代码。如果不知道DeepLink是什么，可以自行百度一下，下面介绍一下实际的用法：&lt;/p&gt;
-&lt;p&gt;接收参数方：&lt;/p&gt;
-&lt;p&gt;1.跳转的App需要在清单文件注册以下是例子：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&amp;lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&amp;gt;
-&amp;lt;manifest xmlns:android=&quot;http://schemas.android.com/apk/res/android&quot;
-package=&quot;com.example.alex.deeplinkproject&quot;&amp;gt;
-
-&amp;lt;uses-permission android:name=&quot;android.permission.INTERNET&quot; /&amp;gt;
-&amp;lt;application
-android:allowBackup=&quot;true&quot;
-android:icon=&quot;@mipmap/ic_launcher&quot;
-android:label=&quot;@string/app_name&quot;
-android:roundIcon=&quot;@mipmap/ic_launcher_round&quot;
-android:supportsRtl=&quot;true&quot;
-android:theme=&quot;@style/AppTheme&quot;&amp;gt;
-&amp;lt;activity android:name=&quot;.MainActivity&quot;&amp;gt;
-&amp;lt;intent-filter&amp;gt;
-&amp;lt;action android:name=&quot;android.intent.action.MAIN&quot; /&amp;gt;
-
-&amp;lt;category android:name=&quot;android.intent.category.LAUNCHER&quot; /&amp;gt;
-&amp;lt;/intent-filter&amp;gt;
-&amp;lt;!--url跳转格式为：open://app.test.com/game--&amp;gt;
-&amp;lt;intent-filter&amp;gt;
-&amp;lt;action android:name=&quot;android.intent.action.VIEW&quot; /&amp;gt;
-&amp;lt;category android:name=&quot;android.intent.category.BROWSABLE&quot; /&amp;gt;
-&amp;lt;category android:name=&quot;android.intent.category.DEFAULT&quot; /&amp;gt;
-
-&amp;lt;data
-android:scheme=&quot;open&quot;
-android:host=&quot;app.test.com&quot;
-android:pathPrefix=&quot;/game&quot;
-/&amp;gt;
-&amp;lt;/intent-filter&amp;gt;
-
-&amp;lt;/activity&amp;gt;
-&amp;lt;/application&amp;gt;
-
-&amp;lt;/manifest&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;通过三个字段生成一个URL：scheme：//host pathPrefix 如上：open://app.test.com/game&lt;/p&gt;
-&lt;p&gt;2 需要接收的参数通过Uri获取&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-//通过Deeplink 跳转获取参数
-String action =&lt;span&gt; getIntent().getAction();
-if&lt;span&gt; (Intent.ACTION_VIEW.equals(action)) {
-Uri data =&lt;span&gt; getIntent().getData();
-if (data != null&lt;span&gt;) {
-String appId = data.getQueryParameter(&quot;appId&quot;&lt;span&gt;);
-String token = data.getQueryParameter(&quot;token&quot;&lt;span&gt;);
-String extend = data.getQueryParameter(&quot;extend&quot;&lt;span&gt;);
-String merchant = data.getQueryParameter(&quot;merchant&quot;&lt;span&gt;);
-String agent = data.getQueryParameter(&quot;agent&quot;&lt;span&gt;);
-}&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;发送参数方（以下代码比较简单使用Kotlin编写）：&lt;/p&gt;
-&lt;p&gt;1.需要传递对应的参数而后拼接到Uri后面，以下是例子&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-class&lt;span&gt; MainActivity : AppCompatActivity() {
-
-override fun onCreate(savedInstanceState: Bundle?&lt;span&gt;) {
-super&lt;span&gt;.onCreate(savedInstanceState)
-setContentView(R.layout.activity_main)
-findViewById&amp;lt;Button&amp;gt;&lt;span&gt;(R.id.bt1).setOnClickListener {
-val intent = Intent(Intent.ACTION_VIEW, Uri.parse(&quot;open://app.test.com/game?appId=com.game.sid21&amp;amp;token=21token&amp;amp;extend=21extend&amp;amp;merchant=21merchant&amp;amp;agent=21agent&quot;&lt;span&gt;))
-intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-startActivity(intent)
-}
-}
-}&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;类似GET请求已Key=Value的形式传递。注意，Uri.parse 中的参数不可用+号进行拼接会出现无法获取参数的情况。跳转到其他App采用开启新的栈方式，避免误认为是一个App。&lt;/p&gt;
-&lt;p&gt;  以上就是一个完整的跳转流程代码，但是实际上，当被跳转的App已经启动的时候我们有时候会取不到数据，但是跳转是正常的跳转了。这边要注意我们使用的flag，当被启动的App已经启动，他会在onNewIntent()返回我们的正确的Intent而不是getIntent()了。你需要重写此方法获取最新的Intent。最好抽取一个方法出来，在onCreate()和onNewIntent()中都获取Intent()。如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;  @Override
-    protected void&lt;span&gt; onCreate(@Nullable Bundle savedInstanceState) {
-        super&lt;span&gt;.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-        //通过Deeplink 跳转获取参数
-&lt;span&gt;        getIntentData(getIntent());
-
-    }
-
-    @Override
-    protected void&lt;span&gt; onNewIntent(Intent intent) {
-        super&lt;span&gt;.onNewIntent(intent);
-        getIntentData(intent);
-    }
-    
-    private  void&lt;span&gt; getIntentData(Intent intent){
-        String action =&lt;span&gt; intent.getAction();
-        if&lt;span&gt; (Intent.ACTION_VIEW.equals(action)) {
-            Uri data =&lt;span&gt; getIntent().getData();
-
-            if (data != null&lt;span&gt;) {
-                String appId = data.getQueryParameter(&quot;appId&quot;&lt;span&gt;);
-                String token = data.getQueryParameter(&quot;token&quot;&lt;span&gt;);
-                String extend = data.getQueryParameter(&quot;extend&quot;&lt;span&gt;);
-                String merchant = data.getQueryParameter(&quot;merchant&quot;&lt;span&gt;);
-                String agent = data.getQueryParameter(&quot;agent&quot;&lt;span&gt;);
-            }
-        }
-        
-    }&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-</description>
-<pubDate>Mon, 11 Feb 2019 11:54:00 +0000</pubDate>
-<dc:creator>MoMask</dc:creator>
-<og:description>网上对于安卓DeepLink方式跳转传递参数的例子较少，说的也不客观，实践之后发现还是有一些坑。其实为什么要用DeepLink方式跳转，有些是因为引流的原因，他们希望通过网页就能直接跳转到App的界面</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/lovelyYakir/p/10363007.html</dc:identifier>
 </item>
 </channel>
 </rss>
