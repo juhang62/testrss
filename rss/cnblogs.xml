@@ -9,6 +9,1132 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>EF6学习笔记二十八：并发冲突（二） - 张四海</title>
+<link>http://www.cnblogs.com/jinshan-go/p/10393583.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jinshan-go/p/10393583.html</guid>
+<description>&lt;h3&gt;&lt;span&gt;要专业系统地学习EF推荐《你必须掌握的Entity Framework 6.x与Core 2.0》。这本书作者（汪鹏，Jeffcky）的博客：https://www.cnblogs.com/CreateMyself/&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;继续来弄EF中的并发，虽然上一篇也弄了，但是总觉得不得要领，这次继续书中的学习，回顾上次的学习，可能还是会理解的不太准确。&lt;/p&gt;
+&lt;p&gt;并发分为乐观并发和悲观并发，乐观就不用管了，客户端随便去修改。所以我们一直弄的是悲观并发。&lt;/p&gt;
+&lt;p&gt;这次所学的东西主要是针对悲观并发我们所采取的有哪些策略。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;客户端获胜&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;数据库获胜&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;客户端数据库合并获胜&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;首先我有这样一个疑问，这几个概念是程序员给的，还是官方就有这个说法，乍一听感觉“获胜”带有很强烈的感情色彩啊，计算机术语一般给人的感觉比较高冷吧。&lt;/p&gt;
+&lt;p&gt;幸好我在看他人博客的时候发现了EF中有一个枚举，呵呵，还真是&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/819807/201902/819807-20190218000039649-1714236690.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在ObjectContext定义了一个方法Refresh，就是要求传递上面枚举作为参数。之前我们了解到早起的EF提供的是ObjectContext供程序员们去派生，现在是改良后的DbContext,他们之间可以互相转换，来眼熟下&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;  这里写法可能毫无意义，纯粹只是温习下DbContext转换ObjectContext，认识下这个枚举&lt;/span&gt;
+EFDbContext ctx = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; EFDbContext();
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; context =&lt;span&gt; ((IObjectContextAdapter)ctx).ObjectContext;
+&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; stu1 = context.CreateQuery&amp;lt;Student3&amp;gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;select * from tb_Students3&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+context.Refresh(RefreshMode.ClientWins, stu1);&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;关于ObjectContext和这个枚举就到这里了，后面我没有去弄到，那到底有没有必要用到，我觉得没有，并且作者在书中也是如此&lt;/p&gt;
+&lt;p&gt;继续说回上面三个概念，其实理解起来非常简单。客户端获胜就是随便客户端请求更新数据；数据库获胜，那就是数据库说了算的，比如数据库中某张表某个字段设置了阈值；客户端数据库合并获胜，那就是商量着来，下面的内容主要说这个。&lt;/p&gt;
+&lt;p&gt;回顾一下上次的内容，要想捕获并发冲突需要做配置，两种方式：并发Token、行版本（RowVersion）&lt;/p&gt;
+&lt;p&gt;其实这里就有两个问题&lt;/p&gt;
+&lt;p&gt;1、为什么要额外配置才能捕获到并发异常，我用1除以0，就会报异常：&lt;span&gt;System.DivideByZeroException: 尝试除以零。&lt;span&gt;这个为什么就不需要配置才能捕获呢？&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;2、并发Token和RowVersion有什么区别？&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;第一个问题，如果我们不为属性或者实体配置并发的话，那么其实就是属于乐观并发，数据库中保留最后一次更新的内容，这个完全没有问题，对吧？所以如果你不需要做并发处理的话，那么对你来说并发就不算异常。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;我想想看我上一家公司有没有做并发异常的处理，应该是没有。最主要的是用户少，而且还有权限，各个功能模块都由不同的角色去操作，这就又降低了并发的可能。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;第二个问题，其实我是没太弄清楚。并发Token是为某个属性配置，而RowVersion是在实体中新添加的一个属性，那是不是rowVersion是作用这个实体的所有属性呢？&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;前面用到EF提供的DbUpdateConcurrencyException类来处理并发冲突。那客户端获胜和数据库获胜我就不说了，下面来说客户端数据库合并获胜。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;怎么合并，来看看作者怎么说&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;1、如果原始值与数据库中的值不同，意味着数据库中的值已被其他并发客户端更新，就放弃更新此属性，并保留数据库中的值。&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;span&gt;2、如果原始值与数据库中的值相同，意味着此属性不会产生并发冲突，就会正常处理&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;我知道这两句话肯定是重点，但是我理解不了，而且我原封不动地按照作者的代码写并没有得到想要的结果，所以我就不去理会了，来说说我自己的理解&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;这里有一个student4类，我为Name属性配置了并发Token&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Student4:BaseEntity
+{
+     &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Name { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+     &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; Score { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+ }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 还有一个Score属性没有配置并发Token，数据库中student原始值为{name:&quot;张三&quot;,score=100},并发进来修改的内容分别为{name:&quot;李四&quot;,score=99}、{name:&quot;王五&quot;,score=88},最后我想要的结果是数据库中修改为{name:&quot;李四&quot;,score=88}&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;如果有两个请求进来同时修改同一个Student,我想要的结果就是Name属性只会第一次更新成功，Score因为没有做并发，两次更新都可以。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;那么思路是不是就是，找到实体中设置了并发的属性，将它的IsModified = false,我是这样想的，我觉得就应该就这样啊，并发的不更新，非并发的更新，有毛病吗？&lt;/p&gt;
+&lt;p&gt;但是如何知道这个属性有没有设置并发，这真的很让人抓狂。因为我没找到，按理说EF应该提供了某个方法的。&lt;/p&gt;
+&lt;p&gt;你说我们用Fluent API对实体或者属性做的那些配置，那到底怎么去获取这些配置呢？&lt;/p&gt;
+&lt;p&gt;我只能想到DataAnnotations方式配置，因为是通过特性的方式来的，那么首先就要知道如何通过DataAnnotations的方式来配置并发属性，还好我找到了&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Student4:BaseEntity
+{
+     [ConcurrencyCheck]
+     &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt; Name { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+     &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; Score { &lt;span&gt;get&lt;/span&gt;; &lt;span&gt;set&lt;/span&gt;&lt;span&gt;; }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;那么最后我是这样写的&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;48&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;using&lt;/span&gt; (EFDbContext ctx1 = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; EFDbContext())
+&lt;/span&gt;&lt;span&gt;using&lt;/span&gt; (EFDbContext ctx2 = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; EFDbContext())
+{
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; stu1 =&lt;span&gt; ctx1.Students4.FirstOrDefault();
+    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; stu2 =&lt;span&gt; ctx2.Students4.FirstOrDefault();
+    stu1.Name &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;李四&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+    stu1.Score &lt;/span&gt;= &lt;span&gt;99&lt;/span&gt;&lt;span&gt;;
+    stu2.Name &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;王五&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+    stu2.Score &lt;/span&gt;= &lt;span&gt;88&lt;/span&gt;&lt;span&gt;;
+    ctx1.SaveChanges();
+    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
+    {
+        ctx2.SaveChanges();
+    }
+    &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (DbUpdateConcurrencyException ex)
+    {
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; tracking =&lt;span&gt; ex.Entries.Single();
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; originalValues =&lt;span&gt; tracking.OriginalValues;
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; databaseValues =&lt;span&gt; tracking.GetDatabaseValues();
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; currentValues =&lt;span&gt; tracking.CurrentValues;
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;original-name:{originalValues.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},original-score:{originalValues.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  original-name:张三,original-score:100
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;database-name:{databaseValues.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},database-score:{databaseValues.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  database-name:李四,database-score:99
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;current-name:{currentValues.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},current-score:{currentValues.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  current-name:王五,current-score:88
+
+        originalValues.SetValues(databaseValues);
+
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; tracking2 =&lt;span&gt; ex.Entries.Single();
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; originalValues2 =&lt;span&gt; tracking2.OriginalValues;
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; databaseValues2 =&lt;span&gt; tracking2.GetDatabaseValues();
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; currentValues2 =&lt;span&gt; tracking2.CurrentValues;
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;original2-name:{originalValues2.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},original2-score:{originalValues2.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  original2-name:李四,original2-score:99
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;database2-name:{databaseValues2.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},database2-score:{databaseValues2.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  database2-name:李四,database2-score:99
+        Console.WriteLine($&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;current2-name:{currentValues2.GetValue&amp;lt;string&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Name&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)},current2-score:{currentValues2.GetValue&amp;lt;int&amp;gt;(&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;Score&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);  //  current2-name:王五,current2-score:88
+
+        &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; concurrencyProp = ((Student4)databaseValues.ToObject()).GetType().GetProperties().Where(x =&amp;gt; Attribute.IsDefined(x, &lt;span&gt;typeof&lt;/span&gt;&lt;span&gt;(ConcurrencyCheckAttribute))).Single();
+        Console.WriteLine(concurrencyProp.Name);
+        tracking.Property(concurrencyProp.Name).IsModified &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
+        ctx2.SaveChanges();
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/819807/201902/819807-20190218004616570-1446246778.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;最后虽然得到了想要的结果但还是感觉不行 ，后面还有一节高级版的解析，利用Polly库来实现重试策略。后面接着学。&lt;/p&gt;
+
+</description>
+<pubDate>Sun, 17 Feb 2019 17:01:00 +0000</pubDate>
+<dc:creator>张四海</dc:creator>
+<og:description>要专业系统地学习EF推荐《你必须掌握的Entity Framework 6.x与Core 2.0》。这本书作者（汪鹏，Jeffcky）的博客：https://www.cnblogs.com/Creat</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jinshan-go/p/10393583.html</dc:identifier>
+</item>
+<item>
+<title>salesforce零基础学习（九十二）使用Ant Migration Tool 实现Metadata迁移 - zero.zhang</title>
+<link>http://www.cnblogs.com/zero-zyq/p/10384767.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/zero-zyq/p/10384767.html</guid>
+<description>&lt;p&gt;我们在做项目时经常会使用changeset作为部署工具，但是某些场景使用changeset会比较难操作，比如当我们在sandbox将apex class更改名字想要部署到生产的org或者其他环境的org，使用changeset是没法实现的，这个时候我们需要使用Ant Migration Tool还是更好的。&lt;/p&gt;
+&lt;p&gt;salesforce基于metadata进行管理，Ant Migration Tool 是一个基于 Java/Ant的命令行工具用于将metadata从本地迁移至Sales Org. Migration Tool通常用于以下场景：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;开发的项目有很多的改动点，这些改动点使用Web界面可能需要花费很长时间；&lt;/li&gt;
+&lt;li&gt;多个阶段Release的发布：开发过程需要重复的构建，测试等才能发布到生产，脚本化的组件检索和部署会更高效；&lt;/li&gt;
+&lt;li&gt;重复部署相同的参数：可以检索出所有的metadata，进行更改，以及部署组件的子集；&lt;/li&gt;
+&lt;li&gt;IT进行迁移到生产的操作：Force.com Migration Tool对于喜欢脚本化操作的人来说是一个很熟悉的过程；&lt;/li&gt;
+&lt;li&gt;定时调度部署。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt; Migration Tool基于Metadata API, Metadata API 包含了一组对象，这些对象用于管理你的org的系统预置的以及自定义的metadata， 我们可以使用SOAP calls来操作这些对象。下面介绍 Migration Tool 如何使用。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Migration Tool 使用前的准备工作&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;在我们使用Migration Tool时，我们需要保证电脑中已经安装了java的运行环境以及ant。由于salesforce对TLS1.0已经弃用，所以建议java JDK使用1.8（曾经java项目使用1.7，尽管按照要求各种配置了 tls信息仍然会有各种位置错误，使用1.8以后便一点问题没有了，所以推荐使用1.8）。&lt;/p&gt;
+&lt;p&gt;1. JDK 1.8 下载地址：&lt;a href=&quot;https://www.oracle.com/technetwork/java/javase/downloads/jdk8-downloads-2133151.html&quot; target=&quot;_blank&quot;&gt;https://www.oracle.com/technetwork/java/javase/downloads/jdk8-downloads-2133151.html&lt;/a&gt; 按照要求下载以后正常安装即可，安装完如果想确认电脑中是否已经就绪JDK 1.8环境，可以打开命令行，输入 java -version 回车即可(需要配置java的jdk的环境变量，网上找一大堆，如果不配置，ant运行会有问题，因为找不到jdk位置)；&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216131156111-385461457.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2. 下载和配置 Ant: Ant下载地址： http://ant.apache.org/bindownload.cgi ， 官方建议下载1.6 及以上版本，目前版本最高为1.10.5， 我这里下载的是这个版本，解压后我放在了C:\ant\apache-ant-1.10.5文件夹下面了。当我们解压以后运行 ant -version后，会发现ant指令是未识别的命令&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216133649847-1320315457.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;原因是bin目录以及lib目录用于运行ant指令，我们没有将bin目录放在path中。我们右键计算机，选择属性，选择高级，下面系统变量栏new一个，name为ANT_HOME，value为你解压的ant的根目录；&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216134031284-343797902.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;找到你的path的信息，新增%ANT_HOME%\bin即可，如果你的环境是win7，在最后需要加;然后输入下面信息&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216134320461-895557502.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;重新运行 ant -version，如果提示你安装的ant 安装的版本，说明安装成功。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216135014820-1198580738.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;3. 下载 Migration Tool，可以在你的org的setup 搜索出搜索 Tools,然后选择 Lightning Platform Tools and Toolkits.在跳转的页面选择下载Ant Migration Tools即可&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216135150508-334740091.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190216140225110-449722014.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;二. Ant Migration Tool的使用&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;可以通过以下的步骤去实现 Ant Migration Tool的使用。&lt;/p&gt;
+&lt;p&gt;1. 配置 Salesforce Connection 信息&lt;/p&gt;
+&lt;p&gt;我们目的是为了检索和部署metadata组件，所以我们需要源及目标的登陆salesforce的账号以及密码等信息，这些信息配置在build.properties，这个文件存在于解压的 Ant Migration Tool 文件中。&lt;/p&gt;
+&lt;p&gt;配置信息主要有以下内容：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;sf.username ： 用于配置的salesforce的账号名称；&lt;/li&gt;
+&lt;li&gt;sf.password ： 用于配置的salesforce的账号密码，如果存在security token，将token放在密码后面填写；&lt;/li&gt;
+&lt;li&gt;sf.sessionId ： 用于配置的salesforce的sessionId，如果配置sessionId，则不用配置username以及password，两者写一个就好，不能同时存在；&lt;/li&gt;
+&lt;li&gt;sf.serverurl ： 根据生产或者测试环境，分别对应于：https://login.salesforce.com / https://test.salesforce.com。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;2.构建项目检索/部署清单&lt;/p&gt;
+&lt;p&gt; 在package.xml中，我们主要需要配置以下的节点的信息：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;fullName：server端想要部署的package的名字，如果不指定则默认unpackage这个package；&lt;/li&gt;
+&lt;li&gt;types：这个元素包含了一个name的标签以及多个members标签，用于逻辑哪些类型的哪些metadata组件需要被检索或者部署；&lt;/li&gt;
+&lt;li&gt;members：组件元素的API名称；&lt;/li&gt;
+&lt;li&gt;name：salesforce 规定的metadata type，可用的metadata type的取值需要参看：&lt;a href=&quot;https://developer.salesforce.com/docs/atlas.en-us.200.0.api_meta.meta/api_meta/meta_types_list.htm&quot; target=&quot;_blank&quot;&gt;https://developer.salesforce.com/docs/atlas.en-us.200.0.api_meta.meta/api_meta/meta_types_list.htm&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;version：文件用于检索和部署的metadata API的版本号。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;上面的具体怎么使用，后面会给一个例子进行简单说明。&lt;/p&gt;
+&lt;p&gt;3. 使用Migration Tool 的指令从salesforce org检索/ 部署 / 移除 metadata组件&lt;/p&gt;
+&lt;p&gt;Ant的jar包里面封装了好多的soap的标准方法，常见的有 retrieve / deploy等等。通过ant指令在cmd中进行操作即可实现通过ant 部署salesforce的metadata组件。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;三. Ant Migration Tool实际操作&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt; 下面通过一个例子来进行演示，例子浅入浅出，描述的是将我一个org里面的custom label全部迁移至另外一个org里面，然后再将指定的custom label从我的新的org删除(检索、部署以及删除操作的简单描述)。想要了解更多使用的小伙伴欢迎查看Ant Migration Tool的官方文档：&lt;a href=&quot;https://resources.docs.salesforce.com/218/latest/en-us/sfdc/pdf/salesforce_migration_guide.pdf&quot; target=&quot;_blank&quot;&gt;https://resources.docs.salesforce.com/218/latest/en-us/sfdc/pdf/salesforce_migration_guide.pdf&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218000406761-680142953.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上图中的内容为例子中的层级结构： My First Test中包含了两个文件夹：remove(用于指定移除的 destructureChanges.xml的metadata结构)、retrieve(用于指定需要检索部署的metadata结构)。&lt;/p&gt;
+&lt;p&gt;build.properties配置了登陆salesforce org A的账号信息，build.xml中用来配置你的操作指令。这里主要有三个部分：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;retrieveOperation：配置的检索的指令，当使用ant执行这个指令以后，会生成一个retrieveFolder的文件夹，并且读取retrieve/package.xml里面的metadata文件信息生成到retrieveFolder中&lt;/li&gt;
+&lt;li&gt;deployOperation： 配置的执行的指令，当使用ant执行这个指令以后，会将retrieveFolder中的文件内容部署到你指定的salesforce org中；&lt;/li&gt;
+&lt;li&gt;removeOperation：配置的删除的指令，当使用ant执行这个指令以后，会将 destructiveChanges.xml中的metadata移除。&lt;/li&gt;
+&lt;/ul&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33.5&quot;&gt;&lt;img id=&quot;code_img_closed_98195007-2943-461a-87b9-8939289a3724&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_98195007-2943-461a-87b9-8939289a3724&quot; class=&quot;code_img_opened&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_98195007-2943-461a-87b9-8939289a3724&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;62&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;project &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;Sample usage of Salesforce Ant tasks&quot;&lt;/span&gt;&lt;span&gt; default&lt;/span&gt;&lt;span&gt;=&quot;test&quot;&lt;/span&gt;&lt;span&gt; basedir&lt;/span&gt;&lt;span&gt;=&quot;.&quot;&lt;/span&gt;&lt;span&gt; xmlns:sf&lt;/span&gt;&lt;span&gt;=&quot;antlib:com.salesforce&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt; 2&lt;/span&gt; 
+&lt;span&gt; 3&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;file&lt;/span&gt;&lt;span&gt;=&quot;build.properties&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;environment&lt;/span&gt;&lt;span&gt;=&quot;env&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt; 5&lt;/span&gt; 
+&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt; Setting default value for username, password and session id properties to empty string 
+&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;         so unset values are treated as empty. Without this, ant expressions such as ${sf.username}
+&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;         will be treated literally.
+&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;--&amp;gt;&lt;/span&gt;
+&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;condition &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.username&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;isset &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.username&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;condition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;11&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;condition &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.password&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;isset &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.password&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;condition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;12&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;condition &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.sessionId&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;isset &lt;/span&gt;&lt;span&gt;property&lt;/span&gt;&lt;span&gt;=&quot;sf.sessionId&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;not&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;condition&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;13&lt;/span&gt; 
+&lt;span&gt;14&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;taskdef &lt;/span&gt;&lt;span&gt;resource&lt;/span&gt;&lt;span&gt;=&quot;com/salesforce/antlib.xml&quot;&lt;/span&gt;&lt;span&gt; uri&lt;/span&gt;&lt;span&gt;=&quot;antlib:com.salesforce&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;15&lt;/span&gt;         &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;classpath&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;16&lt;/span&gt;             &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;pathelement &lt;/span&gt;&lt;span&gt;location&lt;/span&gt;&lt;span&gt;=&quot;../ant-salesforce.jar&quot;&lt;/span&gt; &lt;span&gt;/&amp;gt;&lt;/span&gt;            
+&lt;span&gt;17&lt;/span&gt;         &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;classpath&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;18&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;taskdef&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;19&lt;/span&gt;     
+&lt;span&gt;20&lt;/span&gt; 
+&lt;span&gt;21&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;target &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;retrieveOperation&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;22&lt;/span&gt;       &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;mkdir &lt;/span&gt;&lt;span&gt;dir&lt;/span&gt;&lt;span&gt;=&quot;retrieveFolder&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt;23&lt;/span&gt;       &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;sf:retrieve &lt;/span&gt;&lt;span&gt;username&lt;/span&gt;&lt;span&gt;=&quot;${sf.username}&quot;&lt;/span&gt;&lt;span&gt; password&lt;/span&gt;&lt;span&gt;=&quot;${sf.password}&quot;&lt;/span&gt;&lt;span&gt; sessionId&lt;/span&gt;&lt;span&gt;=&quot;${sf.sessionId}&quot;&lt;/span&gt;&lt;span&gt; serverurl&lt;/span&gt;&lt;span&gt;=&quot;${sf.serverurl}&quot;&lt;/span&gt;&lt;span&gt; maxPoll&lt;/span&gt;&lt;span&gt;=&quot;${sf.maxPoll}&quot;&lt;/span&gt;&lt;span&gt; retrieveTarget&lt;/span&gt;&lt;span&gt;=&quot;retrieveFolder&quot;&lt;/span&gt;&lt;span&gt; pollWaitMillis&lt;/span&gt;&lt;span&gt;=&quot;10000&quot;&lt;/span&gt;&lt;span&gt; unpackaged&lt;/span&gt;&lt;span&gt;=&quot;retrieve/package.xml&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt;24&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;target&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;25&lt;/span&gt; 
+&lt;span&gt;26&lt;/span&gt;     &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;target &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;deployOperation&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;27&lt;/span&gt;       &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;sf:deploy &lt;/span&gt;&lt;span&gt;username&lt;/span&gt;&lt;span&gt;=&quot;${sf.username}&quot;&lt;/span&gt;&lt;span&gt; password&lt;/span&gt;&lt;span&gt;=&quot;${sf.password}&quot;&lt;/span&gt;&lt;span&gt; sessionId&lt;/span&gt;&lt;span&gt;=&quot;${sf.sessionId}&quot;&lt;/span&gt;&lt;span&gt; serverurl&lt;/span&gt;&lt;span&gt;=&quot;${sf.serverurl}&quot;&lt;/span&gt;&lt;span&gt; maxPoll&lt;/span&gt;&lt;span&gt;=&quot;${sf.maxPoll}&quot;&lt;/span&gt;&lt;span&gt; deployRoot&lt;/span&gt;&lt;span&gt;=&quot;retrieveFolder&quot;&lt;/span&gt;&lt;span&gt; rollbackOnError&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt;28&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;target&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;29&lt;/span&gt; 
+&lt;span&gt;30&lt;/span&gt;   &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;target &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;removeOperation&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;31&lt;/span&gt;       &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;sf:deploy &lt;/span&gt;&lt;span&gt;username&lt;/span&gt;&lt;span&gt;=&quot;${sf.username}&quot;&lt;/span&gt;&lt;span&gt; password&lt;/span&gt;&lt;span&gt;=&quot;${sf.password}&quot;&lt;/span&gt;&lt;span&gt; sessionId&lt;/span&gt;&lt;span&gt;=&quot;${sf.sessionId}&quot;&lt;/span&gt;&lt;span&gt; serverurl&lt;/span&gt;&lt;span&gt;=&quot;${sf.serverurl}&quot;&lt;/span&gt;&lt;span&gt; maxPoll&lt;/span&gt;&lt;span&gt;=&quot;${sf.maxPoll}&quot;&lt;/span&gt;&lt;span&gt; deployRoot&lt;/span&gt;&lt;span&gt;=&quot;remove&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
+&lt;span&gt;32&lt;/span&gt;     &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;target&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;span&gt;33&lt;/span&gt; 
+&lt;span&gt;34&lt;/span&gt; &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;project&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;build.xml&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;salesforce  org A：存在custom label&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218001222875-589483471.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;salesforce org B：不存在custom label&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218001259303-278547341.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 我们将retrieve文件夹下的package.xml中配置以下的内容，目的是读取所有的custom label&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218001511891-512262691.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 切换到 My First Test 文件夹下，执行 ant -p build.xml可以搜索出来当前目录下所有可以执行的ant的指令，因为我们在build.xml中只配置了3个，所以当前目录下ant的指令总共有3个。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218001801191-1691745116.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;执行 ant retrieveOperation便可以将所有的retrieve目录下的metadata xml信息检索出来&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218001955560-1452171366.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;retrieveFolder中生成相关的文件信息以及package.xml文件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218002019640-206694307.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;更改build.properties文件，切换成salesforce org B的账号，执行 ant deployOperation操作便可以将retrieveFolder中的metadata文件部署到salesforce org B中。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218002254048-1620361108.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Salesforce Org B已经存在刚部署的metadata component了。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218002329988-699356905.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在remove文件夹中的destructiveChanges.xml中配置需要移除的metadata组件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218003128402-788092674.png&quot; alt=&quot;&quot;/&gt; 执行 ant deleteOperation以后，便可以删除salesforce org B中的配置的metadata组件了。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218003218158-587045123.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; salesforce org B已经移除指定的metadata组件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/910966/201902/910966-20190218003028471-1854640993.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt; 总结：&lt;/strong&gt;篇中只是简单的描述Ant Migration Tool的使用，深入的细节的学习还是要自行查看官方提供的文档以及download下来的ant jar中的sample，篇中有问题的欢迎指出，有不懂的欢迎留言。&lt;/p&gt;
+</description>
+<pubDate>Sun, 17 Feb 2019 16:42:00 +0000</pubDate>
+<dc:creator>zero.zhang</dc:creator>
+<og:description>我们在做项目时经常会使用changeset作为部署工具，但是某些场景使用changeset会比较难操作，比如当我们在sandbox将apex class更改名字想要部署到生产的org或者其他环境的or</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/zero-zyq/p/10384767.html</dc:identifier>
+</item>
+<item>
+<title>（数据科学学习手札55）利用ggthemr来美化ggplot2图像 - 费弗里</title>
+<link>http://www.cnblogs.com/feffery/p/10393566.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/feffery/p/10393566.html</guid>
+<description>&lt;p&gt;&lt;span&gt;一、简介&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　R中的ggplot2是一个非常强大灵活的数据可视化包，熟悉其绘图规则后便可以自由地生成各种可视化图像，但其默认的色彩和样式在很多时候难免有些过于朴素，本文将要介绍的ggthemr包专门针对原生ggplot2图像进行美化，掌握它之后你就可以创作出更具特色和美感的数据可视化作品。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;span&gt;二、基础内容&lt;/span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.1 安装&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　不同于常规的R包，ggthemr并没有在CRAN上发布，因此我们需要使用devtools中的install_github()直接从github上安装它，参照github上ggthemr的项目说明页：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;library(devtools)
+
+install_github(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;cttobin/ggthemr&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;　　笔者在遵循上述步骤时不太顺利，遇到了如下错误：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217212755444-1306043738.png&quot; alt=&quot;&quot;/&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　不过不用担心，按照上述的错误提示，我们打开对应目录，找到了对应的压缩包：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217212925131-163402094.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;实际上我们通过上述语句已经将ggthemr的压缩包下载到本地如上图所示，所以我们可以很容易地使用手动安装本地压缩包的形式来完成ggthemr的安装（注意要吧.tar格式改为.tar.gz格式，我想这可能是install_github()安装失败的原因）：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217213056006-1073969206.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;　　经过上述步骤我们便完成了ggthemr的安装准备工作；&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; &lt;span&gt;2.2 傻瓜式用法&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　在我之前写得某篇文章中使用过Python中matplotlib.pyplot.style，仅仅使用style.use()这个语句，便可傻瓜式地载入各种精美的自适应绘图主题，在ggthemr中也有类似的功能，我们在利用ggplot2创建图像的语句之前，加上ggthemr('主题名称')，便可简单套用多种内建主题，下面是几个简单的例子：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+rm(list=&lt;span&gt;ls())
+library(ggplot2)
+library(ggthemr)
+
+data(mpg)
+data &lt;/span&gt;&amp;lt;-&lt;span&gt; mpg
+
+#chalk风格
+ggthemr(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;chalk&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+p1 &lt;/span&gt;&amp;lt;- ggplot(data=data, aes(displ, hwy))+&lt;span&gt;
+  geom_point(mapping &lt;/span&gt;= aes(shape=factor(cyl)))+&lt;span&gt;
+  geom_smooth(mapping &lt;/span&gt;= aes(displ,hwy,colour=&lt;span&gt;factor(cyl)))
+print(p1)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217221059082-1539253446.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#dust风格
+ggthemr(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;dust&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+p2 &lt;/span&gt;&amp;lt;- ggplot(data=data, aes(displ, hwy))+&lt;span&gt;
+  geom_point(mapping &lt;/span&gt;= aes(shape=factor(cyl)))+&lt;span&gt;
+  geom_smooth(mapping &lt;/span&gt;= aes(displ,hwy,colour=&lt;span&gt;factor(cyl)))
+print(p2)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217221147645-51518127.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;#flat风格
+ggthemr(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;flat&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+p3 &lt;/span&gt;&amp;lt;- ggplot(data=data, aes(displ, hwy))+&lt;span&gt;
+  geom_point(mapping &lt;/span&gt;= aes(shape=factor(cyl)))+&lt;span&gt;
+  geom_smooth(mapping &lt;/span&gt;= aes(displ,hwy,colour=&lt;span&gt;factor(cyl)))
+print(p3)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217221223808-1882351516.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　而官方文档中提到可以用ggthemr_reset()来恢复ggplot2默认风格，但笔者经过实践发现这个函数并不能彻底抹除之前施加的主题模式，因此这里不细说，读者们可以自行尝试；&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;三、自定义主题&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　尽管ggthemr内建了很多风格迥异的主题，有的过于花哨，有的又过于商务硬朗，除了直接套用这些主题，我们还可以自己创建新的主题以加入自己对构图的想法：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;br/&gt;3.1 Palettes（调色板）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　palette决定了图像中所有元素的颜色，包括所有图层、背景、网格线等，而swatch则专门用于控制图层元素的配色方案，我们使用define_palette()来构造自定义调色方案，其主要参数如下:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;swatch：一个颜色向量，用于定义图层元素的配色方案（要注意图像中需要用到的色彩数量要小于等于swatch的向量长度，否则会报错）&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;gradient：一个长度为2的向量，lower位置和upper位置用于控制梯度色彩的上下限&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;background:设置背景色彩&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;text：设置文本部分的字体颜色&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;line：设置坐标轴颜色&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;gridline：控制网格线的颜色&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　下面我们自定义一个色彩简单的主题：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+demo &amp;lt;-&lt;span&gt; define_palette(
+  swatch &lt;/span&gt;= c(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;black&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;green&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;blue&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;brown&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;purple&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;yellow&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;), 
+  gradient &lt;/span&gt;= c(lower = &lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, upper = &lt;span&gt;'&lt;/span&gt;&lt;span&gt;green&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+)
+
+ggthemr(demo)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;span&gt;　　下面来看看应用上述主题之后的图像效果：&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;47&quot;&gt;
+&lt;pre&gt;
+rm(list=&lt;span&gt;ls())
+library(ggplot2)
+library(ggthemr)
+
+data(mpg)
+data &lt;/span&gt;&amp;lt;-&lt;span&gt; mpg
+
+demo &lt;/span&gt;&amp;lt;-&lt;span&gt; define_palette(
+  swatch &lt;/span&gt;= c(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;black&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;green&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;blue&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;brown&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;purple&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;yellow&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;), 
+  gradient &lt;/span&gt;= c(lower = &lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, upper = &lt;span&gt;'&lt;/span&gt;&lt;span&gt;green&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+)
+
+ggthemr(demo)
+p &lt;/span&gt;&amp;lt;- ggplot(data=data, aes(displ, hwy))+&lt;span&gt;
+  geom_point(mapping &lt;/span&gt;= aes(shape=factor(cyl)))+&lt;span&gt;
+  geom_smooth(mapping &lt;/span&gt;= aes(displ,hwy,colour=&lt;span&gt;factor(cyl)))
+print(p)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217232458619-1587427050.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　因为我们的demo主题中还设置了色彩梯度，下面我们绘制密度图（此例来自我的&lt;strong&gt;（数据科学学习手札38）ggplot2基本图形简述&lt;/strong&gt;&lt;/span&gt;&lt;span&gt;）：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+data &amp;lt;- data.frame(matrix(rnorm(&lt;span&gt;200&lt;/span&gt;),nrow=&lt;span&gt;100&lt;/span&gt;&lt;span&gt;))
+p &lt;/span&gt;&amp;lt;- ggplot(data, aes(x = X1, y = X2)) +&lt;span&gt;
+  stat_density2d(aes(fill &lt;/span&gt;= ..density..), geom = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;raster&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, contour =&lt;span&gt; F)
+p&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217232959818-2144673145.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　可以看到，密度图中色彩在预设的红色与绿色之间过渡；&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;3.2 ggthemr()的其他关键参数&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　前文中我们使用函数ggthemr()来挂载主题，而除了最关键的主题参数之外，ggthemr()还有若干控制其他图像样式的参数，如下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;layout：用于网格线样式，有clean、clear、minimal、plain、scientific可选，默认clear&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;spacing：用于控制图像在图床上的紧凑程度，越高意味着图像被挤压得越严重，默认1.6，下面分别为0,1,2时的示例：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217234730607-1222396791.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217234740261-642224540.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217234750365-575306483.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;text_size：用于控制文本部分字体大小，默认12&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;type：用于控制背景区域填充的形式，当'inner'时如下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217234354105-1939790621.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;当设置为'outer'时如下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190217234424189-1654467106.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;line_weight：设置坐标轴和网格线的宽度，默认0.5&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;set_theme：逻辑型变量，控制是否启动palette传入的主题，默认为TRUE&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;3.3 微调图像对比度&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　ggthemr中十分贴心地提供了调节图像对比度的函数，具体如下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;code&gt;darken_swatch()&lt;/code&gt; / &lt;code&gt;lighten_swatch()&lt;/code&gt;: 暗化或亮化所有图形元素的对比度&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;code&gt;darken_gradient()&lt;/code&gt; / &lt;code&gt;lighten_gradient()&lt;/code&gt;: 暗化或亮化所有梯度元素的对比度&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;code&gt;darken_palette()&lt;/code&gt; / &lt;code&gt;lighten_palette()&lt;/code&gt;: 暗化或亮化所有元素的对比度&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; 　　&lt;span&gt;下面是简单的示例：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+rm(list=&lt;span&gt;ls())
+library(ggplot2)
+library(ggthemr)
+
+data(mpg)
+data &lt;/span&gt;&amp;lt;-&lt;span&gt; mpg
+
+
+ggthemr(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;chalk&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+p1 &lt;/span&gt;&amp;lt;- ggplot(data=data, aes(displ, hwy))+&lt;span&gt;
+  geom_point(mapping &lt;/span&gt;= aes(shape=factor(cyl)))+&lt;span&gt;
+  geom_smooth(mapping &lt;/span&gt;= aes(displ,hwy,colour=&lt;span&gt;factor(cyl)))
+print(p1)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190218002812812-1842107056.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　下面我们来分别调低和调高全局色彩对比度：&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+darken_palette(amount = &lt;span&gt;0.5&lt;/span&gt;&lt;span&gt;)
+print(p1)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190218002929904-893976899.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+lighten_palette(amount = &lt;span&gt;0.5&lt;/span&gt;&lt;span&gt;)
+print(p1)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1344061/201902/1344061-20190218003014659-453221625.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;　　以上就是本文的全部内容，如有笔误望指出。&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;参考资料：https://github.com/cttobin/ggthemr&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Sun, 17 Feb 2019 16:32:00 +0000</pubDate>
+<dc:creator>费弗里</dc:creator>
+<og:description>一、简介 R中的ggplot2是一个非常强大灵活的数据可视化包，熟悉其绘图规则后便可以自由地生成各种可视化图像，但其默认的色彩和样式在很多时候难免有些过于朴素，本文将要介绍的ggthemr包专门针对原</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/feffery/p/10393566.html</dc:identifier>
+</item>
+<item>
+<title>Springboot 系列（三）Spring Boot 自动配置 - 雪漫士兵</title>
+<link>http://www.cnblogs.com/niumoo/p/10393547.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/niumoo/p/10393547.html</guid>
+<description>&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;注意：本 Spring Boot 系列文章基于 Spring Boot 版本 &lt;strong&gt;v2.1.1.RELEASE&lt;/strong&gt; 进行学习分析，版本不同可能会有细微差别。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
+&lt;div align=&quot;center&quot;&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/2626549-e38b6d344d19cb76.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;p&gt;关于配置文件可以配置的内容，在 &lt;a href=&quot;https://docs.spring.io/spring-boot/docs/2.1.1.RELEASE/reference/htmlsingle/#common-application-properties&quot;&gt;Spring Boot 官方网站&lt;/a&gt;已经提供了完整了配置示例和解释。&lt;/p&gt;
+&lt;p&gt;可以这么说，Spring Boot 的一大精髓就是自动配置，为开发省去了大量的配置时间，可以更快的融入业务逻辑的开发，那么自动配置是怎么实现的呢？&lt;br/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;springbootapplication&quot;&gt;1. @SpringBootApplication&lt;/h2&gt;
+&lt;p&gt;跟着 Spring Boot 的启动类的注解 &lt;code&gt;@SpringBootApplication&lt;/code&gt; 进行源码跟踪，寻找自动配置的原理。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@Target({ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Inherited
+@SpringBootConfiguration
+@EnableAutoConfiguration
+@ComponentScan(
+    excludeFilters = {@Filter(
+    type = FilterType.CUSTOM,
+    classes = {TypeExcludeFilter.class}
+), @Filter(
+    type = FilterType.CUSTOM,
+    classes = {AutoConfigurationExcludeFilter.class}
+)}
+)
+public @interface SpringBootApplication {&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;@EnableAutoConfiguration&lt;/code&gt; 开启自动配置。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;@ComponentScan&lt;/code&gt; 开启注解扫描&lt;/p&gt;
+&lt;p&gt;从 &lt;code&gt;SpringBootApplication&lt;/code&gt; 我们可以发现，这是一个简便的注解配置，它包含了自动配置，配置类，包扫描等一系列功能。&lt;/p&gt;
+&lt;h2 id=&quot;enableautoconfiguration&quot;&gt;2. @EnableAutoConfiguration&lt;/h2&gt;
+&lt;p&gt;继续跟踪，查看&lt;code&gt;@EnableAutoConfiguration&lt;/code&gt; 源码，里面比较重要的是 &lt;code&gt;@Import&lt;/code&gt; ，导入了一个翻译名为自动配置的选择器的类。这个类其实就是自动配置的加载选择器。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@Target({ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Inherited
+@AutoConfigurationPackage
+@Import({AutoConfigurationImportSelector.class})
+public @interface EnableAutoConfiguration {
+    String ENABLED_OVERRIDE_PROPERTY = &quot;spring.boot.enableautoconfiguration&quot;;
+
+    Class&amp;lt;?&amp;gt;[] exclude() default {};
+
+    String[] excludeName() default {};
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;继续跟踪 &lt;code&gt;AutoConfigurationImportSelector.class&lt;/code&gt; .在这个类有一个重要的方法 &lt;code&gt;getCandidateConfigurations&lt;/code&gt;.用于加载 Spring Boot 配置的自动配置类。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;getAutoConfigurationEntry&lt;/code&gt; 会筛选出有效的自动配置类。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;protected AutoConfigurationEntry getAutoConfigurationEntry(
+            AutoConfigurationMetadata autoConfigurationMetadata,
+            AnnotationMetadata annotationMetadata) {
+        if (!isEnabled(annotationMetadata)) {
+            return EMPTY_ENTRY;
+        }
+        AnnotationAttributes attributes = getAttributes(annotationMetadata);
+        List&amp;lt;String&amp;gt; configurations = getCandidateConfigurations(annotationMetadata,
+                attributes);
+        configurations = removeDuplicates(configurations);
+        Set&amp;lt;String&amp;gt; exclusions = getExclusions(annotationMetadata, attributes);
+        checkExcludedClasses(configurations, exclusions);
+        configurations.removeAll(exclusions);
+        configurations = filter(configurations, autoConfigurationMetadata);
+        fireAutoConfigurationImportEvents(configurations, exclusions);
+        return new AutoConfigurationEntry(configurations, exclusions);
+    }   
+
+protected List&amp;lt;String&amp;gt; getCandidateConfigurations(AnnotationMetadata metadata,
+            AnnotationAttributes attributes) {
+        List&amp;lt;String&amp;gt; configurations = SpringFactoriesLoader.loadFactoryNames(
+                getSpringFactoriesLoaderFactoryClass(), getBeanClassLoader());
+        Assert.notEmpty(configurations,
+                &quot;No auto configuration classes found in META-INF/spring.factories. If you &quot;
+                        + &quot;are using a custom packaging, make sure that file is correct.&quot;);
+        return configurations;
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;下图是 DEBUG 模式下筛选之后的结果，因为我只添加了 web 模块，所以只有 web 相关的自动配置。&lt;/p&gt;
+&lt;div align=&quot;center&quot;&gt;&lt;img src=&quot;https://user-images.githubusercontent.com/26371673/50733348-ec781400-11c6-11e9-8f0d-01797d797d69.png&quot; alt=&quot;筛选过后的自动配置&quot;/&gt;&lt;/div&gt;
+&lt;h2 id=&quot;xxxautoconfiguration-与-xxxproperties&quot;&gt;3. xxxAutoConfiguration 与 xxxProperties&lt;/h2&gt;
+&lt;p&gt;在上面的 debug 里，我们看到了成功加载的自动配置，目前只看到了配置类，却还没有发现自动配置值，随便选择一个 &lt;code&gt;AutoConfiguration&lt;/code&gt; 查看源码。&lt;/p&gt;
+&lt;p&gt;这里选择了 &lt;code&gt;ServletWebServerFactoryAutoConfiguration&lt;/code&gt;.&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@Configuration
+@AutoConfigureOrder(Ordered.HIGHEST_PRECEDENCE)
+//判断当前项目有没有这个类
+//CharacterEncodingFilter；SpringMVC中进行乱码解决的过滤器；
+@ConditionalOnClass(ServletRequest.class)
+//Spring底层@Conditional注解（Spring注解版），根据不同的条件，如果
+//满足指定的条件，整个配置类里面的配置就会生效； 判断当前应用是否是web应用，如果是，当前配置类生效
+@ConditionalOnWebApplication(type = Type.SERVLET)
+@EnableConfigurationProperties(ServerProperties.class)
+@Import({ ServletWebServerFactoryAutoConfiguration.BeanPostProcessorsRegistrar.class,
+        ServletWebServerFactoryConfiguration.EmbeddedTomcat.class,
+        ServletWebServerFactoryConfiguration.EmbeddedJetty.class,
+        ServletWebServerFactoryConfiguration.EmbeddedUndertow.class })
+public class ServletWebServerFactoryAutoConfiguration {&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;需要注意的是 &lt;code&gt;@EnableConfigurationProperties(ServerProperties.class)&lt;/code&gt;.他的意思是启动指定类的&lt;br/&gt;&lt;code&gt;ConfigurationProperties&lt;/code&gt;功能；将配置文件中对应的值和 &lt;code&gt;ServerProperties&lt;/code&gt; 绑定起来；并把&lt;br/&gt;&lt;code&gt;ServerProperties&lt;/code&gt; 加入到 IOC 容器中。&lt;/p&gt;
+&lt;p&gt;再来看一下 &lt;code&gt;ServerProperties&lt;/code&gt; .&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@ConfigurationProperties(prefix = &quot;server&quot;, ignoreUnknownFields = true)
+public class ServerProperties {
+
+    /**
+     * Server HTTP port.
+     */
+    private Integer port;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;显而易见了，这里使用 ConfigurationProperties 绑定属性映射文件中的 server 开头的属性。结合默认配置&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;# 路径spring-boot-autoconfigure-2.1.1.RELEASE.jar
+# /META-INF/spring-configuration-metadata.json
+
+    {
+      &quot;name&quot;: &quot;server.port&quot;,
+      &quot;type&quot;: &quot;java.lang.Integer&quot;,
+      &quot;description&quot;: &quot;Server HTTP port.&quot;,
+      &quot;sourceType&quot;: &quot;org.springframework.boot.autoconfigure.web.ServerProperties&quot;,
+      &quot;defaultValue&quot;: 8080
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;达到了自动配置的目的。&lt;/p&gt;
+&lt;h2 id=&quot;自动配置总结&quot;&gt;4. 自动配置总结&lt;/h2&gt;
+&lt;ol&gt;&lt;li&gt;SpringBoot 启动的时候加载主配置类，开启了自动配置功能 @EnableAutoConfiguration 。&lt;/li&gt;
+&lt;li&gt;@EnableAutoConfiguration 给容器导入META-INF/spring.factories 里定义的自动配置类。&lt;/li&gt;
+&lt;li&gt;筛选有效的自动配置类。&lt;/li&gt;
+&lt;li&gt;每一个自动配置类结合对应的 xxxProperties.java 读取配置文件进行自动配置功能 。&lt;/li&gt;
+&lt;/ol&gt;&lt;h2 id=&quot;配置类&quot;&gt;5. 配置类&lt;/h2&gt;
+&lt;p&gt;通过自动配置，我们发现已经帮我们省去了大量的配置文件的编写，那么在自定义配置的时候，我们是不是需要编写XML呢？Spring boot 尽管可以使用 &lt;code&gt;SpringApplication&lt;/code&gt;XML 文件进行配置，但是我们通常会使用 &lt;code&gt;@Configuration&lt;/code&gt; 类进行代替，这也是官方推荐的方式。&lt;/p&gt;
+&lt;h3 id=&quot;xml配置&quot;&gt;5.1 XML配置&lt;/h3&gt;
+&lt;p&gt;定义 helloService Bean.&lt;/p&gt;
+&lt;pre class=&quot;xml&quot;&gt;
+&lt;code&gt;&amp;lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&amp;gt;
+&amp;lt;beans xmlns=&quot;http://www.springframework.org/schema/beans&quot;
+       xmlns:xsi=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;
+       xsi:schemaLocation=&quot;http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd&quot;&amp;gt;
+
+    &amp;lt;bean id=&quot;helloService&quot; class=&quot;net.codingme.boot.service.HelloService&quot;&amp;gt;&amp;lt;/bean&amp;gt;
+
+&amp;lt;/beans&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;引入配置。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@ImportResource(value = &quot;classpath:spring-service.xml&quot;)
+@SpringBootApplication
+public class BootApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(BootApplication.class, args);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;注解配置&quot;&gt;5.2 注解配置&lt;/h3&gt;
+&lt;p&gt;此种方式和上面的XML配置是等效的，也是官方推荐的方式。&lt;code&gt;@Configuration&lt;/code&gt; 注解的类（要在扫描的包路径中）会被扫描到。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;/**
+ * &amp;lt;p&amp;gt;
+ * 配置类，相当于传统Spring 开发中的 xml-&amp;gt; bean的配置
+ *
+ * @Author niujinpeng
+ * @Date 2018/12/7 0:04
+ */
+@Configuration
+public class ServiceConfig {
+
+    /**
+     * 默认添加到容器中的 ID 为方法名（helloService）
+     *
+     * @return
+     */
+    @Bean
+    public HelloService helloService() {
+        return new HelloService();
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;附录&quot;&gt;6. 附录&lt;/h2&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;13&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnJava&lt;/td&gt;
+&lt;td&gt;系统的java版本是否符合要求&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnBean&lt;/td&gt;
+&lt;td&gt;容器中存在指定Bean；&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;@ConditionalOnMissingBean&lt;/td&gt;
+&lt;td&gt;容器中不存在指定Bean；&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnExpression&lt;/td&gt;
+&lt;td&gt;满足SpEL表达式指定&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;@ConditionalOnClass&lt;/td&gt;
+&lt;td&gt;系统中有指定的类&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;@ConditionalOnMissingClass&lt;/td&gt;
+&lt;td&gt;系统中没有指定的类&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;@ConditionalOnSingleCandidate&lt;/td&gt;
+&lt;td&gt;容器中只有一个指定的Bean，或者这个Bean是首选Bean&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnProperty&lt;/td&gt;
+&lt;td&gt;系统中指定的属性是否有指定的值&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnResource&lt;/td&gt;
+&lt;td&gt;类路径下是否存在指定资源文件&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnWebApplication&lt;/td&gt;
+&lt;td&gt;当前是web环境&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@ConditionalOnNotWebApplication&lt;/td&gt;
+&lt;td&gt;当前不是web环境&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;@ConditionalOnJndi&lt;/td&gt;
+&lt;td&gt;JNDI存在指定项&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;文章代码已经上传到 GitHub &lt;a href=&quot;https://github.com/niumoo/springboot/tree/master/springboot-config&quot;&gt;Spring Boot 自动配置&lt;/a&gt;。&lt;/p&gt;
+&lt;p&gt;&amp;lt;完&amp;gt;&lt;br/&gt;本文原发于个人博客：&lt;a href=&quot;https://www.codingme.net/&quot; class=&quot;uri&quot;&gt;https://www.codingme.net&lt;/a&gt; 转载请注明出处&lt;br/&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/2626549-e1b06fdf782b78e2.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/600&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Sun, 17 Feb 2019 16:16:00 +0000</pubDate>
+<dc:creator>雪漫士兵</dc:creator>
+<og:description>注意：本 Spring Boot 系列文章基于 Spring Boot 版本 v2.1.1.RELEASE 进行学习分析，版本不同可能会有细微差别。 前言 关于配置文件可以配置的内容，在 'Sprin</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/niumoo/p/10393547.html</dc:identifier>
+</item>
+<item>
+<title>docker完整配置nginx+php+mysql - 冒雨ing</title>
+<link>http://www.cnblogs.com/saysmy/p/10389902.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/saysmy/p/10389902.html</guid>
+<description>&lt;p&gt;　　docker在1.3.X版本之后还提供了一个新的命令exec用于进入容器，这种方式相对更简单一些，下面我们来看一下该命令的使用：&lt;/p&gt;&lt;div readability=&quot;184.27916213275&quot;&gt;
+
+&lt;p&gt;查找 &lt;a href=&quot;https://hub.docker.com/r/library/nginx/&quot; rel=&quot;noopener&quot; target=&quot;_blank&quot;&gt;Docker Hub&lt;/a&gt; 上的 nginx 镜像&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;nginx$ docker search nginx
+NAME                      DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+nginx                     &lt;span class=&quot;typ&quot;&gt;Official&lt;span class=&quot;pln&quot;&gt; build of &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pun&quot;&gt;.&lt;span class=&quot;pln&quot;&gt;                        &lt;span class=&quot;lit&quot;&gt;3260&lt;span class=&quot;pln&quot;&gt;      &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;       
+jwilder&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;proxy       &lt;span class=&quot;typ&quot;&gt;Automated&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; reverse proxy &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; docker c&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;674&lt;span class=&quot;pln&quot;&gt;                  &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+richarvey&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm   &lt;span class=&quot;typ&quot;&gt;Container&lt;span class=&quot;pln&quot;&gt; running &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;+&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM capable &lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;207&lt;span class=&quot;pln&quot;&gt;                  &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+million12&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php       &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;+&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM &lt;span class=&quot;lit&quot;&gt;5.5&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;7.0&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;(&lt;span class=&quot;pln&quot;&gt;NG&lt;span class=&quot;pun&quot;&gt;),&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;CentOS&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;67&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+maxexcloo&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php       &lt;span class=&quot;typ&quot;&gt;Docker&lt;span class=&quot;pln&quot;&gt; framework container &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;and&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;57&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+webdevops&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;nginx       &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM                              &lt;span class=&quot;lit&quot;&gt;39&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+h3nrik&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;ldap         NGINX web server &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; LDAP&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;AD&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; SSL &lt;span class=&quot;kwd&quot;&gt;and&lt;span class=&quot;pln&quot;&gt; pro&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;27&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+bitnami&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx             &lt;span class=&quot;typ&quot;&gt;Bitnami&lt;span class=&quot;pln&quot;&gt; nginx &lt;span class=&quot;typ&quot;&gt;Docker&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Image&lt;span class=&quot;pln&quot;&gt;                      &lt;span class=&quot;lit&quot;&gt;19&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+maxexcloo&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx           &lt;span class=&quot;typ&quot;&gt;Docker&lt;span class=&quot;pln&quot;&gt; framework container &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; inst&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;7&lt;span class=&quot;pln&quot;&gt;                    &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+&lt;span class=&quot;pun&quot;&gt;...&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;这里我们拉取官方的镜像&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;nginx$ docker pull nginx&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;等待下载完成后，我们就可以在本地镜像列表里查到 REPOSITORY 为 nginx 的镜像。&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;nginx$ docker images nginx
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+nginx               latest              &lt;span class=&quot;lit&quot;&gt;555bbd91e13c&lt;span class=&quot;pln&quot;&gt;        &lt;span class=&quot;lit&quot;&gt;3&lt;span class=&quot;pln&quot;&gt; days ago          &lt;span class=&quot;lit&quot;&gt;182.8&lt;span class=&quot;pln&quot;&gt; MB&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;p&gt;创建并运行容器：
+&lt;/p&gt;&lt;/pre&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+docker run --name mynginx -p &lt;span&gt;80&lt;/span&gt;:&lt;span&gt;80&lt;/span&gt; -v /&lt;span&gt;var&lt;/span&gt;/www:/&lt;span&gt;var&lt;/span&gt;/www -v /usr/local/nginx/conf/conf.d:/etc/nginx/conf.d -d nginx
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;注意：&lt;/p&gt;
+&lt;p&gt;-v 添加文件映射关系，这样在宿主机上更改的文件可以直接映射到容器中。这里的目录根据自己实际情况进行映射。&lt;/p&gt;
+&lt;p&gt;创建并运行容器后，docker内的nginx即启动成功，无需进入docker内部再次启动nginx, 否则会提示80等端口被占用，因为nginx已经启动。&lt;/p&gt;
+&lt;p&gt;这时候便可以访问nginx配置的域名验证了。&lt;/p&gt;
+&lt;p&gt;我这里映射的conf.d主要包含nginx的配置文件，php的配置信息为：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;# php
+server {
+    charset utf&lt;/span&gt;-&lt;span&gt;8&lt;/span&gt;&lt;span&gt;;
+    client_max_body_size 128M;
+
+    listen &lt;/span&gt;&lt;span&gt;80&lt;/span&gt;; ## listen &lt;span&gt;for&lt;/span&gt;&lt;span&gt; ipv4
+    #listen [::]:&lt;/span&gt;&lt;span&gt;80&lt;/span&gt; default_server ipv6only=on; ## listen &lt;span&gt;for&lt;/span&gt;&lt;span&gt; ipv6
+
+    server_name www.baidu.com;
+    root        &lt;/span&gt;/&lt;span&gt;var&lt;/span&gt;/&lt;span&gt;www;
+    index       index.php;
+
+    location &lt;/span&gt;/&lt;span&gt; {
+        #&lt;/span&gt;-&lt;span&gt;e表示只要filename存在，则为真
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!-&lt;span&gt;e $request_filename){
+            rewrite  &lt;/span&gt;^(.*)$  /index.php?s=$&lt;span&gt;1&lt;/span&gt;&lt;span&gt;  last;
+            &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+        }
+        # Redirect everything that isn&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;t a real file to index.php&lt;/span&gt;
+        try_files $uri $uri/ /&lt;span&gt;index.php$is_args$args;
+    }
+
+    # uncomment to avoid processing of calls to non&lt;/span&gt;-existing &lt;span&gt;static&lt;/span&gt;&lt;span&gt; files by Yii
+    #location &lt;/span&gt;~ \.(js|css|png|jpg|gif|swf|ico|pdf|mov|fla|zip|&lt;span&gt;rar)$ {
+    #    try_files $uri &lt;/span&gt;=&lt;span&gt;404&lt;/span&gt;&lt;span&gt;;
+    #}
+    #error_page &lt;/span&gt;&lt;span&gt;404&lt;/span&gt; /&lt;span&gt;404&lt;/span&gt;&lt;span&gt;.html;
+
+    # deny accessing php files &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; the /&lt;span&gt;assets directory
+    location &lt;/span&gt;~ ^/assets/.*&lt;span&gt;\.php$ {
+        deny all;
+    }
+
+    location &lt;/span&gt;~&lt;span&gt; \.php$ {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass &lt;/span&gt;&lt;span&gt;172.17&lt;/span&gt;.&lt;span&gt;0.3&lt;/span&gt;:&lt;span&gt;9000&lt;/span&gt;&lt;span&gt;;
+        #fastcgi_pass unix:&lt;/span&gt;/&lt;span&gt;var&lt;/span&gt;/run/php5-&lt;span&gt;fpm.sock;
+        try_files $uri &lt;/span&gt;=&lt;span&gt;404&lt;/span&gt;&lt;span&gt;;
+    }
+
+    location &lt;/span&gt;~* /&lt;span&gt;\. {
+        deny all;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;注意最后面的fastcgi_pass的ip地址，在php配置常见问题有详细介绍。&lt;/p&gt;
+
+
+&lt;p&gt;查找Docker Hub上的php镜像&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm$ docker search php
+NAME                      DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+php                       &lt;span class=&quot;typ&quot;&gt;While&lt;span class=&quot;pln&quot;&gt; designed &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; web development&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; the PH&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;1232&lt;span class=&quot;pln&quot;&gt;      &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;       
+richarvey&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm   &lt;span class=&quot;typ&quot;&gt;Container&lt;span class=&quot;pln&quot;&gt; running &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;+&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM capable &lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;207&lt;span class=&quot;pln&quot;&gt;                  &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+phpmyadmin&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;phpmyadmin     A web &lt;span class=&quot;kwd&quot;&gt;interface&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;and&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;MariaDB&lt;span class=&quot;pun&quot;&gt;.&lt;span class=&quot;pln&quot;&gt;          &lt;span class=&quot;lit&quot;&gt;123&lt;span class=&quot;pln&quot;&gt;                  &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+eboraas&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;apache&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php        PHP5 on &lt;span class=&quot;typ&quot;&gt;Apache&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;(&lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; SSL support&lt;span class=&quot;pun&quot;&gt;),&lt;span class=&quot;pln&quot;&gt; built o&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;69&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;zendserver            &lt;span class=&quot;typ&quot;&gt;Zend&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Server&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt; the integrated PHP applicati&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;69&lt;span class=&quot;pln&quot;&gt;        &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;       
+million12&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;nginx&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;php       &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;+&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM &lt;span class=&quot;lit&quot;&gt;5.5&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;7.0&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;(&lt;span class=&quot;pln&quot;&gt;NG&lt;span class=&quot;pun&quot;&gt;),&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;CentOS&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;67&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+webdevops&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;nginx       &lt;span class=&quot;typ&quot;&gt;Nginx&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM                              &lt;span class=&quot;lit&quot;&gt;39&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+webdevops&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;apache      &lt;span class=&quot;typ&quot;&gt;Apache&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;with&lt;span class=&quot;pln&quot;&gt; PHP&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;FPM &lt;span class=&quot;pun&quot;&gt;(&lt;span class=&quot;pln&quot;&gt;based on webdevops&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;)&lt;span class=&quot;pln&quot;&gt;    &lt;span class=&quot;lit&quot;&gt;14&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+phpunit&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;phpunit           &lt;span class=&quot;typ&quot;&gt;PHPUnit&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;is&lt;span class=&quot;pln&quot;&gt; a programmer&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;oriented testing f&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;14&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+tetraweb&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php              PHP &lt;span class=&quot;lit&quot;&gt;5.3&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;5.4&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;5.5&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;7.0&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; CI &lt;span class=&quot;kwd&quot;&gt;and&lt;span class=&quot;pln&quot;&gt; run&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;12&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+webdevops&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;php             PHP &lt;span class=&quot;pun&quot;&gt;(&lt;span class=&quot;pln&quot;&gt;FPM &lt;span class=&quot;kwd&quot;&gt;and&lt;span class=&quot;pln&quot;&gt; CLI&lt;span class=&quot;pun&quot;&gt;)&lt;span class=&quot;pln&quot;&gt; service container             &lt;span class=&quot;lit&quot;&gt;10&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+&lt;span class=&quot;pun&quot;&gt;...&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;这里我们拉取官方的镜像,标签为5.6-fpm&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm$ docker pull php&lt;span class=&quot;pun&quot;&gt;:&lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;等待下载完成后，我们就可以在本地镜像列表里查到REPOSITORY为php,标签为5.6-fpm的镜像。&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;php&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm$ docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+php                 &lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;fpm             &lt;span class=&quot;lit&quot;&gt;025041cd3aa5&lt;span class=&quot;pln&quot;&gt;        &lt;span class=&quot;lit&quot;&gt;6&lt;span class=&quot;pln&quot;&gt; days ago          &lt;span class=&quot;lit&quot;&gt;456.3&lt;span class=&quot;pln&quot;&gt; MB&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/pre&gt;
+&lt;p&gt;创建并运行php容器：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+docker run -p &lt;span&gt;9000&lt;/span&gt;:&lt;span&gt;9000&lt;/span&gt; --name  phpfpm -v /&lt;span&gt;var&lt;/span&gt;/www:/&lt;span&gt;var&lt;/span&gt;/www -d php:&lt;span&gt;5.6&lt;/span&gt;-fpm
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;注意这里一定要创建文件映射，或者php容器内有对应的php代码。上一步nginx的文件映射，在这里是找不到的。所以如果没有文件映射，127.0.0.1:9000 在此容器内就找不到文件 。&lt;/p&gt;
+
+&lt;h2&gt;常见问题：&lt;/h2&gt;
+&lt;p&gt;启动php容器后，如果访问nginx为：502 Bad Gateway&lt;/p&gt;
+&lt;p&gt;尝试以下方法：&lt;/p&gt;
+&lt;p&gt;查看php镜像的ip地址&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+docker inspect --format=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;{{.NetworkSettings.IPAddress}}&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; phpfpm
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; &lt;br/&gt;如：192.168.4.202&lt;br/&gt; &lt;br/&gt;那么修改nginx的conf配置文件，使fastcgi_pass的值为 192.168.4.202:9000&lt;br/&gt;vim /docker/nginx/conf.d/default.conf&lt;br/&gt;fastcgi_pass 192.168.4.202:9000;&lt;/p&gt;
+&lt;p&gt;&lt;br/&gt;重启nginx容器后，就可以正常访问。&lt;/p&gt;
+
+
+&lt;p&gt;查找Docker Hub上的mysql镜像&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:/&lt;span class=&quot;pln&quot;&gt;mysql$ docker search mysql
+NAME                     DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+mysql                    &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;is&lt;span class=&quot;pln&quot;&gt; a widely used&lt;span class=&quot;pun&quot;&gt;,&lt;span class=&quot;pln&quot;&gt; open&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;source relati&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;2529&lt;span class=&quot;pln&quot;&gt;      &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;       
+mysql&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql&lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt;server       &lt;span class=&quot;typ&quot;&gt;Optimized&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Server&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Docker&lt;span class=&quot;pln&quot;&gt; images&lt;span class=&quot;pun&quot;&gt;.&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Crea&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;161&lt;span class=&quot;pln&quot;&gt;                  &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+centurylink&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql        &lt;span class=&quot;typ&quot;&gt;Image&lt;span class=&quot;pln&quot;&gt; containing mysql&lt;span class=&quot;pun&quot;&gt;.&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Optimized&lt;span class=&quot;pln&quot;&gt; to be li&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;45&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+sameersbn&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql                                                          &lt;span class=&quot;lit&quot;&gt;36&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+google&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql             &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; server &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Google&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Compute&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Engine&lt;span class=&quot;pln&quot;&gt;          &lt;span class=&quot;lit&quot;&gt;16&lt;span class=&quot;pln&quot;&gt;                   &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+appcontainers&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql      &lt;span class=&quot;typ&quot;&gt;Centos&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;typ&quot;&gt;Debian&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Based&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Customizable&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Con&lt;span class=&quot;pun&quot;&gt;...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;8&lt;span class=&quot;pln&quot;&gt;                    &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+marvambass&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql         &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Server&lt;span class=&quot;pln&quot;&gt; based on &lt;span class=&quot;typ&quot;&gt;Ubuntu&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;lit&quot;&gt;14.04&lt;span class=&quot;pln&quot;&gt;              &lt;span class=&quot;lit&quot;&gt;6&lt;span class=&quot;pln&quot;&gt;                    &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+drupaldocker&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql       &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;for&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Drupal&lt;span class=&quot;pln&quot;&gt;                                &lt;span class=&quot;lit&quot;&gt;2&lt;span class=&quot;pln&quot;&gt;                    &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+azukiapp&lt;span class=&quot;pun&quot;&gt;/&lt;span class=&quot;pln&quot;&gt;mysql           &lt;span class=&quot;typ&quot;&gt;Docker&lt;span class=&quot;pln&quot;&gt; image to run &lt;span class=&quot;typ&quot;&gt;MySQL&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;kwd&quot;&gt;by&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;typ&quot;&gt;Azuki&lt;span class=&quot;pln&quot;&gt; &lt;span class=&quot;pun&quot;&gt;-&lt;span class=&quot;pln&quot;&gt; http&lt;span class=&quot;pun&quot;&gt;:...&lt;span class=&quot;pln&quot;&gt;   &lt;span class=&quot;lit&quot;&gt;2&lt;span class=&quot;pln&quot;&gt;                    &lt;span class=&quot;pun&quot;&gt;[&lt;span class=&quot;pln&quot;&gt;OK&lt;span class=&quot;pun&quot;&gt;]&lt;span class=&quot;pln&quot;&gt;
+&lt;span class=&quot;pun&quot;&gt;...&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;这里我们拉取官方的镜像,标签为5.6&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;mysql$ docker pull mysql&lt;span class=&quot;pun&quot;&gt;:&lt;span class=&quot;lit&quot;&gt;5.6&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;
+&lt;/pre&gt;
+&lt;p&gt;等待下载完成后，我们就可以在本地镜像列表里查到REPOSITORY为mysql,标签为5.6的镜像。&lt;/p&gt;
+&lt;pre class=&quot;prettyprint prettyprinted&quot;&gt;
+&lt;span class=&quot;pln&quot;&gt;runoob@runoob&lt;span class=&quot;pun&quot;&gt;:~/&lt;span class=&quot;pln&quot;&gt;mysql$ docker images &lt;span class=&quot;pun&quot;&gt;|&lt;span class=&quot;pln&quot;&gt;grep mysql
+mysql               &lt;span class=&quot;lit&quot;&gt;5.6&lt;span class=&quot;pln&quot;&gt;                 &lt;span class=&quot;lit&quot;&gt;2c0964ec182a&lt;span class=&quot;pln&quot;&gt;        &lt;span class=&quot;lit&quot;&gt;3&lt;span class=&quot;pln&quot;&gt; weeks ago         &lt;span class=&quot;lit&quot;&gt;329&lt;span class=&quot;pln&quot;&gt; MB&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/pre&gt;
+&lt;p&gt;创建并运行MySQL容器：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+docker run -p &lt;span&gt;3306&lt;/span&gt;:&lt;span&gt;3306&lt;/span&gt; --name mysql -v /usr/local/mysql:/etc/mysql/sqlinit -e MYSQL_ROOT_PASSWORD=&lt;span&gt;123456&lt;/span&gt; -d mysql:&lt;span&gt;5.6&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;这里的文件映射主要目的是把宿主机的sql数据库数据文件映射到docker mysql容器，方便导入，注意这里mysql容器的目录不能是已有的目录，否则会覆盖。&lt;/p&gt;
+&lt;p&gt;注意：&lt;/p&gt;
+&lt;p&gt;这里创建容易已经有了my.cnf，无需自己添加。&lt;/p&gt;
+
+&lt;h2&gt; 拓展&lt;/h2&gt;
+&lt;p&gt;使用外部工具navicat连接docker 内mysql&lt;/p&gt;
+&lt;p&gt;mysql的host 填写docker内的IP，获取方式为： &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;1&lt;/span&gt; docker inspect --format=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;{{.NetworkSettings.IPAddress}}&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; mysql
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217175955592-1470710005.png&quot; alt=&quot;&quot; width=&quot;727&quot; height=&quot;648&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;填写ssh连接信息：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217180058941-1815427262.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;即可连接成功！&lt;/p&gt;
+
+
+&lt;p&gt;docker的容器启动顺序问题会导致容器的IP地址不一致，如果在连接数据库和fastcgi处有用到容器的IP，要注意容器的启动顺序。&lt;/p&gt;
+&lt;p&gt;重启容器：docker restart 容器名/容器ID&lt;/p&gt;
+&lt;p&gt;关闭容器：docker stop xxx&lt;/p&gt;
+&lt;p&gt;开启容器：docker start xxx&lt;/p&gt;
+&lt;p&gt;查看正在运行的容器：docker ps&lt;/p&gt;
+&lt;p&gt;查看所有容器（包括未运行的容器）： docker ps -a&lt;/p&gt;
+&lt;p&gt;创建并运行容器： docker run&lt;/p&gt;
+
+&lt;p&gt; ---------------------------------------&lt;/p&gt;
+
+
+&lt;h2&gt;1.  thinkphp报错 Undefined class constant 'MYSQL_ATTR_INIT_COMMAND'&lt;/h2&gt;
+&lt;p&gt;缺少pdo_mysql扩展，链接数据库失败&lt;/p&gt;
+&lt;p&gt;找到php.ini，docker中在/usr/local/etc/php中，复制一份php.ini，增加 &lt;span class=&quot;cnblogs_code&quot;&gt;extension=pdo_mysql.so&lt;/span&gt;  ，重启phpfpm。&lt;/p&gt;
+&lt;p&gt;如果还不行，访问phpinfo页面，查看是否有pdo_mysql&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217193623501-615016357.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果没有，说名扩展不存在，需要编译。&lt;/p&gt;
+&lt;p&gt;编译方法如下：&lt;/p&gt;
+&lt;p&gt;可以通过两种方式实现&lt;br/&gt;方式一(未验证)：&lt;/p&gt;
+&lt;p&gt;pecl pdo_msql&lt;/p&gt;
+&lt;p&gt;方式二（已验证可行）：&lt;/p&gt;
+&lt;p&gt;到docker的php容器中，在php文件夹下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+docker-php-ext-install pdo pdo_mysql
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;如果报 /usr/local/bin/docker-php-ext-enable: cannot create /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini: Directory nonexistent&lt;br/&gt;&lt;strong&gt;解决方案：&lt;/strong&gt;&lt;br/&gt;直接在/usr/local/etc/php目录下面新建 conf.d目录和对应的docker-php-ext-pdo_msql.ini文件&lt;br/&gt;其中docker-php-ext-pdo_msql.ini的内容为：&lt;br/&gt;extension=pdo_mysql.so&lt;/p&gt;
+
+&lt;h2&gt;2. thinkphp 报错 _STORAGE_WRITE_ERROR_:./Application/Runtime/Cache/Home/4e64ea6a2012f26b832b14cbc2152b28.php&lt;/h2&gt;
+&lt;p&gt;是因为服务器缓存文件夹的操作权限不够，即Runtime没有权限，把缓存文件全部删除，再给Runtime777权限就行了&lt;/p&gt;
+&lt;p&gt;sudo chmod 777 Runtime 或者直接对代码库最外层设置777权限&lt;/p&gt;
+
+&lt;h2&gt;3. thinkphp验证码图片显示不出来&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217201257680-2059779290.png&quot; alt=&quot;&quot; width=&quot;303&quot; height=&quot;79&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 缺少gd扩展，安装：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+docker-php-ext-install gd
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;可能以下报错：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+If configure fails &lt;span&gt;try&lt;/span&gt; --with-webp-dir=&amp;lt;DIR&amp;gt;&lt;span&gt;
+If configure fails &lt;/span&gt;&lt;span&gt;try&lt;/span&gt; --with-jpeg-dir=&amp;lt;DIR&amp;gt;&lt;span&gt;
+configure: error: png.h not found.&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;安装：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+apt-&lt;span&gt;get&lt;/span&gt; install libpng-dev libjpeg-dev
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;再次执行：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre readability=&quot;5&quot;&gt;
+// 增加freetype配置&lt;br/&gt;docker-php-ext-configure gd --enable-gd-native-ttf --with-freetype-dir=/usr/include/freetype2 --with-png-dir=/usr/include --with-jpeg-dir=/usr/include&lt;p&gt;// 安装&lt;br/&gt;docker-php-ext-install gd
+&lt;/p&gt;&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;php.ini增加php_gd2.so&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217201211530-1482875627.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;phpinfo中显示gd库 &lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217211451696-2128743819.png&quot; alt=&quot;&quot; width=&quot;601&quot; height=&quot;333&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;注意如果phpinfo的gd库中没有freetype的支持，验证码依然显示不出来, 会报错：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+Call to undefined function Think\imagettftext()
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;如果gd库中没有freeType，则按照以下步骤进行：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+docker-php-ext-configure gd --enable-gd-native-ttf --with-freetype-dir=/usr/include/freetype2 --with-png-dir=/usr/&lt;span&gt;include
+
+重新编译：
+docker&lt;/span&gt;-php-ext-install gd
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;如果报错：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+configure: error: freetype-config not found.
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;运行： &lt;span class=&quot;cnblogs_code&quot;&gt;apt-&lt;span&gt;get&lt;/span&gt; -y install libfreetype6-dev&lt;/span&gt; ，然后再继续运行上面的命令。 &lt;/p&gt;
+&lt;p&gt;gd库中有了freetype，则验证码显示正常了：&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/979473/201902/979473-20190217211610034-433197172.png&quot; alt=&quot;&quot; width=&quot;392&quot; height=&quot;85&quot;/&gt;&lt;/p&gt;
+
+
+&lt;/div&gt;</description>
+<pubDate>Sun, 17 Feb 2019 16:13:00 +0000</pubDate>
+<dc:creator>冒雨ing</dc:creator>
+<og:description>首先了解一个方法： 使用docker exec进入Docker容器 docker在1.3.X版本之后还提供了一个新的命令exec用于进入容器，这种方式相对更简单一些，下面我们来看一下该命令的使用： 接</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/saysmy/p/10389902.html</dc:identifier>
+</item>
+<item>
+<title>彩色图到灰度图究竟是怎么变换的 - shayue111</title>
+<link>http://www.cnblogs.com/shayue/p/10393542.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/shayue/p/10393542.html</guid>
+<description>&lt;p&gt;  之前对彩色图与灰度图仅仅停留在前者是3通道后者是单通道的理解上。我也知道计算机看图片是将它们当成数组，但是一直搞不清楚将一张彩色图转变为灰度图是怎么操作的。当然，很多库函数都提供借口，包括OpenCV、PIL等。这里我参考https://blog.csdn.net/saltriver/article/details/79677116 手动实现将一张彩色图转换为灰色图。当然还是以帅气的哈士奇.jpg作为我的练习对象，看到它敲代码都有动力。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;from PIL import  Image
+import numpy as np
+import matplotlib.pyplot as plt
+%matplotlib inline&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;rgb_img = Image.open('Husky.jpg')
+grey_img = rgb_img.convert('L')&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;rgb_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000659177-332533463.png&quot;/&gt;&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000701505-635146334.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以看到通过PIL的函数，可以轻松将图片转换为灰度图。&lt;br/&gt;这里的哈士奇照片实在太大了，将它变得小一些。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;rgb_img.thumbnail((800, 800))
+grey_img.thumbnail((800, 800))&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;rgb_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000710490-1641603533.png&quot;/&gt;&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000728285-366502829.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最终的效果应该变为类似上面这张灰度图&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 获取彩色图的数据
+rgb_arr = np.array(rgb_img)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 窥探下这个数组，第一印象它是一个3维的
+rgb_arr&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;array([[[ 93, 153, 203],
+        [ 91, 151, 201],
+        [ 90, 149, 200],
+        ...,
+        [  3, 120, 189],
+        [  2, 119, 188],
+        [  4, 121, 190]],
+
+       [[ 90, 151, 200],
+        [ 89, 150, 199],
+        [ 90, 150, 200],
+        ...,
+        [  2, 119, 188],
+        [  2, 119, 188],
+        [  2, 119, 188]],
+
+       [[ 86, 149, 196],
+        [ 86, 149, 196],
+        [ 89, 151, 198],
+        ...,
+        [  1, 119, 188],
+        [  1, 119, 188],
+        [  1, 118, 187]],
+
+       ...,
+
+       [[ 24,  22,  24],
+        [ 25,  22,  24],
+        [ 29,  26,  26],
+        ...,
+        [ 10,   9,  14],
+        [  9,   8,  13],
+        [  6,   5,  10]],
+
+       [[ 23,  24,  28],
+        [ 27,  28,  32],
+        [ 44,  45,  48],
+        ...,
+        [ 10,   9,  14],
+        [  7,   6,  11],
+        [  6,   5,  10]],
+
+       [[ 38,  41,  47],
+        [ 50,  53,  59],
+        [ 64,  66,  71],
+        ...,
+        [  8,   7,  12],
+        [  6,   5,  10],
+        [  7,   6,  11]]], dtype=uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 行 列 通道
+rgb_arr.shape&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;(633, 800, 3)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 宽（列数） 高（行数）
+rgb_img.size&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;(800, 633)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 可以用matlibplot.pyplot将数组显示为图片
+plt.imshow(rgb_arr)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;matplotlib.image.AxesImage at 0x110cb71d0&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000739798-48685775.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;接下来对数组进行操作，第一种想法是将3个通道的数据取平均。&lt;br/&gt;那么不禁要问，三个通道的数据是哪些？其实这也是我之前一直有些疑惑的地方。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;x = rgb_arr[0][0]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# x代表图片中的1个像素点，它的颜色由[93, 153, 203]表示，因此这3个值为3个通道的值
+x&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;array([ 93, 153, 203], dtype=uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# 那么不难想象，可以通过两个for循环对这些值取平均
+grey_arr = np.zeros(rgb_arr.shape[0:2])
+
+# grey_arr.shape (633, 800)
+
+for row in range(633):
+    for col in range(800):
+        grey_arr[row][col] = (int(rgb_arr[row][col][0]) + int(rgb_arr[row][col][1]) + int(rgb_arr[row][col][2])) / 3&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_arr = np.array(grey_arr, dtype=np.uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_arr&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;array([[149, 147, 146, ..., 104, 103, 105],
+       [147, 146, 146, ..., 103, 103, 103],
+       [143, 143, 146, ..., 102, 102, 102],
+       ...,
+       [ 23,  23,  27, ...,  11,  10,   7],
+       [ 25,  29,  45, ...,  11,   8,   7],
+       [ 42,  54,  67, ...,   9,   7,   8]], dtype=uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;out_img = Image.fromarray(grey_arr)
+out_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000749789-230504541.png&quot;/&gt;&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;std_grey_arr = np.asarray(grey_img)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;std_grey_arr&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;array([[140, 138, 136, ...,  92,  91,  93],
+       [138, 137, 137, ...,  91,  91,  91],
+       [135, 135, 137, ...,  91,  91,  90],
+       ...,
+       [ 22,  22,  26, ...,   9,   8,   5],
+       [ 23,  27,  45, ...,   9,   6,   5],
+       [ 40,  52,  66, ...,   7,   5,   6]], dtype=uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;自行生成的数据和通过借口函数转换得到的标准灰度图的数据还是有一定差距，&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;## 通过给定不同权重的方法再试一次
+
+for row in range(633):
+    for col in range(800):
+        grey_arr[row][col] = 0.11 * rgb_arr[row][col][0] + 0.59 * rgb_arr[row][col][1] + 0.3 * rgb_arr[row][col][2]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_arr = np.array(grey_arr, dtype=np.uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;grey_arr&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;array([[161, 159, 157, ..., 127, 126, 128],
+       [158, 157, 158, ..., 126, 126, 126],
+       [156, 156, 158, ..., 126, 126, 125],
+       ...,
+       [ 22,  22,  26, ...,  10,   9,   6],
+       [ 25,  29,  45, ...,  10,   7,   6],
+       [ 42,  54,  67, ...,   8,   6,   7]], dtype=uint8)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;out_img = Image.fromarray(grey_arr)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;out_img&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531067/201902/1531067-20190218000802944-2006413538.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;以上就是手动实现将RGB图片转为灰度图的过程，注意图片的数值类型为unit8&lt;/p&gt;
+</description>
+<pubDate>Sun, 17 Feb 2019 16:09:00 +0000</pubDate>
+<dc:creator>shayue111</dc:creator>
+<og:description>  之前对彩色图与灰度图仅仅停留在前者是3通道后者是单通道的理解上。我也知道计算机看图片是将它们当成数组，但是一直搞不清楚将一张彩色图转变为灰度图是怎么操作的。当然，很多库函数都提</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/shayue/p/10393542.html</dc:identifier>
+</item>
+<item>
 <title>SLAM+语音机器人DIY系列：（二）ROS入门——8.理解roslaunch在大型项目中的作用 - 小虎哥哥爱学习</title>
 <link>http://www.cnblogs.com/hiram-zhang/p/10393328.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/hiram-zhang/p/10393328.html</guid>
@@ -491,884 +1617,6 @@ quickSort(&lt;/span&gt;&lt;span&gt;$arr&lt;/span&gt;, 0, &lt;span&gt;$len&lt;/sp
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/xiyuanMore/p/10393240.html</dc:identifier>
-</item>
-<item>
-<title>搭建一个具有缓存功能的反向代理服务 - guoew</title>
-<link>http://www.cnblogs.com/guoew/p/10393231.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/guoew/p/10393231.html</guid>
-<description>&lt;p&gt;前提：需要搭建和部署nginx服务以及后端服务，以便测试反向代理使用，这部分工作省略。&lt;/p&gt;
-&lt;h3 id=&quot;一.-设置缓存空间&quot;&gt;一. 设置缓存空间&lt;/h3&gt;
-&lt;p&gt;在nginx的http模块中开辟一块名为my_cache的缓存空间，缓存路径为/tmp/nginxcache,大小为10m。&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;# 设置缓存路径及其他缓存参数。
-# levels定义高速缓存的级别，每个级别接收值1或2，
-# keys_zone设置共享缓存名称和大小，所有活动的key和信息被存储再缓存中。
-# max_size设置最大缓存大小
-proxy_cache_path  /tmp/nginxcache levels=1:2 keys_zone=my_cache:10m max_size=1g;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;二.-设置缓存&quot;&gt;二. 设置缓存&lt;/h3&gt;
-&lt;p&gt;在nginx server模块设置反向代理缓存&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;    proxy_pass  http://127.0.0.1:3000;   #代理的后端服务
-    proxy_cache my_cache ;    #定义用于缓存的共享缓存区域，默认为proxy_cache off
-    proxy_cache_key $host$uri$is_args$args;    #设置缓存key
-    proxy_cache_valid 200 304 302 5m;    #设置不同响应码的缓存时间
-    proxy_cache_valid 404 10s;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;三.-重启nginx测试&quot;&gt;三. 重启nginx，测试&lt;/h3&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;nginx -s reload
-siege http://onlinetest.guoew.cc/ -c 500 -t 5
-
-Lifting the server siege...      done.                                                                                      Transactions:              129470 hits
-Availability:              100.00 %            #成功率
-Elapsed time:              299.03 secs        #执行时间
-Data transferred:         6918.02 MB        #数据传输大小
-Response time:                0.65 secs        #平均响应时间
-Transaction rate:          432.97 trans/sec    #每秒处理请求数
-Throughput:               23.13 MB/sec        #平均每秒传输数据量
-Concurrency:              282.00            #实际最高并发
-Successful transactions:      129470    #成功处理次数
-Failed transactions:               0        #失败处理次数
-Longest transaction:           17.72    #传输所花最长时间
-Shortest transaction:            0.00    #传输所花最短时间&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;四.-不使用缓存再进行测试&quot;&gt;四. 不使用缓存，再进行测试&lt;/h3&gt;
-&lt;p&gt;不敢直视，siege 500并发几乎全部报错，降低到并发100才能勉强进行测试。&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;ransactions:                8389 hits
-Availability:              100.00 %
-Elapsed time:              299.32 secs
-Data transferred:          356.36 MB
-Response time:                3.05 secs
-Transaction rate:           28.03 trans/sec
-Throughput:                1.19 MB/sec
-Concurrency:               85.60
-Successful transactions:        6721
-Failed transactions:               0
-Longest transaction:           18.60
-Shortest transaction:            0.00&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;五.-总结&quot;&gt;五. 总结&lt;/h3&gt;
-</description>
-<pubDate>Sun, 17 Feb 2019 15:15:00 +0000</pubDate>
-<dc:creator>guoew</dc:creator>
-<og:description>前提：需要搭建和部署nginx服务以及后端服务，以便测试反向代理使用，这部分工作省略。 一. 设置缓存空间 在nginx的http模块中开辟一块名为my_cache的缓存空间，缓存路径为/tmp/ng</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/guoew/p/10393231.html</dc:identifier>
-</item>
-<item>
-<title>WebGL或OpenGL关于模型视图投影变换的设置技巧 - charlee44</title>
-<link>http://www.cnblogs.com/charlee44/p/10393227.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/charlee44/p/10393227.html</guid>
-<description>&lt;p&gt;看了不少的关于WebGL/OpenGL的资料，笔者发现这些资料在讲解图形变换的时候都讲了很多的原理，然后举出一个特别简单的实例(坐标是1.0，0.5的那种)来讲解。确实一看就懂，但用到实际的场景之中就一脸懵逼了（比如地形的三维坐标都是很大的数字）。所以笔者这里结合一个具体的实例，总结下WebGL/OpenGL中，关于模型变换、视图变换、投影变换的设置技巧。&lt;/p&gt;
-&lt;p&gt;绘制任何复杂的场景之前，都可以先绘制出其包围盒，能应用于包围盒的图形变换，基本上就能用于该场景了，因此，笔者这里绘制一幅地形的包围盒。它的最大最小范围为：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//包围盒范围
-var minX = 399589.072;
-var maxX = 400469.072;
-var minY = 3995118.062;
-var maxY = 3997558.062;
-var minZ = 732;
-var maxZ = 1268;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;WebGL是OpenGL的子集，因此我这里直接用WebGL的例子，但是各种接口函数跟OpenGL是非常类似的，尤其是图形变换的函数。&lt;/p&gt;
-&lt;h2 id=&quot;cube.html&quot;&gt;1) Cube.html&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;!DOCTYPE html&amp;gt;
-&amp;lt;html lang=&quot;zh&quot;&amp;gt;
-  &amp;lt;head&amp;gt;
-    &amp;lt;meta charset=&quot;utf-8&quot; /&amp;gt;
-    &amp;lt;title&amp;gt;Hello cube&amp;lt;/title&amp;gt;
-  &amp;lt;/head&amp;gt;
-
-  &amp;lt;body onload=&quot;main()&quot;&amp;gt;
-    &amp;lt;canvas id=&quot;webgl&quot; width=&quot;600&quot; height=&quot;600&quot;&amp;gt;
-    Please use a browser that supports &quot;canvas&quot;
-    &amp;lt;/canvas&amp;gt;
-
-    &amp;lt;script src=&quot;lib/webgl-utils.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-    &amp;lt;script src=&quot;lib/webgl-debug.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-    &amp;lt;script src=&quot;lib/cuon-utils.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-    &amp;lt;script src=&quot;lib/cuon-matrix.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-    &amp;lt;script src=&quot;Cube.js&quot;&amp;gt;&amp;lt;/script&amp;gt;
-  &amp;lt;/body&amp;gt;
-&amp;lt;/html&amp;gt;
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;cube.js&quot;&gt;2) Cube.js&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code&gt;// Vertex shader program
-var VSHADER_SOURCE =
-    'attribute vec4 a_Position;\n' +
-    'attribute vec4 a_Color;\n' +
-    'uniform mat4 u_MvpMatrix;\n' +
-    'varying vec4 v_Color;\n' +
-    'void main() {\n' +
-    '  gl_Position = u_MvpMatrix * a_Position;\n' +
-    '  v_Color = a_Color;\n' +
-    '}\n';
-
-// Fragment shader program
-var FSHADER_SOURCE =
-    '#ifdef GL_ES\n' +
-    'precision mediump float;\n' +
-    '#endif\n' +
-    'varying vec4 v_Color;\n' +
-    'void main() {\n' +
-    '  gl_FragColor = v_Color;\n' +
-    '}\n';
-
-//包围盒范围
-var minX = 399589.072;
-var maxX = 400469.072;
-var minY = 3995118.062;
-var maxY = 3997558.062;
-var minZ = 732;
-var maxZ = 1268;
-
-//包围盒中心
-var cx = (minX + maxX) / 2.0;
-var cy = (minY + maxY) / 2.0;
-var cz = (minZ + maxZ) / 2.0;
-
-//当前lookAt()函数初始视点的高度
-var eyeHight = 2000.0;
-
-//根据视点高度算出setPerspective()函数的合理角度
-var fovy = (maxY - minY) / 2.0 / eyeHight;
-fovy = 180.0 / Math.PI * Math.atan(fovy) * 2;
-
-//setPerspective()远截面
-var far = 3000;
-
-//
-function main() {
-    // Retrieve &amp;lt;canvas&amp;gt; element
-    var canvas = document.getElementById('webgl');
-
-    // Get the rendering context for WebGL
-    var gl = getWebGLContext(canvas);
-    if (!gl) {
-        console.log('Failed to get the rendering context for WebGL');
-        return;
-    }
-
-    // Initialize shaders
-    if (!initShaders(gl, VSHADER_SOURCE, FSHADER_SOURCE)) {
-        console.log('Failed to intialize shaders.');
-        return;
-    }
-
-    // Set the vertex coordinates and color
-    var n = initVertexBuffers(gl);
-    if (n &amp;lt; 0) {
-        console.log('Failed to set the vertex information');
-        return;
-    }
-
-    // Get the storage location of u_MvpMatrix
-    var u_MvpMatrix = gl.getUniformLocation(gl.program, 'u_MvpMatrix');
-    if (!u_MvpMatrix) {
-        console.log('Failed to get the storage location of u_MvpMatrix');
-        return;
-    }
-
-    // Register the event handler
-    var currentAngle = [0.0, 0.0]; // Current rotation angle ([x-axis, y-axis] degrees)
-    initEventHandlers(canvas, currentAngle);
-
-    // Set clear color and enable hidden surface removal
-    gl.clearColor(0.0, 0.0, 0.0, 1.0);
-    gl.enable(gl.DEPTH_TEST);
-
-    // Start drawing
-    var tick = function () {
-
-        //setPerspective()宽高比
-        var aspect = canvas.width / canvas.height;
-
-        //
-        draw(gl, n, aspect, u_MvpMatrix, currentAngle);
-        requestAnimationFrame(tick, canvas);
-    };
-    tick();
-}
-
-function initEventHandlers(canvas, currentAngle) {
-    var dragging = false;         // Dragging or not
-    var lastX = -1, lastY = -1;   // Last position of the mouse
-
-    // Mouse is pressed
-    canvas.onmousedown = function (ev) {
-        var x = ev.clientX;
-        var y = ev.clientY;
-        // Start dragging if a moue is in &amp;lt;canvas&amp;gt;
-        var rect = ev.target.getBoundingClientRect();
-        if (rect.left &amp;lt;= x &amp;amp;&amp;amp; x &amp;lt; rect.right &amp;amp;&amp;amp; rect.top &amp;lt;= y &amp;amp;&amp;amp; y &amp;lt; rect.bottom) {
-            lastX = x;
-            lastY = y;
-            dragging = true;
-        }
-    };
-
-    //鼠标离开时
-    canvas.onmouseleave = function (ev) {
-        dragging = false;
-    };
-
-    // Mouse is released
-    canvas.onmouseup = function (ev) {
-        dragging = false;
-    };
-
-    // Mouse is moved
-    canvas.onmousemove = function (ev) {
-        var x = ev.clientX;
-        var y = ev.clientY;
-        if (dragging) {
-            var factor = 100 / canvas.height; // The rotation ratio
-            var dx = factor * (x - lastX);
-            var dy = factor * (y - lastY);
-            // Limit x-axis rotation angle to -90 to 90 degrees
-            //currentAngle[0] = Math.max(Math.min(currentAngle[0] + dy, 90.0), -90.0);
-            currentAngle[0] = currentAngle[0] + dy;
-            currentAngle[1] = currentAngle[1] + dx;
-        }
-        lastX = x, lastY = y;
-    };
-
-    //鼠标缩放
-    canvas.onmousewheel = function (event) {
-        var lastHeight = eyeHight;
-        if (event.wheelDelta &amp;gt; 0) {
-            eyeHight = Math.max(1, eyeHight - 80);
-        } else {
-            eyeHight = eyeHight + 80;
-        }
-
-        far = far + eyeHight - lastHeight;
-    };
-}
-
-function draw(gl, n, aspect, u_MvpMatrix, currentAngle) {
-    //模型矩阵
-    var modelMatrix = new Matrix4();
-    modelMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis 
-    modelMatrix.rotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis    
-    modelMatrix.translate(-cx, -cy, -cz);
-
-    //视图矩阵
-    var viewMatrix = new Matrix4();
-    viewMatrix.lookAt(0, 0, eyeHight, 0, 0, 0, 0, 1, 0);
-
-    //投影矩阵
-    var projMatrix = new Matrix4();
-    projMatrix.setPerspective(fovy, aspect, 10, far);
-
-    //模型视图投影矩阵
-    var mvpMatrix = new Matrix4();
-    mvpMatrix.set(projMatrix).multiply(viewMatrix).multiply(modelMatrix);
-
-    // Pass the model view projection matrix to u_MvpMatrix
-    gl.uniformMatrix4fv(u_MvpMatrix, false, mvpMatrix.elements);
-
-    // Clear color and depth buffer
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-    // Draw the cube
-    gl.drawElements(gl.TRIANGLES, n, gl.UNSIGNED_BYTE, 0);
-}
-
-function initVertexBuffers(gl) {
-    // Create a cube
-    //    v6----- v5
-    //   /|      /|
-    //  v1------v0|
-    //  | |     | |
-    //  | |v7---|-|v4
-    //  |/      |/
-    //  v2------v3
-
-    var verticesColors = new Float32Array([
-        // Vertex coordinates and color
-        maxX, maxY, maxZ, 1.0, 1.0, 1.0,  // v0 White
-        minX, maxY, maxZ, 1.0, 0.0, 1.0,  // v1 Magenta
-        minX, minY, maxZ, 1.0, 0.0, 0.0,  // v2 Red
-        maxX, minY, maxZ, 1.0, 1.0, 0.0,  // v3 Yellow
-        maxX, minY, minZ, 0.0, 1.0, 0.0,  // v4 Green
-        maxX, maxY, minZ, 0.0, 1.0, 1.0,  // v5 Cyan
-        minX, maxY, minZ, 0.0, 0.0, 1.0,  // v6 Blue
-        minX, minY, minZ, 1.0, 0.0, 1.0   // v7 Black
-    ]);
-
-    // Indices of the vertices
-    var indices = new Uint8Array([
-        0, 1, 2, 0, 2, 3,    // front
-        0, 3, 4, 0, 4, 5,    // right
-        0, 5, 6, 0, 6, 1,    // up
-        1, 6, 7, 1, 7, 2,    // left
-        7, 4, 3, 7, 3, 2,    // down
-        4, 7, 6, 4, 6, 5     // back
-    ]);
-
-    // Create a buffer object
-    var vertexColorBuffer = gl.createBuffer();
-    var indexBuffer = gl.createBuffer();
-    if (!vertexColorBuffer || !indexBuffer) {
-        return -1;
-    }
-
-    // Write the vertex coordinates and color to the buffer object
-    gl.bindBuffer(gl.ARRAY_BUFFER, vertexColorBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, verticesColors, gl.STATIC_DRAW);
-
-    var FSIZE = verticesColors.BYTES_PER_ELEMENT;
-    // Assign the buffer object to a_Position and enable the assignment
-    var a_Position = gl.getAttribLocation(gl.program, 'a_Position');
-    if (a_Position &amp;lt; 0) {
-        console.log('Failed to get the storage location of a_Position');
-        return -1;
-    }
-    gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, FSIZE * 6, 0);
-    gl.enableVertexAttribArray(a_Position);
-    // Assign the buffer object to a_Color and enable the assignment
-    var a_Color = gl.getAttribLocation(gl.program, 'a_Color');
-    if (a_Color &amp;lt; 0) {
-        console.log('Failed to get the storage location of a_Color');
-        return -1;
-    }
-    gl.vertexAttribPointer(a_Color, 3, gl.FLOAT, false, FSIZE * 6, FSIZE * 3);
-    gl.enableVertexAttribArray(a_Color);
-
-    // Write the indices to the buffer object
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-
-    return indices.length;
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;运行结果&quot;&gt;3) 运行结果&lt;/h2&gt;
-&lt;p&gt;这份代码改进《WebGL编程指南》一书里面绘制一个简单立方体的例子，引用的几个JS-lib也是该书提供。本例全部源代码地址链接为：&lt;a href=&quot;https://share.weiyun.com/52XmsFv&quot; class=&quot;uri&quot;&gt;https://share.weiyun.com/52XmsFv&lt;/a&gt; ，密码：h1lbay。&lt;br/&gt;用chrome打开Cube.html，会出现一个长方体的包围盒，还可以用鼠标左键旋转，鼠标滚轮缩放：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1000410/201902/1000410-20190217231046380-1339025221.png&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;本例的思路是通过JS的requestAnimationFrame()函数不停的调用绘制函数draw(),同时将一些变量关联到鼠标操作事件和draw()，达到页面图形变换的效果。这里笔者就不讲原理，重点讲一讲设置三个图形变换的具体过程，网上已经有非常多的原理介绍了。&lt;/p&gt;
-&lt;h2 id=&quot;模型变换&quot;&gt;1) 模型变换&lt;/h2&gt;
-&lt;p&gt;在draw()函数中设置模型矩阵：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//模型矩阵
-var modelMatrix = new Matrix4();
-modelMatrix.rotate(currentAngle[0], 1.0, 0.0, 0.0); // Rotation around x-axis 
-modelMatrix.rotate(currentAngle[1], 0.0, 1.0, 0.0); // Rotation around y-axis    
-modelMatrix.translate(-cx, -cy, -cz);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;由于这个包围盒（长方体）的坐标值都非常大，所以第一步需要对其做平移变换translate(-cx, -cy, -cz)，cx，cy，cz就是包围盒的中心：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//包围盒中心
-var cx = (minX + maxX) / 2.0;
-var cy = (minY + maxY) / 2.0;
-var cz = (minZ + maxZ) / 2.0;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;接下来是旋转变换，数组currentAngle记录了绕X轴和Y轴旋转的角度，初始值为0。配合onmousedown，onmouseup，onmousemove三个鼠标事件，将页面鼠标X、Y方向的移动，转换成绕X轴，Y轴的角度值，累计到currentAngle中，从而实现了三维模型随鼠标旋转。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;// Mouse is moved
-canvas.onmousemove = function (ev) {
-    var x = ev.clientX;
-    var y = ev.clientY;
-    if (dragging) {
-        var factor = 100 / canvas.height; // The rotation ratio
-        var dx = factor * (x - lastX);
-        var dy = factor * (y - lastY);
-        // Limit x-axis rotation angle to -90 to 90 degrees
-        //currentAngle[0] = Math.max(Math.min(currentAngle[0] + dy, 90.0), -90.0);
-        currentAngle[0] = currentAngle[0] + dy;
-        currentAngle[1] = currentAngle[1] + dx;
-    }
-    lastX = x, lastY = y;
-};&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;注意模型矩阵的平移变换要放后面，需要把坐标轴换到包围盒中心，才能绕三维模型自转。&lt;/p&gt;
-&lt;h2 id=&quot;视图变换&quot;&gt;2) 视图变换&lt;/h2&gt;
-&lt;p&gt;通过lookAt()函数设置视图矩阵：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//当前lookAt()函数初始视点的高度
-var eyeHight = 2000.0;
-
-// …
-
-//视图矩阵
-var viewMatrix = new Matrix4();
-viewMatrix.lookAt(0, 0, eyeHight, 0, 0, 0, 0, 1, 0);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;视图变换调整的是观察者的状态，lookAt()函数分别设置了视点、目标观察点以及上方向。虽然可以在任何位置去观察三维场景的点，从而得到渲染结果。但在实际的应用当中，这个函数设置的结果很难以想象，所以笔者设置成，观察者站在包围盒中心上方的位置，对准坐标系原点（注意这个时候经过模型变换，包围盒的中心点已经是坐标系原点了），常见的Y轴作为上方向。这样，视图内无论如何都是可见的。&lt;br/&gt;这里将视点的高度设置成变量eyeHight，初始值为2000，是一个大于0的经验值。同时通过鼠标的滚轮事件onmousewheel()调整该值，从而实现三维模型的缩放的：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt; //鼠标缩放
- canvas.onmousewheel = function (event) {
-     var lastHeight = eyeHight;
-     if (event.wheelDelta &amp;gt; 0) {
-         eyeHight = Math.max(1, eyeHight - 80);
-     } else {
-         eyeHight = eyeHight + 80;
-     } 
- };&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;投影变换&quot;&gt;3) 投影变换&lt;/h2&gt;
-&lt;p&gt;通过setPerspective()来设置投影变换：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//根据视点高度算出setPerspective()函数的合理角度
-var fovy = (maxY - minY) / 2.0 / eyeHight;
-fovy = 180.0 / Math.PI * Math.atan(fovy) * 2;
-
-//setPerspective()远截面
-var far = 3000;
-
-//setPerspective()宽高比
-var aspect = canvas.width / canvas.height;
-
-//...
-
-//投影矩阵
-var projMatrix = new Matrix4();
-projMatrix.setPerspective(fovy, aspect, 10, far);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;前面的视图变换已经论述了，这个模型是在中心点上方去观察中心点，相当于视线垂直到前界面near的表面，那么setPerspective()就可以确定其角度fovy了，示意图如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1000410/201902/1000410-20190217231117876-1480964252.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;很明显的看出，当光线射到包围盒的中心，包围盒Y方向长度的一半，除以视点高，就是fovy一般的正切值。&lt;/p&gt;
-&lt;p&gt;宽高比aspect即是页面canvas元素的宽高比。&lt;/p&gt;
-&lt;p&gt;近界面near一般设置成较近的值，但是不能太近（比如小于1），否则会影响深度判断的精度造成页面闪烁。&lt;a href=&quot;https://blog.csdn.net/u011450490/article/details/50601458&quot;&gt;《OpenGL绘制纹理，缩放相机导致纹理闪烁的解决方法gluPerspective ()》&lt;/a&gt;论述了这个问题。&lt;/p&gt;
-&lt;p&gt;而远界面far也是需要跟着鼠标滚轮一起变换的，否则当eyeHight变大，三维物体会逐渐离开透视变换的视锥体：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//鼠标缩放
-canvas.onmousewheel = function (event) {
-    var lastHeight = eyeHight;
-    if (event.wheelDelta &amp;gt; 0) {
-        eyeHight = Math.max(1, eyeHight - 80);
-    } else {
-        eyeHight = eyeHight + 80;
-    }
-
-    far = far + eyeHight - lastHeight;
-};&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;模型视图投影矩阵&quot;&gt;4) 模型视图投影矩阵&lt;/h2&gt;
-&lt;p&gt;将三个矩阵都应用起来，就得到最终的模型视图投影矩阵。注意计算式是：投影矩阵 * 视图矩阵 * 模型矩阵：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//模型视图投影矩阵
-var mvpMatrix = new Matrix4();
-mvpMatrix.set(projMatrix).multiply(viewMatrix).multiply(modelMatrix);&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;本例中的三维物体随着鼠标旋转，是把鼠标X、Y方向的移动距离转换成绕X轴，Y轴方向的角度来实现的。但是如何用鼠标实现绕Z轴（第三轴）旋转呢？例如像OSG这样的渲染引擎，是可以用鼠标绕第三个轴旋转的(当然操作有点费力)。这里希望大家能批评指正下。&lt;/p&gt;
-</description>
-<pubDate>Sun, 17 Feb 2019 15:14:00 +0000</pubDate>
-<dc:creator>charlee44</dc:creator>
-<og:description>通过一个地形包围盒的具体实例，讲解了WebGL/OpenGL中设置模型变换、视图变换、投影变换的技巧。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/charlee44/p/10393227.html</dc:identifier>
-</item>
-<item>
-<title>[Flutter] 写第一个 Flutter app，part1 要点 - 黑眼诗人</title>
-<link>http://www.cnblogs.com/farwish/p/10393029.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/farwish/p/10393029.html</guid>
-<description>&lt;p&gt;模拟器中调试元素的布局：&lt;/p&gt;
-&lt;p&gt;　　Android Studio 右侧边栏 Flutter Inspector，选择 Toggle Debug Paint 打开。&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;格式化代码：&lt;/p&gt;
-&lt;p&gt;　　编辑器中右键 Reformat Code with dartfmt。&lt;/p&gt;
-
-&lt;p&gt;使用外部功能包（https://pub.dartlang.org/flutter）：&lt;/p&gt;
-&lt;p&gt;　　把外部包名加到 pubspec.yaml 的 dependencies 依赖中，运行 flutter packages get 安装，代码中 import 进来使用。&lt;/p&gt;
-
-&lt;p&gt;例子内容解读（https://flutter.io/docs/get-started/codelab）：&lt;/p&gt;
-&lt;p&gt;　　StatelessWidget 子 Widget 实现 build 方法，Stateless widget 是不变的，意思是它们的属性不能变 - 所有的值都是 final。&lt;/p&gt;
-&lt;p&gt;　　StatefulWidget   子 Widget 实现 createState 方法；Stateful widget 维护着 widget 生命周期内可能改变的状态。&lt;/p&gt;
-&lt;p&gt;　　　　实现一个 stateful widget 需要至少两个 class：&lt;/p&gt;
-&lt;p&gt;　　　　1）一个创建了 State 类实例的 StatefulWidget 类。&lt;/p&gt;
-&lt;p&gt;　　　　2）一个 State 类。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;51&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 我们使用了一个 RandomWords 的 State 类，RandomWordsState 依赖 RandomWords 类。&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; RandomWordsState &lt;span&gt;extends&lt;/span&gt; State&amp;lt;RandomWords&amp;gt;&lt;span&gt; {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; TODO 实现 build() 方法，返回 Scaffold&lt;/span&gt;
-&lt;span&gt;    @override
-    Widget build(BuildContext context) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; Scaffold(
-            appBar: AppBar(
-                title: Text(&lt;/span&gt;'Startup Name Generator'&lt;span&gt;),
-            ),
-            body: _buildSuggestions(),
-        );
-    }
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 实现 Scaffold 里使用的私有 widget 功能，比如构建 ListView，ListView 构造方法允许我们构建一个按需加载的 list
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; ListView 提供一个 builder 属性和 itemBuilder 方法，itemBuilder 是一个匿名函数形式的回调方法，传入 BuildContext 和 行索引号。&lt;/span&gt;&lt;span&gt;
-    Widget _buildSuggestions() {
-      &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; ListView.builder(
-         padding: &lt;/span&gt;&lt;span&gt;const&lt;/span&gt; EdgeInsets.all(16.0&lt;span&gt;),
-         itemBuilder: &lt;/span&gt;&lt;span&gt;/*&lt;/span&gt;&lt;span&gt;1&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt; (context, i) {
-            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (i.isOdd) &lt;span&gt;return&lt;/span&gt; Divider(); &lt;span&gt;/*&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-
-            &lt;span&gt;final&lt;/span&gt; index = i ~/ 2; &lt;span&gt;/*&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-            &lt;span&gt;if&lt;/span&gt; (index &amp;gt;=&lt;span&gt; _suggestions.length) {
-                _suggestions.addAll(generateWordPairs().take(&lt;/span&gt;10)); &lt;span&gt;/*&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
-            }
-            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; _buildRow(_suggestions[index]);
-         });
-      }&lt;br/&gt;　　　/*1*/ itemBuilder回调在生成每个单词时调用一次，并替换 ListTile 行。偶数行为单词添加 ListTile，奇数行添加 Divider widget 垂直分隔实体。&lt;br/&gt;　　　/*2*/ 在 ListView 每行之前添加一个一像素高的 divider&lt;br/&gt;　　　/*3*/ 表达式 i ~/ 2，i 整除 2，返回整数的结果。如 1,2,3,4,5 变成 0,1,1,2,2。这计算 ListView 中真实的单词数，减去 divider widget 数。&lt;br/&gt;　　　/*4*/ 如果到达了可用单词的结尾，接着生成 10个到建议列表中。调用 _buildRow 展示每行的 title。&lt;br/&gt;Widget _buildRow(WordPair pair) {
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; ListTile(
-            title: Text(
-                pair.asPascalCase,
-                style: _biggerFont,
-             ),
-        );
-    }
-}
-
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 有状态的类除了创建 State 类的实例，什么都不做。&lt;/span&gt;
-&lt;span&gt;class&lt;/span&gt; RandomWords &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; StatefulWidget {
-    @override
-    RandomWordsState createState() &lt;/span&gt;=&amp;gt; &lt;span&gt;new&lt;/span&gt;&lt;span&gt; RandomWordsState();
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;Flutter Api Doc（https://docs.flutter.io/flutter/index.html）：&lt;/p&gt;
-&lt;p&gt;　　ListTile 一个单独的固定高度的行，一般包含有文本和前后图标（https://docs.flutter.io/flutter/material/ListTile-class.html）。&lt;/p&gt;
-&lt;p&gt;　　　　第一行的 text 不是可选的，由 title 指定。&lt;/p&gt;
-&lt;p&gt;　　　　subtitle 是可选的，会分配附加一行文本的空间，或者当 isThreeLine 为 true 是两行。&lt;/p&gt;
-&lt;p&gt;　　　　dense 为 true 时，title 总高 和 DefaultTextStyles 包裹的 title、subtitle 尺寸会缩小。&lt;/p&gt;
-&lt;p&gt;　　　　ListTile 总是固定的高度（取决于 isThreeLine、dense、subtitle 是如何配置的）；根据它们的内容无法增加高度。&lt;/p&gt;
-&lt;p&gt;　　　　如果你在寻找可以在一行内任意布局的 widget，考虑使用 Row.&lt;/p&gt;
-&lt;p&gt;　　　　ListTile 一般在 ListViews 中使用，或者 Drawer 和 Card 的 Column 中。&lt;/p&gt;
-&lt;p&gt;　　　　需要它的一个祖先是 Material widget。&lt;/p&gt;
-&lt;p&gt;　　　　ListTileTheme，给 ListTiles 定义了视觉属性。&lt;/p&gt;
-&lt;p&gt;　　　　ListView，可以在一个滚动列表中展示任意数量的 ListTile。&lt;/p&gt;
-&lt;p&gt;　　　　CircleAvatar，代表一个人的 icon，通常作为 ListTile 的 leading 元素来使用。&lt;/p&gt;
-&lt;p&gt;　　　　Card，展示少量的带有 Column 的 ListTiles。&lt;/p&gt;
-&lt;p&gt;　　　　Divider，&lt;/p&gt;
-&lt;p&gt;　　　　ListTile.divideTitles，&lt;/p&gt;
-&lt;p&gt;　　　　CheckboxListTile，RadioListTile，SwitchListTile&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;　　Divider 两边带有 padding的一个设备像素厚水平线（https://docs.flutter.io/flutter/material/Divider-class.html）。&lt;/p&gt;
-&lt;p&gt;　　　　Divider 可以用在 list、Drawer 和其它需要水平/垂直分隔内容的地方。&lt;/p&gt;
-&lt;p&gt;　　　　在一个列表的 item 中使用一像素 divider，考虑使用 ListTile.divideTiles，是针对这种情况优化的例子。&lt;/p&gt;
-&lt;p&gt;　　　　盒子高度由 Divider.height 控制，合适的 padding 会在宽高中自动计算。&lt;/p&gt;
-&lt;p&gt;　　　　PopupMenuDivider，等同 Divider，但是针对弹出菜单。&lt;/p&gt;
-&lt;p&gt;　　　　ListTile.divideTiles，另一种 list 中的 divide widget 的途径。&lt;/p&gt;
-
-&lt;p&gt;part1：&lt;a href=&quot;https://flutter.io/docs/get-started/codelab&quot; target=&quot;_blank&quot;&gt;https://flutter.io/docs/get-started/codelab&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Link：&lt;a href=&quot;https://www.cnblogs.com/farwish/p/10393029.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/farwish/p/10393029.html&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Sun, 17 Feb 2019 15:12:00 +0000</pubDate>
-<dc:creator>黑眼诗人</dc:creator>
-<og:description>模拟器中调试元素的布局： Android Studio 右侧边栏 Flutter Inspector，选择 Toggle Debug Paint 打开。 格式化代码： 编辑器中右键 Reformat</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/farwish/p/10393029.html</dc:identifier>
-</item>
-<item>
-<title>简单介绍Java的静态分派和动态分派 - kingsleylam</title>
-<link>http://www.cnblogs.com/kingsleylam/p/10390323.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/kingsleylam/p/10390323.html</guid>
-<description>&lt;p&gt;最近复习JVM的知识，对于静态分派和动态分派的理解有点混乱，于是自己尝试写写代码，在分析中巩固知识。&lt;/p&gt;
-&lt;p&gt;有如下一段代码，请问每一段分别输出什么？&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;package&lt;/span&gt;&lt;span&gt; com.khlin.my.test;
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; 
-&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Base {
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; 
-&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; foo() {
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         System.out.println(&quot;Base.foo() invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; 
-&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; bar(&lt;span&gt;int&lt;/span&gt;&lt;span&gt; c) {
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;         System.out.println(&quot;Base.bar(int) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; 
-&lt;span&gt;13&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; bar(Character c) {
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;         System.out.println(&quot;Base.bar(Character) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; 
-&lt;span&gt;17&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; baz(Object o) {
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;         System.out.println(&quot;Base.baz(Object) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; 
-&lt;span&gt;21&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; baz(Integer i) {
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;         System.out.println(&quot;Base.baz(Integer) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; 
-&lt;span&gt;25&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; 
-&lt;span&gt;27&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Child &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; Base {
-&lt;/span&gt;&lt;span&gt;28&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; foo() {
-&lt;/span&gt;&lt;span&gt;29&lt;/span&gt;         System.out.println(&quot;Child.foo() invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;30&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;31&lt;/span&gt; 
-&lt;span&gt;32&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; bar(Character c) {
-&lt;/span&gt;&lt;span&gt;33&lt;/span&gt;         System.out.println(&quot;Child.bar(Character) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;34&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;35&lt;/span&gt; 
-&lt;span&gt;36&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; bar(&lt;span&gt;char&lt;/span&gt;&lt;span&gt; c) {
-&lt;/span&gt;&lt;span&gt;37&lt;/span&gt;         System.out.println(&quot;Child.bar(char) invoked&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;38&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;39&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt;40&lt;/span&gt; 
-&lt;span&gt;41&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; App {
-&lt;/span&gt;&lt;span&gt;42&lt;/span&gt; 
-&lt;span&gt;43&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-&lt;/span&gt;&lt;span&gt;44&lt;/span&gt;         Base child = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Child();
-&lt;/span&gt;&lt;span&gt;45&lt;/span&gt; 
-&lt;span&gt;46&lt;/span&gt;         System.out.println(&quot;第1段输出：&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;47&lt;/span&gt; &lt;span&gt;        child.foo();
-&lt;/span&gt;&lt;span&gt;48&lt;/span&gt;         child.bar(&lt;span&gt;new&lt;/span&gt; Character('C'&lt;span&gt;));
-&lt;/span&gt;&lt;span&gt;49&lt;/span&gt; 
-&lt;span&gt;50&lt;/span&gt;         System.out.println(&quot;第2段输出：&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;51&lt;/span&gt;         Object integer = &lt;span&gt;new&lt;/span&gt; Integer(100&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;52&lt;/span&gt; &lt;span&gt;        child.baz(integer);
-&lt;/span&gt;&lt;span&gt;53&lt;/span&gt; 
-&lt;span&gt;54&lt;/span&gt;         System.out.println(&quot;第3段输出：&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;55&lt;/span&gt;         child.bar('C'&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;56&lt;/span&gt; 
-&lt;span&gt;57&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;58&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;下面我简单地介绍一下从代码编译到方法调用的整个过程。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;· &lt;strong&gt;编译&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;先看看第1段输出，child.foo()是调用父类还是子类的静态方法呢？&lt;/p&gt;
-&lt;p&gt;在编译阶段，发生了&lt;span&gt;&lt;strong&gt;静态分派&lt;/strong&gt;&lt;/span&gt;。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; Base child = &lt;span&gt;new&lt;/span&gt; Child();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;在我们创建一个对象时，如上图，Base称为变量的的静态类型(Static Type), 或者叫做外观类型(Apparent Type)，后面的Child则称为变量的实际类型(Actual Type)。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;所有依赖静态类型来定位方法执行版本的分派动作，称为静态分派。&lt;/strong&gt;&lt;/span&gt;静态分派的典型应用是方法重载，其发生在编译阶段，因此确定静态分派的动作实际上不是由虚拟机来执行的。&lt;/p&gt;
-&lt;p&gt;方法的接收者(Reciever) 和方法的参数统称为方法的宗量，根据分派基于多少种宗量，可以将分派划分为单分派和多分派两种。&lt;/p&gt;
-&lt;p&gt;在静态分派的时候，选择目标方法的依据有两点，&lt;span&gt;&lt;strong&gt;一是静态类型是Base还是Child，二是方法的参数类型。因此，静态分派是多分派。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;接下来，我们来看看“第1段输出”代码生成的指令。通过javap -v App.class指令得出如下结果，可以看到第18和第31行两条指令的符号引用，和上述分析一致：child的静态类型是Base，所以选择Base类的方法；通过无参数和Character类型，分别确定是具体哪个方法版本。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/452847/201902/452847-20190217222001270-620129333.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;但最终两者的行为不一样，child.foo() 调用的是静态类型Base的foo()，而child.bar(new Character('C')) 则是调用实际类型Child的方法。&lt;/p&gt;
-&lt;p&gt;原因就是出在两条指令不一样：invokestatic和invokevirtual&lt;/p&gt;
-&lt;p&gt;在Java虚拟机里面提供了5条方法调用字节码指令：&lt;/p&gt;
-&lt;p&gt;invokestatic:调用静态方法&lt;/p&gt;
-&lt;p&gt;invokespecial:调用实例构造器&amp;lt;init&amp;gt;方法、私有方法和父类方法&lt;/p&gt;
-&lt;p&gt;invokevirtual: 调用所有的虚方法&lt;/p&gt;
-&lt;p&gt;invokeinterface:调用接口方法，会在运行时再确定 一个实现此接口的对象&lt;/p&gt;
-&lt;p&gt;invokedynamic:先在运行时动态解析出调用点限定符所引用的方法，然后再执行该方法，在此之前的4条调用指令，分派逻辑是固化在Java虚拟机内部的，而invokedynamic是由用户所设定的引导方法决定的。&lt;/p&gt;
-&lt;p&gt;具体原因是不同的指令在下一阶段（类加载的解析）的行为不一样，暂时先放到一边，我们再看看第2段输出的指令。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/452847/201902/452847-20190217224514028-1594349870.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以看出，&lt;strong&gt;&lt;span&gt;在静态分派时，是根据传入方法的参数的静态类型来决定调用的方法版本，&lt;/span&gt;&lt;/strong&gt;虽然有baz(Integer)的方法，但是传入的参数integer的静态类型是Object，所以调用了baz(Object)。&lt;/p&gt;
-&lt;p&gt;再来看看第3段输出的指令，我们知道符号引用肯定还是Base类里的方法(尽管Child类里有参数一样的bar(char c) 方法)，但Base里没有一模一样参数(char类型) 的方法，不会报错吗？会调用哪个方法呢？&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/452847/201902/452847-20190217225110057-1718363360.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;原来，编译器虽然能确定出方法的重载版本，但在很多情况下这个重载版本并不是“唯一的”，往往只能确定一个“更加合适”的版本。&lt;/p&gt;
-&lt;p&gt;具体可参考：&lt;a title=&quot;JVM 方法调用之静态分派&quot; href=&quot;https://www.cnblogs.com/kingsleylam/p/6789119.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/kingsleylam/p/6789119.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;· 类加载之解析&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; 解析阶段是虚拟机将常量池内的符号引用替换为直接引用的过程。&lt;/p&gt;
-&lt;p&gt;只要能被invokestatic和invokespecial指令调用的方法，都可以在解析阶段中确定唯一的调用版本，符合这个条件的有静态方法，私有方法，实例构造器，父类方法4类，它们在类加载的时候就会把符号引用解析为该方法的直接引用。这些方法可以称为非虚方法，其他方法称为非虚方法（除了final方法）。&lt;/p&gt;
-&lt;p&gt;final修饰的方法，虽然是使用invokevirtual指令来调用，但由于它无法被覆盖，没有其他版本，因此也是非虚方法。具体参考：&lt;a title=&quot;JVM 方法调用之解析&quot; href=&quot;https://www.cnblogs.com/kingsleylam/p/6765426.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/kingsleylam/p/6765426.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;回到第1段输出，child.foo()是invokestatic指令，那么在解析阶段，就会替换成直接引用，具体的类也就确定下来了，因此调用的是静态类型Base.foo()。&lt;/p&gt;
-&lt;p&gt;而child.bar(new Character('C')) 是invokevirtual, 在这个阶段可以确定调用的方法签名，但还不能确定方法的接收者的实际类型。它将由动态分派来完成确定。&lt;span&gt;&lt;strong&gt;&lt;span&gt;由于只有一个宗量影响，因此动态分派是单分派。&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;方法接收者的实际类型在下一阶段确定。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;· 运行期的方法调用&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;在运行期根据实际类型确定方法执行版本的分派过程称为动态分派。&lt;/p&gt;
-&lt;p&gt;具体可以参考：&lt;a title=&quot;JVM 方法调用之动态分派&quot; href=&quot;https://www.cnblogs.com/kingsleylam/p/6789989.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/kingsleylam/p/6789989.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;最终输出结果是：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/452847/201902/452847-20190217230931661-1725515536.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;参考资料：《深入理解Java虚拟机》第2版 周志明著&lt;/p&gt;
-</description>
-<pubDate>Sun, 17 Feb 2019 14:53:00 +0000</pubDate>
-<dc:creator>kingsleylam</dc:creator>
-<og:description>最近复习JVM的知识，对于静态分派和动态分派的理解有点混乱，于是自己尝试写写代码，在分析中巩固知识。 有如下一段代码，请问每一段分别输出什么？ 下面我简单地介绍一下从代码编译到方法调用的整个过程。 &amp;</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/kingsleylam/p/10390323.html</dc:identifier>
-</item>
-<item>
-<title>how networks work fifth note - lingyefengzi</title>
-<link>http://www.cnblogs.com/lingyefengzi/p/10393105.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/lingyefengzi/p/10393105.html</guid>
-<description>&lt;h2 id=&quot;思维导图&quot;&gt;思维导图&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1557340/201902/1557340-20190217224142920-247067411.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;问题&quot;&gt;问题&lt;/h2&gt;
-&lt;pre&gt;
-&lt;code&gt;当使用浏览器访问Web服务器时，浏览器的通信对象不仅限于Web服务器
-防火墙并不是必需的，但是没有防火墙会增加风险
-也有防火墙无法抵御的攻击(防火墙不会检查通信数据的具体内容，因此无法地狱隐藏在&amp;gt;通信数据内容中的攻击)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;看点&quot;&gt;看点&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;Web服务器的部署地&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;防火墙的结构原理&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;通过将请求平均分配给多台服务器来平衡负载&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;利用缓存服务器分担负载&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;内容分发服务&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;内容分发服务是从缓存服务器发展而来，它在互联网中部署很多缓存服务器，
-并将用户的访问引导到最近的缓存服务器上。&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;web服务器的部署地点&quot;&gt;Web服务器的部署地点&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;在公司里部署Web服务器&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;1. 服务器直接部署在公司网络上，并且可以从互联网直接访问。
-淘汰原因：
-(1)IP地址不足。
-(2)安全问题。
-2.部署防火墙&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;将Web服务部署在数据中心&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;数据中心是与运营商核心部分NOC直接连接的，或者是与运营商之间的枢纽IX直接连接的。&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;防火墙的结构和原理&quot;&gt;防火墙的结构和原理&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;主流的包过滤方式&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;如何设置包过滤规则&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;通过网络包的头部控制信息来设置过滤规则(IP地址)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;通过端口号限定应用程序&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;通过控制位判断连接方向&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;阻止以Web服务器为起点，SYN为1，而ACK为0的包
-使用UDP协议无法进行阻止&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;从公司内网访问公开区域的规则&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;从外部无法访问公司内网&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;防火墙内置的路由功能可以由用户自行设置，因此可以在路由表中配置私有地址相关的路由，使得公司内网到公开区域的访问可以从私有地址的形式来进行，这意味着公司内网和公开区域之间传输的包不需要地址转化
-
-当使用地址转化时，默认状态下是无法从互联网访问公司内网的，因此我们不需要在设置一条包过滤规则来阻止从互联网访问
-公司内网&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;通过防火墙&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;防火墙无法抵御的攻击&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;Web服务器在收到含有特定数据的包时会引起宕机
-
-解决方式;
-one way:修复Web服务器程序中的Bug
-another way:在防火墙之外部署用来检查包的内容并阻止有害包的设备或软件&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;通过将请求平均分配给多台服务器来平衡负载&quot;&gt;通过将请求平均分配给多台服务器来平衡负载&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;性能不足时需要负载均衡&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;服务器的分布式架构&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;使用负载均衡器分配访问&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;用负载均衡器的IP地址代替Web服务器的实际地址注册到DNS服务器上
-然后由负载均衡器来判断将请求转发给哪台Web服务器上&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;使用缓存服务器分担负载&quot;&gt;使用缓存服务器分担负载&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;缓存服务器通过更新时间管理内容&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;需要代替Web服务器被注册到DNS服务器上。
-缓存服务器接受请求消息
-检查请求消息的内容，看看请求的数据是否已经保存在缓存中
-
-若不存在，在HTTP头部字段中添加一个Via字段
-确定转发到哪台服务器上是根据请求消息的URI中的目录名来判断的
-缓存服务器会以客户端的身份向目标Web服务器发送请求消息
-缓存服务器会在响应消息中加上Via头部字段
-缓存服务器会以Web服务器的身份向客户端发送响应消息，并把缓存服务器响应消息保存到缓存中，并记录保存时间
-
-若存在，缓存服务器会添加一个If-Modified-Since头部字段并将请求转发给Web服务器，询问Web服务器用户请求的数据
-是否已经发生变化
-若没有变化，则会返回一个没有变化的响应消息
-
-若Web服务器上的数据有变化，后面的过程和没有命中缓存的情况是一样的。Web服务器会返回最新版本的数据&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;最原始的代理-正向代理(客户端一侧的缓存服务器)&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;目的:缓存  实现防火墙
-
-工作方式：先接收来自客户端的请求消息，然后再转发到互联网中
-由于代理在转发过程中可以查看请求的内容，所以可以根据内容判断是否允许访问
-
-一般需要在浏览器中设置窗口中的&quot;代理服务器&quot;一栏中填写正向代理的IP地址&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;透明代理&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;透明代理:通过查看请求消息的包头部(IP地址)
-在接入网的入口处放置透明代理&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;内容分发服务&quot;&gt;内容分发服务&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;利用内容分发服务分担负载&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;缓存服务器放在服务器端时，可以减轻Web服务器的负载，但无法减少互联网中的流量。
-客户端缓存服务器服务器运营者无法控制它。
-Web缓冲服务器放在客户端的运营商处
-
-内容分发服务，提供这种厂商称为CDSP(Content Delivery Service Provider)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;如何找到最近的缓存服务器&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;服务器端的DNS服务器收集缓存服务器部署地点的路由器收集路由信息
-查出路由器到客户端DNS服务器的路由距离&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;通过重定向服务器分配访问目标&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;将重定向服务器注册到Web服务器端的DNS服务器上
-客户端会将HTTP请求消息发送到重定向服务器上
-将缓存服务器的地址放到Location字段中返回响应
-
-缺点：增加了HTTP消息的交互次数
-优点：重定向的方法是根据客户端发送来的HTTP消息的发送方IP地址来估算距离的，因此精度较高
-
-重定向服务器可以返回一个通过网络包往返时间估算到缓存服务器的距离的脚本，通过在客户端运行脚本
-来找到最优的缓存服务器。&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;缓存的更新方法会影响性能&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;当Web服务器在原始数据发生更新时，立即通知缓存服务器(内容分发服务)&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Sun, 17 Feb 2019 14:44:00 +0000</pubDate>
-<dc:creator>lingyefengzi</dc:creator>
-<og:description>服务器端的局域网中有什么玄机 思维导图 问题 看点 Web服务器的部署地 防火墙的结构原理 通过将请求平均分配给多台服务器来平衡负载 利用缓存服务器分担负载 内容分发服务 Web服务器的部署地点 在公</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/lingyefengzi/p/10393105.html</dc:identifier>
-</item>
-<item>
-<title>Java 中的按值传递 - 水目沾</title>
-<link>http://www.cnblogs.com/zhuwbox/p/10392970.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhuwbox/p/10392970.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;Java 中只有按值传递&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;    &quot;Java 中只有按值传递&quot;，初看到这几个字有点不敢相信，无数次通过函数改变过对象，无数次跟同事说 Java 在传对象的时候是按引用传递。后来细细想想，之所以以为 Java 传对象是按引用传递是因为其中有很多概念都没理清楚，与 C++ 中的搞混了。从 C++ 转 Java 的时候将 C++ 中的知识点映射到 Java 没错，这有利于 C++ 转 Java 的人更快的学习 Java。但一旦映射错误就很容易形成固定思维。&lt;/p&gt;
-&lt;p&gt;    在 C++ 和 Java 中都有引用的概念，但他们完全不是同一个东西。Java 中的引用更类似 C++ 的指针，C++ 的引用在 Java 中并无对应概念。在 C++ 中有按值传递、按指针传递和按引用传递三种，而在 Java 中没有 C++ 引用和指针的概念，所以只有按值传递一说。&lt;/p&gt;
-&lt;p&gt;    为了更好的说明 Java 中只有按值传递，先来看看 Java 的数据类型，Java 的数据类型分为基本数据类型和引用类型，其中：&lt;/p&gt;
-&lt;p&gt;    1、基本类型包括 byte/short/int/long/float/double/char/boolean 八种，基本类型在内存中地址中保存的即本身的值，其一般都在栈上分配。&lt;/p&gt;
-&lt;p&gt;    2、引用类型指向一个对象，它与 C++ 的指针非常相似。但 C++ 的指针可以指向基本类型和类对象，而 Java 的引用只能指向类（枚举、接口等）对象。Java 中对象本身在堆上分配，而引用类型在栈上分配，其内存地址中保存的是对象在堆中的地址。两种类型在内存中的布局如下：&lt;/p&gt;
-
-&lt;p&gt;    上图可以一目了然的看出基本类型与引用类型的区别，基本类型数据即本身，引用类型仅仅是引用。来看下基本类型和引用类型在参数传递中所表现的不同的地方：&lt;/p&gt;
-
-&lt;p&gt;    运行结果如下：&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;cke_widget_wrapper cke_widget_inline cke_widget_image cke_image_nocaption cke_widget_selected&quot; data-cke-widget-wrapper=&quot;1&quot; data-cke-filter=&quot;off&quot; data-cke-display-name=&quot;图像&quot; data-cke-widget-id=&quot;3&quot;&gt;&lt;img class=&quot;has cke_widget_element&quot; src=&quot;https://mmbiz.qpic.cn/mmbiz_png/EbGrZVyOwibB2bicolPWgJ8uuEpxaxzr4NkqEXhnjRIpUbfhzcTLWRnq5YXAicqtFiajqvyqTcy5PRlv6pNibRIEibsQ/640?wx_fmt=png&quot; alt=&quot;&quot; data-cke-saved-src=&quot;https://mmbiz.qpic.cn/mmbiz_png/EbGrZVyOwibB2bicolPWgJ8uuEpxaxzr4NkqEXhnjRIpUbfhzcTLWRnq5YXAicqtFiajqvyqTcy5PRlv6pNibRIEibsQ/640?wx_fmt=png&quot; data-cke-widget-data=&quot;{&amp;amp;quot;hasCaption&amp;amp;quot;:false,&amp;amp;quot;src&amp;amp;quot;:&amp;amp;quot;https://mmbiz.qpic.cn/mmbiz_png/EbGrZVyOwibB2bicolPWgJ8uuEpxaxzr4NkqEXhnjRIpUbfhzcTLWRnq5YXAicqtFiajqvyqTcy5PRlv6pNibRIEibsQ/640?wx_fmt=png&amp;amp;quot;,&amp;amp;quot;alt&amp;amp;quot;:&amp;amp;quot;&amp;amp;quot;,&amp;amp;quot;width&amp;amp;quot;:&amp;amp;quot;&amp;amp;quot;,&amp;amp;quot;height&amp;amp;quot;:&amp;amp;quot;&amp;amp;quot;,&amp;amp;quot;lock&amp;amp;quot;:true,&amp;amp;quot;align&amp;amp;quot;:&amp;amp;quot;none&amp;amp;quot;,&amp;amp;quot;classes&amp;amp;quot;:{&amp;amp;quot;has&amp;amp;quot;:1}}&quot; data-cke-widget-upcasted=&quot;1&quot; data-cke-widget-keep-attr=&quot;0&quot; data-widget=&quot;image&quot;/&gt;&lt;span class=&quot;cke_reset cke_widget_drag_handler_container&quot;&gt;&lt;img class=&quot;cke_reset cke_widget_drag_handler&quot; title=&quot;点击并拖拽以移动&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAPABAP///wAAACH5BAEKAAAALAAAAAABAAEAAAICRAEAOw==&quot; alt=&quot;&quot; width=&quot;15&quot; height=&quot;15&quot; data-cke-widget-drag-handler=&quot;1&quot;/&gt;&lt;span class=&quot;cke_image_resizer&quot; title=&quot;点击并拖拽以改变尺寸&quot;&gt;​&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;    可以看出基本类型 int 的变量 basicTypeA 在 changeBasic 调用后值并没有发生改变，而引用类型 MyInteger 的变量 referenceTypeA 在调用 changeReference 后发生了改变。&lt;strong&gt;这里就比较容易误导读者以为：Java 基本类型是按值传递而引用类型是按引用传递（暂且这么定义）。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;    其实不然，按值传递的意思想必大家都知道：传递的是值的的拷贝，比如上面代码中的调用 changeBasic(basicTypeA) 时，arg 是 basicTypeA 的一个拷贝，所以无论对 arg 做任何操作都不影响 basicTypeA 变量本身。而调用 changeReference(referenceTypeA) ，arg 也是 referenceTypeA 的一个拷贝，但是由于 arg 和 referenceTypeA 都是引用类型且他们指向同一对象，所以通过 arg 修改对象，referenceTypeA 也能看到。两种类型变量在内存中调用过程如下：&lt;/p&gt;
-
-&lt;p&gt;    所以可以看出无论是基本类型还是引用类型，都是按值传递。只是由于它们在内存中所表示的内容不同，最后表现出来的结果也有所不同。同理，在 C++ 中的按值传递、按指针传递和按引用传递理论上都可以归为按值传递（其实这个归类在学 C++ 的时候就归纳出来了，只是后来反而忘了）。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;对&quot;引用&quot;进行传递的坑&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;    Java 的引用类似于 C++ 的指针，但是 C++ 的对象传递提供了对象本身直接传递和指针传递两种方式（引用方式不谈），而 Java 对象只有对引用进行传递这一种，不存在直接将对象本身进行传递。&lt;/p&gt;
-&lt;p&gt;    1、对象本身进行传递的好处是传递的都是对象的拷贝，在函数中对拷贝的对象做任何修改都不会改变原对象。但是如果对象非常大，而且调用很频繁会影响性能。&lt;/p&gt;
-&lt;p&gt;    2、对象的引用（或者指针）传递的好处是只需要拷贝一个引用（或者指针）大小的数据即可，且可以在调用的函数中改变原对象内容。&lt;/p&gt;
-&lt;p&gt;    在 C++ 中以上（1）和（2）程序员自己还可以选择，Java 里面直接只有第 2 种方式，凡事有利有弊，有时候我们并不想在函数中改变原对象的内容，这里我就踩过一个坑，有个对象通过管道传递的流程如下：&lt;/p&gt;
-
-&lt;p&gt;    funcA 与 funcB 是两个不同的人负责的，一次升级后 funcB 的负责人发现在函数中获取的对象 X 内容不对，一开始还以为是传递对象 X 的接口出现了错误便是一顿排查，知道最后才发现对象 X 是在升级后在 funcA 中被修改了，浪费了不少时间。当然这个架构的流程设计的不合理是主要原因（只需要在分发的时候讲对象 X 做手动拷贝即可避免上述问题），但是不不影响我们抛出 Java 只能对引用进行传递的弊端。&lt;/p&gt;
-&lt;p&gt;    在调用链较长、各种 for/while 循环中很容易就犯了上述错误，解决方案当然就是手动拷贝对象，Java 中拷贝对象有以下两种方式：&lt;/p&gt;
-&lt;p&gt;    1、实现Cloneable接口并重写Object类中的clone()方法。&lt;/p&gt;
-&lt;p&gt;    2、实现Serializable接口，通过对象的序列化和反序列化实现克隆，可以实现真正的深度克隆。&lt;/p&gt;
-&lt;p&gt;    其中 2 能避免深浅拷贝的问题，但调用比较耗时。1 也能避免深浅拷贝但是需要自己手动去写相应的代码，如果嵌套较深，代码将非常复杂。至于深浅拷贝的问题可以自行百度，其本质还是因为只是将对象的引用进行了传递而导致的一些问题。&lt;/p&gt;
-
-
-</description>
-<pubDate>Sun, 17 Feb 2019 14:14:00 +0000</pubDate>
-<dc:creator>水目沾</dc:creator>
-<og:description>Java 中只有按值传递 &quot;Java 中只有按值传递&quot;，初看到这几个字有点不敢相信，无数次通过函数改变过对象，无数次跟同事说 Java 在传对象的时候是按引用传递。后来细细想想，之</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhuwbox/p/10392970.html</dc:identifier>
 </item>
 </channel>
 </rss>
