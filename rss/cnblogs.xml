@@ -9,15 +9,1319 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>AppBoxFuture(五): 分布式文件存储-Store Everything - 白菜园</title>
+<link>http://www.cnblogs.com/BaiCai/p/10415698.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/BaiCai/p/10415698.html</guid>
+<description>&lt;p&gt;  本来本篇是想介绍前端组件化开发用户界面，发现框架还未实现文件存储，原本计划是后续设计开发的，索性把计划提前，所以本篇将介绍基于Raft实现分布式的文件存储引擎。&lt;/p&gt;
+
+&lt;p&gt;  既然是分布式存储，就需要解决以下几个关键问题：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;如何将文件以多副本的形式存储在集群的节点上，且保证副本间的一致性？这个问题可基于Raft协议实现相应的状态机来解决；&lt;/li&gt;
+&lt;li&gt;如何将大量的文件分组，即如何划分多个Raft组？这个问题可通过在目录元数据内保存多个Raft组信息，每个组存储限制在64M（暂定）来解决；&lt;/li&gt;
+&lt;li&gt;如何存储与管理目录及文件的元数据？这个问题可通过实现元数据状态机来管理，利用已实现的KV存储引擎来存储元数据；&lt;/li&gt;
+&lt;li&gt;如何保证元数据与文件数据的一致性？这个问题开始时想用已实现的EntityStore的事务引擎来解决，虽能保证强一致性但逻辑复杂，性能损失大。因此放弃了强一致性改为保证最终一致性，元数据状态机及文件状态机内都有定时器来检查不一致的状态。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;  开始时想设计为一个集群对应一个BlobMetaRaftGroup，后来考虑到单个RaftGroup可能会压力较大，所以改为每个Application对应一个BlobMetaRaftGroup。每个元数据状态机主要存储以下各项信息：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;目录元数据：包括目录名称及标识，该目录下分配了多少个Chunk，每个Chunk占用了多少空间，隶属于哪个RaftGroup等；&lt;/li&gt;
+&lt;li&gt;文件元数据：包括文件名称及标识，该文件隶属的目录标识及隶属的ChunkRaftGroup标识等；&lt;/li&gt;
+&lt;li&gt;Chunk元数据： 包括Chunk的RaftGroup内的各个RaftNode分配在集群的哪个节点上；&lt;/li&gt;
+&lt;li&gt;写锁数据：用于并发写时加锁。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;  确认了需要存储哪些信息后，就需要确认如何将这些数据映射至底层的KV存储，既要保证高效又要方便Api检索这些元数据，经过一些尝试后最终定为以下方案。&lt;/p&gt;
+&lt;h3 id=&quot;目录元数据-key&quot;&gt;目录元数据 Key&lt;/h3&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;8bit&lt;/td&gt;
+&lt;td&gt;8bit&lt;/td&gt;
+&lt;td&gt;n bit&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;ul&gt;&lt;li&gt;TypeFlag = 0&lt;/li&gt;
+&lt;li&gt;注意:最后一个'/' 0x2F被替换为0x00，以方便扫描某一目录下所有子目录&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;目录元数据-value&quot;&gt;目录元数据 Value&lt;/h3&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;128bit&lt;/td&gt;
+&lt;td&gt;16bit&lt;/td&gt;
+&lt;td&gt;n * 64bit&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h3 id=&quot;文件元数据-key&quot;&gt;文件元数据 Key&lt;/h3&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;8bit&lt;/td&gt;
+&lt;td&gt;8bit&lt;/td&gt;
+&lt;td&gt;128bit&lt;/td&gt;
+&lt;td&gt;8bit&lt;/td&gt;
+&lt;td&gt;n bit&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;ul&gt;&lt;li&gt;TypeFlag = 1&lt;/li&gt;
+&lt;li&gt;分隔占位始终 = 0&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;文件元数据-value&quot;&gt;文件元数据 Value&lt;/h3&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;128bit&lt;/td&gt;
+&lt;td&gt;32bit&lt;/td&gt;
+&lt;td&gt;64bit&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h2 id=&quot;文件存储-blobchunkstatemachine&quot;&gt;2. 文件存储-BlobChunkStateMachine&lt;/h2&gt;
+&lt;p&gt;  根据上述设计，每个目录下的文件分成了多个存储组（BlobChunkRaftGroup），本来想用MemoryMapFile来实现底层Chunk存储，但考虑到有更重要的功能要实现所以暂偷懒直接利用Linux文件系统来存储文件，状态机Apply文件写命令时，将文件直接写入节点运行时blob/ChunkRaftGroupId/目录下。&lt;/p&gt;
+&lt;h2 id=&quot;读写流程&quot;&gt;3. 读写流程&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;读流程较简单: 发送读元数据命令至BlobMetaRaftGroup获取文件元数据（缓存），然后再分小块发读命令至目标ChunkRaftGroup获取文件小块数据；&lt;/li&gt;
+&lt;li&gt;写流程要考虑元数据与文件数据的一致性，还要考虑在目录下无可用ChunkRaftGroup时创建新的组，具体参考以下设计草图：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/4928/201902/4928-20190221221406005-1751039725.jpg&quot;/&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;  根据以上设计在经历了1个月的编码后已初步实现（其中约一半时间在更改架构，抛弃了Mono依赖，改为Hosting CoreCLR，性能提升1倍），在框架IDE内每个Application内有个&quot;BlobStore&quot;节点，如下图所示可测试上传文件，然后通过浏览器访问上传至/pub目录内的文件（&lt;a href=&quot;http://%7B%E5%9C%B0%E5%9D%80:%E7%AB%AF%E5%8F%A3%7D/blob/%7Bapp%E5%90%8D%E7%A7%B0%7D/%7B%E6%96%87%E4%BB%B6%E8%B7%AF%E5%BE%84%7D&quot; class=&quot;uri&quot;&gt;http://{地址:端口}/blob/{app名称}/{文件路径}&lt;/a&gt; eg: &lt;a href=&quot;http://xx.xx.xx.xx:5000/blob/sys/imgs/aa.jpg&quot; class=&quot;uri&quot;&gt;http://xx.xx.xx.xx:5000/blob/sys/imgs/aa.jpg&lt;/a&gt;）&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/4928/201902/4928-20190221221418198-1750554165.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;  作者简单测试了一下通过框架WebHost下载文件的性能(测试时尚未实现缓存元数据, 虚拟机I74C8G)，如下图所示：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/4928/201902/4928-20190221221429943-368652057.jpg&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;  本实现适用于存储大量小文件，如业务单证的附件，或者用于OA系统作为文档库。目前只是实现了基本的上传下载功能，删除、重命名、Chunk合并等功能尚未实现，另待将来框架实现反向索引后再实现全文搜索功能。&lt;/p&gt;
+&lt;p&gt;  框架已更新，如何安装测试请参考&lt;a href=&quot;https://www.cnblogs.com/BaiCai/p/10018947.html&quot;&gt;AppBoxFuture(一): Hello Future!&lt;/a&gt;（架构图尚未更新）。如果您有问题或Bug报告，请留言或在&lt;a href=&quot;https://github.com/enjoycode/appbox.deploy&quot;&gt;Github&lt;/a&gt;提交Issue。&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 23:36:00 +0000</pubDate>
+<dc:creator>白菜园</dc:creator>
+<og:description>  本来本篇是想介绍前端组件化开发用户界面，发现框架还未实现文件存储，原本计划是后续设计开发的，索性把计划提前，所以本篇将介绍基于Raft实现分布式的文件存储引擎。 一. 实现思路</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/BaiCai/p/10415698.html</dc:identifier>
+</item>
+<item>
+<title>都2019年了，还问GET和POST的区别 - Fundebug</title>
+<link>http://www.cnblogs.com/fundebug/p/10416234.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/fundebug/p/10416234.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;摘要：&lt;/strong&gt; 对比GET与POST。&lt;/p&gt;
+&lt;h3 id=&quot;前言&quot;&gt;1. 前言&lt;/h3&gt;
+&lt;p&gt;最近看了一些同学的面经，发现无论什么技术岗位，还是会问到 get 和 post 的区别，而搜索出来的答案并不能让我们装得一手好逼，那就让我们从 HTTP 报文的角度来撸一波，从而搞明白他们的区别。&lt;/p&gt;
+&lt;h3 id=&quot;标准答案&quot;&gt;2. 标准答案&lt;/h3&gt;
+&lt;p&gt;在开撸之前吗，让我们先看一下标准答案长什么样子 &lt;a href=&quot;http://www.w3school.com.cn/tags/html_ref_httpmethods.asp&quot;&gt;w3school: GET 对比 POST&lt;/a&gt;。标准答案很美好，但是在面试的时候把下面的表格甩面试官一脸，估计会装逼不成反被*。&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;13&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;后退按钮/刷新&lt;/td&gt;
+&lt;td&gt;无害&lt;/td&gt;
+&lt;td&gt;数据会被重新提交（浏览器应该告知用户数据会被重新提交）。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;书签&lt;/td&gt;
+&lt;td&gt;可收藏为书签&lt;/td&gt;
+&lt;td&gt;不可收藏为书签&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;缓存&lt;/td&gt;
+&lt;td&gt;能被缓存&lt;/td&gt;
+&lt;td&gt;不能缓存&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;编码类型&lt;/td&gt;
+&lt;td&gt;application/x-www-form-urlencoded&lt;/td&gt;
+&lt;td&gt;application/x-www-form-urlencoded 或 multipart/form-data。为二进制数据使用多重编码。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;历史&lt;/td&gt;
+&lt;td&gt;参数保留在浏览器历史中。&lt;/td&gt;
+&lt;td&gt;参数不会保存在浏览器历史中。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;3&quot;&gt;&lt;td&gt;对数据长度的限制&lt;/td&gt;
+&lt;td&gt;是的。当发送数据时，GET 方法向 URL 添加数据；URL 的长度是受限制的（URL 的最大长度是 2048 个字符）。&lt;/td&gt;
+&lt;td&gt;无限制。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;对数据类型的限制&lt;/td&gt;
+&lt;td&gt;只允许 ASCII 字符。&lt;/td&gt;
+&lt;td&gt;没有限制。也允许二进制数据。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;5&quot;&gt;&lt;td&gt;安全性&lt;/td&gt;
+&lt;td&gt;与 POST 相比，GET 的安全性较差，因为所发送的数据是 URL 的一部分。在发送密码或其他敏感信息时绝不要使用 GET ！&lt;/td&gt;
+&lt;td&gt;POST 比 GET 更安全，因为参数不会被保存在浏览器历史或 web 服务器日志中。&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;可见性&lt;/td&gt;
+&lt;td&gt;数据在 URL 中对所有人都是可见的。&lt;/td&gt;
+&lt;td&gt;数据不会显示在 URL 中。&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;注意，并不是说标准答案有误，上述区别在&lt;strong&gt;大部分浏览器&lt;/strong&gt;上是存在的，因为这些浏览器实现了 HTTP 标准。&lt;/p&gt;
+&lt;p&gt;所以从标准上来看，GET 和 POST 的区别如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;GET 用于获取信息，是无副作用的，是幂等的，且可缓存&lt;/li&gt;
+&lt;li&gt;POST 用于修改服务器上的数据，有副作用，非幂等，不可缓存&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;但是，既然本文从报文角度来说，那就先不讨论 RFC 上的区别，单纯从数据角度谈谈。&lt;/p&gt;
+&lt;h3 id=&quot;get-和-post-报文上的区别&quot;&gt;3. GET 和 POST 报文上的区别&lt;/h3&gt;
+&lt;p&gt;先下结论，&lt;strong&gt;GET 和 POST 方法没有实质区别&lt;/strong&gt;，只是报文格式不同。&lt;/p&gt;
+&lt;p&gt;GET 和 POST 只是 HTTP 协议中两种请求方式，而 HTTP 协议是基于 TCP/IP 的应用层协议，无论 GET 还是 POST，用的都是同一个传输层协议，所以在传输上，没有区别。&lt;/p&gt;
+&lt;p&gt;报文格式上，不带参数时，最大区别就是第一行方法名不同&lt;/p&gt;
+&lt;p&gt;POST方法请求报文第一行是这样的 &lt;code&gt;POST /uri HTTP/1.1 \r\n&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;GET方法请求报文第一行是这样的 &lt;code&gt;GET /uri HTTP/1.1 \r\n&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;是的，不带参数时他们的区别就仅仅是报文的前几个字符不同而已&lt;/p&gt;
+&lt;p&gt;带参数时报文的区别呢？ 在约定中，GET 方法的参数应该放在 url 中，POST 方法参数应该放在 body 中&lt;/p&gt;
+&lt;p&gt;举个例子，如果参数是 name=qiming.c, age=22。&lt;/p&gt;
+&lt;p&gt;GET 方法简约版报文是这样的&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;GET /index.php?name=qiming.c&amp;amp;age=22 HTTP/1.1
+Host: localhost&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;POST 方法简约版报文是这样的&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;POST /index.php HTTP/1.1
+Host: localhost
+Content-Type: application/x-www-form-urlencoded
+
+name=qiming.c&amp;amp;age=22&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;现在我们知道了两种方法本质上是 TCP 连接，没有差别，也就是说，如果我不按规范来也是可以的。我们可以在 URL 上写参数，然后方法使用 POST；也可以在 Body 写参数，然后方法使用 GET。当然，这需要服务端支持。&lt;/p&gt;
+&lt;h3 id=&quot;常见问题&quot;&gt;4. 常见问题&lt;/h3&gt;
+&lt;h4 id=&quot;get-方法参数写法是固定的吗&quot;&gt;GET 方法参数写法是固定的吗？&lt;/h4&gt;
+&lt;p&gt;在约定中，我们的参数是写在 &lt;code&gt;?&lt;/code&gt; 后面，用 &lt;code&gt;&amp;amp;&lt;/code&gt; 分割。&lt;/p&gt;
+&lt;p&gt;我们知道，解析报文的过程是通过获取 TCP 数据，用正则等工具从数据中获取 Header 和 Body，从而提取参数。&lt;/p&gt;
+&lt;p&gt;也就是说，我们可以自己约定参数的写法，只要服务端能够解释出来就行，一种比较流行的写法是 &lt;code&gt;http://www.example.com/user/name/chengqm/age/22&lt;/code&gt;。&lt;/p&gt;
+&lt;h4 id=&quot;post-方法比-get-方法安全&quot;&gt;POST 方法比 GET 方法安全？&lt;/h4&gt;
+&lt;p&gt;按照网上大部分文章的解释，POST 比 GET 安全，因为数据在地址栏上不可见。&lt;/p&gt;
+&lt;p&gt;然而，从传输的角度来说，他们都是不安全的，因为 HTTP 在网络上是明文传输的，只要在网络节点上捉包，就能完整地获取数据报文。&lt;/p&gt;
+&lt;p&gt;要想安全传输，就只有加密，也就是 HTTPS。&lt;/p&gt;
+&lt;h4 id=&quot;get-方法的长度限制是怎么回事&quot;&gt;GET 方法的长度限制是怎么回事？&lt;/h4&gt;
+&lt;p&gt;在网上看到很多关于两者区别的文章都有这一条，提到浏览器地址栏输入的参数是有限的。&lt;/p&gt;
+&lt;p&gt;首先说明一点，HTTP 协议没有 Body 和 URL 的长度限制，对 URL 限制的大多是浏览器和服务器的原因。&lt;/p&gt;
+&lt;p&gt;浏览器原因就不说了，服务器是因为处理长 URL 要消耗比较多的资源，为了性能和安全（防止恶意构造长 URL 来攻击）考虑，会给 URL 长度加限制。&lt;/p&gt;
+&lt;h4 id=&quot;post-方法会产生两个tcp数据包&quot;&gt;POST 方法会产生两个TCP数据包？&lt;/h4&gt;
+&lt;p&gt;有些文章中提到，post 会将 header 和 body 分开发送，先发送 header，服务端返回 100 状态码再发送 body。&lt;/p&gt;
+&lt;p&gt;HTTP 协议中没有明确说明 POST 会产生两个 TCP 数据包，而且实际测试(Chrome)发现，header 和 body 不会分开发送。&lt;/p&gt;
+&lt;p&gt;所以，header 和 body 分开发送是部分浏览器或框架的请求方法，不属于 post 必然行为。&lt;/p&gt;
+&lt;h3 id=&quot;talk-is-cheap-show-me-the-code&quot;&gt;5. talk is cheap show me the code&lt;/h3&gt;
+&lt;p&gt;如果对 get 和 post 报文区别有疑惑，直接起一个 Socket 服务端，然后封装简单的 HTTP 处理方法，直接观察和处理 HTTP 报文，就能一目了然&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import socket
+
+HOST, PORT = '', 23333
+
+
+def server_run():
+    listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen_socket.bind((HOST, PORT))
+    listen_socket.listen(1)
+    print('Serving HTTP on port %s ...' % PORT)
+    while True:
+        # 接受连接
+        client_connection, client_address = listen_socket.accept()
+        handle_request(client_connection)
+
+
+def handle_request(client_connection):
+    # 获取请求报文
+    request = ''
+    while True:
+        recv_data = client_connection.recv(2400)
+        recv_data = recv_data.decode()
+        request += recv_data
+        if len(recv_data) &amp;lt; 2400:
+            break
+
+    # 解析首行
+    first_line_array = request.split('\r\n')[0].split(' ')
+
+    # 分离 header 和 body
+    space_line_index = request.index('\r\n\r\n')
+    header = request[0: space_line_index]
+    body = request[space_line_index + 4:]
+
+    # 打印请求报文
+    print(request)
+
+    # 返回报文
+    http_response = b&quot;&quot;&quot;\
+HTTP/1.1 200 OK
+
+&amp;lt;!DOCTYPE html&amp;gt;
+&amp;lt;html&amp;gt;
+&amp;lt;head&amp;gt;
+    &amp;lt;title&amp;gt;Hello, World!&amp;lt;/title&amp;gt;
+&amp;lt;/head&amp;gt;
+&amp;lt;body&amp;gt;
+&amp;lt;p style=&quot;color: green&quot;&amp;gt;Hello, World!&amp;lt;/p&amp;gt;
+&amp;lt;/body&amp;gt;
+&amp;lt;/html&amp;gt;
+&quot;&quot;&quot;
+    client_connection.sendall(http_response)
+    client_connection.close()
+
+
+if __name__ == '__main__':
+    server_run()&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面代码就是简单的打印请求报文然后返回 HelloWorld 的 html 页面，我们运行起来&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[root@chengqm shell]# python httpserver.py 
+Serving HTTP on port 23333 ...&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后从浏览器中请求看看&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://image.fundebug.com/2019-02-21-01.jpeg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;打印出来的报文&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://image.fundebug.com/2019-02-21-02.jpeg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;然后就可以手动证明上述说法，比如说要测试 header 和 body 是否分开传输，由于代码没有返回 100 状态码，如果我们 post 请求成功就说明是一起传输的(Chrome/postman)。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://image.fundebug.com/2019-02-21-03.jpeg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;又比如 w3school 里面说 URL 的最大长度是 2048 个字符，那我们在代码里面加上一句计算 uri 长度的代码&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;...
+# 解析首行
+first_line_array = request.split('\r\n')[0].split(' ')
+print('uri长度: %s' % len(first_line_array[1]))
+...&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;我们用 postman 直接发送超过 2048 个字符的请求看看&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://image.fundebug.com/2019-02-21-04.jpeg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;然后我们可以得出结论，url 长度限制是某些浏览器和服务器的限制，和 HTTP 协议没有关系。&lt;/p&gt;
+&lt;p&gt;到此，我们可以愉快地装逼了 :)&lt;/p&gt;
+&lt;h3 id=&quot;参考&quot;&gt;参考&lt;/h3&gt;
+&lt;h3 id=&quot;关于fundebug&quot;&gt;关于Fundebug&lt;/h3&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.fundebug.com/&quot;&gt;Fundebug&lt;/a&gt;专注于JavaScript、微信小程序、微信小游戏、支付宝小程序、React Native、Node.js和Java实时BUG监控。 自从2016年双十一正式上线，Fundebug累计处理了6亿+错误事件，得到了Google、360、金山软件等众多知名用户的认可。欢迎免费试用！&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 23:28:00 +0000</pubDate>
+<dc:creator>Fundebug</dc:creator>
+<og:description>对比GET与POST。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/fundebug/p/10416234.html</dc:identifier>
+</item>
+<item>
+<title>Spring Boot 2.x（十一）：AOP实战--打印接口日志 - Vi的技术博客</title>
+<link>http://www.cnblogs.com/viyoung/p/10416230.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/viyoung/p/10416230.html</guid>
+<description>&lt;h3 id=&quot;接口日志有啥用&quot;&gt;接口日志有啥用&lt;/h3&gt;
+&lt;p&gt;在我们日常的开发过程中，我们可以通过接口日志去查看这个接口的一些详细信息。比如客户端的IP，客户端的类型，响应的时间，请求的类型，请求的接口方法等等，我们可以对这些数据进行统计分析，提取出我们想要的信息。&lt;/p&gt;
+&lt;h3 id=&quot;怎么拿到接口日志&quot;&gt;怎么拿到接口日志&lt;/h3&gt;
+&lt;p&gt;这里，我们使用的是Spring的两大杀器之AOP，通过在Controller层定义切点，然后对请求对象进行分析获取接口信息，同时开启一个ThreadLocal来记录响应时间。&lt;/p&gt;
+&lt;h3 id=&quot;关于aop的注解&quot;&gt;关于AOP的注解&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;&lt;code&gt;@Aspect&lt;/code&gt;：将一个类定义为切面类。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@Pointcut&lt;/code&gt;：定义一个切入点。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@Before&lt;/code&gt;：在切入点开始处切入内容。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@After&lt;/code&gt;：在切入点结尾处切入内容。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@AfterReturning&lt;/code&gt;：在切入点返回内容之后切入内容（可以用来对处理返回值做一些加工处理。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@Around&lt;/code&gt;：在切入点前后切入内容，并自己控制何时执行切入点自身的内容&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@AfterThrowing&lt;/code&gt;：用来处理当切入内容部分抛出异常之后的处理逻辑。&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;@Order&lt;/code&gt;：在切入点前的操作，按order的值由小到大执行；在切入点后的操作，按order的值由大到小执行。&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;实战应用&quot;&gt;实战应用&lt;/h3&gt;
+&lt;h4 id=&quot;一引入依赖&quot;&gt;一：引入依赖&lt;/h4&gt;
+&lt;p&gt;首先，我们需要新增引入aop的依赖，以及用于分析客户端信息的UserAgentUtils包，还有用于&lt;code&gt;@Slf4j&lt;/code&gt;打印日志的Lombok的包：&lt;/p&gt;
+&lt;pre class=&quot;xml&quot;&gt;
+&lt;code&gt;        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;spring-boot-starter-aop&amp;lt;/artifactId&amp;gt;
+        &amp;lt;/dependency&amp;gt;
+        &amp;lt;dependency&amp;gt;
+            &amp;lt;groupId&amp;gt;eu.bitwalker&amp;lt;/groupId&amp;gt;
+            &amp;lt;artifactId&amp;gt;UserAgentUtils&amp;lt;/artifactId&amp;gt;
+            &amp;lt;version&amp;gt;1.20&amp;lt;/version&amp;gt;
+        &amp;lt;/dependency&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;二定义一个responseaop切面类&quot;&gt;二：定义一个ResponseAop切面类&lt;/h4&gt;
+&lt;p&gt;在之前的统一返回值和异常处理中我们已经定义过这个类，这里是对其进行完善。这里我再把代码再写一下：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@Aspect
+@Order(5)
+@Component
+@Slf4j
+public class ResponseAop&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;三定义一个threadlocal变量&quot;&gt;三：定义一个ThreadLocal变量&lt;/h4&gt;
+&lt;p&gt;直接在这里定义基本类型会有同步问题，所以我们定义一个ThreadLocal对象来记录消耗的时间。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;ThreadLocal&amp;lt;Long&amp;gt; startTime = new ThreadLocal&amp;lt;&amp;gt;();&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;四定义切点&quot;&gt;四：定义切点&lt;/h4&gt;
+&lt;p&gt;这里需要注意的是切点的写法，一定要正确才能保证AOP生效！这里附上一些简单的写法，后续会单独开一章讲解execution表达式的书写。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;任意公共方法：&lt;br/&gt;&lt;code&gt;execution(public * *(..))&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;任何一个以“set”开始的方法的执行：&lt;br/&gt;&lt;code&gt;execution(* set*(..))&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Service接口的任意方法的执行：&lt;br/&gt;&lt;code&gt;execution(* com.xyz.service.Service.*(..))&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;定义在service包里的任意方法的执行：&lt;br/&gt;&lt;code&gt;execution(* com.xyz.service.*.*(..))&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;定义在service包和所有子包里的任意类的任意方法的执行：&lt;br/&gt;e&lt;code&gt;xecution(* com.xyz.service..*.*(..))&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;    /**
+     * 切点
+     */
+    @Pointcut(&quot;execution(public * indi.viyoung.viboot.*.controller..*(..))&quot;)
+    public void httpResponse() {
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;五在before中获取请求信息&quot;&gt;五：在@Before中获取请求信息&lt;/h4&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;@Before(&quot;httpResponse()&quot;)
+    public void doBefore(JoinPoint joinPoint){
+        //开始计时
+        startTime.set(System.currentTimeMillis());
+        ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        HttpServletRequest request = attributes.getRequest();
+        //打印请求的内容
+        UserAgent userAgent = UserAgent.parseUserAgentString(request.getHeader(&quot;User-Agent&quot;));//获取请求头中的User-Agent
+        log.info(&quot;接口路径：{}&quot; , request.getRequestURL().toString());
+        log.info(&quot;浏览器：{}&quot;, userAgent.getBrowser().toString());
+        log.info(&quot;浏览器版本：{}&quot;,userAgent.getBrowserVersion());
+        log.info(&quot;操作系统: {}&quot;, userAgent.getOperatingSystem().toString());
+        log.info(&quot;IP : {}&quot; , request.getRemoteAddr());
+        log.info(&quot;请求类型：{}&quot;, request.getMethod());
+        log.info(&quot;类方法 : &quot; + joinPoint.getSignature().getDeclaringTypeName() + &quot;.&quot; + joinPoint.getSignature().getName());
+        log.info(&quot;请求参数 : {} &quot; + Arrays.toString(joinPoint.getArgs()));
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;六在afterreturning中获取方法的返回值和执行时间&quot;&gt;六：在@AfterReturning中获取方法的返回值和执行时间&lt;/h4&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;    @AfterReturning(returning = &quot;ret&quot; , pointcut = &quot;httpResponse()&quot;)
+    public void doAfterReturning(Object ret){
+        //处理完请求后，返回内容
+        log.info(&quot;方法返回值：{}&quot; , ret);
+        log.info(&quot;方法执行时间：{}毫秒&quot;, (System.currentTimeMillis() - startTime.get()));
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;七测试结果&quot;&gt;七：测试结果&lt;/h4&gt;
+&lt;p&gt;下面，我们对一个接口进行访问：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;2019-02-21 21:03:31.358  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 接口路径：http://localhost:8090/users
+2019-02-21 21:03:31.359  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 浏览器：CHROME
+2019-02-21 21:03:31.359  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 浏览器版本：72.0.3626.109
+2019-02-21 21:03:31.360  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 操作系统: MAC_OS_X
+2019-02-21 21:03:31.360  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : IP : 0:0:0:0:0:0:0:1
+2019-02-21 21:03:31.360  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 请求类型：GET
+2019-02-21 21:03:31.360  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 类方法 : indi.viyoung.viboot.apilog.controller.UserController.findAll
+2019-02-21 21:03:31.360  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 请求参数 : {} []
+...
+2019-02-21 21:03:31.393  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 方法返回值：ReturnVO{code='2000', message='操作成功', data=[User(id=10000001, password=123456, userName=vi-young), User(id=10000002, password=123456, userName=vi-young), User(id=10000003, password=123123, userName=lxt), User(id=10000004, password=123456, userName=yangwei)]}
+2019-02-21 21:03:31.393  INFO 11788 --- [nio-8090-exec-5] indi.viyoung.viboot.aop.ResponseAop      : 方法执行时间：36毫秒&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;可以看出，我们已经获取到我们想要的信息~&lt;/p&gt;
+&lt;p&gt;在后面的应用实战中，我们会将这些信息保存到数据库中，并且使用一些数据分析工具进行分析。&lt;/p&gt;
+&lt;h3 id=&quot;活动预告&quot;&gt;活动预告&lt;/h3&gt;
+&lt;p&gt;本公号为了反馈广大读者对我的支持，特将在近期举办送书活动，&lt;strong&gt;无套路&lt;/strong&gt;，&lt;strong&gt;包邮&lt;/strong&gt;，扫码关注即可参与即将开始的抽奖活动，敬请期待。&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190222065015829.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ZpX3lvdW5nXzk1,size_16,color_FFFFFF,t_70&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190222064829854.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;您的推荐是对我最大的帮助！&lt;/strong&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 23:09:00 +0000</pubDate>
+<dc:creator>Vi的技术博客</dc:creator>
+<og:description>接口日志有啥用 在我们日常的开发过程中，我们可以通过接口日志去查看这个接口的一些详细信息。比如客户端的IP，客户端的类型，响应的时间，请求的类型，请求的接口方法等等，我们可以对这些数据进行统计分析，提</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/viyoung/p/10416230.html</dc:identifier>
+</item>
+<item>
+<title>Scss预处理器的使用总结 - fozero</title>
+<link>http://www.cnblogs.com/fozero/p/10416170.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/fozero/p/10416170.html</guid>
+<description>&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;变量 、嵌套、Mixin混合、function函数、插值&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;变量及文件导入&quot;&gt;变量及文件导入&lt;/h3&gt;
+&lt;p&gt;通过$定义变量&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;$white:#fff;
+$black:#000;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;变量引用&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.containner{
+    color:$black;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通常我们会单独创建一个局部scss文件来定义这些变量 例如 _varables.scss&lt;br/&gt;varables前面的下划线用来区分这是局部文件，不会生成对应的css文件，通过@import方式在其他文件中导入该文件（下划线可以省略）&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@import 'varables';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;嵌套&quot;&gt;嵌套&lt;/h3&gt;
+&lt;p&gt;例如我们有这样一个html结构&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;div class=&quot;containner&quot;&amp;gt;
+        &amp;lt;div class=&quot;banner&quot;&amp;gt;&amp;lt;/div&amp;gt;
+    &amp;lt;/div&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;使用嵌套语法可以写成：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.containner{
+    background: #eee;
+    color:$black;
+    .banner{
+        background: red;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;最后编译成css：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.containner {
+  background: #eee;
+  color: #000; }
+  .containner .banner {
+    background: red; }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;高级用法&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;amp;、&amp;gt;、+、~&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;使用&amp;amp;符合使得区分元素不以后代选择器的方式连接，例如链接使用到的hover效果&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;a{
+        color:red;
+        &amp;amp;:hover{
+            color:blue;
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;编译后&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.containner a:hover {
+      color: blue; }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;mixin混合&quot;&gt;mixin混合&lt;/h3&gt;
+&lt;p&gt;如果我们有多个地方使用到相同的样式，我们就可以将其写成一个mixin方法，然后在不同的地方去使用它&lt;/p&gt;
+&lt;p&gt;一般通过@mixin来定义一个函数，@include来引用&lt;/p&gt;
+&lt;p&gt;例如定义一个用于清除浮动的mixin方法&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt; @mixin clearfix() {
+  &amp;amp;::after {
+    display: block;
+    clear: both;
+    content: &quot;&quot;;
+  }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;我们就可以这样使用&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.list{
+        list-style: none;
+        @include clearfix();
+        .item{
+            float: left;
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;mixin方法传参&quot;&gt;mixin方法传参&lt;/h4&gt;
+&lt;p&gt;类似JavaScript函数我们可以传递参数&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@mixin colorlink($normal, $hover, $visited){
+    color: $normal;
+      &amp;amp;:hover { color: $hover; }
+      &amp;amp;:visited { color: $visited; }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;使用&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@include colorlink(blue,red,green);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;也可以使用这种方式，不用区分参数顺序&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@include colorlink(
+                $normal: blue,
+                  $visited: green,
+                  $hover: red
+            );&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;设置默认参数值&quot;&gt;设置默认参数值&lt;/h4&gt;
+&lt;p&gt;通过以下方式来这是默认参数值&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@mixin size($size:50px){
+    font-size: $size;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;调用的时候我们可以根据需求来决定是否传递参数&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.title{
+        // @include size();
+        @include size(20px);
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;fuction和mixin&quot;&gt;@fuction和@mixin&lt;/h3&gt;
+&lt;h4 id=&quot;区别&quot;&gt;区别：&lt;/h4&gt;
+&lt;ul&gt;&lt;li&gt;sass本身就有一些内置的函数，方便我们调用，如强大的color函数，还有darken、rgba、ie-hex-str、percentage、lighten、length、nth、unit、unitless等&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;其次就是它返回的是一个值，而不是一段css样式代码什么的&lt;/li&gt;
+&lt;/ul&gt;&lt;h4 id=&quot;内置函数&quot;&gt;内置函数&lt;/h4&gt;
+&lt;p&gt;1、rgba&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;rgba(blue, 0.2) =&amp;gt; rgba(0, 0, 255, 0.2)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;2、percentage&lt;/p&gt;
+&lt;p&gt;将一个没有单位的数字转成百分比形式&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;percentage(0.2) =&amp;gt; 20%&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;通过function来自定义函数&quot;&gt;通过@function来自定义函数&lt;/h4&gt;
+&lt;pre&gt;
+&lt;code&gt;// px转em 
+@function pxToEm($px, $base: 16) { 
+    @return ($px / $base) * 1em; 
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;调用&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;p{
+    font-size:pxToEm(20);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;解析&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;p{
+    font-size: 1.25em;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;其他&quot;&gt;其他&lt;/h3&gt;
+&lt;p&gt;1、插值语句 #{}&lt;br/&gt;通过 #{} 插值语句可以在选择器或属性名中使用变量：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;$name: foo;
+$attr: border;
+p.#{$name} {
+  #{$attr}-color: blue;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;生成&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;p.foo {
+  border-color: blue; }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;2、使用@for指令输出重复格式内容&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;@for $i from 1 through 28
+{
+    .bg-#{$i}
+    {
+      background: url(brand_day_review#{$i}.jpg) no-repeat center / 1560px auto;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;生成&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;.containner .bg-1 {
+    background: url(brand_day_review1.jpg) no-repeat center/1560px auto; }
+  .containner .bg-2 {
+    background: url(brand_day_review2.jpg) no-repeat center/1560px auto; }
+  .containner .bg-3 {
+    background: url(brand_day_review3.jpg) no-repeat center/1560px auto; }
+  .containner .bg-4 {
+    background: url(brand_day_review4.jpg) no-repeat center/1560px auto; }
+  .containner .bg-5 {
+    background: url(brand_day_review5.jpg) no-repeat center/1560px auto; }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;除了@for，其他的还有@if 、@each、@while等，这些都属于控制指令&lt;/p&gt;
+&lt;h3 id=&quot;参考阅读&quot;&gt;参考阅读&lt;/h3&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.sass.hk/&quot;&gt;sass中文网&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.w3cplus.com/preprocessor/organize-your-sass-files.html&quot;&gt;组织你的Sass文件&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.w3cplus.com/preprocessor/sass-mixins-function-placeholder.html&quot;&gt;sass揭秘之@mixin，%，@function&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.w3cplus.com/preprocessor/sass-px-to-rem-with-mixin-and-function.html&quot;&gt;Sass基础——Rem与Px的转换&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 17:45:00 +0000</pubDate>
+<dc:creator>fozero</dc:creator>
+<og:description>变量 、嵌套、Mixin混合、function函数、插值 变量及文件导入 通过$定义变量 变量引用 通常我们会单独创建一个局部scss文件来定义这些变量 例如 _varables.scss varab</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/fozero/p/10416170.html</dc:identifier>
+</item>
+<item>
+<title>还在为记不住Markdown语法犯愁？收藏这篇文章吧！ - Coding小僧</title>
+<link>http://www.cnblogs.com/tuike/p/10416106.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/tuike/p/10416106.html</guid>
+<description>&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;本文已同步发表到我的技术微信公众号，扫一扫文章底部的二维码或在微信搜索 “程序员驿站”即可关注，每天都会更新优质技术文章。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;最近在用Markdown记录生活，发现有些语法总记不住，特此写下这篇文字，方便自己查阅。如果有和我情况一样的小伙伴，欢迎查阅或收藏这篇文章！讲解顺序和官方一致！&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691081cc00bee14?w=534&amp;amp;h=381&amp;amp;f=png&amp;amp;s=22588&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;概述&quot;&gt;概述&lt;/h2&gt;
+&lt;blockquote readability=&quot;4.3862068965517&quot;&gt;
+&lt;p&gt;本篇文章基于：&lt;a href=&quot;https://www.appinn.com/markdown/&quot;&gt;Markdown 语法说明 (简体中文版)&lt;/a&gt; 的说明和例子实践之后所写，文章所用文字多摘录于官方文档。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;文中描述文字中用到的HTML标签均在方括号&quot;&amp;lt;&amp;gt;&quot;中字母前加了空格，防止被Markdown编译器识别，如 &amp;lt; div&amp;gt;。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;宗旨&quot;&gt;宗旨&lt;/h3&gt;
+&lt;p&gt;Markdown 的目标是实现「易读易写」。&lt;/p&gt;
+&lt;p&gt;可读性，无论如何，都是最重要的。一份使用Markdown格式撰写的文件应该可以直接以纯文本发布，并且看起来不会像是由许多标签或是格式指令所构成。Markdown语法受到一些既有text-to-HTML格式的影响，包括 Setext、atx、Textile、reStructuredText、Grutatext和EtText，而最大灵感来源其实是纯文本电子邮件的格式。&lt;br/&gt;总之， Markdown的语法全由一些符号所组成，这些符号经过精挑细选，其作用一目了然。比如：在文字两旁加上星号，看起来就像*强调*。Markdown的列表看起来，嗯，就是列表。Markdown的区块引用看起来就真的像是引用一段文字，就像你曾在电子邮件中见过的那样.&lt;/p&gt;
+&lt;p&gt;Markdown 不是想要取代HTML，甚至也没有要和它相近，它的语法种类很少，只对应 HTML 标记的一小部分。Markdown的构想不是要使得HTML文档更容易书写。在我看来， HTML 已经很容易写了。Markdown的理念是，能让文档更容易读、写和随意改。HTML 是一种发布的格式，Markdown是一种书写的格式。就这样，Markdown 的格式语法只涵盖纯文本可以涵盖的范围。&lt;/p&gt;
+&lt;p&gt;不在 Markdown 涵盖范围之内的标签，都可以直接在文档里面用HTML撰写。不需要额外标注这是 HTML 或是 Markdown；只要直接加标签就可以了。&lt;/p&gt;
+&lt;p&gt;要制约的只有一些 HTML区块元素――比如&amp;lt; div&amp;gt;、&amp;lt; table&amp;gt;、&amp;lt; pre&amp;gt;、&amp;lt; p&amp;gt;等标签，必须在前后加上空行与其它内容区隔开，还要求它们的开始标签与结尾标签不能用制表符或空格来缩进。Markdown 的生成器有足够智能，不会在 HTML 区块标签外加上不必要的 &amp;lt; p&amp;gt; 标签。&lt;/p&gt;
+&lt;p&gt;例子如下，在 Markdown 文件里加上一段 HTML 表格：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691087f47cf5884?w=606&amp;amp;h=304&amp;amp;f=png&amp;amp;s=71051&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;对应效果：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/169108872f478ff7?w=446&amp;amp;h=248&amp;amp;f=png&amp;amp;s=45189&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;请注意，在 HTML 区块标签间的 Markdown 格式语法将不会被处理。比如，你在 HTML 区块内使用 Markdown 样式的*强调*会没有效果。&lt;/p&gt;
+&lt;p&gt;HTML 的区段（行内）标签如 &amp;lt; span&amp;gt;、&amp;lt; cite&amp;gt;、&amp;lt; del&amp;gt; 可以在 Markdown 的段落、列表或是标题里随意使用。依照个人习惯，甚至可以不用 Markdown 格式，而直接采用 HTML 标签来格式化。举例说明：如果比较喜欢 HTML 的 &amp;lt; a&amp;gt; 或 &amp;lt; img&amp;gt; 标签，可以直接使用这些标签，而不用 Markdown 提供的链接或是图像标签语法。&lt;/p&gt;
+&lt;p&gt;和处在 HTML 区块标签间不同，Markdown 语法在 HTML 区段标签间是有效的。&lt;/p&gt;
+&lt;h3 id=&quot;特殊字符自动转换&quot;&gt;特殊字符自动转换&lt;/h3&gt;
+&lt;p&gt;在 HTML 文件中，有两个字符需要特殊处理： &amp;lt; 和 &amp;amp; 。 &amp;lt; 符号用于起始标签，&amp;amp; 符号则用于标记 HTML 实体，如果你只是想要显示这些字符的原型，你必须要使用实体的形式，像是 &amp;amp;lt; 和 &amp;amp;amp;。&lt;/p&gt;
+&lt;p&gt;&amp;amp; 字符尤其让网络文档编写者受折磨，如果你要打「AT&amp;amp;T」 ，你必须要写成「AT&amp;amp;amp;T」。而网址中的 &amp;amp; 字符也要转换。比如你要链接到：&lt;br/&gt;&lt;code&gt;http://images.google.com/images?num=30&amp;amp;q=larry+bird&lt;/code&gt;&lt;br/&gt;你必须要把网址转换写为：&lt;br/&gt;&lt;code&gt;http://images.google.com/images?num=30&amp;amp;amp;q=larry+bird&lt;/code&gt;&lt;br/&gt;才能放到链接标签的 href 属性里。不用说也知道这很容易忽略，这也可能是 HTML 标准检验所检查到的错误中，数量最多的。&lt;/p&gt;
+&lt;p&gt;Markdown 让你可以自然地书写字符，需要转换的由它来处理好了。如果你使用的 &amp;amp; 字符是 HTML 字符实体的一部分，它会保留原状，否则它会被转换成 &amp;amp;amp ; 。&lt;/p&gt;
+&lt;p&gt;所以你如果要在文档中插入一个版权符号©，你可以这样写：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;amp;copy;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Markdown 会保留它不动。而若你写：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;AT&amp;amp;T&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Markdown 就会将它转为：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;AT&amp;amp;amp;T&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;类似的状况也会发生在 &amp;lt; 符号上，因为 Markdown 允许 兼容 HTML ，如果你是把 &amp;lt; 符号作为 HTML 标签的定界符使用，那 Markdown 也不会对它做任何转换，但是如果你写：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;4 &amp;lt; 5&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Markdown 将会把它转换为：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;4 &amp;amp;lt; 5&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;不过需要注意的是，code 范围内，不论是行内还是区块， &amp;lt; 和 &amp;amp; 两个符号都一定会被转换成 HTML 实体，这项特性让你可以很容易地用 Markdown 写 HTML code （和 HTML 相对而言， HTML 语法中，你要把所有的 &amp;lt; 和 &amp;amp; 都转换为 HTML 实体，才能在 HTML 文件里面写出 HTML code。）&lt;/p&gt;
+&lt;h2 id=&quot;区块元素&quot;&gt;区块元素&lt;/h2&gt;
+&lt;h3 id=&quot;段落和换行&quot;&gt;段落和换行&lt;/h3&gt;
+&lt;p&gt;有一个以上的空行（空行的定义是显示上看起来像是空的，便会被视为空行。比方说，若某一行只包含空格和制表符，则该行也会被视为空行）。普通段落不该用空格或制表符来缩进。&lt;/p&gt;
+&lt;p&gt;「由一个或多个连续的文本行组成」这句话其实暗示了 Markdown 允许段落内的强迫换行（插入换行符），这个特性和其他大部分的 text-to-HTML 格式不一样（包括 Movable Type 的「Convert Line Breaks」选项），其它的格式会把每个换行符都转成 &amp;lt; br /&amp;gt; 标签。&lt;/p&gt;
+&lt;p&gt;如果你确实想要依赖 Markdown 来插入 &amp;lt; br /&amp;gt; 标签的话，在插入处先按入两个以上的空格然后回车。&lt;/p&gt;
+&lt;p&gt;的确，需要多费点事（多加空格）来产生 &amp;lt; br /&amp;gt; ，但是简单地「每个换行都转换为 &amp;lt; br /&amp;gt;」的方法在 Markdown 中并不适合， Markdown 中 email 式的 区块引用 和多段落的 列表 在使用换行来排版的时候，不但更好用，还更方便阅读。&lt;/p&gt;
+&lt;h3 id=&quot;标题&quot;&gt;标题&lt;/h3&gt;
+&lt;p&gt;Markdown 支持两种标题的语法，类 Setext 和类 atx 形式。&lt;/p&gt;
+&lt;p&gt;类 Setext 形式是用底线的形式，利用 = （最高阶标题）和 - （第二阶标题），例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;This is an H1
+=============
+This is an H2
+-------------&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910918ff6baf74?w=596&amp;amp;h=294&amp;amp;f=png&amp;amp;s=53649&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;任何数量的 = 和 - 都可以有效果。&lt;/p&gt;
+&lt;p&gt;类 Atx 形式则是在行首插入 1 到 6 个 # ，对应到标题 1 到 6 阶，例如：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;# 这是 H1
+
+## 这是 H2
+
+###### 这是 H6&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/169109364f5ed0c7?w=656&amp;amp;h=362&amp;amp;f=png&amp;amp;s=61951&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;你可以选择性地「闭合」类 atx 样式的标题，这纯粹只是美观用的，若是觉得这样看起来比较舒适，你就可以在行尾加上 #，而行尾的 # 数量也不用和开头一样（行首的井字符数量决定标题的阶数）：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;# 这是 H1 #
+
+## 这是 H2 ##
+
+### 这是 H3 ######
+---&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691094af1dcfca4?w=664&amp;amp;h=416&amp;amp;f=png&amp;amp;s=71404&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;区块引用-blockquotes&quot;&gt;区块引用 Blockquotes&lt;/h3&gt;
+&lt;p&gt;Markdown 标记区块引用是使用类似 email 中用 &amp;gt; 的引用方式。如果你还熟悉在 email 信件中的引言部分，你就知道怎么在 Markdown 文件中建立一个区块引用，那会看起来像是你自己先断好行，然后在每行的最前面加上 &amp;gt; ：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt; This is a blockquote with two paragraphs. Lorem ipsum dolor sit amet,
+&amp;gt; consectetuer adipiscing elit. Aliquam hendrerit mi posuere lectus.
+&amp;gt; Vestibulum enim wisi, viverra nec, fringilla in, laoreet vitae, risus.
+&amp;gt; 
+&amp;gt; Donec sit amet nisl. Aliquam semper ipsum sit amet velit. Suspendisse
+&amp;gt; id sem consectetuer libero luctus adipiscing.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691095c2881c4fc?w=872&amp;amp;h=336&amp;amp;f=png&amp;amp;s=162885&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;Markdown 也允许你偷懒只在整个段落的第一行最前面加上 &amp;gt; ：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt; This is a blockquote with two paragraphs. Lorem ipsum dolor sit amet,
+consectetuer adipiscing elit. Aliquam hendrerit mi posuere lectus.
+Vestibulum enim wisi, viverra nec, fringilla in, laoreet vitae, risus.
+
+&amp;gt; Donec sit amet nisl. Aliquam semper ipsum sit amet velit. Suspendisse
+id sem consectetuer libero luctus adipiscing.
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691096d92b34425?w=882&amp;amp;h=336&amp;amp;f=png&amp;amp;s=162689&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;区块引用可以嵌套（例如：引用内的引用），只要根据层次加上不同数量的 &amp;gt; ：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;gt; ## 这是一个标题。
+&amp;gt; 
+&amp;gt; 1.   这是第一行列表项。
+&amp;gt; 2.   这是第二行列表项。
+&amp;gt; 
+&amp;gt; 给出一些例子代码：
+&amp;gt; 
+&amp;gt;     return shell_exec(&quot;echo $input | $markdown_script&quot;);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691097f1f0d4999?w=922&amp;amp;h=436&amp;amp;f=png&amp;amp;s=128971&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;任何像样的文本编辑器都能轻松地建立 email 型的引用。例如在 BBEdit 中，你可以选取文字后然后从选单中选择增加引用阶层。&lt;/p&gt;
+&lt;h3 id=&quot;列表&quot;&gt;列表&lt;/h3&gt;
+&lt;p&gt;Markdown 支持有序列表和无序列表。&lt;br/&gt;无序列表使用星号、加号或是减号作为列表标记：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   Red
+*   Green
+*   Blue
+
+等同于：
++   Red
++   Green
++   Blue
+
+也等同于：
+-   Red
+-   Green
+-   Blue&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/1691099badce6b58?w=828&amp;amp;h=682&amp;amp;f=png&amp;amp;s=112716&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;有序列表则使用数字接着一个英文句点：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;1.  Bird
+2.  McHale
+3.  Parish &lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/169109a85bfcf9b3?w=764&amp;amp;h=190&amp;amp;f=png&amp;amp;s=32591&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;很重要的一点是，你在列表标记上使用的数字并不会影响输出的 HTML 结果，上面的列表所产生的 HTML 标记为：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;&amp;lt;ol&amp;gt;
+&amp;lt;li&amp;gt;Bird&amp;lt;/li&amp;gt;
+&amp;lt;li&amp;gt;McHale&amp;lt;/li&amp;gt;
+&amp;lt;li&amp;gt;Parish&amp;lt;/li&amp;gt;
+&amp;lt;/ol&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/169109a85bfcf9b3?w=764&amp;amp;h=190&amp;amp;f=png&amp;amp;s=32591&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果你的列表标记写成：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a06b910f328?w=696&amp;amp;h=384&amp;amp;f=png&amp;amp;s=68837&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/169109ff4c94469b?w=794&amp;amp;h=426&amp;amp;f=png&amp;amp;s=76231&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;你都会得到完全相同的 HTML 输出。重点在于，你可以让 Markdown 文件的列表数字和输出的结果相同，或是你懒一点，你可以完全不用在意数字的正确性。&lt;/p&gt;
+&lt;p&gt;如果你使用懒惰的写法，建议第一个项目最好还是从 1. 开始，因为 Markdown 未来可能会支持有序列表的 start 属性。&lt;/p&gt;
+&lt;p&gt;列表项目标记通常是放在最左边，但是其实也可以缩进，最多 3 个空格，项目标记后面则一定要接着至少一个空格或制表符。&lt;/p&gt;
+&lt;p&gt;要让列表看起来更漂亮，你可以把内容用固定的缩进整理好：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   Lorem ipsum dolor sit amet, consectetuer adipiscing elit.
+    Aliquam hendrerit mi posuere lectus. Vestibulum enim wisi,
+    viverra nec, fringilla in, laoreet vitae, risus.
+*   Donec sit amet nisl. Aliquam semper ipsum sit amet velit.
+    Suspendisse id sem consectetuer libero luctus adipiscing.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a2020acf71d?w=896&amp;amp;h=296&amp;amp;f=png&amp;amp;s=141383&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;但是如果你懒，那也行：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   Lorem ipsum dolor sit amet, consectetuer adipiscing elit.
+Aliquam hendrerit mi posuere lectus. Vestibulum enim wisi,
+viverra nec, fringilla in, laoreet vitae, risus.
+*   Donec sit amet nisl. Aliquam semper ipsum sit amet velit.
+Suspendisse id sem consectetuer libero luctus adipiscing&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a2c12bd8e46?w=912&amp;amp;h=262&amp;amp;f=png&amp;amp;s=136401&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果列表项目间用空行分开，在输出 HTML 时 Markdown 就会将项目内容用 &amp;lt; p&amp;gt; 标签包起来，举例来说：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a3aeb9334f9?w=836&amp;amp;h=854&amp;amp;f=png&amp;amp;s=178387&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a41065e640a?w=876&amp;amp;h=780&amp;amp;f=png&amp;amp;s=139683&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;列表项目可以包含多个段落，每个项目下的段落都必须缩进 4 个空格或是 1 个制表符：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;1.  This is a list item with two paragraphs. Lorem ipsum dolor
+    sit amet, consectetuer adipiscing elit. Aliquam hendrerit
+    mi posuere lectus.
+
+    Vestibulum enim wisi, viverra nec, fringilla in, laoreet
+    vitae, risus. Donec sit amet nisl. Aliquam semper ipsum
+    sit amet velit.
+
+2.  Suspendisse id sem consectetuer libero luctus adipiscing.
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a5235a11dd1?w=898&amp;amp;h=392&amp;amp;f=png&amp;amp;s=167932&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果你每行都有缩进，看起来会看好很多，当然，再次地，如果你很懒惰，Markdown 也允许：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   This is a list item with two paragraphs.
+
+    This is the second paragraph in the list item. You're
+only required to indent the first line. Lorem ipsum dolor
+sit amet, consectetuer adipiscing elit.
+
+*   Another item in the same list.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a67e341ea87?w=890&amp;amp;h=328&amp;amp;f=png&amp;amp;s=123832&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果要在列表项目内放进引用，那 &amp;gt; 就需要缩进:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   A list item with a blockquote:
+
+    &amp;gt; This is a blockquote
+    &amp;gt; inside a list item.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a774e7bbd35?w=688&amp;amp;h=188&amp;amp;f=png&amp;amp;s=48185&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果要放代码区块的话，该区块就需要缩进两次，也就是 8 个空格或是 2 个制表符：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;*   一列表项包含一个列表区块：
+
+        &amp;lt;代码写在这&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a86cabd6311?w=904&amp;amp;h=232&amp;amp;f=png&amp;amp;s=52903&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;当然，项目列表很可能会不小心产生，像是下面这样的写法：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;1986. What a great season.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910a991679fc89?w=390&amp;amp;h=96&amp;amp;f=png&amp;amp;s=18829&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;换句话说，也就是在行首出现数字-句点-空白，要避免这样的状况，你可以在句点前面加上反斜杠。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;1986\. What a great season.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910aa8b5780f7f?w=474&amp;amp;h=96&amp;amp;f=png&amp;amp;s=20218&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;代码区块&quot;&gt;代码区块&lt;/h3&gt;
+&lt;p&gt;和程序相关的写作或是标签语言原始码通常会有已经排版好的代码区块，通常这些区块我们并不希望它以一般段落文件的方式去排版，而是照原来的样子显示，Markdown 会用 &amp;lt; pre&amp;gt; 和 &amp;lt; code&amp;gt; 标签来把代码区块包起来。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910acb34caebb8?w=634&amp;amp;h=438&amp;amp;f=png&amp;amp;s=112913&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910ad1049d99c1?w=916&amp;amp;h=494&amp;amp;f=png&amp;amp;s=115568&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;这个每行一阶的缩进（4 个空格或是 1 个制表符），都会被移除，例如：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910ad9da9ae278?w=790&amp;amp;h=582&amp;amp;f=png&amp;amp;s=154627&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910ae15374480f?w=928&amp;amp;h=646&amp;amp;f=png&amp;amp;s=158231&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;一个代码区块会一直持续到没有缩进的那一行（或是文件结尾）。&lt;/p&gt;
+&lt;p&gt;在代码区块里面， &amp;amp; 、 &amp;lt; 和 &amp;gt; 会自动转成 HTML 实体，这样的方式让你非常容易使用 Markdown 插入范例用的 HTML 原始码，只需要复制贴上，再加上缩进就可以了，剩下的 Markdown 都会帮你处理，例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910aed0d1953af?w=776&amp;amp;h=436&amp;amp;f=png&amp;amp;s=133569&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910af2dcfa3561?w=930&amp;amp;h=486&amp;amp;f=png&amp;amp;s=125858&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;代码区块中，一般的 Markdown 语法不会被转换，像是星号便只是星号，这表示你可以很容易地以 Markdown 语法撰写 Markdown 语法相关的文件。&lt;/p&gt;
+&lt;h3 id=&quot;分隔线&quot;&gt;分隔线&lt;/h3&gt;
+&lt;p&gt;你可以在一行中用三个以上的星号、减号、底线来建立一个分隔线，行内不能有其他东西。你也可以在星号或是减号中间插入空格。下面每种写法都可以建立分隔线：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910afbfdee8a40?w=822&amp;amp;h=412&amp;amp;f=png&amp;amp;s=53809&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b009c4a0a32?w=928&amp;amp;h=290&amp;amp;f=png&amp;amp;s=35486&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;区段元素&quot;&gt;区段元素&lt;/h2&gt;
+&lt;h3 id=&quot;链接&quot;&gt;链接&lt;/h3&gt;
+&lt;p&gt;Markdown 支持两种形式的链接语法： 行内式和参考式两种形式。&lt;/p&gt;
+&lt;p&gt;不管是哪一种，链接文字都是用 [方括号] 来标记。&lt;/p&gt;
+&lt;p&gt;要建立一个行内式的链接，只要在方块括号后面紧接着圆括号并插入网址链接即可，如果你还想要加上链接的 title 文字，只要在网址后面，用双引号把 title 文字包起来即可，例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b0dc868ded4?w=830&amp;amp;h=618&amp;amp;f=png&amp;amp;s=205639&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b1362fa624c?w=690&amp;amp;h=398&amp;amp;f=png&amp;amp;s=92494&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果你是要链接到同样主机的资源，你可以使用相对路径：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b1fa6020b1d?w=728&amp;amp;h=92&amp;amp;f=png&amp;amp;s=29973&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b279a6a99ac?w=630&amp;amp;h=88&amp;amp;f=png&amp;amp;s=22732&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;参考式的链接是在链接文字的括号后面再接上另一个方括号，而在第二个方括号里面要填入用以辨识链接的标记：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b3494c7229c?w=830&amp;amp;h=432&amp;amp;f=png&amp;amp;s=171618&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b52bc0d3af7?w=894&amp;amp;h=318&amp;amp;f=png&amp;amp;s=128546&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;链接内容定义的形式为：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;方括号（前面可以选择性地加上至多三个空格来缩进），里面输入链接文字&lt;/li&gt;
+&lt;li&gt;接着一个冒号&lt;/li&gt;
+&lt;li&gt;接着一个以上的空格或制表符&lt;/li&gt;
+&lt;li&gt;接着链接的网址&lt;/li&gt;
+&lt;li&gt;选择性地接着 title 内容，可以用单引号、双引号或是括弧包着&lt;br/&gt;下面这三种链接的定义都是相同：&lt;/li&gt;
+&lt;/ul&gt;&lt;pre&gt;
+&lt;code&gt;[foo]: http://example.com/  &quot;Optional Title Here&quot;  
+[foo]: http://example.com/  'Optional Title Here'  
+[foo]: http://example.com/  (Optional Title Here)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b6d3f0866bf?w=688&amp;amp;h=166&amp;amp;f=png&amp;amp;s=78091&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;请注意：有一个已知的问题是 Markdown.pl 1.0.1 会忽略单引号包起来的链接 title。&lt;/p&gt;
+&lt;p&gt;链接网址也可以用方括号包起来：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[id]: &amp;lt;http://example.com/&amp;gt;  &quot;Optional Title Here&quot; &lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b78fbadf92b?w=662&amp;amp;h=76&amp;amp;f=png&amp;amp;s=28805&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;你也可以把 title 属性放到下一行，也可以加一些缩进，若网址太长的话，这样会比较好看：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[id]: http://example.com/longish/path/to/resource/here
+    &quot;Optional Title Here&quot;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910b8c4eef85da?w=886&amp;amp;h=116&amp;amp;f=png&amp;amp;s=48158&quot;/&gt;&lt;br/&gt;网址定义只有在产生链接的时候用到，并不会直接出现在文件之中。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;链接辨别标签可以有字母、数字、空白和标点符号，但是并不区分大小写，因此下面两个链接是一样的：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;[link text][a]   
+[link text][A] &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;隐式链接标记功能让你可以省略指定链接标记，这种情形下，链接标记会视为等同于链接文字，要用隐式链接标记只要在链接文字后面加上一个空的方括号，如果你要让 &quot;Google&quot; 链接到 google.com，你可以简化成：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910ba53a3c1c91?w=584&amp;amp;h=82&amp;amp;f=png&amp;amp;s=23104&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910baa03af6b6e?w=410&amp;amp;h=64&amp;amp;f=png&amp;amp;s=17491&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;由于链接文字可能包含空白，所以这种简化型的标记内也许包含多个单词：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bb51f0c4797?w=820&amp;amp;h=238&amp;amp;f=png&amp;amp;s=80965&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bb8d8b7faac?w=590&amp;amp;h=98&amp;amp;f=png&amp;amp;s=26156&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;链接的定义可以放在文件中的任何一个地方，我比较偏好直接放在链接出现段落的后面，你也可以把它放在文件最后面，就像是注解一样。&lt;/p&gt;
+&lt;p&gt;下面是一个参考式链接的范例：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bc9df1e544f?w=844&amp;amp;h=1520&amp;amp;f=png&amp;amp;s=644114&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;运行效果图：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bd288716cdf?w=884&amp;amp;h=650&amp;amp;f=png&amp;amp;s=264661&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;参考式的链接其实重点不在于它比较好写，而是它比较好读，比较一下上面的范例，使用参考式的文章本身只有 81 个字符，但是用行内形式的却会增加到 176 个字元，如果是用纯 HTML 格式来写，会有 234 个字元，在 HTML 格式中，标签比文本还要多。&lt;/p&gt;
+&lt;p&gt;使用 Markdown 的参考式链接，可以让文件更像是浏览器最后产生的结果，让你可以把一些标记相关的元数据移到段落文字之外，你就可以增加链接而不让文章的阅读感觉被打断。&lt;/p&gt;
+&lt;h3 id=&quot;强调&quot;&gt;强调&lt;/h3&gt;
+&lt;p&gt;Markdown 使用星号（&lt;em&gt;）和底线（&lt;/em&gt;）作为标记强调字词的符号，被 * 或 包围的字词会被转成用 &amp;lt; em&amp;gt; 标签包围，用两个 或 _ 包起来的话，则会被转成 &amp;lt; strong&amp;gt;，例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bde1aec3f8d?w=786&amp;amp;h=698&amp;amp;f=png&amp;amp;s=185060&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910be46b3ad81e?w=644&amp;amp;h=674&amp;amp;f=png&amp;amp;s=141417&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;你可以随便用你喜欢的样式，唯一的限制是，你用什么符号开启标签，就要用什么符号结束。&lt;/p&gt;
+&lt;p&gt;强调也可以直接插在文字中间：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;un*frigging*believable&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bf13ab24738?w=472&amp;amp;h=86&amp;amp;f=png&amp;amp;s=17441&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;但是如果你的 * 和 _ 两边都有空白的话，它们就只会被当成普通的符号。&lt;/p&gt;
+&lt;p&gt;如果要在文字前后直接插入普通的星号或底线，你可以用反斜线：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;\*this text is surrounded by literal asterisks\*&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910bff23ade5ea?w=672&amp;amp;h=90&amp;amp;f=png&amp;amp;s=26816&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;代码&quot;&gt;代码&lt;/h3&gt;
+&lt;p&gt;如果要标记一小段行内代码，你可以用反引号把它包起来（`），例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c073e18019b?w=828&amp;amp;h=236&amp;amp;f=png&amp;amp;s=66217&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果图：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c0b5c339f61?w=478&amp;amp;h=232&amp;amp;f=png&amp;amp;s=47362&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;如果要在代码区段内插入反引号，你可以用多个反引号来开启和结束代码区段：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c1f8f530a1f?w=786&amp;amp;h=292&amp;amp;f=png&amp;amp;s=85293&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果为：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c221609256d?w=664&amp;amp;h=244&amp;amp;f=png&amp;amp;s=60780&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;代码区段的起始和结束端都可以放入一个空白，起始端后面一个，结束端前面一个，这样你就可以在区段的一开始就插入反引号：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c2b89c37e3e?w=824&amp;amp;h=496&amp;amp;f=png&amp;amp;s=156768&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果图：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c31aac2a218?w=788&amp;amp;h=386&amp;amp;f=png&amp;amp;s=120242&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;在代码区段内，&amp;amp; 和方括号都会被自动地转成 HTML 实体，这使得插入 HTML 原始码变得很容易，Markdown 会把下面这段：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c42ae419f86?w=802&amp;amp;h=506&amp;amp;f=png&amp;amp;s=159961&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果图：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/21/16910c46c950aec4?w=870&amp;amp;h=384&amp;amp;f=png&amp;amp;s=109420&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;图片&quot;&gt;图片&lt;/h3&gt;
+&lt;p&gt;很明显地，要在纯文字应用中设计一个「自然」的语法来插入图片是有一定难度的。&lt;/p&gt;
+&lt;p&gt;Markdown 使用一种和链接很相似的语法来标记图片，同样也允许两种样式： 行内式和参考式。&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910c91ee6b0b76?w=852&amp;amp;h=462&amp;amp;f=png&amp;amp;s=324002&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910c97daf82044?w=822&amp;amp;h=964&amp;amp;f=png&amp;amp;s=591247&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;详细叙述如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;一个惊叹号 !&lt;/li&gt;
+&lt;li&gt;接着一个方括号，里面放上图片的替代文字&lt;/li&gt;
+&lt;li&gt;接着一个普通括号，里面放上图片的网址，最后还可以用引号包住并加上 选择性的 'title' 文字。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;详细叙述如下：&lt;/p&gt;
+&lt;p&gt;一个惊叹号 !&lt;br/&gt;接着一个方括号，里面放上图片的替代文字&lt;br/&gt;接着一个普通括号，里面放上图片的网址，最后还可以用引号包住并加上 选择性的 'title' 文字。&lt;/p&gt;
+&lt;p&gt;参考式的图片语法则长得像这样：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910ca7928338c2?w=844&amp;amp;h=412&amp;amp;f=png&amp;amp;s=163366&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;其它&quot;&gt;其它&lt;/h2&gt;
+&lt;h3 id=&quot;自动链接&quot;&gt;自动链接&lt;/h3&gt;
+&lt;p&gt;Markdown 支持以比较简短的自动链接形式来处理网址和电子邮件信箱，只要是用方括号包起来， Markdown 就会自动把它转成链接。一般网址的链接文字就和链接地址一样，例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910cafff125cab?w=830&amp;amp;h=250&amp;amp;f=png&amp;amp;s=75857&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910cb550d6941f?w=594&amp;amp;h=252&amp;amp;f=png&amp;amp;s=52449&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;邮址的自动链接也很类似，只是 Markdown 会先做一个编码转换的过程，把文字字符转成 16 进位码的 HTML 实体，这样的格式可以糊弄一些不好的邮址收集机器人，例如：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910cc1cf97a1df?w=844&amp;amp;h=460&amp;amp;f=png&amp;amp;s=234870&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;效果：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910cc673d2cd4c?w=578&amp;amp;h=244&amp;amp;f=png&amp;amp;s=54399&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;&lt;code&gt;在浏览器里面，这段字串（其实是 &amp;lt;a href=&quot;mailto:address@example.com&quot;&amp;gt;address@example.com&amp;lt;/a&amp;gt;）会变成一个可以点击的「address@example.com」链接。&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;（这种作法虽然可以糊弄不少的机器人，但并不能全部挡下来，不过总比什么都不做好些。不管怎样，公开你的信箱终究会引来广告信件的。）&lt;/p&gt;
+&lt;h3 id=&quot;反斜杠&quot;&gt;反斜杠&lt;/h3&gt;
+&lt;p&gt;Markdown 可以利用反斜杠来插入一些在语法中有其它意义的符号，例如：如果你想要用星号加在文字旁边的方式来做出强调效果（但不用 &amp;lt; em&amp;gt; 标签），你可以在星号的前面加上反斜杠：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/22/16910ce80bc88cf7?w=834&amp;amp;h=708&amp;amp;f=png&amp;amp;s=177100&quot;/&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;关注技术公众号&quot;程序员驿站&quot;，微信搜索“程序员驿站”，或者微信扫一扫下方二维码即可关注：&lt;br/&gt;&lt;img src=&quot;https://user-gold-cdn.xitu.io/2019/2/20/16908e42fad91e20?w=258&amp;amp;h=258&amp;amp;f=jpeg&amp;amp;s=27043&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 16:27:00 +0000</pubDate>
+<dc:creator>Coding小僧</dc:creator>
+<og:description>本文已同步发表到我的技术微信公众号，扫一扫文章底部的二维码或在微信搜索 “程序员驿站”即可关注，每天都会更新优质技术文章。 最近在用Markdown记录生活，发现有些语法总记不住，特此写下这篇文字，方</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/tuike/p/10416106.html</dc:identifier>
+</item>
+<item>
+<title>StackExchange.Redis中文使用文档 - WeihanLi</title>
+<link>http://www.cnblogs.com/weihanli/p/StackExchange-Redis-docs-cn.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/weihanli/p/StackExchange-Redis-docs-cn.html</guid>
+<description>&lt;h2 id=&quot;intro&quot;&gt;Intro&lt;/h2&gt;
+&lt;p&gt;最近想深入学习一些 Redis 相关的东西。于是看了看官方的项目 &lt;a href=&quot;https://github.com/StackExchange/StackExchange.Redis&quot;&gt;StackExchange&lt;/a&gt;，发现里面有一份文档，于是打算翻译成中文，方便大家学习参考，如果有什么翻译不准确的地方，欢迎大家指出。&lt;/p&gt;
+&lt;p&gt;StackExchange.Redis 是 Stackoverflow 开发的 Redis C# 客户端，是目前.net应用使用的最多的 redis 客户端，性能优越。&lt;/p&gt;
+
+&lt;h2 id=&quot;目录&quot;&gt;目录&lt;/h2&gt;
+&lt;h2 id=&quot;more&quot;&gt;More&lt;/h2&gt;
+&lt;p&gt;作者水平有限，若有疏漏或错误还望提醒，十分感谢。&lt;/p&gt;
+&lt;p&gt;您可以在这里 &lt;a href=&quot;https://github.com/WeihanLi/StackExchange.Redis-docs-cn/issues/new&quot;&gt;提出问题&lt;/a&gt; 。&lt;/p&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 16:10:00 +0000</pubDate>
+<dc:creator>WeihanLi</dc:creator>
+<og:description>StackExchange.Redis中文使用文档 Intro 最近想深入学习一些 Redis 相关的东西。于是看了看官方的项目 'StackExchange' ，发现里面有一份文档，于是打算翻译成中</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/weihanli/p/StackExchange-Redis-docs-cn.html</dc:identifier>
+</item>
+<item>
+<title>【设计模式+原型理解】第二章：基于构造函数扩展出来的原型模式 - 彭胜光</title>
+<link>http://www.cnblogs.com/pengshengguang/p/10416044.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/pengshengguang/p/10416044.html</guid>
+<description>&lt;p&gt;       在第一章的时候，说过了单例模式、工厂模式、构造函数模式，你还记得构造模式是怎么样的吗？&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;39&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+function CreateJsPerson(name, age) {
+        this.name = name;
+        this.age = age;
+        this.writeJs = function() {
+                console.log(&quot;my name is &quot; + this.name + &quot;, i can write js.&quot;);
+        }
+}
+var p1 = new CreateJsPerson(&quot;p1&quot;, 18);
+var p2 = new CreateJsPerson(&quot;p2&quot;, 17);
+p1.writeJs();
+p2.writeJs();
+console.log(p1.writeJs() === p2.writeJs()); //-&amp;gt; false
+// 构造函数模式中拥有了类和实例的概念，并且实例和实例之间是相互独立开的
+// -&amp;gt; 叫做实例识别
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;       上面的就是构造函数模式，你知道，为什么p1、p2的writeJs()方法为什么不相等吗？这是因为正如上面所说的，两个实例是相互独立的，也就是说，两个实例的属性都是各自私有属性。&lt;/p&gt;
+&lt;p&gt;   -&amp;gt; 问题来了，两个实例里面的属性都是私有的以外，是不是还得有公有的部分？&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;一、【&lt;span&gt;基于构造函数的原型模式&lt;/span&gt;】&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;        &lt;strong&gt;使用基于构造函数模式的原型模式，能够实现把writeJs()方法&lt;span&gt;变成公有的&lt;/span&gt;&lt;/strong&gt;，代码如下：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;40&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+function CreateJsPerson(name, age) {
+        this.name = name;
+        this.age = age;
+        // this.writeJs = function() {
+        //       console.log(&quot;my name is &quot; + this.name + &quot;, i can write js.&quot;);
+        // }
+}
+CreateJsPerson.prototype.writeJsG = function() {
+        console.log(&quot;my name is &quot; + this.name + &quot;, i can write js.&quot;);
+};
+
+var p1 = new CreateJsPerson(&quot;p1&quot;, 18);
+var p2 = new CreateJsPerson(&quot;p2&quot;, 17);
+p1.writeJs();
+p2.writeJs();
+console.log(p1.writeJsG() === p2.writeJsG()); //-&amp;gt;true
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;        为什么这样写，就能把属性变为公有的呢？&lt;/p&gt;
+&lt;p&gt;        &lt;strong&gt;基于构造函数模式扩展出来的原型模式：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;                -&amp;gt;它解决了方法或者属性公有的问题&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;                -&amp;gt;即把实例之间公有的属性和方法提出成公有的属性和方法&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;                -&amp;gt;想让谁公有，就把它放在prototype上即可&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;二、【原型基础3句话】&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;         想要学习原型，要记住下面的三句话（&lt;strong&gt;不要问为什么&lt;/strong&gt;~~）：&lt;/p&gt;
+&lt;p&gt;         &lt;span&gt;&lt;em&gt;&lt;strong&gt;1）每一个函数数据类型（普通函数、类）都有一个天生自带的属性，prototype（原型），并且这个属性是一个对象数据类型的值。&lt;/strong&gt;&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;em&gt;&lt;strong&gt;          2）并且在prototype上浏览器会天生给它加上一个属性contructor（构造函数），属性值是当前函数（类）本身。&lt;/strong&gt;&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;em&gt;&lt;strong&gt;          3）每一个对象数据类型（普通对象，实例，prototype...）也天生自带一个属性：__proto__，属性值是当前实例所属类的原型（prototype）。&lt;/strong&gt;&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;下面这段代码，可以说明一下上面的3句话：&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;34&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+function Fn() {
+        this.x = 100;
+};
+Fn.prototype.getX = function() {
+        console.log(this.x);
+};
+var f1 = new Fn;
+var f2 = new Fn;
+console.log(Fn.prototype.constructor === Fn); //-&amp;gt;true
+// 堆内存：存储 对象、函数里面的代码字符串
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;上面代码的原型链如下图所示，正方形代表栈内存（即函数作用域），椭圆正方形代表堆内存（即对象）&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1254758/201902/1254758-20190221233254173-43068746.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;    从画图可以很清晰看到，整个基于构造函数扩展出来的原型链函数，类与实例的原型链，实例与JS基类Object的原型链关系，一览无遗。&lt;/p&gt;
+&lt;p&gt;    上图+代码，可以总结出：&lt;/p&gt;
+&lt;p&gt;    &lt;span&gt;&lt;strong&gt; 1、Object是JS中所有对象数据类型的基类（最顶层的类）&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;           1） f1 instanceof Object -&amp;gt; true，这是因为f1通过__proto__可以向上级查找，不管有多少级，最后总能找到Object&lt;/p&gt;
+&lt;p&gt;            2）在Object.prototype上没有__proto__这个属性（因为自己指向自己没意义）&lt;/p&gt;
+&lt;p&gt;     &lt;span&gt; &lt;strong&gt;&lt;span&gt;2、&lt;span&gt;原型链模&lt;/span&gt;式&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;            举个简单的例子，f1.hasOwnProperty(&quot;x&quot;);  //-&amp;gt;hasWwnProperty是f1的一个属性，但是我们发现f1的私有属性上并没有这个方法，那如何处理的呢？&lt;/p&gt;
+&lt;p&gt;            通过 对象名.属性名 的方式获取属性值的时候，首先在对象的私有的属性上进行查找，如果私有中存在这个属性，则获取的是私有的属性值；&lt;/p&gt;
+&lt;p&gt;         -&amp;gt;如果私有的没有，则通过__proto__找到所属类的原型（类的原型上定义的属性和方法都是当前实例的公有的属性和方法），原型上存在的话，获取的是公有的属性值；&lt;/p&gt;
+&lt;p&gt;        -&amp;gt; 如果原型上也没有，则继续通过原型上的__proto__继续向上查找，一直找到Object.prototype为止...&lt;/p&gt;
+&lt;p&gt;         -&amp;gt;这种查找的机制就是我们的原型链模式&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;三、【原型知识玩起来】&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;35&quot;&gt;
+&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
+cconsole.log(f1.getX === f2.getX); //-&amp;gt;true
+console.log(f1.__proto__.getX === f2.getX); //-&amp;gt;true 
+console.log(f1.getX === Fn.prototype.getX); //-&amp;gt;true
+// f1.getX 跟 f1.__proto__.getX的区别
+// 前者是浏览器先找私有作用域，找不到再找公有作用域
+// 后者是浏览器直接查找公有作用域
+// 
+console.log(f1.hasOwnProperty === f1.__proto__.__proto__.hasOwnProperty);
+
+// 在IE浏览器中，我们原型模式也是同样的原理，但是IE浏览器怕你通过__proto__把公有的修改，
+// 禁止我们使用__proto__，下面的例子就可以很明显的说明为啥IE禁止了
+
+f1.sum == function() {
+        //修改自己私有的sum
+};
+f1.__proto__.sum = function() {
+        //修改所属类原型上的sum
+};
+// 所以修改公有的，IE只能通过prototype
+Fn.prototype.sum = function() {
+        // 修改公有的sum
+};
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;四、【总结】&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;        在这一章中，主要说的是原型模式，但是原型模式是通过构造函数扩展出来的，同时也通过代码+图的方式，把原型模式的实现原理给画了出来。&lt;/p&gt;
+&lt;p&gt;        既然原型这个知识点出来了，&lt;strong&gt;我会在后面介绍一下，&lt;span&gt;使用原型来实现类的封装、继承、多态&lt;/span&gt;（里面的重写），并且会介绍&lt;span&gt;使用原型来实现7中继承方法&lt;/span&gt;，将会非常有趣。&lt;/strong&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Thu, 21 Feb 2019 16:02:00 +0000</pubDate>
+<dc:creator>彭胜光</dc:creator>
+<og:description>在第一章的时候，说过了单例模式、工厂模式、构造函数模式，你还记得构造模式是怎么样的吗？ 上面的就是构造函数模式，你知道，为什么p1、p2的writeJs()方法为什么不相等吗？这是因为正如上面所说的，</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/pengshengguang/p/10416044.html</dc:identifier>
+</item>
+<item>
+<title>痞子衡嵌入式：超级好用的可视化PyQt GUI构建工具(Qt Designer) - 痞子衡</title>
+<link>http://www.cnblogs.com/henjay724/p/10416052.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/henjay724/p/10416052.html</guid>
+<description>&lt;hr/&gt;&lt;p&gt;　　大家好，我是痞子衡，是正经搞技术的痞子。今天痞子衡给大家介绍的是&lt;strong&gt;PyQt GUI构建工具Qt Designer&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;　　痞子衡开博客至今已有好几年，一直以嵌入式开发相关主题的文章为主线，偶尔穿插一些其他技术或工具的介绍，前段时间因为要做一个跟恩智浦MCU启动相关的上位机工具 &lt;a href=&quot;https://github.com/JayHeng/NXP-MCUBootUtility&quot;&gt;NXP-MCUBootUtility&lt;/a&gt;，网上搜索对比了几个Python下的GUI框架，最终选择了wxPython这个成熟稳定的GUI库，从而接触到wxFormBuilder这个配套wxPython使用的GUI构建工具。苦于网上关于该构建工具的中文资料不多，所以根据自己使用经验写了一篇 &lt;a href=&quot;https://www.cnblogs.com/henjay724/p/9426966.html&quot;&gt;极易上手的可视化wxPython GUI构建工具(wxFormBuilder)&lt;/a&gt;，没想到该篇博客很受欢迎，居然目前是痞子衡博客里阅读量最高的一篇博客，而且也是搜索 wxFormBuilder 关键字出来的中文结果排名第二位的链接，真是万万没想到。&lt;/p&gt;
+&lt;p&gt;　　wxPython框架虽然成熟稳定，但是相对最近更火的PyQt框架来说，还是显得古老了一些，控件风格不符合现代审美观，因此痞子衡决定学习一下PyQt的用法，感受下PyQt做出来的界面效果到底如何。根据wxPython学习经验，当然首先要从PyQt的可视化GUI构建工具Qt Designer开始下手，因此便有了本篇博客。&lt;/p&gt;
+&lt;h3 id=&quot;一qt-designer工具背景&quot;&gt;一、Qt Designer工具背景&lt;/h3&gt;
+&lt;p&gt;　　Qt Designer从名字上来看显然就是久负盛名的跨平台GUI库Qt的配套设计工具。Qt库本身是C++语言实现的；Riverbank公司用Python语言对Qt做了一层封装，封装后便成了Python版GUI库PyQt（目前最新的版本是PyQt5）；下面是这两个GUI库的官方主页：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;　　Qt的各种UI控件功能均是通过class来实现的，这个链接 &lt;a href=&quot;https://doc.qt.io/qt-5/classes.html&quot; class=&quot;uri&quot;&gt;https://doc.qt.io/qt-5/classes.html&lt;/a&gt; 列出了Qt里的所有class。PyQt5其用法基本与Qt一致，这个链接 &lt;a href=&quot;https://www.riverbankcomputing.com/static/Docs/PyQt5/module_index.html#ref-module-index&quot; class=&quot;uri&quot;&gt;https://www.riverbankcomputing.com/static/Docs/PyQt5/module_index.html#ref-module-index&lt;/a&gt; 列出了PyQt5里所有的Modules，其中用于设计界面最常用的便是 &lt;a href=&quot;https://www.riverbankcomputing.com/static/Docs/PyQt5/api/qtwidgets/qtwidgets-module.html&quot;&gt;QtWidgets&lt;/a&gt; 模块。&lt;/p&gt;
+&lt;p&gt;　　在Qt官网的Tools下面可以看到所有Qt相关的工具，在UI design tools下面可以找到Qt Designer，可见Qt Designer是用于设计GUI界面的工具之一。由于痞子衡介绍的PyQt5下的GUI构建工具，因此本文的Qt Designer并不是直接在Qt官网下载安装的，具体安装方法详见下一章节。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-Toolset.png&quot;/&gt;&lt;/p&gt;
+&lt;h3 id=&quot;二qt-designer快速上手&quot;&gt;二、Qt Designer快速上手&lt;/h3&gt;
+&lt;p&gt;　　使用Qt Designer去设计GUI界面可以不用掌握PyQt5里的各个控件class的具体用法，你只需要在Qt Designer软件里添加这些控件即可，下面痞子衡将简介Qt Designer的用法：&lt;/p&gt;
+&lt;h4 id=&quot;软件安装&quot;&gt;2.1软件安装&lt;/h4&gt;
+&lt;p&gt;　　简单了解PyQt5的module和class便可以开始设计GUI界面，首先得安装Qt Designer，在安装完Python3之后（痞子衡安装的是Python 3.6），借助\Python36\Scripts\下的pip.exe工具来分别安装PyQt5和Qt Designer，命令见如下主页：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;　　安装完成之后打开\Python36\Lib\site-packages\pyqt5_tools\designer.exe，这便是Qt Designer。&lt;/p&gt;
+&lt;h4 id=&quot;软件界面&quot;&gt;2.2软件界面&lt;/h4&gt;
+&lt;p&gt;　　打开Qt Designer可见到如下界面，界面主要分为四大区：项目区、控件区、编辑区、属性区。软件使用起来非常简单，就是在【控件区】里点击添加需要的控件，这些控件的效果会在【编辑区】里实时显示，并在【属性区】这些控件的属性，【项目区】用于显示控件间的层级关系。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-mainWin.PNG&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;基础布局&quot;&gt;2.3基础布局&lt;/h4&gt;
+&lt;p&gt;　　让我们开始创建一个GUI的基础框架，基础框架包括：Container（局部外围轮廓）、Layout（内部控件区）、menubar（顶部菜单栏）、statusbar（底部状态栏）。&lt;br/&gt;　　第一步是添加一个Container（此处选择常用的Frame），这是GUI的轮廓基础，有了Frame之后还需要在Frame里添加Layout（此处选择竖排样式），用于规范后续控件的排列样式。默认GUI即有menubar和statusbar。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-step1-containerLayout.PNG&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;多种控件&quot;&gt;2.4多种控件&lt;/h4&gt;
+&lt;p&gt;　　基础布局搞定之后，接下来便是在Layout里添加控件，PyQt5支持的控件非常丰富，其中比较常用的是如下几个：各种Button（按钮）、Label（静态显示文本框）、Text Edit（输入输出文本框）、Check Box（选中框）、各种Slider（滑动条）等。由于前面痞子衡选择的是verticalLayout，因此你会看到控件们都是竖着排的。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-step2-ctrl.PNG&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;控件属性&quot;&gt;2.5控件属性&lt;/h4&gt;
+&lt;p&gt;　　添加了所有控件之后，下一步便是分别设置控件的属性，进一步调整控件。痞子衡以Push Button属性为例，痞子衡勾选了如下3项比较重要的属性设置，分别是objectName（button在后续python代码的对象名，一般需要按其功能修改，修改后使得代码阅读/修改起来更直观）、geometry（设置button的尺寸与位置，如果是放在Layout里，则受限于Layout不可设置）、text（button在GUI里显示的标签名，此处是PushButton，也需要按其功能修改，方便用户使用软件）。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-step3-button_property.PNG&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;保存为xml代码工程文件&quot;&gt;2.6保存为xml代码（工程文件）&lt;/h4&gt;
+&lt;p&gt;　　当GUI界面布局全部完成之后，需选择File-&amp;gt;Save As保存为.ui文件，该文件既是Qt Designer的工程文件也是最终生成的GUI xml代码文件，痞子衡保存在了my_win.ui文件里。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-step4-xml.PNG&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;转换成python代码&quot;&gt;2.7转换成python代码&lt;/h4&gt;
+&lt;p&gt;　　虽然保存的my_win.ui文件里是可以直接在python代码里被加载使用的，但是更好的办法是直接将.ui文件转换成相应的.py文件。需要借助 \Python36\Scripts\pyuic5.exe工具，命令如下：&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;&lt;span&gt;pyuic5 - o my_win.py my_win.ui&lt;/span&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;　　转换成功后，让我们打开my_win.py文件，可以简单看一下这个my_win.py里的内容，代码里首先import了PyQt5相关库，并定义了名为Ui_MainWindow的class，这个class主要包含两个函数setupUi()和retranslateUi()。setupUi()里初始化了各个控件成员self.xx，这与我们在Qt Designer里添加控件是对应的。&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;# -*- coding: utf-8 -*-
+
+# Form implementation generated from reading ui file '.\my_win.ui'
+#
+# Created by: PyQt5 UI code generator 5.11.3
+#
+# WARNING! All changes made in this file will be lost!
+
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+class Ui_MainWindow(object):
+    def setupUi(self, MainWindow):
+        MainWindow.setObjectName(&quot;MainWindow&quot;)
+        MainWindow.resize(603, 448)
+        self.centralwidget = QtWidgets.QWidget(MainWindow)
+        self.centralwidget.setObjectName(&quot;centralwidget&quot;)
+        self.frame = QtWidgets.QFrame(self.centralwidget)
+        self.frame.setGeometry(QtCore.QRect(100, 80, 361, 211))
+        self.frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.frame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.frame.setObjectName(&quot;frame&quot;)
+        self.verticalLayoutWidget = QtWidgets.QWidget(self.frame)
+        self.verticalLayoutWidget.setGeometry(QtCore.QRect(30, 20, 160, 172))
+        self.verticalLayoutWidget.setObjectName(&quot;verticalLayoutWidget&quot;)
+        self.verticalLayout = QtWidgets.QVBoxLayout(self.verticalLayoutWidget)
+        self.verticalLayout.setContentsMargins(0, 0, 0, 0)
+        self.verticalLayout.setObjectName(&quot;verticalLayout&quot;)
+        self.pushButton = QtWidgets.QPushButton(self.verticalLayoutWidget)
+        self.pushButton.setEnabled(True)
+        self.pushButton.setObjectName(&quot;pushButton&quot;)
+        self.verticalLayout.addWidget(self.pushButton)
+        self.label = QtWidgets.QLabel(self.verticalLayoutWidget)
+        self.label.setObjectName(&quot;label&quot;)
+        self.verticalLayout.addWidget(self.label)
+        self.textEdit = QtWidgets.QTextEdit(self.verticalLayoutWidget)
+        self.textEdit.setObjectName(&quot;textEdit&quot;)
+        self.verticalLayout.addWidget(self.textEdit)
+        self.checkBox = QtWidgets.QCheckBox(self.verticalLayoutWidget)
+        self.checkBox.setObjectName(&quot;checkBox&quot;)
+        self.verticalLayout.addWidget(self.checkBox)
+        self.horizontalSlider = QtWidgets.QSlider(self.verticalLayoutWidget)
+        self.horizontalSlider.setOrientation(QtCore.Qt.Horizontal)
+        self.horizontalSlider.setObjectName(&quot;horizontalSlider&quot;)
+        self.verticalLayout.addWidget(self.horizontalSlider)
+        MainWindow.setCentralWidget(self.centralwidget)
+        self.menubar = QtWidgets.QMenuBar(MainWindow)
+        self.menubar.setGeometry(QtCore.QRect(0, 0, 603, 21))
+        self.menubar.setObjectName(&quot;menubar&quot;)
+        MainWindow.setMenuBar(self.menubar)
+        self.statusbar = QtWidgets.QStatusBar(MainWindow)
+        self.statusbar.setObjectName(&quot;statusbar&quot;)
+        MainWindow.setStatusBar(self.statusbar)
+
+        self.retranslateUi(MainWindow)
+        QtCore.QMetaObject.connectSlotsByName(MainWindow)
+
+    def retranslateUi(self, MainWindow):
+        _translate = QtCore.QCoreApplication.translate
+        MainWindow.setWindowTitle(_translate(&quot;MainWindow&quot;, &quot;MainWindow&quot;))
+        self.pushButton.setText(_translate(&quot;MainWindow&quot;, &quot;PushButton&quot;))
+        self.label.setText(_translate(&quot;MainWindow&quot;, &quot;TextLabel&quot;))
+        self.checkBox.setText(_translate(&quot;MainWindow&quot;, &quot;CheckBox&quot;))&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;三使用qt-designer生成的代码&quot;&gt;三、使用Qt Designer生成的代码&lt;/h3&gt;
+&lt;p&gt;　　前面已经使用Qt Designer生成GUI界面类Ui_MainWindow并保存在my_win.py文件中，此时需要创建一个主函数文件去调用Ui_MainWindow，下面是痞子衡创建的main_win.py中的代码：&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;import sys
+from PyQt5.QtWidgets import QApplication, QMainWindow
+# 导入my_win.py中内容
+from my_win import *
+
+# 创建mainWin类并传入Ui_MainWindow
+class mainWin(QMainWindow, Ui_MainWindow):
+    def __init__(self, parent=None):
+        super(mainWin, self).__init__(parent)
+        self.setupUi(self)
+
+if __name__ == '__main__':
+    # 下面是使用PyQt5的固定用法
+    app = QApplication(sys.argv)
+    main_win = mainWin()
+    main_win.show()
+    sys.exit(app.exec_())&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;触发事件与响应&quot;&gt;3.1触发事件与响应&lt;/h4&gt;
+&lt;p&gt;　　有了Button，我们肯定希望其能与一个响应函数相联系起来，此处痞子衡定义了showMessage()函数，并且将showMessage()与PushButton绑定起来，点击Button便会执行一次这个showMessage()函数。代码如下：&lt;/p&gt;
+&lt;pre class=&quot;python&quot;&gt;
+&lt;code&gt;class mainWin(QMainWindow, Ui_MainWindow):
+    def __init__(self, parent=None):
+        super(mainWin, self).__init__(parent)
+        self.setupUi(self)
+        # 将响应函数绑定到指定Button
+        self.pushButton.clicked.connect(self.showMessage)
+
+    # Button响应函数
+    def showMessage(self):
+        self.textEdit.setText('hello world')&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;　　最后让我们测试一下这个GUI软件，在命令行下运行main_win.py&lt;/p&gt;
+&lt;pre class=&quot;text&quot;&gt;
+&lt;code&gt;PS D:\my_git_repo\&amp;gt; python .\main_win.py&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;http://henjay724.com/image/cnblogs/QtDesigner-gui_run.PNG&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　至此，PyQt5 GUI构建工具Qt Designer痞子衡便介绍完毕了，掌声在哪里~~~&lt;/p&gt;
+&lt;h3 id=&quot;参考资料&quot;&gt;参考资料&lt;/h3&gt;
+&lt;blockquote&gt;
+&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/rrxc/p/4462890.html&quot;&gt;使用PyQt来编写第一个Python GUI程序&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.jianshu.com/p/5b063c5745d0&quot;&gt;PyQT5速成教程-2 Qt Designer介绍与入门&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;/blockquote&gt;
+</description>
+<pubDate>Thu, 21 Feb 2019 15:54:00 +0000</pubDate>
+<dc:creator>痞子衡</dc:creator>
+<og:description>wxPython框架虽然成熟稳定，但是相对最近更火的PyQt框架来说，还是显得古老了一些，控件风格不符合现代审美观，因此痞子衡决定学习一下PyQt的用法，感受下PyQt做出来的界面效果到底如何。根据w</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/henjay724/p/10416052.html</dc:identifier>
+</item>
+<item>
 <title>SLAM+语音机器人DIY系列：（六）SLAM建图与自主避障导航——2.google-cartographer机器人SLAM建图 - 小虎哥哥爱学习</title>
 <link>http://www.cnblogs.com/hiram-zhang/p/10415865.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/hiram-zhang/p/10415865.html</guid>
 <description>&lt;p&gt;&lt;span&gt;通过前面的基础学习，本章进入最为激动的&lt;span&gt;机器人自主导航&lt;span&gt;的学习。在前面的学习铺垫后，终于迎来了最大乐趣的时刻，就是赋予我们的miiboo机器人能自由行走的生命。本章将围绕机器人SLAM建图、导航避障、巡航、监控等内容展开。本章内容：&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;1.在机器人上使用传感器&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;2.google-cartographer机器人SLAM建图&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;3.ros-navigation机器人自主避障导航&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;4.多目标点导航及任务调度&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;5.机器人巡航与现场监控&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/hiram-zhang/p/10412509.html&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;1.在机器人上使用传感器&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/hiram-zhang/p/10415865.html&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;2.google-cartographer机器人SLAM建图&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/hiram-zhang/p/10416081.html&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;3.ros-navigation机器人自主避障导航&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/hiram-zhang/p/10416104.html&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;4.多目标点导航及任务调度&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/hiram-zhang/p/10416115.html&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;5.机器人巡航与现场监控&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
 &lt;hr/&gt;&lt;hr/&gt;
 &lt;p&gt;&lt;span&gt;主流的激光&lt;/span&gt;SLAM&lt;span&gt;算法有&lt;/span&gt;&lt;span&gt;hector&lt;/span&gt;&lt;span&gt;、&lt;/span&gt;&lt;span&gt;gmapping&lt;/span&gt;&lt;span&gt;、&lt;/span&gt;&lt;span&gt;karto&lt;/span&gt;&lt;span&gt;、&lt;/span&gt;&lt;span&gt;cartographer&lt;/span&gt;&lt;span&gt;。&lt;/span&gt;&lt;/p&gt;
 &lt;p&gt;hector&lt;span&gt;是一种结合了鲁棒性较好的扫描匹方法&lt;/span&gt;&lt;span&gt;2D_SLAM&lt;/span&gt;&lt;span&gt;方法和使用惯性传感系统的导航技术。传感器的要求较高，高更新频率小测量噪声的激光扫描仪，不需要里程计。使空中无人机与地面小车在不平坦区域运行存在运用的可能性。作者利用现代激光雷达的高更新率和低距离测量噪声，通过扫描匹配实时地对机器人运动进行估计。所以当只有低更新率的激光传感器时，即便测距估计很精确，对该系统都会出现一定的问题。&lt;/span&gt;&lt;/p&gt;
@@ -237,1625 +1541,6 @@ roslaunch cartographer_ros miiboo_pbstream2rosmap.launch pbstream_filename:=/hom
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/xiyuanMore/p/10415886.html</dc:identifier>
-</item>
-<item>
-<title>陪你解读Spring Batch（二）带你入手Spring Batch - GrimMjx</title>
-<link>http://www.cnblogs.com/GrimMjx/p/10415667.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/GrimMjx/p/10415667.html</guid>
-<description>&lt;h2&gt;前言&lt;/h2&gt;
-&lt;p&gt;　　说得多不如show code。上一章简单介绍了一下Spring Batch。本章将从头到尾搭建一套基于Spring Batch(2.1.9)、Spring(3.0.5)、mybatis(3.4.5)、mysql、gradle的批处理简单应用来处理文件中大量交易数据的写入。&lt;/p&gt;
-&lt;p&gt;　　那么这里简单定义以下交易文件的格式，一个txnId交易Id，一个amt交易金额。一天比如有100w交易数据过来要落表。文件大概长这样，只是简单定义以下，实际开发肯定不会那么少。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1465200/201902/1465200-20190221220956239-1945469204.png&quot; alt=&quot;&quot; width=&quot;700&quot; height=&quot;166&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　因工作需求没有使用最新版本的Spring Batch，所以&lt;span&gt;本章是基于XML config的例子&lt;/span&gt;。最新版本支持用Java Config配置Spring Batch Job、Job Scope等。有兴趣的同学可以自行研究一下。本人技术有限，本章讲的如有错误希望请指正。&lt;/p&gt;
-
-&lt;h2&gt;2.1 项目依赖&lt;/h2&gt;
-&lt;p&gt;　　首先我们要引入Spring Batch的依赖，这里的版本是2.1.9&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-springbatch = [&quot;org.springframework.batch:spring-batch-core:2.1.9.RELEASE&quot;&lt;span&gt;,
-                   &lt;/span&gt;&quot;org.springframework.batch:spring-batch-infrastructure:2.1.9.RELEASE&quot;]
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　批量处理的过程中，我们都需要数据持久化。这里我用的数据库是mysql，ORM框架是mybatis。所以还要添加mysql-connect和mybatis的依赖&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-mybatis = &quot;org.mybatis:mybatis:3.4.5&quot;&lt;span&gt;
-mysqlconnect &lt;/span&gt;= &quot;mysql:mysql-connector-java:5.1.25&quot;&lt;span&gt;
-dbcp &lt;/span&gt;= &quot;commons-dbcp:commons-dbcp:1.4&quot;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　事务和数据库的配置就不用说了，必须的。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&amp;lt;!-- transaction config --&amp;gt;
-    &amp;lt;bean id=&quot;transactionManager&quot; &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.jdbc.datasource.DataSourceTransactionManager&quot;&amp;gt;
-        &amp;lt;property name=&quot;dataSource&quot; ref=&quot;dataSource&quot;/&amp;gt;
-    &amp;lt;/bean&amp;gt;
-
-    &amp;lt;bean id=&quot;dataSource&quot; &lt;span&gt;class&lt;/span&gt;=&quot;org.apache.commons.dbcp.BasicDataSource&quot; destroy-method=&quot;close&quot;&amp;gt;
-        &amp;lt;property name=&quot;driverClassName&quot; value=&quot;com.mysql.jdbc.Driver&quot;/&amp;gt;
-        &amp;lt;property name=&quot;url&quot; value=&quot;jdbc:mysql://localhost/m_test_db&quot;/&amp;gt;
-        &amp;lt;property name=&quot;username&quot; value=&quot;root&quot;/&amp;gt;
-        &amp;lt;property name=&quot;password&quot; value=&quot;root&quot;/&amp;gt;
-    &amp;lt;/bean&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h2&gt;2.2 配置Job&lt;/h2&gt;
-&lt;p&gt;　　上一章节说过，其实文件批处理的场景，抽象的处理三大步骤分为，读，处理，写。那么我们就依照这张图来开始&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1465200/201902/1465200-20190221212512509-185058300.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　上图如果看不懂的请看上一章节来理解。那么我们先建立一个Spring Batch任务的xml文件，然后定义Job&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&amp;lt;!--data-source，transaction-manager 数据源以及事务管理器--&amp;gt;&lt;br/&gt;&amp;lt;batch:job-repository id=&quot;jobRepository&quot;&lt;br/&gt;data-source=&quot;dataSource&quot; transaction-manager=&quot;transactionManager&quot;&lt;br/&gt;isolation-level-for-create=&quot;SERIALIZABLE&quot;&lt;br/&gt;table-prefix=&quot;DPL_&quot; max-varchar-length=&quot;1000&quot;/&amp;gt;&lt;/pre&gt;
-&lt;pre&gt;
-&amp;lt;batch:job id=&quot;investmentMatchFileJob&quot;&lt;span&gt;
-               job-repository=&quot;jobRepository&quot;&amp;gt;
-        &amp;lt;batch:step id=&quot;investmentMatchFileToDb&quot;&amp;gt;
-            &amp;lt;batch:tasklet&amp;gt;
-                &amp;lt;batch:chunk reader=&quot;txnListFileReader&quot; writer=&quot;txnListResultWriter&quot;&lt;span&gt;
-                             commit-interval=&quot;300&quot;/&amp;gt;
-            &amp;lt;/batch:tasklet&amp;gt;
-        &amp;lt;/batch:step&amp;gt;
-&amp;lt;/batch:job&amp;gt;&lt;/span&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　结合上面的图看，是不是找到点感觉了？一个Job可以有多个Step组合，每一个Step由开发者自己编写，可一把一个大Step分成多个小Step，完全看开发者意愿。每一个Step对应一个ItemReader、ItemProcessor和ItemWriter。所有的批处理框架都可以抽象成最简单的过程，读取数据，处理数据，写数据。所以Spring Batch提供了3个接口，ItemReader、ItemProcessor和ItemWriter。JobRepository则是记录Job、Step和发起Job的执行信息等。 &lt;/p&gt;
-&lt;p&gt; 　　&lt;span&gt;xml配置Job必须依赖的有三项，名称，JobRepository和Step列表。还有一个没介绍就是commit-interval属性，这就是控制读了多少行进行一次写。总不可能读一行写一行对吧？这里配置多少，那么Writer的入参list的size就是多少。&lt;/span&gt;&lt;/p&gt;
-&lt;h3&gt;2.2.1 JobRepository&lt;/h3&gt;
-&lt;p&gt;　　JobRepository是记录Job、Step和发起Job的执行信息，&lt;span&gt;SpringBatch一共会让你导入9张表&lt;/span&gt;，具体哪9张表请导入依赖然后查看schema-mysql.sql文件。&lt;/p&gt;
-&lt;p&gt;　　这里要说明的一点是&lt;span&gt;table-prefix属性，默认是以BATCH_开头的，你可以改变前缀，当然你的sql脚本的表名前缀也要改动。注意，这里只能改前缀，不可以改表的全名&lt;/span&gt;。表的列可以增加，比如说你的公司建表必须要有id,created_at,xxxx等字段的话，可以增加列，没有问题。&lt;span&gt;但是原有列的名称不可以修改。脚本会在3张以SEQ结尾的表插入0，必须要先插入。&lt;/span&gt;&lt;/p&gt;
-
-&lt;h2&gt;2.3 Step&lt;/h2&gt;
-&lt;h3&gt;2.3.1 Reader&lt;/h3&gt;
-&lt;p&gt;　　上面配置的reader是以下这个bean，value=&quot;file:#{jobParameters['txnListFile']}&quot;。这里用到SPEL表达式，传入文件路径参数。FlatFileItemReader只能处理一个文件，实际使用中不可能只处理一个文件，所以你也可以导入下面那个叫MultiResourceItemReader类，通过给MultiResourceItemReader设置Resource数组可以实现一个Job读取一个目录下多个文件。但是这里注意，&lt;span&gt;JobRepository不会记录每个文件的处理情况。&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&amp;lt;bean id=&quot;txnListFileReader&quot;
-      &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.FlatFileItemReader&quot;&lt;span&gt;
-      scope&lt;/span&gt;=&quot;step&quot;&amp;gt;
-    &amp;lt;!--输入文件--&amp;gt;
-    &amp;lt;property name=&quot;resource&quot; value=&quot;file:#{jobParameters['txnListFile']}&quot;/&amp;gt;
-    &amp;lt;!--将每行映射为一个对象--&amp;gt;
-    &amp;lt;property name=&quot;lineMapper&quot;&amp;gt;
-        &amp;lt;bean &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.mapping.DefaultLineMapper&quot;&amp;gt;
-            &amp;lt;!--从划分的字段中构建一个对象--&amp;gt;
-            &amp;lt;property name=&quot;fieldSetMapper&quot; ref=&quot;InvestMatchItemMapper&quot;/&amp;gt;
-            &amp;lt;!--根据某种分隔符来分--&amp;gt;
-            &amp;lt;property name=&quot;lineTokenizer&quot; ref=&quot;TxnListItemMapperFileLineTokenizer&quot;/&amp;gt;
-        &amp;lt;/bean&amp;gt;
-    &amp;lt;/property&amp;gt;
-    &amp;lt;!--跳过开头的的一些行--&amp;gt;
-    &amp;lt;property name=&quot;linesToSkip&quot; value=&quot;1&quot;/&amp;gt;
-    &amp;lt;property name=&quot;encoding&quot; value=&quot;UTF-8&quot;/&amp;gt;
-&amp;lt;/bean&amp;gt;
-&amp;lt;bean id=&quot;InvestMatchItemMapper&quot; &lt;span&gt;class&lt;/span&gt;=&quot;me.grimmjx.sync.TxnListItemMapper&quot;/&amp;gt;
-&amp;lt;bean id=&quot;TxnListItemMapperFileLineTokenizer&quot;
-      &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.transform.DelimitedLineTokenizer&quot;&amp;gt;
-    &amp;lt;property name=&quot;delimiter&quot; value=&quot;|&quot;/&amp;gt;
-    &amp;lt;property name=&quot;names&quot;&amp;gt;
-        &amp;lt;list&amp;gt;
-            &amp;lt;value&amp;gt;txnId&amp;lt;/value&amp;gt;
-            &amp;lt;value&amp;gt;amt&amp;lt;/value&amp;gt;
-        &amp;lt;/list&amp;gt;
-    &amp;lt;/property&amp;gt;
-&amp;lt;/bean&amp;gt;
-
-
-
-&amp;lt;!--以下的内容是对一个目录下多个文件进行批处理的样例--&amp;gt;
-&amp;lt;bean id=&quot;txnListFileReader&quot;
-      &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.MultiResourceItemReader&quot;&lt;span&gt;
-      scope&lt;/span&gt;=&quot;step&quot;&amp;gt;
-    &amp;lt;property name=&quot;resources&quot; value=&quot;file:#{jobParameters['txnListFile']}/*.txt&quot;/&amp;gt;
-    &amp;lt;property name=&quot;delegate&quot;&amp;gt;
-        &amp;lt;bean &lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.FlatFileItemReader&quot;&lt;span&gt;
-              scope&lt;/span&gt;=&quot;step&quot;&amp;gt;
-            &amp;lt;property name=&quot;lineMapper&quot;&amp;gt;
-                &amp;lt;&lt;span&gt;bean
-                        &lt;/span&gt;&lt;span&gt;class&lt;/span&gt;=&quot;org.springframework.batch.item.file.mapping.DefaultLineMapper&quot;&amp;gt;
-                    &amp;lt;property name=&quot;fieldSetMapper&quot; ref=&quot;InvestMatchItemMapper&quot;/&amp;gt;
-                    &amp;lt;property name=&quot;lineTokenizer&quot;&lt;span&gt;
-                              ref&lt;/span&gt;=&quot;TxnListItemMapperFileLineTokenizer&quot;/&amp;gt;
-                &amp;lt;/bean&amp;gt;
-            &amp;lt;/property&amp;gt;
-            &amp;lt;property name=&quot;linesToSkip&quot; value=&quot;1&quot;/&amp;gt;
-            &amp;lt;property name=&quot;encoding&quot; value=&quot;UTF-8&quot;/&amp;gt;
-        &amp;lt;/bean&amp;gt;
-    &amp;lt;/property&amp;gt;
-&amp;lt;/bean&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　以下图来理解比较方便&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1465200/201902/1465200-20190221220026881-839937897.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　从xml配置来看，&lt;span&gt;delimiter控制如何分割，names就是文件每一列的名字&lt;/span&gt;。在这么多配置里，我们只需要写一个Java类。这里就是从一行数据，转换成一个对象。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * &lt;/span&gt;&lt;span&gt;@author&lt;/span&gt;&lt;span&gt; GrimMjx
- * 交易记录匹配器类。
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; TxnListItemMapper &lt;span&gt;implements&lt;/span&gt; FieldSetMapper&amp;lt;TxnList&amp;gt;&lt;span&gt;{
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; TxnList mapFieldSet(FieldSet fieldSet) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; BindException {
-        TxnList txnList &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; TxnList();
-        txnList.setTxnId(fieldSet.readString(&lt;/span&gt;&quot;txnId&quot;&lt;span&gt;));
-        txnList.setAmt(fieldSet.readBigDecimal(&lt;/span&gt;&quot;amt&quot;&lt;span&gt;));
-
-        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; txnList;
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h3&gt;2.3.2 Writer&lt;/h3&gt;
-&lt;p&gt;　　writer的bean为&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&amp;lt;bean id=&quot;txnListResultWriter&quot; &lt;span&gt;class&lt;/span&gt;=&quot;me.grimmjx.sync.TxnListResultWriter&quot; scope=&quot;step&quot;/&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　writer执行的是写入操作，我们要实现ItemWriter&amp;lt;T&amp;gt;接口，以下为这个类的Java代码。这里的操作很简单，将构建好的对象集合直接写入库。注意了，&lt;span&gt;外面没有幂等的话，最好这里先判断库里有没有，不要无脑写入。&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * &lt;/span&gt;&lt;span&gt;@author&lt;/span&gt;&lt;span&gt; GrimMjx
- * 交易数据写入类。
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; TxnListResultWriter &lt;span&gt;implements&lt;/span&gt; ItemWriter&amp;lt;TxnList&amp;gt;&lt;span&gt; {
-    @Autowired
-    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; TxnListMapper txnListMapper;
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; write(List&amp;lt;? &lt;span&gt;extends&lt;/span&gt; TxnList&amp;gt; items) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
-        List&lt;/span&gt;&amp;lt;TxnList&amp;gt; txnLists =&lt;span&gt; Lists.newArrayList();
-        &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (TxnList item : items) {
-            txnLists.add(item);
-        }
-        txnListMapper.insertBatch(txnLists);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h2&gt;2.4 启动Job&lt;/h2&gt;
-&lt;p&gt;　　这里先定义一个bean，与之前的Job相关联。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&amp;lt;bean id=&quot;DefaultFileProcessor&quot; &lt;span&gt;class&lt;/span&gt;=&quot;me.grimmjx.processor.DefaultFileProcessor&quot;&amp;gt;
-        &amp;lt;property name=&quot;job&quot; ref=&quot;investmentMatchFileJob&quot;/&amp;gt;
-        &amp;lt;property name=&quot;jobLauncher&quot; ref=&quot;jobLauncher&quot;/&amp;gt;
-&amp;lt;/bean&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　以下为这个processor的Java代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 默认文件处理器类。
- *
- * &lt;/span&gt;&lt;span&gt;@author&lt;/span&gt;&lt;span&gt; GrimMjx
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DefaultFileProcessor {
-    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * 批次job
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-    &lt;span&gt;protected&lt;/span&gt;&lt;span&gt; Job job;
-
-    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
-     * 任务启动器
-     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-    &lt;span&gt;protected&lt;/span&gt;&lt;span&gt; JobLauncher jobLauncher;
-
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; process() {
-        String baseDir &lt;/span&gt;= &quot;/Users/miaojiaxing/test/2019.01.31.txt&quot;&lt;span&gt;;
-
-        JobParametersBuilder builder &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; JobParametersBuilder();
-        builder.addString(&lt;/span&gt;&quot;txnListFile&quot;&lt;span&gt;, baseDir);
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 携带参数
-&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;        builder.addString(&quot;packageCode&quot;, &quot;12345&quot;);&lt;/span&gt;
-        builder.addString(&quot;dateTime&quot;, System.currentTimeMillis() + &quot;&quot;&lt;span&gt;);
-        JobParameters jobParas &lt;/span&gt;=&lt;span&gt; builder.toJobParameters();
-
-        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-            jobLauncher.run(job, jobParas);
-        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Exception e) {
-            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; RuntimeException(&quot;Run springBatchJob meet error&quot;&lt;span&gt;, e);
-        }
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; setJob(Job job) {
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.job =&lt;span&gt; job;
-    }
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; setJobLauncher(JobLauncher jobLauncher) {
-        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.jobLauncher =&lt;span&gt; jobLauncher;
-    }
-
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　最后我们试试&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * &lt;/span&gt;&lt;span&gt;@author&lt;/span&gt;&lt;span&gt; GrimMjx
- * &amp;lt;p&amp;gt;
- * 测试类。
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; MainTest {
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-        ApplicationContext ctx &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; ClassPathXmlApplicationContext(&quot;applicationContext.xml&quot;&lt;span&gt;);
-        DefaultFileProcessor bean &lt;/span&gt;= ctx.getBean(&quot;DefaultFileProcessor&quot;, DefaultFileProcessor.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
-        bean.process();
-        DefaultFileProcessor rereadProcessor &lt;/span&gt;= ctx.getBean(&quot;rereadProcessor&quot;, DefaultFileProcessor.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;);
-        rereadProcessor.process();
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1465200/201902/1465200-20190221223919728-582905706.png&quot; alt=&quot;&quot; width=&quot;774&quot; height=&quot;365&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　没有问题。&lt;/p&gt;
-&lt;p&gt;　　&lt;span&gt;下一章节将结合校验清洗、异常弹性处理、并行配置附上代码。&lt;/span&gt;&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Feb 2019 14:46:00 +0000</pubDate>
-<dc:creator>GrimMjx</dc:creator>
-<og:description>前言 说得多不如show code。上一章简单介绍了一下Spring Batch。本章将从头到尾搭建一套基于Spring Batch(2.1.9)、Spring(3.0.5)、mybatis(3.4.</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/GrimMjx/p/10415667.html</dc:identifier>
-</item>
-<item>
-<title>详解mybatis映射配置文件 - Alan_beijing</title>
-<link>http://www.cnblogs.com/wangjiming/p/10399333.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wangjiming/p/10399333.html</guid>
-<description>&lt;p&gt;&lt;span&gt;一  mybatis 映射文件结构&lt;/span&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;      mybatis映射配置文件存在如下顶级元素，且这些元素按照如下顺序被定义。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;tt&gt;cache&lt;/tt&gt; – 给定命名空间的缓存配置。&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;cache-ref&lt;/tt&gt; – 其他命名空间缓存配置的引用。  &lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;resultMap&lt;/tt&gt; – 是最复杂也是最强大的元素，用来描述如何从数据库结果集中来加载对象。&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;&lt;s&gt;parameterMap&lt;/s&gt;&lt;/tt&gt;&lt;s&gt; – 已废弃！老式风格的参数映射。内联参数是首选,这个元素可能在将来被移除，这里不会记录。&lt;/s&gt;&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;sql&lt;/tt&gt; – 可被其他语句引用的可重用语句块。&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;insert&lt;/tt&gt; – 映射插入语句&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;update&lt;/tt&gt; – 映射更新语句&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;delete&lt;/tt&gt; – 映射删除语句&lt;/li&gt;
-&lt;li&gt;&lt;tt&gt;select&lt;/tt&gt; – 映射查询语句&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;二  mybatis映射配置文件顶级元素分析&lt;/span&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt; （一）CRUD&lt;/p&gt;
-&lt;p&gt; 在映射配置文件中，基本的CRUD操作定义如下&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;select by id&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;getUserInfoById&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;UserInfo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-        SELECT user_name ,user_addr FROM user_info WHERE user_id=#{user_id}
-    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;insert&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;insert &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;addUserInfo&quot;&lt;/span&gt;&lt;span&gt; useGeneratedKeys&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-        INSERT INTO user_info(user_name,user_addr)VALUES(#{user_name},#{user_addr})
-    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;insert&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;update&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;update &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;updateUserInfo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-         UPDATE user_info set user_name=#{user_name} WHERE user_id=#{user_id}
-    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;update&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span&gt;&amp;lt;!--&lt;/span&gt;&lt;span&gt;delete&lt;/span&gt;&lt;span&gt;--&amp;gt;&lt;/span&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;delete &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;delUserInfoById&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-        DELETE FROM user_info WHERE user_id=#{user_id}
-    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;delete&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;1.#{}表示占位符，相当于？，#{}需要经过预处理，能防止SQL漏洞注入，当然，也可以使用${}，只是不能防止漏洞注入。&lt;/p&gt;
-&lt;p&gt;2.select语句有很多属性&lt;/p&gt;
-&lt;p&gt;id -- 唯一标识select语句&lt;/p&gt;
-&lt;p&gt;parameterType --参数类型&lt;/p&gt;
-&lt;p&gt;paramerterMap -- 参数映射&lt;/p&gt;
-&lt;p&gt;resultType -- 返回类型&lt;/p&gt;
-&lt;p&gt;resultMap -- 返回类型映射&lt;/p&gt;
-&lt;p&gt;flushCache -- 当语句被调用时，是否清除本地缓存或二级缓存&lt;/p&gt;
-&lt;p&gt;useCache -- 是否使用二级缓存&lt;/p&gt;
-&lt;p&gt;timeout -- 在抛出异常之前，驱动程序等待数据库返回请求结果的秒数&lt;/p&gt;
-&lt;p&gt;fetchSize -- 每次批量返回的结果行数&lt;/p&gt;
-&lt;p&gt;statementType -- 使用STATEMENT，PREPARED 或 CALLABLE 的一个&lt;/p&gt;
-&lt;p&gt;resultSetType -- 使用FORWARD_ONLY，SCROLL_SENSITIVE 或 SCROLL_INSENSITIVE 中的一个&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select
-  &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;selectPerson&quot;&lt;/span&gt;&lt;span&gt;
-  parameterType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt;
-  parameterMap&lt;/span&gt;&lt;span&gt;=&quot;deprecated&quot;&lt;/span&gt;&lt;span&gt;
-  resultType&lt;/span&gt;&lt;span&gt;=&quot;hashmap&quot;&lt;/span&gt;&lt;span&gt;
-  resultMap&lt;/span&gt;&lt;span&gt;=&quot;personResultMap&quot;&lt;/span&gt;&lt;span&gt;
-  flushCache&lt;/span&gt;&lt;span&gt;=&quot;false&quot;&lt;/span&gt;&lt;span&gt;
-  useCache&lt;/span&gt;&lt;span&gt;=&quot;true&quot;&lt;/span&gt;&lt;span&gt;
-  timeout&lt;/span&gt;&lt;span&gt;=&quot;10000&quot;&lt;/span&gt;&lt;span&gt;
-  fetchSize&lt;/span&gt;&lt;span&gt;=&quot;256&quot;&lt;/span&gt;&lt;span&gt;
-  statementType&lt;/span&gt;&lt;span&gt;=&quot;PREPARED&quot;&lt;/span&gt;&lt;span&gt;
-  resultSetType&lt;/span&gt;&lt;span&gt;=&quot;FORWARD_ONLY&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（二）resultType&lt;/p&gt;
-&lt;p&gt;resultType可表示返回基本类型，也可表示返回复杂对象类型(包括自定义类型)&lt;/p&gt;
-&lt;p&gt;1.返回基本类型&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;listUserInfo&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;int&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-     SELECT userId FROM user_info
-&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;2.返回复杂类型&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;getUserInfoById&quot;&lt;/span&gt;&lt;span&gt; resultType&lt;/span&gt;&lt;span&gt;=&quot;UserInfo&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-     SELECT user_name ,user_addr FROM user_info WHERE user_id=#{user_id}
-&lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（三）resultMap&lt;/p&gt;
-&lt;p&gt;resultMap主要解决TABLE字段与JavaBean映射不匹配问题。&lt;/p&gt;
-&lt;p&gt;举个例子：&lt;/p&gt;
-&lt;p&gt;定义一个JavaBean&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; UserInfo {
-    String userName;
-    String addr;
-
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;setter和getter&lt;/span&gt;
-}
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;SQL语句：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;DROP&lt;/span&gt; &lt;span&gt;TABLE&lt;/span&gt; &lt;span&gt;IF&lt;/span&gt; &lt;span&gt;EXISTS&lt;/span&gt;&lt;span&gt; `user_info`;
-&lt;/span&gt;&lt;span&gt;CREATE&lt;/span&gt; &lt;span&gt;TABLE&lt;/span&gt;&lt;span&gt; `user_info`  (
-  `&lt;/span&gt;&lt;span&gt;user_id&lt;/span&gt;` &lt;span&gt;int&lt;/span&gt;(&lt;span&gt;5&lt;/span&gt;) &lt;span&gt;NOT&lt;/span&gt; &lt;span&gt;NULL&lt;/span&gt;&lt;span&gt; AUTO_INCREMENT,
-  `&lt;/span&gt;&lt;span&gt;user_name&lt;/span&gt;` &lt;span&gt;varchar&lt;/span&gt;(&lt;span&gt;50&lt;/span&gt;) &lt;span&gt;CHARACTER&lt;/span&gt; &lt;span&gt;SET&lt;/span&gt; latin1 COLLATE latin1_swedish_ci &lt;span&gt;NOT&lt;/span&gt; &lt;span&gt;NULL&lt;/span&gt;&lt;span&gt;,
-  `user_addr` &lt;/span&gt;&lt;span&gt;varchar&lt;/span&gt;(&lt;span&gt;100&lt;/span&gt;) &lt;span&gt;CHARACTER&lt;/span&gt; &lt;span&gt;SET&lt;/span&gt; latin1 COLLATE latin1_swedish_ci &lt;span&gt;NOT&lt;/span&gt; &lt;span&gt;NULL&lt;/span&gt;&lt;span&gt;,
-  &lt;/span&gt;&lt;span&gt;PRIMARY&lt;/span&gt; &lt;span&gt;KEY&lt;/span&gt; (`&lt;span&gt;user_id&lt;/span&gt;&lt;span&gt;`) USING BTREE
-) ENGINE &lt;/span&gt;&lt;span&gt;=&lt;/span&gt; InnoDB AUTO_INCREMENT &lt;span&gt;=&lt;/span&gt; &lt;span&gt;16&lt;/span&gt; &lt;span&gt;CHARACTER&lt;/span&gt; &lt;span&gt;SET&lt;/span&gt; &lt;span&gt;=&lt;/span&gt; latin1 COLLATE &lt;span&gt;=&lt;/span&gt; latin1_swedish_ci ROW_FORMAT &lt;span&gt;=&lt;/span&gt;&lt;span&gt; Compact;
-
-&lt;/span&gt;&lt;span&gt;SET&lt;/span&gt; FOREIGN_KEY_CHECKS &lt;span&gt;=&lt;/span&gt; &lt;span&gt;1&lt;/span&gt;;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;通过如上发现，user_name与userName不匹配，user_addr与addr不匹配。&lt;/p&gt;
-&lt;p&gt;通过resultMap就能很好地解决该问题&lt;/p&gt;
-&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;33&quot;&gt;
-&lt;pre class=&quot;brush:csharp;gutter:true;&quot;&gt;
-&amp;lt;resultMap id=&quot;userInfoMap&quot; type=&quot;UserInfo&quot;&amp;gt;
-   &amp;lt;result property=&quot;userName&quot; column=&quot;user_name&quot;/&amp;gt;
-   &amp;lt;result property=&quot;addr&quot; column=&quot;user_addr&quot;/&amp;gt;
-&amp;lt;/resultMap&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;property表示JavaBean,column表示table字段&lt;/p&gt;
-&lt;p&gt;（四）SQL&lt;/p&gt;
-&lt;p&gt;sql语句，定义可重用语句。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
- &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;sql &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;userColumns&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt; ${alias}.id,${alias}.username,${alias}.addr &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;sql&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;引定义好的sql&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-    &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;select &lt;/span&gt;&lt;span&gt;id&lt;/span&gt;&lt;span&gt;=&quot;listUserInfo&quot;&lt;/span&gt;&lt;span&gt; resultMap&lt;/span&gt;&lt;span&gt;=&quot;userInfoMap&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-        SELECT
-        &lt;/span&gt;&lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;include &lt;/span&gt;&lt;span&gt;refid&lt;/span&gt;&lt;span&gt;=&quot;userColumns&quot;&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-            &lt;span&gt;&amp;lt;&lt;/span&gt;&lt;span&gt;property &lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;=&quot;alias&quot;&lt;/span&gt;&lt;span&gt; value&lt;/span&gt;&lt;span&gt;=&quot;t1&quot;&lt;/span&gt;&lt;span&gt;/&amp;gt;&lt;/span&gt;
-        &lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;include&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;&lt;span&gt;
-        FROM user_info t1
-    &lt;/span&gt;&lt;span&gt;&amp;lt;/&lt;/span&gt;&lt;span&gt;select&lt;/span&gt;&lt;span&gt;&amp;gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;（五）cache &amp;amp;cache-ref&lt;/p&gt;
-&lt;p&gt;cache和cache-ref比较重要，放在下篇文章讲解。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;三   Mybatis系列文章&lt;/span&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;     &lt;a href=&quot;https://www.cnblogs.com/wangjiming/p/10376010.html&quot;&gt;浅谈JavaWeb架构演变&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;     &lt;a href=&quot;https://www.cnblogs.com/wangjiming/p/10384975.html&quot;&gt;浅谈mybatis如何半自动化解耦&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;     &lt;a href=&quot;https://www.cnblogs.com/wangjiming/p/10399320.html&quot;&gt;详解mybatis配置文件&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;四  参考文献&lt;/span&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;   【01】http://www.mybatis.org/mybatis-3/zh/configuration.html#&lt;/p&gt;
-&lt;p&gt;五 版权区&lt;/p&gt;
-&lt;hr/&gt;&lt;ul&gt;&lt;li&gt;   转载博客，必须注明博客出处&lt;/li&gt;
-&lt;li&gt;   博主网址：http://www.cnblogs.com/wangjiming/&lt;/li&gt;
-&lt;li&gt;   如您有新想法，欢迎提出，邮箱：2098469527@qq.com&lt;/li&gt;
-&lt;/ul&gt;
-</description>
-<pubDate>Thu, 21 Feb 2019 14:38:00 +0000</pubDate>
-<dc:creator>Alan_beijing</dc:creator>
-<og:description>一 mybatis 映射文件结构 mybatis映射配置文件存在如下顶级元素，且这些元素按照如下顺序被定义。 cache – 给定命名空间的缓存配置。 cache-ref – 其他</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wangjiming/p/10399333.html</dc:identifier>
-</item>
-<item>
-<title>javascript深入浅出图解作用域链和闭包 - saucxs</title>
-<link>http://www.cnblogs.com/chengxs/p/10415735.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/chengxs/p/10415735.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;&lt;span&gt;一、概要&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;对于闭包的定义（红宝书P178）：闭包就是指有权访问另外一个函数的作用域中的变量的函数。&lt;/p&gt;
-&lt;p&gt;关键点：&lt;/p&gt;
-&lt;p&gt;1、闭包是一个函数&lt;/p&gt;
-&lt;p&gt;2、能够访问另外一个函数作用域中的变量&lt;/p&gt;
-&lt;p&gt;文章首发地址于&lt;a href=&quot;https://www.mwcxs.top&quot; target=&quot;_blank&quot;&gt;sau交流学习社区&lt;/a&gt;：&lt;a href=&quot;https://www.mwcxs.top/page/571.html&quot; target=&quot;_blank&quot;&gt;https://www.mwcxs.top/page/571.html&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;二、闭包特性&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;对于闭包有下面三个特性：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;1、闭包可以访问当前函数以外的变量&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;getOuter(&lt;span class=&quot;hljs-params&quot;&gt;){
-  &lt;span class=&quot;hljs-keyword&quot;&gt;var date = &lt;span class=&quot;hljs-string&quot;&gt;'815';
-  &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;getDate(&lt;span class=&quot;hljs-params&quot;&gt;str){
-    &lt;span class=&quot;hljs-built_in&quot;&gt;console.log(str + date);  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2、即使外部函数已经返回，闭包仍能访问外部函数定义的变量&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;getOuter(&lt;span class=&quot;hljs-params&quot;&gt;){
-  &lt;span class=&quot;hljs-keyword&quot;&gt;var date = &lt;span class=&quot;hljs-string&quot;&gt;'815';
-  &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;getDate(&lt;span class=&quot;hljs-params&quot;&gt;str){
-    &lt;span class=&quot;hljs-built_in&quot;&gt;console.log(str + date);  &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt; &lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;3、闭包可以更新外部变量的值&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;updateCount(&lt;span class=&quot;hljs-params&quot;&gt;){
-  &lt;span class=&quot;hljs-keyword&quot;&gt;var count = &lt;span class=&quot;hljs-number&quot;&gt;0;
-  &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;getCount(&lt;span class=&quot;hljs-params&quot;&gt;val){
-    count = val;
-    &lt;span class=&quot;hljs-built_in&quot;&gt;console.log(count);
-  }
-  &lt;span class=&quot;hljs-keyword&quot;&gt;return getCount;     &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;三、作用域链&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;javascript中有一个执行上下文（execution context）的概念，它定义了变量或函数有权访问的其他数据，决定它们各自的行为。每一个执行环境都有一个与之关联的变量对象，环境中定义的所有变量和函数都保存在这个对象中。你可以把它当做Javascript的一个普通对象，但是你只能修改它的属性，却不能引用它。&lt;/p&gt;
-&lt;p&gt;变量对象也是有父作用域的。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;作用域链定义&lt;/strong&gt;：当访问一个变量时，解释器会首先在当前作用域查找标示符，如果没有找到，就去父作用域找，直到找到该变量的标示符或者不再存在父作用域了，这就是作用域链。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;作用域链和原型继承有点类似，但又有点小区别&lt;/strong&gt;：如果去查找一个普通对象的属性时，在当前对象和其原型中都找不到时，会返回undefined；但查找的属性在作用域链中不存在的话就会抛出ReferenceError。&lt;/p&gt;
-&lt;p&gt;作用域链的顶端是全局对象。对于全局环境中的代码，作用域链只包含一个元素：全局对象。所以，在全局环境中定义变量的时候，它们就会被定义到全局对象中。当函数被调用的时候，作用域链就会包含多个作用域对象。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;四、全局环境&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;关于作用域链讲得略多(红皮书上有关于作用域及执行环境的详细解释)，看一个简单地例子：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;在全局环境中，创建了两个简单地变量。如前面所说，此时变量对象是全局对象：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31BNIPZFyRiTp1_BlU5J5z3CAQ.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;执行上述代码，my_script.js本身会形成一个执行环境，以及它所引用的变量对象。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;4.1无嵌套函数&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;定义时&lt;/strong&gt;：当myFunc被定义的时候，myFunc的标识符（identifier）就被加到了全局对象中，这个标识符所引用的是一个函数对象（myFunc function object）。&lt;/p&gt;
-&lt;p&gt;内部属性[[scope]]指向当前的作用域对象，也就是函数的标识符被创建的时候，我们所能够直接访问的那个作用域对象（即全局对象）。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31HOyw8toT-8IoyVyeouZEirSk.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;myFunc所引用的函数对象，其本身不仅仅含有函数的代码，并且还含有指向其被创建的时候的作用域对象。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;调用时&lt;/strong&gt;：当myFunc函数被调用的时候，一个新的作用域对象被创建了。新的作用域对象中包含myFunc函数所定义的本地变量，以及其参数（arguments）。这个新的作用域对象的父作用域对象就是在运行myFunc时能直接访问的那个作用域对象（即全局对象）。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31FuNRWBdFr_Q3uiXGszWE3n2z.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;4.2嵌套函数&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;当函数返回没有被引用的时候，就会被垃圾回收器回收。但是对于闭包，即使外部函数返回了，函数对象仍会引用它被&lt;strong&gt;创建时&lt;/strong&gt;的作用域对象。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;&gt;&lt;span class=&quot;hljs-meta&quot;&gt;&quot;use strict&quot;;
-&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;createCounter(&lt;span class=&quot;hljs-params&quot;&gt;initial) {
-  &lt;span class=&quot;hljs-keyword&quot;&gt;var counter = initial;
-  
-  &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;increment(&lt;span class=&quot;hljs-params&quot;&gt;value) {
-    counter += value;
-  }
-  
-  &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function &lt;span class=&quot;hljs-title&quot;&gt;get(&lt;span class=&quot;hljs-params&quot;&gt;) {
-    &lt;span class=&quot;hljs-keyword&quot;&gt;return counter;
-  }
-  
-  &lt;span class=&quot;hljs-keyword&quot;&gt;return {
-    increment: increment,
-    get: get
-  };
-}
-
-&lt;span class=&quot;hljs-keyword&quot;&gt;var myCounter = createCounter(&lt;span class=&quot;hljs-number&quot;&gt;100);
-&lt;span class=&quot;hljs-built_in&quot;&gt;console.log(myCounter.get());   &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;当调用 createCounter(100) 时，内嵌函数increment和get都有指向createCounter(100) scope的引用。&lt;strong&gt;假设&lt;/strong&gt;createCounter(100)没有任何返回值，那么createCounter(100) scope不再被引用，于是就可以被垃圾回收。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31w93n77ZrHs1QV2UXm8-nuYJz.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;但是createCounter(100)实际上是有返回值的，并且返回值被存储在了myCounter中，所以对象之间的引用关系如下图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31C6IkjcFwmi-wrDUlgJMX1PoX.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;即使createCounter(100)已经返回，但是其作用域仍在，并且只能被内联函数访问。可以通过调用myCounter.increment() 或 myCounter.get()来直接访问createCounter(100)的作用域。&lt;/p&gt;
-&lt;p&gt;当myCounter.increment() 或 myCounter.get()被调用时，新的作用域对象会被创建，并且该作用域对象的父作用域对象会是当前可以直接访问的作用域对象。&lt;/p&gt;
-&lt;p&gt;调用get()时，当执行到return counter时，在get()所在的作用域并没有找到对应的标示符，就会沿着作用域链往上找，直到找到变量counter，然后返回该变量。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31co_qbvvMWRD0Y0INdbrVBTk8.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;单独调用increment(5)时，参数value保存在当前的作用域对象。当函数要访问counter时，没有找到，于是沿着作用域链向上查找，在createCounter(100)的作用域找到了对应的标示符，increment()就会修改counter的值。除此之外，没有其他方式来修改这个变量。闭包的强大也在于此，能够存贮私有数据。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/315q5ALd3xZ0tngopD-_Uhppu-.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;创建两个函数：&lt;code&gt;myCounter1&lt;/code&gt;和&lt;code&gt;myCounter2&lt;/code&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;javascript hljs&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;关系图如下&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://www.mwcxs.top/static/upload/pics/2019/1/31KyMTzv_D0Cn-fdfO1ALfB79M.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;myCounter1.increment和myCounter2.increment的函数对象拥有着一样的代码以及一样的属性值（name，length等等），但是它们的[[scope]]指向的是不一样的作用域对象。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;五、参考&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/dwqs/blog/issues/18&quot; target=&quot;_blank&quot;&gt;https://github.com/dwqs/blog/issues/18&lt;/a&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Thu, 21 Feb 2019 14:25:00 +0000</pubDate>
-<dc:creator>saucxs</dc:creator>
-<og:description>一、概要 对于闭包的定义（红宝书P178）：闭包就是指有权访问另外一个函数的作用域中的变量的函数。 关键点： 1、闭包是一个函数 2、能够访问另外一个函数作用域中的变量 文章首发地址于sau交流学习社</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/chengxs/p/10415735.html</dc:identifier>
-</item>
-<item>
-<title>整合X-Admin前端框架改造ABP - 微笑刺客D</title>
-<link>http://www.cnblogs.com/CKExp/p/10403132.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/CKExp/p/10403132.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;　　“站在巨人的肩膀上”，这样一来，不要万事亲恭，在值得的方向上节约时间，毕竟人生就这么一次。在接触ABP以来，一直想花点时间整合LayUI前端框架到ABP中，进而能够逐渐打磨出一套适合自己的框架，开发习惯、项目架构、界面风格等等。在年前花了点时间了解了LayUI现有的后台模板，虽然LayUI自家的LayUIAdmin很不错，但奈何于贫穷，因此绕道看看是否有前端同胞已经弄出来一份免费版的，比较了几份后台模板后，找到了合适的X-Admin。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; 　　&lt;strong&gt;演示地址：&lt;/strong&gt;&lt;a href=&quot;http://123.207.15.233:9527/&quot; target=&quot;_blank&quot;&gt;http://123.207.15.233:9527/&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt; 　&lt;strong&gt;　码云地址：&lt;/strong&gt;&lt;a href=&quot;https://gitee.com/530521314/PithyDesign.git&quot; target=&quot;_blank&quot;&gt;https://gitee.com/530521314/PithyDesign.git&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;&lt;span&gt;一、X-Admin前端框架和ABP框架&lt;/span&gt;&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;　　X-Admin是基于LayUI打造的一套前端框架，比起Bootstrap那种粗犷的风格，LayUI更加符合国人的审美观，同时LayUI也对后端开发人员友好，在不完全掌握前端知识的前提下也能够进行项目开发，官网地址：&lt;a href=&quot;http://x.xuebingsi.com/&quot; target=&quot;_blank&quot;&gt;http://x.xuebingsi.com/&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;　　ABP框架是一个用最佳实践和流行技术开发现代Web应用程序的新起点，旨在快速搭建一个通用的Web应用框架和项目模板，集成着一些优秀的工具和思想，官网地址：&lt;a href=&quot;https://aspnetboilerplate.com/&quot; target=&quot;_blank&quot;&gt;https://aspnetboilerplate.com/&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;　　如果觉得自己组合一套框架觉得繁琐，可以试试使用52ABP框架，该套优秀的前后端框架由梁桐铭在ABP框架的基础上进行整合，对于前后端相关功能进行改造，使满足国人的开发习惯，官网地址：&lt;a href=&quot;https://www.52abp.com/&quot; target=&quot;_blank&quot;&gt;https://www.52abp.com/&lt;/a&gt;。&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;&lt;span&gt;二、开始整合两个框架&lt;/span&gt;&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt;　　1、先从ABP官网下载项目模板。经过文件结构调整后，项目文件路径如下，之所以项目文件路径和官网下载下来的不完全一致，是经过了一些调整，适用自己的开发习惯，毕竟适合的才是最好的，在之前的&lt;a href=&quot;https://www.cnblogs.com/CKExp/p/9860427.html&quot; target=&quot;_blank&quot;&gt;生成流水线搭建中&lt;/a&gt;也提到过项目结构，目的是使之标准化，而不需要每次都要重新设置一下项目文件结构。(&lt;strong&gt;注意，此处我下载的是.Net Core+MPA版+去掉登录、注册、用户、角色和多租户功能&lt;/strong&gt;)&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220222258914-349359430.png&quot; alt=&quot;&quot; width=&quot;796&quot; height=&quot;397&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;　　2、下载X-Admin源码包，解压后，开始着手Ctrl+C、V操作，将需要的一些js、css等文件移入到ABP中。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220221000627-1642025122.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 　　3、去除在本次整合后部分在ABP中的不再需要的功能，如Boostrap及其相关的插件，并不是Boostrap不优秀而是LayUI是我的目的，功能相似下，没必要在冗余存在。&lt;/p&gt;
-&lt;p&gt; 　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220223409112-574710225.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　并在bower包管理中删除对Boostrap的依赖，尽可能的使用大部分LayUI及LayUI社区提供的插件和功能，以减少后端开发人员的学习和使用成本。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220223505320-1886583432.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 　　4、将X-Admin文件夹中的js文件及css文件移入到ABP中，部分ABP分装了一层的js、css保持不变，仍然先存放着，如果后期确定不再使用，再进行移除ABP下载后自带了一个main.css文件，可以使用这个文件或直接使用X-Admin中的css文件。　　&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220224049095-486162967.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　5、以现有的Layout母版页复制一个(此处我命名为_LayoutBase)，从X-Admin文件夹中查看index.html并复制Body标签内的代码到_Layout母版页的Body中(我对底部的footer删除了，位置不太合适)，整理引用的js、css文件，具体可见我的Git仓库中，使用控制器Home,方法Index的视图作为使用_LayoutBase母版页的视图，其余页面都将在Index界面中以iframe的形式出现，到现在，直接启动项目后，初步的界面可以展现出来了。&lt;/p&gt;
-&lt;p&gt; 　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190220224958308-1703538482.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;&lt;span&gt;三、优化展示效果&lt;/span&gt;&lt;/strong&gt;&lt;/h3&gt;
-&lt;p&gt; 　　1、X-Admin中，对于侧边栏收缩采用的是直接全部隐藏，在该功能的基础上改造一些功能，使得收缩后可以留下一列图标，实现方式可以有很多种，此处采取使用js脚本去控制左侧菜单宽度实现，在xadmin.js脚本中，找到&lt;strong&gt;$('.container .left_open').click()&lt;/strong&gt;方法，然后在此基础上进行改造，如以下改造，注意，部分css也需要改造，具体见仓库源代码中。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;42&quot;&gt;
-&lt;pre&gt;
-$('.container .left_open').click(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; (event) {
-    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!$('.left-nav #nav .layui-nav-item').hasClass('nav-mini'&lt;span&gt;)) {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;左侧菜单&lt;/span&gt;
-        $('.left-nav #nav .layui-nav-item').addClass('nav-mini'&lt;span&gt;);
-        $(&lt;/span&gt;'.left-nav').animate({ left: '0px', width: '60px' }, 100&lt;span&gt;);
-        $(&lt;/span&gt;'.sub-menu li').each(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
-            $(&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;).hide();
-        });
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;右侧内容&lt;/span&gt;
-        $('.page-content').animate({ left: '60px' }, 100&lt;span&gt;);
-        $(&lt;/span&gt;'.page-content-bg'&lt;span&gt;).hide();
-    } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;左侧菜单&lt;/span&gt;
-        $('.left-nav .layui-nav-item').removeClass('nav-mini'&lt;span&gt;);
-        $(&lt;/span&gt;'.left-nav').animate({ left: '0px', width: '220px' }, 100, &lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
-            $(&lt;/span&gt;'.sub-menu li').each(&lt;span&gt;function&lt;/span&gt;&lt;span&gt; () {
-                $(&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;).show();
-            });
-        });
-
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;右侧内容&lt;/span&gt;
-        $('.page-content').animate({ left: '220px' }, 100&lt;span&gt;);
-        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; ($(window).width() &amp;lt; 768&lt;span&gt;) {
-            $(&lt;/span&gt;'.page-content-bg'&lt;span&gt;).show();
-        }
-    }
-});&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 　　2、加入语言为简体中文，在领域层中的本地资源配置中加入中文及中文语言包，此处我将中文设置为默认语言，更改原有默认的英文包的PithyDesign为PithyDesign-en，并增加一个PithyDesign.json内容与英文包一样，将英文译成中文即可。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190221213111005-955050302.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　增加中文并设置为默认选项，如有更多语言，可以在此基础上进行扩展。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190221212041673-174573465.png&quot; alt=&quot;&quot; width=&quot;940&quot; height=&quot;330&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;　　3、对X-Admin代码包中存在的一些其它界面加入到ABP中如用户、管理员的增删改查界面、地址三级联动、百度的ECharts图表展示界面等，在增加前需要注意母版页的设置，在按Url：Home/Index进入后台界面后，Index视图直接套用_LayoutBase母版页，然后其它功能页以iframe的形式嵌入，其余功能页使用_Layout母版页。&lt;/p&gt;
-&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1133736/201902/1133736-20190221215000364-1823276173.png&quot; alt=&quot;&quot; width=&quot;594&quot; height=&quot;655&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;　至此，整合工作算是完成了，后期考虑提高一些操作上的体验感，同时逐步完善如用户登录、注册、组织机构、角色等基础功能。&lt;/p&gt;
-
-&lt;pre class=&quot;lang-java prettyprint prettyprinted&quot;&gt;
-&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;str&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;typ&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;pun&quot;&gt;&lt;span class=&quot;pln&quot;&gt;&lt;span class=&quot;lit&quot;&gt;&lt;strong&gt;&lt;span class=&quot;hljs-number&quot;&gt;2019-&lt;span class=&quot;hljs-number&quot;&gt;02-&lt;span class=&quot;hljs-number&quot;&gt;21,望技术有成后能回来看见自己的脚步&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;</description>
-<pubDate>Thu, 21 Feb 2019 13:58:00 +0000</pubDate>
-<dc:creator>微笑刺客D</dc:creator>
-<og:description>“站在巨人的肩膀上”，这样一来，不要万事亲恭，在值得的方向上节约时间，毕竟人生就这么一次。在接触ABP以来，一直想花点时间整合LayUI前端框架到ABP中，进而能够逐渐打磨出一套适合自己的框架，开发习</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/CKExp/p/10403132.html</dc:identifier>
-</item>
-<item>
-<title>补习系列(16)-springboot mongodb 数据库应用技巧 - 美码师</title>
-<link>http://www.cnblogs.com/littleatp/p/10415569.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/littleatp/p/10415569.html</guid>
-<description>&lt;h2 id=&quot;一关于-mongodb&quot;&gt;一、关于 MongoDB&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201902/242916-20190221214305541-498285244.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;MongoDB 目前非常流行，在最近的&lt;a href=&quot;https://db-engines.com/en/ranking&quot;&gt;DB-Engine&lt;/a&gt;排名中居第5位，仅次于传统的关系型数据库如 Oracle、Mysql。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201902/242916-20190221214337091-181575137.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;然而在非关系型数据库领域，MongoDB已经持续成为佼佼者一段时间了，这与 MongoDB的一些优势存在一定关系：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;无模式(Schema)，便于快速开发；&lt;/li&gt;
-&lt;li&gt;面向文档化的数据，基于BSON格式(类JSON)，灵活性强&lt;/li&gt;
-&lt;li&gt;高性能，得益于其内存计算能力；&lt;/li&gt;
-&lt;li&gt;副本集、自动分片特性，提供了高可用及水平扩展能力&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;MongoDB 的主要对象包括数据库（database）、集合（collection）、文档对象（document），与关系型数据库的对应关系如下：&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;schema&lt;/td&gt;
-&lt;td&gt;database&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;table&lt;/td&gt;
-&lt;td&gt;collection&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;record&lt;/td&gt;
-&lt;td&gt;document&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;column&lt;/td&gt;
-&lt;td&gt;field&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;与关系型数据库一样，MongoDB也支持索引(不支持外键)，然而其没有定义固定的列(Column)，字段可以是任何类型的值，比如数值、数组或嵌套文档等。&lt;br/&gt;在最近发布的4.0版本中，MongoDB开始支持事务。可见，在未来这些数据库之间的差异只会越来越少。&lt;/p&gt;
-&lt;h2 id=&quot;二spring-data-mongo&quot;&gt;二、Spring-Data-Mongo&lt;/h2&gt;
-&lt;p&gt;Spring-Data-Mongo 是Spring框架对于MongoDB 数据读写的ORM 封装，&lt;br/&gt;与 大家熟悉的 JPA一样，其在MongoDB-Java-Driver基础之上做了一些封装，令应用开发更加简便。&lt;/p&gt;
-&lt;p&gt;如下是&lt;strong&gt;SpringData&lt;/strong&gt; 整体框架的一个概要：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201902/242916-20190221214415279-268603964.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;从上图中可以看出，SpringData 是基于分层设计的。从下之上，分别是：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;数据库层；&lt;/li&gt;
-&lt;li&gt;驱动层(JDBC/Driver)；&lt;/li&gt;
-&lt;li&gt;ORM层(Repository)；&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;三整合-mongodb-crud&quot;&gt;三、整合 MongoDB CRUD&lt;/h2&gt;
-&lt;p&gt;接下来的篇幅，主要针对如何在项目中使用框架进行MongoDB数据库的读写，部分代码可供参考。&lt;/p&gt;
-&lt;h3 id=&quot;a.-引入框架&quot;&gt;A. 引入框架&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;        &amp;lt;dependency&amp;gt;
-            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;spring-boot-starter-data-mongodb&amp;lt;/artifactId&amp;gt;
-            &amp;lt;version&amp;gt;${spring-boot.version}&amp;lt;/version&amp;gt;
-        &amp;lt;/dependency&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;其中 &lt;strong&gt;&lt;em&gt;spring-boot-starter-mongodb&lt;/em&gt;&lt;/strong&gt; 是一个胶水组件，声明对它的依赖会令项目自动引入&lt;strong&gt;&lt;em&gt;spring-data-mongo&lt;/em&gt;&lt;/strong&gt;、&lt;strong&gt;&lt;em&gt;mongodb-java-driver&lt;/em&gt;&lt;/strong&gt;等基础组件。&lt;/p&gt;
-&lt;h3 id=&quot;b.-数据库配置&quot;&gt;B. 数据库配置&lt;/h3&gt;
-&lt;p&gt;我们在 &lt;strong&gt;application.properties&lt;/strong&gt; 中声明一段配置：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;spring.data.mongodb.host=127.0.0.1
-spring.data.mongodb.port=27017
-spring.data.mongodb.username=appuser
-spring.data.mongodb.password=appuser@2016
-spring.data.mongodb.database=appdb&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;不难理解，这里是数据库主机、端口、用户密码、数据库的设置。&lt;/p&gt;
-&lt;h3 id=&quot;c.-数据模型&quot;&gt;C. 数据模型&lt;/h3&gt;
-&lt;p&gt;接下来，要定义数据集合(collection) 的一个结构，以 &lt;strong&gt;Book&lt;/strong&gt;实体为例：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Document(collection = &quot;book&quot;)
-@CompoundIndexes({ @CompoundIndex(name = &quot;idx_category_voteCount&quot;, def = &quot;{'category': 1, 'voteCount': 1}&quot;),
-        @CompoundIndex(name = &quot;idx_category_createTime&quot;, def = &quot;{'category': 1, 'createTime': 1}&quot;) })
-public class Book {
-
-    @Id
-    private String id;
-
-    @Indexed
-    private String author;
-
-    private String category;
-
-    @Indexed
-    private String title;
-
-    private int voteCount;
-    private int price;
-
-    @Indexed
-    private Date publishDate;
-
-    private Date updateTime;
-    private Date createTime;
-...
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里，我们给Book 实体定义了一些属性：&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;id&lt;/td&gt;
-&lt;td&gt;书籍ID&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;author&lt;/td&gt;
-&lt;td&gt;作者&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;category&lt;/td&gt;
-&lt;td&gt;书籍分类&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;title&lt;/td&gt;
-&lt;td&gt;书籍标题&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;voteCount&lt;/td&gt;
-&lt;td&gt;投票数量&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;price&lt;/td&gt;
-&lt;td&gt;价格&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;publishDate&lt;/td&gt;
-&lt;td&gt;发布日期&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;updateTime&lt;/td&gt;
-&lt;td&gt;更新时间&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;createTime&lt;/td&gt;
-&lt;td&gt;创建时间&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;除此以外，我们还会用到几个注解：&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;1&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;@Document&lt;/td&gt;
-&lt;td&gt;声明实体为MongoDB文档&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;@Id&lt;/td&gt;
-&lt;td&gt;标记ID属性&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;@Indexed&lt;/td&gt;
-&lt;td&gt;单键索引&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;@CompoundIndexes&lt;/td&gt;
-&lt;td&gt;复合索引集&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;@CompoundIndex&lt;/td&gt;
-&lt;td&gt;复合索引&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;关于MongoDB索引形态，可以参考&lt;a href=&quot;https://docs.mongodb.com/manual/indexes/&quot;&gt;官方文档&lt;/a&gt;做一个详细了解。&lt;/p&gt;
-&lt;h3 id=&quot;d.-数据操作&quot;&gt;D. 数据操作&lt;/h3&gt;
-&lt;p&gt;ORM 框架可以让你通过操作对象来直接影响数据，这样一来，可以大大减少上手的难度，你不再需要熟悉大量驱动层的API了。&lt;br/&gt;Spring-Data-Mongo 实现了类JPA的接口，通过预定义好的Repository可实现&lt;strong&gt;代码方法到数据库操作语句DML&lt;/strong&gt;的映射。&lt;br/&gt;下面是一些例子：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;BookRepository&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;public interface BookRepository extends MongoRepository&amp;lt;Book, String&amp;gt; {
-
-    public List&amp;lt;Book&amp;gt; findByAuthor(String author);
-
-    public List&amp;lt;Book&amp;gt; findByCategory(String category, Pageable pageable);
-
-    public Book findOneByTitle(String title);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;我们所看到的 &lt;strong&gt;&lt;em&gt;findByAttribute&lt;/em&gt;&lt;/strong&gt; 将会直接被转换成对应的条件查询，如 findByAuthor 等价于&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;db.book.find({author:'Lilei'})&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;接下来，我们可以方便的在业务逻辑层(service层) 对Repository 进行调用，如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Service
-public class BookService {
-
-    @Autowired
-    private BookRepository bookRepository;
-
-    private static final Logger logger = LoggerFactory.getLogger(BookService.class);
-
-    /**
-     * 创建book
-     * 
-     * @param category
-     * @param title
-     * @param author
-     * @param price
-     * @param publishDate
-     * @return
-     */
-    public Book createBook(String category, String title, String author, int price, Date publishDate) {
-        if (StringUtils.isEmpty(category) || StringUtils.isEmpty(title) || StringUtils.isEmpty(author)) {
-            return null;
-        }
-
-        Book book = new Book();
-        book.setAuthor(author);
-        book.setTitle(title);
-        book.setCategory(category);
-        book.setPrice(price);
-        book.setPublishDate(publishDate);
-
-        book.setVoteCount(0);
-        book.setCreateTime(new Date());
-        book.setUpdateTime(book.getCreateTime());
-
-        return bookRepository.save(book);
-    }
-
-    /**
-     * 更新价格
-     * 
-     * @param id
-     * @param price
-     * @return
-     */
-    public boolean updatePrice(String id, int price) {
-        if (StringUtils.isEmpty(id)) {
-            return false;
-        }
-
-        Book book = bookRepository.findOne(id);
-        if (book == null) {
-
-            logger.info(&quot;the book '{}' is not exist&quot;, id);
-            return false;
-        }
-
-        book.setPrice(price);
-        book.setUpdateTime(new Date());
-        if (bookRepository.save(book) != null) {
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 根据获取book
-     * 
-     * @param title
-     * @return
-     */
-    public Book getBookByTitle(String title) {
-        if (StringUtils.isEmpty(title)) {
-            return null;
-        }
-        return bookRepository.findOneByTitle(title);
-    }
-
-    /**
-     * 获取投票排行列表
-     * 
-     * @param category
-     * @param max
-     * @return
-     */
-    public List&amp;lt;Book&amp;gt; listTopVoted(String category, int max) {
-
-        if (StringUtils.isEmpty(category) || max &amp;lt;= 0) {
-            return Collections.emptyList();
-        }
-
-        // 按投票数倒序排序
-        Sort sort = new Sort(Direction.DESC, Book.COL_VOTE_COUNT);
-        PageRequest request = new PageRequest(0, max, sort);
-
-        return bookRepository.findByCategory(category, request);
-
-    }
-
-    /**
-     * 删除书籍
-     * 
-     * @param id
-     * @return
-     */
-    public boolean deleteBook(String id) {
-        Book book = bookRepository.findOne(id);
-        if (book == null) {
-
-            logger.info(&quot;the book '{}' is not exist&quot;, id);
-            return false;
-        }
-
-        bookRepository.delete(book);
-        return true;
-    }
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;关于Repository 映射规则，可以从&lt;a href=&quot;https://docs.spring.io/spring-data/mongodb/docs/2.1.0.M3/reference/html/#mongodb.repositories.queries&quot;&gt;这里&lt;/a&gt;找到详细介绍。&lt;/p&gt;
-&lt;h3 id=&quot;e.-自定义操作&quot;&gt;E. 自定义操作&lt;/h3&gt;
-&lt;p&gt;有时候，Repository的方法映射无法较好的满足一些特定场景，比如高级检索、局部更新、覆盖索引查询等等，&lt;br/&gt;此时可以使用框架提供的 &lt;strong&gt;MongoTemplate&lt;/strong&gt; 工具类来完成这些定制，MongoTemplate 提供了大量的 &lt;strong&gt;Criteria API&lt;/strong&gt; 来封装 Mongo-Java-Driver的实现。&lt;br/&gt;我们一方面可以选择直接使用该API，另一方面，则可以更加&lt;strong&gt;&quot;优雅&quot;&lt;/strong&gt;的整合到Repository 接口，如下面的代码：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;声明 Custom 接口&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;public interface BookRepositoryCustom {
-
-    public PageResult&amp;lt;Book&amp;gt; search(String category, String title, String author, Date publishDataStart,
-            Date publishDataEnd, Pageable pageable);
-
-    public boolean incrVoteCount(String id, int voteIncr);
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;声明接口继承关系&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;public interface BookRepository extends MongoRepository&amp;lt;Book, String&amp;gt;, BookRepositoryCustom{&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre&gt;
-&lt;code&gt;public class BookRepositoryImpl implements BookRepositoryCustom {
-
-    @Autowired
-    private MongoTemplate mongoTemplate;
-
-    public boolean incrVoteCount(String id, int voteIncr) {
-        if (StringUtils.isEmpty(id)) {
-            return false;
-        }
-
-        Query query = new Query();
-        query.addCriteria(Criteria.where(&quot;id&quot;).is(id));
-
-        Update update = new Update();
-
-        update.inc(Book.COL_VOTE_COUNT, voteIncr);
-        update.set(Book.COL_UPDATE_TIME, new Date());
-
-        WriteResult result = mongoTemplate.updateFirst(query, update, Book.class);
-        return result != null &amp;amp;&amp;amp; result.getN() &amp;gt; 0;
-    }
-
-    @Override
-    public PageResult&amp;lt;Book&amp;gt; search(String category, String title, String author, Date publishDataStart,
-            Date publishDataEnd, Pageable pageable) {
-        Query query = new Query();
-
-        if (!StringUtils.isEmpty(category)) {
-            query.addCriteria(Criteria.where(Book.COL_CATEGORY).is(category));
-        }
-
-        if (!StringUtils.isEmpty(author)) {
-            query.addCriteria(Criteria.where(Book.COL_AUTHOR).is(author));
-        }
-
-        if (!StringUtils.isEmpty(title)) {
-            query.addCriteria(Criteria.where(Book.COL_TITLE).regex(title));
-        }
-
-        if (publishDataStart != null || publishDataEnd != null) {
-            Criteria publishDateCond = Criteria.where(Book.COL_PUBLISH_DATE);
-
-            if (publishDataStart != null) {
-                publishDateCond.gte(publishDataStart);
-            }
-            if (publishDataEnd != null) {
-                publishDateCond.lt(publishDataEnd);
-            }
-            query.addCriteria(publishDateCond);
-        }
-
-        long totalCount = mongoTemplate.count(query, Book.class);
-        if (totalCount &amp;lt;= 0) {
-            return new PageResult&amp;lt;Book&amp;gt;();
-        }
-
-        if (pageable != null) {
-            query.with(pageable);
-        }
-
-        List&amp;lt;Book&amp;gt; books = mongoTemplate.find(query, Book.class);
-        return PageResult.of(totalCount, books);
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;利用 AOP的魔法 ，Spring 框架会自动将我们这段代码实现&lt;strong&gt;织入&lt;/strong&gt; 到Bean对象中，&lt;br/&gt;这样一来，我们原先对Repository的依赖引用方式就不需要改变了。&lt;/p&gt;
-&lt;h2 id=&quot;四高级技巧&quot;&gt;四、高级技巧&lt;/h2&gt;
-&lt;p&gt;SpringBoot中完成Mongodb的自动化配置，是通过MongoAutoConfiguration、MongoDataAutoConfiguration完成的。&lt;/p&gt;
-&lt;p&gt;其中MongoAutoConfiguration的实现如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Configuration
-@ConditionalOnClass(MongoClient.class)
-@EnableConfigurationProperties(MongoProperties.class)
-@ConditionalOnMissingBean(type = &quot;org.springframework.data.mongodb.MongoDbFactory&quot;)
-public class MongoAutoConfiguration {
-
-    private final MongoProperties properties;
-
-    private final MongoClientOptions options;
-
-    private final Environment environment;
-
-    private MongoClient mongo;
-
-    public MongoAutoConfiguration(MongoProperties properties,
-            ObjectProvider&amp;lt;MongoClientOptions&amp;gt; options, Environment environment) {
-        this.properties = properties;
-        this.options = options.getIfAvailable();
-        this.environment = environment;
-    }
-
-    @PreDestroy
-    public void close() {
-        if (this.mongo != null) {
-            this.mongo.close();
-        }
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public MongoClient mongo() throws UnknownHostException {
-        this.mongo = this.properties.createMongoClient(this.options, this.environment);
-        return this.mongo;
-    }
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;从上面的代码可见，如果应用代码中未声明 MongoClient、MongoDbFactory，那么框架会根据配置文件自动做客户端的初始化。&lt;br/&gt;通过声明，可以取消这些自动化配置：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@SpringBootApplication
-@EnableAutoConfiguration(exclude = { EmbeddedMongoAutoConfiguration.class, MongoDataAutoConfiguration.class,
-        MongoAutoConfiguration.class })
-public class DemoBoot {
-...
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;真实线上的项目中，会对MongoDB 客户端做一些定制，下面的介绍几个用法&lt;/p&gt;
-&lt;h3 id=&quot;连接池配置&quot;&gt;1. 连接池配置&lt;/h3&gt;
-&lt;pre&gt;
-&lt;code&gt;@Configuration
-public class MongoConfig {
-
-    @Bean
-    public MongoDbFactory mongoFactory(MongoProperties mongo) throws Exception {
-
-        MongoClientOptions.Builder builder = new MongoClientOptions.Builder();
-        // 连接池配置
-        builder.maxWaitTime(1000 * 60 * 1).socketTimeout(30 * 1000).connectTimeout(10 * 1000).connectionsPerHost(60)
-                .minConnectionsPerHost(60).socketKeepAlive(true);
-
-        // 设置鉴权信息
-        MongoCredential credential = null;
-        if (!StringUtils.isEmpty(mongo.getUsername())) {
-            credential = MongoCredential.createCredential(mongo.getUsername(), mongo.getDatabase(),
-                    mongo.getPassword());
-        }
-
-        MongoClientOptions mongoOptions = builder.build();
-
-        List&amp;lt;ServerAddress&amp;gt; addrs = Arrays.asList(new ServerAddress(mongo.getHost(), mongo.getPort()));
-        MongoClient mongoClient = null;
-        if (credential != null) {
-            mongoClient = new MongoClient(addrs, Arrays.asList(credential), mongoOptions);
-        } else {
-            mongoClient = new MongoClient(addrs, mongoOptions);
-        }
-        return new SimpleMongoDbFactory(mongoClient, mongo.getDatabase());
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;我们所关心的，往往是连接池大小、超时参数阈值、队列这几个，如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;//连接池最小值
-private int minConnectionsPerHost;
-//连接池最大值
-private int maxConnectionsPerHost = 100;
-//线程等待连接阻塞系数
-private int threadsAllowedToBlockForConnectionMultiplier = 5;
-//选择主机超时
-private int serverSelectionTimeout = 1000 * 30;
-//最大等待
-private int maxWaitTime = 1000 * 60 * 2;
-//最大连接闲时
-private int maxConnectionIdleTime;
-//最大连接存活
-private int maxConnectionLifeTime;
-//TCP建立连接超时
-private int connectTimeout = 1000 * 10;
-//TCP读取超时
-private int socketTimeout = 0;
-//TCP.keepAlive是否启用
-private boolean socketKeepAlive = true;
-//心跳频率
-private int heartbeatFrequency = 10000;
-//最小心跳间隔
-private int minHeartbeatFrequency = 500;
-//心跳TCP建立连接超时
-private int heartbeatConnectTimeout = 20000;
-//心跳TCP读取超时
-private int heartbeatSocketTimeout = 20000;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;去掉_class属性&quot;&gt;2. 去掉_class属性&lt;/h3&gt;
-&lt;p&gt;通过 SpringDataMongo 定义的实体，会自动写入一个***_class***属性，大多数情况下这个不是必须的，可以通过配置去掉：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Bean
-    public MongoTemplate mongoTemplate(MongoDbFactory mongoDbFactory, MongoMappingContext context) {
-
-        DbRefResolver dbRefResolver = new DefaultDbRefResolver(mongoDbFactory);
-        MappingMongoConverter converter = new MappingMongoConverter(dbRefResolver, context);
-        converter.setTypeMapper(new DefaultMongoTypeMapper(null));
-
-        converter.afterPropertiesSet();
-
-        MongoTemplate mongoTemplate = new MongoTemplate(mongoDbFactory, converter);
-
-        return mongoTemplate;
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;自定义序列化&quot;&gt;3. 自定义序列化&lt;/h3&gt;
-&lt;p&gt;一些基础的字段类型，如 int 、long、string，通过JDK 装箱类就可以完成，&lt;br/&gt;对于内嵌的对象类型，SpringDataMongo框架会将其转换为 DBObject对象(java driver 实体)。&lt;br/&gt;一般情况下这已经足够了，但某些场景下你不得不实现自己的序列化方式，比如通过文档存储某些特殊格式的内容。&lt;/p&gt;
-&lt;p&gt;这需要用到 Converter 接口，如下面的代码：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;   @Bean
-    public MongoTemplate mongoTemplate(MongoDbFactory mongoDbFactory, MongoMappingContext context) {
-
-        DbRefResolver dbRefResolver = new DefaultDbRefResolver(mongoDbFactory);
-        MappingMongoConverter converter = new MappingMongoConverter(dbRefResolver, context);
-        converter.setTypeMapper(new DefaultMongoTypeMapper(null));
-
-        // 自定义转换
-        converter.setCustomConversions(customConversions());
-        converter.afterPropertiesSet();
-
-        MongoTemplate mongoTemplate = new MongoTemplate(mongoDbFactory, converter);
-        return mongoTemplate;
-    }
-
-    private CustomConversions customConversions() {
-        List&amp;lt;Converter&amp;lt;?, ?&amp;gt;&amp;gt; converters = new ArrayList&amp;lt;Converter&amp;lt;?, ?&amp;gt;&amp;gt;();
-        converters.add(new BasicDBObjectWriteConverter());
-        converters.add(new BasicDBObjectReadConverter());
-        return new CustomConversions(converters);
-    }
-
-    /**
-     * 写入序列化
-     */
-    @WritingConverter
-    public static class BasicDBObjectWriteConverter implements Converter&amp;lt;BasicDBObject, String&amp;gt; {
-
-        public String convert(BasicDBObject source) {
-            if (source == null) {
-                return null;
-            }
-            return source.toJson();
-        }
-    }
-
-    /**
-     * 读取反序列化
-     */
-    @ReadingConverter
-    public static class BasicDBObjectReadConverter implements Converter&amp;lt;String, BasicDBObject&amp;gt; {
-
-        public BasicDBObject convert(String source) {
-            if (source == null || source.length() &amp;lt;= 0) {
-                return null;
-            }
-            return BasicDBObject.parse(source);
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;读写分离&quot;&gt;4. 读写分离&lt;/h3&gt;
-&lt;p&gt;MongoDB 本身支持读写分离的实现，前提是采用副本集、分片副本集的架构，&lt;br/&gt;通过声明客户端的 ReadPreference 级别可以达到优先读主、优先读备的控制。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Configuration
-public class MongoConfig {
-
-    @Bean(name=&quot;secondary&quot;)
-    public MongoDbFactory mongoFactory(MongoProperties mongo) throws Exception {
-
-        MongoClientOptions.Builder builder = new MongoClientOptions.Builder();
-        // 连接池配置
-        builder.maxWaitTime(1000 * 60 * 1).socketTimeout(30 * 1000).connectTimeout(10 * 1000).connectionsPerHost(60)
-                .minConnectionsPerHost(60).socketKeepAlive(true);
-        // 优先读备节点
-        builder.readPreference(ReadPreference.secondaryPreferred());
-        ...
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;上面的代码中，将会为MongoClient 设置 &lt;strong&gt;secondaryPreferred&lt;/strong&gt; 的读级别。&lt;br/&gt;ReadPreference 级别包括以下几种：&lt;/p&gt;
-&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;5&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;&lt;strong&gt;primary&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;默认值，只从主节点读，主节点不可用时报错&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;primaryPreferred&lt;/td&gt;
-&lt;td&gt;优先主节点(primary)读，主节点不可用时到从节点(secondary)读&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;secondary&lt;/td&gt;
-&lt;td&gt;仅从备节点(secondary)读取数据&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;secondaryPreferred&lt;/td&gt;
-&lt;td&gt;优先从备节点读，从节点不可用时到主节点读取&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;nearest&lt;/td&gt;
-&lt;td&gt;到网络延迟最低的节点读取数据，不管是主节点还是从节点&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;a href=&quot;https://gitee.com/littleatp/springboot-samples&quot;&gt;Gitee同步代码&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;小结&quot;&gt;小结&lt;/h2&gt;
-&lt;p&gt;MongoDB 是当下 NoSQL 数据库的首选，也有不少服务化架构采用了 MongoDB作为主要数据库，&lt;br/&gt;其在 4.x版本中即将推出事务功能，在未来该文档数据库相对于RDBMS的差距将会大大缩小。&lt;br/&gt;也正由于MongoDB 具备 简单、易扩展、高性能等特性，其社区活跃度非常高，是非常值得关注和学习的。&lt;/p&gt;
-&lt;p&gt;欢迎继续关注&quot;美码师的补习系列-springboot篇&quot; ，期待更多精彩内容^-^&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Feb 2019 13:54:00 +0000</pubDate>
-<dc:creator>美码师</dc:creator>
-<og:description>[TOC] 一、关于 MongoDB MongoDB 目前非常流行，在最近的 'DB Engine' 排名中居第5位，仅次于传统的关系型数据库如 Oracle、Mysql。 然而在非关系型数据库领域，</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/littleatp/p/10415569.html</dc:identifier>
-</item>
-<item>
-<title>游戏服务器h2engine架构优化和跨平台设计 - 知然</title>
-<link>http://www.cnblogs.com/zhiranok/p/h2enginewin.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhiranok/p/h2enginewin.html</guid>
-<description>&lt;p&gt;H2engine的GitHub星星不知不觉已经破百了，也没有特意推广过，但是慢慢的关注的人越来越多。因为事情多，好久没有写东西了，前一段时间有了一些想法，把h2engine又更新了一下，感觉h2engine又向前迈了一大步。本文记录一下最近的心得体会，以及做出的相应修改。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/282357/201902/282357-20190221202933929-1765334617.jpg&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;关于rpc&quot;&gt;关于RPC&lt;/h2&gt;
-&lt;p&gt;H2engine的rpc部分使用的是原来fflib的ffrpc组件，ffrpc设计的比较强大，但是因为h2engie的架构特点，ffrpc的一些功能用不到，很多网友都询问我关于rpc部分的设计问题，我仔细思考后觉得确实可以把h2engine的rpc部分进行简化，这样对于使用者而言更容易理解。&lt;br/&gt;先看一下h2engine的架构：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;H2engine设计的为单gate，单服环境内linux下一个gate完全能够满足性能要求，Apache/nigx都是一个进程不是吗？单gate让分布式的结构大大简化。我们知道一般单服架构都有个loginserver，现在可以省略了，因为单gate，每个服直接配置gate地址。&lt;/li&gt;
-&lt;li&gt;H2engine为多进程架构，但是h2engine限定了采用伪分布式的设计，虽然gate和gameserver通过网络通信，但是限定了gate和gameserver在一台机器上。虽然gate和gameserver放在不同机器上也可以通信，但是我们从现实运营的情况出发，很少运维会把gate和gameserver放不同机器上，一般有的时候一台机器上甚至有多个服。所以伪分布式是既能满足需求又能大大简化架构的一个设计。&lt;/li&gt;
-&lt;li&gt;采用伪分布式设计后，gameserver之间就可以利用共享内存了，全局的数据比如排行榜、行会、好友、组队等，这些模块都是分布式进程中最费时费力容易出错的，但是在h2engine里变得逻辑清晰，直接操作全局内存就可以了，全同步。&lt;/li&gt;
-&lt;li&gt;Rpc模块进行了简化，其实rpc通信分三种，gate调用gameserver接口，gameserver调用gate接口，和gameserver与gameserver之间调用，发现没，所有架构内rpc都需要通过gate，而且h2engine是单gate伪分布式（127.0.0.1速度飞起），那么整个rpc结构就变得非常清晰简单，感兴趣的可以看下gate的broker文件和rpc文件。这两个文件一个是gate端中转，一个是请求端封装，非常简洁。&lt;/li&gt;
-&lt;li&gt;网络层进行了升级，原来socket是裸的指针，很多网友还是表达了不知道什么时候应该调用safedelete的问题，所以还是改成了智能指针，不需要关系socket什么时候释放。另外socket的私有数据进行了泛型封装，可以存入任何私有数据类型。&lt;br/&gt;共享内存的简单示意：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/282357/201902/282357-20190221203025771-351202048.jpg&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;关于跨平台&quot;&gt;关于跨平台&lt;/h2&gt;
-&lt;p&gt;&lt;em&gt;2engine一直是只支持linux下编译，Windows的移植一直没有时间弄，虽然行业内大部分服务器都是跑linux的，但是如果可以Windows下可以开发调试，那对于提高平常的开发效率来说将会大有裨益。&lt;br/&gt;&lt;/em&gt;2engine由于一开始是在linux下gcc下开发的，那么在Windows下也用gcc，那么需要修改的跨平台代码将会非常少，本着这个思路，h2engine成功移植到了Windows，并且改动的非常少。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Windows下的虽然有mingw直接包含了gcc环境，但是想用上cmake等编译工具还是挺麻烦的，所以我找了一个集成mingw且算得上比较流行的一个Windows IDE：CodeBlocks。见了一个CodeBlocks的项目，想要在Windows下运行只要下载一个CodeBlocks，然后双击工程文件就可以了。&lt;/li&gt;
-&lt;li&gt;编译h2engine需要依赖openssl、curl、mysql、lua、python2.7，依赖文件都放到windependency文件夹里，包括运行的dll。&lt;/li&gt;
-&lt;li&gt;H2workerlua在Windows下用的lua5.1&lt;/li&gt;
-&lt;li&gt;H2workerpython在Windows下用的python2.7&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;关于c-sharp&quot;&gt;关于C sharp&lt;/h2&gt;
-&lt;p&gt;H2engine的c#版本正在紧锣密鼓的开发中，大家拭目以待。&lt;br/&gt;相关连接&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;文档 &lt;a href=&quot;http://h2cloud.org&quot; class=&quot;uri&quot;&gt;http://h2cloud.org&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;源码 &lt;a href=&quot;https://github.com/fanchy/h2engine&quot; class=&quot;uri&quot;&gt;https://github.com/fanchy/h2engine&lt;/a&gt;&lt;/li&gt;
-&lt;/ol&gt;</description>
-<pubDate>Thu, 21 Feb 2019 12:33:00 +0000</pubDate>
-<dc:creator>知然</dc:creator>
-<og:description>H2engine的GitHub星星不知不觉已经破百了，也没有特意推广过，但是慢慢的关注的人越来越多。因为事情多，好久没有写东西了，前一段时间有了一些想法，把h2engine又更新了一下，感觉h2eng</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhiranok/p/h2enginewin.html</dc:identifier>
-</item>
-<item>
-<title>Node 框架接入 ELK 实践总结 - 腾讯云+社区</title>
-<link>http://www.cnblogs.com/qcloud1001/p/10415062.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/qcloud1001/p/10415062.html</guid>
-<description>&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;本文由云+社区发表&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;blockquote&gt;
-&lt;p&gt;作者：J2X&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;我们都有过上机器查日志的经历，当集群数量增多的时候，这种原始的操作带来的低效率不仅给我们定位现网问题带来极大的挑战，同时，我们也无法对我们服务框架的各项指标进行有效的量化诊断，更无从谈有针对性的优化和改进。这个时候，构建具备信息查找，服务诊断，数据分析等功能的实时日志监控系统尤为重要。&lt;/p&gt;
-&lt;p&gt;ELK （ELK Stack: ElasticSearch, LogStash, Kibana, Beats） 是一套成熟的日志解决方案，其开源及高性能在各大公司广泛使用。而我们业务所使用的服务框架，如何接入 ELK 系统呢？&lt;/p&gt;
-&lt;h2 id=&quot;业务背景&quot;&gt;业务背景&lt;/h2&gt;
-&lt;p&gt;我们的业务框架背景：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;业务框架是基于 NodeJs 的 WebServer&lt;/li&gt;
-&lt;li&gt;服务使用 winston 日志模块将日志本地化&lt;/li&gt;
-&lt;li&gt;服务产生的日志存储在各自机器的磁盘上&lt;/li&gt;
-&lt;li&gt;服务部署在不同地域多台机器&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;接入步骤&quot;&gt;接入步骤&lt;/h2&gt;
-&lt;p&gt;我们将整个框架接入 ELK 简单归纳为下面几个步骤：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;日志结构设计：由传统的纯文本日志改成结构化对象并输出为 JSON.&lt;/li&gt;
-&lt;li&gt;日志采集：在框架请求生命周期的一些关键节点输出日志&lt;/li&gt;
-&lt;li&gt;ES 索引模版定义：建立 JSON 到 ES 实际存储的映射&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;一日志结构设计&quot;&gt;一、日志结构设计&lt;/h2&gt;
-&lt;p&gt;传统的，我们在做日志输出的时候，是直接输出日志的等级（level）和日志的内容字符串（message）。然而我们不仅关注什么时间，发生了什么，可能还需要关注类似的日志发生了多少次，日志的细节与上下文，以及关联的日志。 因此我们不只是简单地将我们的日志结构化一下为对象，还要提取出日志关键的字段。&lt;/p&gt;
-&lt;h3 id=&quot;将日志抽象为事件&quot;&gt;1. 将日志抽象为事件&lt;/h3&gt;
-&lt;p&gt;我们将每一条日志的发生都抽像为一个事件。事件包含：&lt;/p&gt;
-&lt;h4 id=&quot;事件元字段&quot;&gt;事件元字段&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;事件发生时间：&lt;code&gt;datetime&lt;/code&gt;, &lt;code&gt;timestamp&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;事件等级：&lt;code&gt;level&lt;/code&gt;， 例如: &lt;code&gt;ERROR&lt;/code&gt;, &lt;code&gt;INFO&lt;/code&gt;, &lt;code&gt;WARNING&lt;/code&gt;, &lt;code&gt;DEBUG&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;事件名称: &lt;code&gt;event&lt;/code&gt;, 例如：&lt;code&gt;client-request&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;事件发生的相对时间（单位：纳秒）：&lt;code&gt;reqLife&lt;/code&gt;, 此字段为事件相对请求开始发生的时间（间隔）&lt;/li&gt;
-&lt;li&gt;事件发生的位置: &lt;code&gt;line&lt;/code&gt;，代码位置; &lt;code&gt;server&lt;/code&gt;, 服务器的位置&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 id=&quot;请求元字段&quot;&gt;请求元字段&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;请求唯一ID: &lt;code&gt;reqId&lt;/code&gt;, 此字段贯穿整个请求链路上发生的所有事件&lt;/li&gt;
-&lt;li&gt;请求用户ID: &lt;code&gt;reqUid&lt;/code&gt;, 此字段为用户标识，可以跟踪用户的访问或请求链路&lt;/li&gt;
-&lt;/ul&gt;&lt;h4 id=&quot;数据字段&quot;&gt;数据字段&lt;/h4&gt;
-&lt;p&gt;不同类型的事件，需要输出的细节不尽相同，我们将这些细节（非元字段）统一放到&lt;code&gt;d&lt;/code&gt; -- data，之中。使我们的事件结构更加清晰，同时，也能避免数据字段对元字段造成污染。&lt;/p&gt;
-&lt;p&gt;e.g. 如 &lt;code&gt;client-init&lt;/code&gt;事件，该事件会在每次服务器接收到用户请求时打印，我们将用户的 &lt;code&gt;ip&lt;/code&gt;, &lt;code&gt;url&lt;/code&gt;等事件独有的统一归为数据字段放到 &lt;code&gt;d&lt;/code&gt; 对象中&lt;/p&gt;
-&lt;p&gt;举个完整的例子&lt;/p&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;{
-    &quot;datetime&quot;:&quot;2018-11-07 21:38:09.271&quot;,
-    &quot;timestamp&quot;:1541597889271,
-    &quot;level&quot;:&quot;INFO&quot;,
-    &quot;event&quot;:&quot;client-init&quot;,
-    &quot;reqId&quot;:&quot;rJtT5we6Q&quot;,
-    &quot;reqLife&quot;:5874,
-    &quot;reqUid&quot;: &quot;999793fc03eda86&quot;,
-    &quot;d&quot;:{
-        &quot;url&quot;:&quot;/&quot;,
-        &quot;ip&quot;:&quot;9.9.9.9&quot;,
-        &quot;httpVersion&quot;:&quot;1.1&quot;,
-        &quot;method&quot;:&quot;GET&quot;,
-        &quot;userAgent&quot;:&quot;Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.77 Safari/537.36&quot;,
-        &quot;headers&quot;:&quot;*&quot;
-    },
-    &quot;browser&quot;:&quot;{&quot;name&quot;:&quot;Chrome&quot;,&quot;version&quot;:&quot;70.0.3538.77&quot;,&quot;major&quot;:&quot;70&quot;}&quot;,
-    &quot;engine&quot;:&quot;{&quot;version&quot;:&quot;537.36&quot;,&quot;name&quot;:&quot;WebKit&quot;}&quot;,
-    &quot;os&quot;:&quot;{&quot;name&quot;:&quot;Mac OS&quot;,&quot;version&quot;:&quot;10.14.0&quot;}&quot;,
-    &quot;content&quot;:&quot;(Empty)&quot;,
-    &quot;line&quot;:&quot;middlewares/foo.js:14&quot;,
-    &quot;server&quot;:&quot;127.0.0.1&quot;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;10&quot;&gt;
-&lt;p&gt;一些字段，如：&lt;strong&gt;browser&lt;/strong&gt;, &lt;strong&gt;os&lt;/strong&gt;, &lt;strong&gt;engine&lt;/strong&gt;为什么在外层 &lt;em&gt;有时候我们希望日志尽量扁平（最大深度为2），以避免 ES 不必要的索引带来的性能损耗。在实际输出的时候，我们会将深度大于1的值输出为字符串。而有时候一些对象字段是我们关注的，所以我们将这些特殊字段放在外层，以保证输出深度不大于2的原则。&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;一般的，我们在打印输出日志的时候，只须关注&lt;code&gt;事件名称&lt;/code&gt;及&lt;code&gt;数据字段&lt;/code&gt;即可。其他，我们可以在打印日志的方法中，通过访问上下文统一获取，计算，输出。&lt;/p&gt;
-&lt;h3 id=&quot;日志改造输出&quot;&gt;2. 日志改造输出&lt;/h3&gt;
-&lt;p&gt;前面我们提到了如何定义一个日志事件， 那么，我们如何基于已有日志方案做升级，同时，兼容旧代码的日志调用方式。&lt;/p&gt;
-&lt;h4 id=&quot;升级关键节点的日志&quot;&gt;升级关键节点的日志&lt;/h4&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;// 改造前
-logger.info('client-init =&amp;gt; ' + JSON.stringfiy({
-    url,
-    ip,
-    browser,
-    //...
-}));
-
-// 改造后
-logger.info({
-    event: 'client-init',
-    url,
-    ip,
-    browser,
-    //...
-});&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;兼容旧的日志调用方式&quot;&gt;兼容旧的日志调用方式&lt;/h4&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;logger.debug('checkLogin');&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为 winston 的 日志方法本身就支持 &lt;code&gt;string&lt;/code&gt; 或者 &lt;code&gt;object&lt;/code&gt; 的传入方式, 所以对于旧的字符串传入写法，formatter 接收到的实际上是&lt;code&gt;{ level: 'debug', message: 'checkLogin' }&lt;/code&gt;。formatter 是 winston 的日志输出前调整日志格式的一道工序， 这一点使我们在日志输出前有机会将这类调用方式输出的日志，转为一个&lt;strong&gt;纯输出&lt;/strong&gt;事件 -- 我们称它们为&lt;code&gt;raw-log&lt;/code&gt;事件，而不需要修改调用方式。&lt;/p&gt;
-&lt;h4 id=&quot;改造日志输出格式&quot;&gt;改造日志输出格式&lt;/h4&gt;
-&lt;p&gt;前面提到 winston 输出日志前，会经过我们预定义的formatter，因此除了兼容逻辑的处理外，我们可以将一些公共逻辑统一放在这里处理。而调用上，我们只关注字段本身即可。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;元字段提取及处理&lt;/li&gt;
-&lt;li&gt;字段长度控制&lt;/li&gt;
-&lt;li&gt;兼容逻辑处理&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;如何提取元字段，这里涉及上下文的创建与使用，这里简单介绍一下 domain 的创建与使用。&lt;/p&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;//--- middlewares/http-context.js
-const domain = require('domain');
-const shortid = require('shortid');
-
-module.exports = (req, res, next) =&amp;gt; {
-    const d = domain.create();
-    d.id =  shortid.generate(); // reqId;
-    d.req = req;
-    
-    //...
-
-    res.on('finish', () =&amp;gt; process.nextTick(() =&amp;gt; {
-        d.id = null;
-        d.req = null;
-        d.exit();
-    });
-
-    d.run(() =&amp;gt; next());
-}
-
-//--- app.js
-app.use(require('./middlewares/http-context.js'));
-
-//--- formatter.js
-if (process.domain) {
-    reqId = process.domain.id;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这样，我们就可以将 &lt;code&gt;reqId&lt;/code&gt; 输出到一次请求中所有的事件, 从而达到关联事件的目的。&lt;/p&gt;
-&lt;h2 id=&quot;二日志采集&quot;&gt;二、日志采集&lt;/h2&gt;
-&lt;p&gt;现在，我们知道怎么输出一个事件了，那么下一步，我们该考虑两个问题：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;我们要在哪里输出事件？&lt;/li&gt;
-&lt;li&gt;事件要输出什么细节？&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;换句话说，整个请求链路中，哪些节点是我们关注的，出现问题，可以通过哪个节点的信息快速定位到问题？除此之外，我们还可以通过哪些节点的数据做统计分析？&lt;/p&gt;
-&lt;p&gt;结合一般常见的请求链路（用户请求，服务侧接收请求，服务请求下游服务器/数据库（*多次），数据聚合渲染，服务响应），如下方的流程图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://ask.qcloudimg.com/draft/1000052/7ndyqr784u.png?imageView2/2/w/1620&quot; alt=&quot;img&quot;/&gt;流程图&lt;/p&gt;
-&lt;p&gt;那么，我们可以这样定义我们的事件：&lt;/p&gt;
-&lt;h3 id=&quot;用户请求&quot;&gt;用户请求&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;client-init&lt;/code&gt;: 打印于框架接收到请求（未解析）， 包括：请求地址，请求头，Http 版本和方法，用户 IP 和 浏览器&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;client-request&lt;/code&gt;: 打印于框架接收到请求（已解析），包括：请求地址，请求头，Cookie, 请求包体&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;client-response&lt;/code&gt;: 打印于框架返回请求，包括：请求地址，响应码，响应头，响应包体&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;下游依赖&quot;&gt;下游依赖&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;http-start&lt;/code&gt;: 打印于请求下游起始：请求地址，请求包体，模块别名（方便基于名字聚合而且域名）&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;http-success&lt;/code&gt;: 打印于请求返回 &lt;strong&gt;200&lt;/strong&gt;：请求地址，请求包体，响应包体(code &amp;amp; msg &amp;amp; data)，耗时&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;http-error&lt;/code&gt;: 打印于请求返回&lt;strong&gt;非 200&lt;/strong&gt;，亦即连接服务器失败：请求地址，请求包体，响应包体(code &amp;amp; message &amp;amp; stack)，耗时。&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;http-timeout&lt;/code&gt;: 打印于请求连接超时：请求地址，请求包体，响应包体(code &amp;amp; msg &amp;amp; stack)，耗时。&lt;/li&gt;
-&lt;/ul&gt;&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;字段这么多，该怎么选择？ 一言以蔽之，事件输出的字段原则就是：输出你关注的，方便检索的，方便后期聚合的字段。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;一些建议&quot;&gt;一些建议&lt;/h3&gt;
-&lt;ol&gt;&lt;li&gt;请求下游的请求体和返回体有固定格式， e.g. 输入：&lt;code&gt;{ action: 'getUserInfo', payload: {} }&lt;/code&gt; 输出: &lt;code&gt;{ code: 0, msg: '', data: {}}&lt;/code&gt; 我们可以在事件输出 action，code 等，以便后期通过 action 检索某模块具体某个接口的各项指标和聚合。&lt;/li&gt;
-&lt;/ol&gt;&lt;h3 id=&quot;一些原则&quot;&gt;一些原则&lt;/h3&gt;
-&lt;ol&gt;&lt;li&gt;&lt;strong&gt;保证输出字段类型一致&lt;/strong&gt; 由于所有事件都存储在同一个 ES 索引， 因此，相同字段不管是相同事件还是不同事件，都应该保持一致，例如：code不应该既是数字，又是字符串，这样可能会产生字段冲突，导致某些记录（document）无法被冲突字段检索到。&lt;/li&gt;
-&lt;li&gt;ES 存储类型为 keyword, 不应该超过 ES mapping 设定的 &lt;code&gt;ignore_above&lt;/code&gt; 中指定的字节数（默认4096个字节）。否则同样可能会产生无法被检索的情况&lt;/li&gt;
-&lt;/ol&gt;&lt;h2 id=&quot;三es-索引模版定义&quot;&gt;三、ES 索引模版定义&lt;/h2&gt;
-&lt;p&gt;这里引入 ES 的两个概念，映射(Mapping)与模版(Template)。&lt;/p&gt;
-&lt;p&gt;首先，ES 基本的存储类型大概枚举下，有以下几种&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;String: keyword &amp;amp; text&lt;/li&gt;
-&lt;li&gt;Numeric: long, integer, double&lt;/li&gt;
-&lt;li&gt;Date: date&lt;/li&gt;
-&lt;li&gt;Boolean: boolean&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;一般的，我们不需要显示指定每个事件字段的在ES对应的存储类型，ES 会自动根据字段第一次出现的document中的值来决定这个字段在这个索引中的存储类型。但有时候，我们需要显示指定某些字段的存储类型，这个时候我们需要定义这个索引的 Mapping, 来告诉 ES 这此字段如何存储以及如何索引。&lt;/p&gt;
-&lt;p&gt;e.g.&lt;/p&gt;
-&lt;p&gt;还记得事件元字段中有一个字段为 timestamp ？实际上，我们输出的时候，timestamp 的值是一个数字，它表示跟距离 1970/01/01 00:00:00 的毫秒数，而我们期望它在ES的存储类型为 date 类型方便后期的检索和可视化, 那么我们创建索引的时候，指定我们的Mapping。&lt;/p&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;PUT my_logs
-{
-  &quot;mappings&quot;: {
-    &quot;_doc&quot;: { 
-      &quot;properties&quot;: { 
-        &quot;title&quot;:    {
-            &quot;type&quot;: &quot;date&quot;,
-            &quot;format&quot;: &quot;epoch_millis&quot;
-         }, 
-      }
-    }
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;但一般的，我们可能会按日期自动生成我们的日志索引，假定我们的索引名称格式为 my_logs_&lt;em&gt;yyyyMMdd&lt;/em&gt; （e.g. my_logs_20181030）。那么我们需要定义一个模板（Template），这个模板会在（匹配的）索引创建时自动应用预设好的 Mapping。&lt;/p&gt;
-&lt;pre class=&quot;js&quot;&gt;
-&lt;code&gt;PUT _template/my_logs_template
-{
-  &quot;index_patterns&quot;: &quot;my_logs*&quot;,
-  &quot;mappings&quot;: {
-    &quot;_doc&quot;: { 
-      &quot;properties&quot;: { 
-        &quot;title&quot;:    {
-            &quot;type&quot;: &quot;date&quot;,
-            &quot;format&quot;: &quot;epoch_millis&quot;
-         }, 
-      }
-    }
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;提示：将所有日期产生的日志都存在一张索引中，不仅带来不必要的性能开销，也不利于定期删除比较久远的日志。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h2 id=&quot;小结&quot;&gt;小结&lt;/h2&gt;
-&lt;p&gt;至此，日志改造及接入的准备工作都已经完成了，我们只须在机器上安装 FileBeat -- 一个轻量级的文件日志Agent, 它负责将日志文件中的日志传输到 ELK。接下来，我们便可使用 Kibana 快速的检索我们的日志。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;此文已由腾讯云+社区在各渠道发布&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;获取更多新鲜技术干货，可以关注我们&lt;a href=&quot;https://www.zhihu.com/org/teng-xun-yun-ji-zhu-she-qu/activities&quot;&gt;腾讯云技术社区-云加社区官方号及知乎机构号&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Feb 2019 12:29:00 +0000</pubDate>
-<dc:creator>腾讯云+社区</dc:creator>
-<og:description>本文由云+社区发表 作者：J2X 我们都有过上机器查日志的经历，当集群数量增多的时候，这种原始的操作带来的低效率不仅给我们定位现网问题带来极大的挑战，同时，我们也无法对我们服务框架的各项指标进行有效的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/qcloud1001/p/10415062.html</dc:identifier>
-</item>
-<item>
-<title>Java 泛型完全解读 - 三枣</title>
-<link>http://www.cnblogs.com/sanzao/p/10415035.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/sanzao/p/10415035.html</guid>
-<description>&lt;p&gt;对于泛型的使用我想大家都非常熟悉，但是对于类型擦除，边界拓展等细节问题，可能不是很清楚，所以本文会重点讲解一下；另外对泛型的了解其实可以看出，一个语言特性的产生逻辑，这对我们平时的开发也是非常有帮助的；&lt;/p&gt;
-&lt;h2 id=&quot;一为什么会出现泛型&quot;&gt;一、为什么会出现泛型&lt;/h2&gt;
-&lt;p&gt;首先泛型并不是Java的语言特性，是直到 JDK1.5 才支持的特性（具体区别后面会讲到）；那么在泛型出现之前是怎么做的呢？&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List list = new ArrayList();
-list.add(&quot;123&quot;);
-String s = (String) list.get(0);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如上面代码所示，在集合里面需要我们自己记住放进去的是什么，取出来的时候再强转； 也就将这种类型转换的错误推迟到了运行时，即麻烦还不安全，所以才出现了泛型；&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;使用场景&lt;/strong&gt;：泛型类，泛型接口，泛型方法；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public class Test&amp;lt;T&amp;gt;
-public interface Test&amp;lt;T&amp;gt;
-public &amp;lt;T&amp;gt; void test(T t)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;二泛型会带来什么样的问题&quot;&gt;二、泛型会带来什么样的问题&lt;/h2&gt;
-&lt;p&gt;正如上面所讲泛型并不是 Java 一开始就具有的特性，所以在后来想要增加泛型的时候，就必须要兼容以前的版本，Sun 他们想到的折中解决方案就是&lt;strong&gt;类型擦除&lt;/strong&gt;；意思就是泛型的信息只存在于编译期，在运行时期所有的泛型信息都被擦除了，就想没有一样；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;String&amp;gt; list1 = new ArrayList&amp;lt;&amp;gt;();
-List&amp;lt;Integer&amp;gt; list2 = new ArrayList&amp;lt;&amp;gt;();
-System.out.println(list1.getClass());
-System.out.println(list2.getClass() == list1.getClass());&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;// 打印：&lt;br/&gt;class java.util.ArrayList&lt;br/&gt;true&lt;/p&gt;
-&lt;p&gt;可以看到&lt;code&gt;List&amp;lt;String&amp;gt;&lt;/code&gt;和&lt;code&gt;List&amp;lt;String&amp;gt;&lt;/code&gt;在运行时其实都是一样的，都是&lt;code&gt;class java.util.ArrayList&lt;/code&gt;；所以在使用泛型的时候需要牢记，&lt;strong&gt;在运行时期没有泛型信息，也无法获取任何有关参数类型的信息&lt;/strong&gt;；所以凡是需要获取运行时类型的操作，泛型都不支持！&lt;/p&gt;
-&lt;h3 id=&quot;不能用基本类型实例化类型参数&quot;&gt;1. 不能用基本类型实例化类型参数&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;new ArrayList&amp;lt;int&amp;gt;();      // error
-new ArrayList&amp;lt;Integer&amp;gt;();  // correct&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为类型擦除，会擦除到他的上界也就是&lt;code&gt;Object&lt;/code&gt;；而 Java 的8个基本类型的直接父类是 &lt;code&gt;Number&lt;/code&gt;，所以基本类型不不能用基本类型实例化类型参数，而必须使用基本类型的包装类；&lt;/p&gt;
-&lt;h3 id=&quot;不能用于运行时类型检查&quot;&gt;2. 不能用于运行时类型检查&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;t instanceof T             // error
-t instanceof List&amp;lt;T&amp;gt;       // error
-t instanceof List&amp;lt;String&amp;gt;  // error
-t instanceof List          // correct&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;但是可以使用&lt;code&gt;clazz.isInstance();&lt;/code&gt;进行补偿；&lt;/p&gt;
-&lt;h3 id=&quot;不能创建类型实例&quot;&gt;3. 不能创建类型实例&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;T t = new T();  // error&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;同样可以使用&lt;code&gt;clazz.newInstance();&lt;/code&gt;进行补偿；&lt;/p&gt;
-&lt;h3 id=&quot;不能静态化&quot;&gt;4. 不能静态化&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;private static T t;                  // error
-private T t;                         // correct
-private static List&amp;lt;T&amp;gt; list;         // error
-private static List&amp;lt;?&amp;gt; list;         // correct
-private static List&amp;lt;String&amp;gt; list;    // correct
-
-// e.g.
-class Test&amp;lt;T&amp;gt; {
-  private T t;
-  public void set(T arg) { t = arg; }
-  public T get() { return t; }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为静态变量在类中共享，而泛型类型是不确定的，所以泛型不能静态化；但是非静态的时候，编译期可以根据上下文推断出&lt;code&gt;T&lt;/code&gt;是什么，例如：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;Test l = new Test();
-System.out.println(l.get());
-l.set(&quot;123&quot;);
-System.out.println(l.get());
-
-// javap -v 反编译
-12: invokevirtual #15         // Method JDK/Test14_genericity$Test.get:()Ljava/lang/Object;
-15: invokevirtual #16         // Method java/io/PrintStream.println:(Ljava/lang/Object;)V
-18: aload_1
-19: ldc       #17             // String 123
-21: invokevirtual #18         // Method JDK/Test14_genericity$Test.set:(Ljava/lang/Object;)V
-24: getstatic   #6            // Field java/lang/System.out:Ljava/io/PrintStream;
-
-// ---------------------------
-Test l = new Test();
-System.out.println(l.get());
-l.set(&quot;123&quot;);
-System.out.println(l.get());
-
-// javap -v 反编译
-12: invokevirtual #15         // Method JDK/Test14_genericity$Test.get:()Ljava/lang/Object;
-15: invokevirtual #16         // Method java/io/PrintStream.println:(Ljava/lang/Object;)V
-18: aload_1
-19: bipush    123
-21: invokestatic  #17         // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;根据上面的代码，可以很清楚的看到，编译器对非静态类型的推导；&lt;/p&gt;
-&lt;p&gt;另外&lt;code&gt;List&amp;lt;?&amp;gt;和List&amp;lt;String&amp;gt;&lt;/code&gt;之所以是正确的，仍然是因为编译器可以在编译期间就能确定类型转换的正确性；&lt;/p&gt;
-&lt;h3 id=&quot;不能抛出或捕获泛型类的实例&quot;&gt;5. 不能抛出或捕获泛型类的实例&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;catch (T t)                        // error
-class Test&amp;lt;T&amp;gt; extends Throwable    // error&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为在捕捉异常时候需要运行时类信息，并且判断异常的继承关系，所以不能抛出或捕获泛型类的实例；&lt;/p&gt;
-&lt;h3 id=&quot;不允许作为参数进行重载&quot;&gt;6. 不允许作为参数进行重载&lt;/h3&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;void test(List&amp;lt;Integer&amp;gt; list)
-void test(List&amp;lt;String&amp;gt; list)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;因为在运行时期泛型信息被擦除，重载的两个方法签名就完全一样了；&lt;/p&gt;
-&lt;h3 id=&quot;不能创建泛型数组&quot;&gt;7. 不能创建泛型数组&lt;/h3&gt;
-&lt;p&gt;对于一点我觉得是最重要的，关于数组的介绍可以参考，&lt;a href=&quot;https://www.cnblogs.com/sanzao/p/10098974.html&quot;&gt;Array 相关&lt;/a&gt; ；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;String&amp;gt;[] lists = new ArrayList&amp;lt;String&amp;gt;[10];             // error
-List&amp;lt;String&amp;gt;[] lists1 = (List&amp;lt;String&amp;gt;[]) new ArrayList[10];   // correct&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;之所以不能创建泛型数组的主要原因：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;数组是协变的，而泛型的不变的；&lt;/li&gt;
-&lt;li&gt;数组的&lt;code&gt;Class&lt;/code&gt;信息是在运行时动态创建的，而运行时不能获取泛型的类信息；&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;根据上面的讲解可以看出所谓的擦除补偿或者擦除后的修正，其大体思路都是用额外的方法告知运行时的类型信息，可以是记录到局部变量，也可以是指定参数的确切类型（&lt;code&gt;Array.newInstance(Class&amp;lt;?&amp;gt; componentType, int length)&lt;/code&gt;）；&lt;/p&gt;
-&lt;h2 id=&quot;三边界拓展&quot;&gt;三、边界拓展&lt;/h2&gt;
-&lt;p&gt;基于安全的考虑 Java 泛型是不变的（避免取出数据时的类型转换错误）；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;Object&amp;gt; list = new ArrayList&amp;lt;String&amp;gt;();    // error&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;所以在使用集合类的时候，每个集合都需要强制指定确切类型就有点不方便，比如我想指定一个集合存放 A 以及 A 的子类；在这种情况下就引入了&lt;code&gt;extends,super,?&lt;/code&gt; 来拓展和管理泛型的边界；&lt;/p&gt;
-&lt;h3 id=&quot;无界通配符&quot;&gt;1. 无界通配符 &lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;通配符主要用于泛型的使用场景（泛型一般有“声明”和“使用”两种场景）；&lt;br/&gt;通常情况下&lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt;和原生类型大致相同，就像&lt;code&gt;List&lt;/code&gt;和&lt;code&gt;List&amp;lt;?&amp;gt;&lt;/code&gt;的表现大部分都是一样的；但是要注意他们其实是有本质去别的，&lt;strong&gt;&lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt; 代表了某一特定的类型，但是编译器不知道这种类型是什么；&lt;/strong&gt;而原生的表示可以是任何 &lt;code&gt;Object&lt;/code&gt;，其中并没有类型限制；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;?&amp;gt; list = new ArrayList&amp;lt;String&amp;gt;();    // correct
-list.add(&quot;34&quot;);                            // error
-String s = list.get(0);                    // error
-Object o = list.get(0);                    // correct
-
-boolean add(E e);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;上面的代码很明确的反应了这一点（&lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt; 代表了某一特定的类型，但是编译器不知道这种类型是什么），&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;因为编译器不知道这种类型是什么，所以在添加元素的时候，当然也就不能确认添加的这个类型是否正确；当使用&lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt;的时候，代码中的&lt;code&gt;add(E e)&lt;/code&gt;方法，此时的 &lt;code&gt;E&lt;/code&gt; 会被替换为 &lt;code&gt;&amp;lt;?&amp;gt;&lt;/code&gt;，&lt;strong&gt;实际上编译器为了安全起见，会直接拒绝参数列表中涉及通配符的方法调用；&lt;/strong&gt;就算这个方法没有向集合中添加元素，也会被直接拒绝；&lt;/li&gt;
-&lt;li&gt;当&lt;code&gt;List&amp;lt;?&amp;gt;&lt;/code&gt;取出元素的时候，同样因为不知道这个特定的类型是什么，所以只能将取出的元素放在&lt;code&gt;Object&lt;/code&gt;中；或者在取出后强转；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;上界-extends&quot;&gt;2. 上界 &lt;code&gt;&amp;lt;extends&amp;gt;&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;code&gt;extends&lt;/code&gt;，主要用于确定泛型的上界；&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;&amp;lt;T extends Test&amp;gt;                             // 泛型声明
-&amp;lt;T extends Test &amp;amp; interface1 &amp;amp; interface2&amp;gt;   // 声明泛型是可以确定多个上界
-&amp;lt;? extends T&amp;gt;                                // 泛型使用时&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;界定的范围如图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1119937/201902/1119937-20190221202216393-9943252.png&quot; width=&quot;600&quot; alt=&quot;upperBounds&quot; align=&quot;center&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;应当注意的是当&lt;code&gt;extends&lt;/code&gt;用于参数类型限定时：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;? extends List&amp;gt; list = new ArrayList&amp;lt;ArrayList&amp;gt;();  // correct
-list.add(new ArrayList());                               // error
-List l = list.get(0);                                    // correct
-ArrayList l = list.get(0);                               // error&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;上面的分析同无界通配符类似，只是 &lt;code&gt;List l = list.get(0);&lt;/code&gt; 是正确的，是因为 &lt;code&gt;&amp;lt;? extends List&amp;gt;&lt;/code&gt; 界定了放入的元素一定是 &lt;code&gt;List&lt;/code&gt; 或者 &lt;code&gt;list&lt;/code&gt; 的子类，所以取出的元素能放入 &lt;code&gt;List&lt;/code&gt; 中，但是不能放入 &lt;code&gt;ArrayList&lt;/code&gt; 中；&lt;/p&gt;
-&lt;h3 id=&quot;下界-super&quot;&gt;3. 下界 &lt;code&gt;&amp;lt;super&amp;gt;&lt;/code&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;code&gt;super&lt;/code&gt;，主要用于确定泛型的下界；如图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1119937/201902/1119937-20190221202249893-1818324335.png&quot; width=&quot;650&quot; alt=&quot;lowerBounds&quot; align=&quot;center&quot;/&gt;&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;List&amp;lt;? super HashMap&amp;gt; list = new ArrayList&amp;lt;&amp;gt;();   // correct
-LinkedHashMap m = new LinkedHashMap();            // correct
-HashMap m1 = m;                                   // correct
-Map m2 = m;                                       // correct
-list.add(m);                                      // correct
-list.add(m1);                                     // correct
-list.add(m2);                                     // error
-
-Map mm = list.get(0);                             // error
-LinkedHashMap mm1 = list.get(0);                  // error&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;根据图中的范围对照代码，就能很快发现&lt;code&gt;Map&lt;/code&gt;在&lt;code&gt;List&amp;lt;? super HashMap&amp;gt;&lt;/code&gt;的范围之外；而编辑器为了安全泛型下界集合取出的元素只能放在 &lt;code&gt;Object&lt;/code&gt;里面；&lt;/p&gt;
-&lt;h3 id=&quot;pecs-原则&quot;&gt;4. &lt;code&gt;PECS&lt;/code&gt; 原则&lt;/h3&gt;
-&lt;p&gt;&lt;code&gt;PECS&lt;/code&gt;原则是对上界和下界使用的归纳，即&lt;code&gt;producer-extends, consumer-super&lt;/code&gt;；结合上面的两幅图，表示：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;extends&lt;/code&gt;，&lt;strong&gt;只能读&lt;/strong&gt;，相当于生产者，向外产出；&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;super&lt;/code&gt;，&lt;strong&gt;只能写&lt;/strong&gt;，相当于消费者，只能接收消费；&lt;/li&gt;
-&lt;li&gt;同时边界不能同时规定上界和下界，正如图所示，他们的范围其实是一样的，只是开口不一样；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;自限定类型&quot;&gt;5. 自限定类型&lt;/h3&gt;
-&lt;p&gt;对于上面讲的泛型边界拓展，有一个很特别的用法，&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;class Test&amp;lt;T extends Test&amp;lt;T&amp;gt;&amp;gt; {}
-
-public &amp;lt;T extends Comparable&amp;lt;T&amp;gt;&amp;gt; T max(List&amp;lt;T&amp;gt; list) {} &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;自限定类型可以通俗的解释，就是用自己限定自己，即自和自身相同的类进行某操作；如上面的 &lt;code&gt;max&lt;/code&gt; 方法，就表示可以和自身进行比较的类型；&lt;/p&gt;
-&lt;p&gt;那么如果想要表达只要是同一祖先就能相互比较呢？&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public &amp;lt;T extends Comparable&amp;lt;? super&amp;gt;&amp;gt; T max(List&amp;lt;? extends T&amp;gt; list) {} &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;code&gt;&amp;lt;T extends Comparable&amp;lt;? super&amp;gt;&amp;gt;&lt;/code&gt;：表明只要是同一祖先就能相互比较，&lt;code&gt;&amp;lt;? extends T&amp;gt;&lt;/code&gt;表明集合中装的都是同一祖先的元素；（出至《Effective Java》第 28 条）&lt;/p&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;对于泛型的时候首先要很清楚的知道，在运行时没有任何泛型的信息，全部都被擦除掉了；&lt;/li&gt;
-&lt;li&gt;需要知道 Java 泛型做不到的事情；&lt;/li&gt;
-&lt;li&gt;需要知道怎么拓展边界，让泛型更加灵活；&lt;/li&gt;
-&lt;/ul&gt;</description>
-<pubDate>Thu, 21 Feb 2019 12:24:00 +0000</pubDate>
-<dc:creator>三枣</dc:creator>
-<og:description>对于泛型的使用我想大家都非常熟悉，但是对于类型擦除，边界拓展等细节问题，可能不是很清楚，所以本文会重点讲解一下；另外对泛型的了解其实可以看出，一个语言特性的产生逻辑，这对我们平时的开发也是非常有帮助的</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/sanzao/p/10415035.html</dc:identifier>
 </item>
 </channel>
 </rss>
