@@ -9,6 +9,591 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>Endlessh: An SSH Tarpit</title>
+<link>https://nullprogram.com/blog/2019/03/22/</link>
+<guid isPermaLink="true" >https://nullprogram.com/blog/2019/03/22/</guid>
+<description>&lt;time datetime=&quot;2019-03-22&quot;&gt;March 22, 2019&lt;/time&gt;&lt;p&gt;nullprogram.com/blog/2019/03/22/&lt;/p&gt;
+&lt;p&gt;I’m a big fan of tarpits: a network service that intentionally inserts delays in its protocol, slowing down clients by forcing them to wait. This arrests the speed at which a bad actor can attack or probe the host system, and it ties up some of the attacker’s resources that might otherwise be spent attacking another host. When done well, a tarpit imposes more cost on the attacker than the defender.&lt;/p&gt;
+&lt;p&gt;The Internet is a very hostile place, and anyone who’s ever stood up an Internet-facing IPv4 host has witnessed the immediate and continuous attacks against their server. I’ve maintained &lt;a href=&quot;https://nullprogram.com/blog/2017/06/15/&quot;&gt;such a server&lt;/a&gt; for nearly six years now, and more than 99% of my incoming traffic has ill intent. One part of my defenses has been tarpits in various forms. The latest addition is an SSH tarpit I wrote a couple of months ago:&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/skeeto/endlessh&quot;&gt;&lt;strong&gt;Endlessh: an SSH tarpit&lt;/strong&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;This program opens a socket and pretends to be an SSH server. However, it actually just ties up SSH clients with false promises indefinitely — or at least until the client eventually gives up. After cloning the repository, here’s how you can try it out for yourself (default port 2222):&lt;/p&gt;
+&lt;div class=&quot;highlighter-rouge&quot; readability=&quot;6&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;7&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;$ make
+$ ./endlessh &amp;amp;
+$ ssh -p2222 localhost
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;Your SSH client will hang there and wait for at least several days before finally giving up. Like a mammoth in the La Brea Tar Pits, it got itself stuck and can’t get itself out. As I write, my Internet-facing SSH tarpit currently has 27 clients trapped in it. A few of these have been connected for weeks. In one particular spike it had 1,378 clients trapped at once, lasting about 20 hours.&lt;/p&gt;
+&lt;p&gt;My Internet-facing Endlessh server listens on port 22, which is the standard SSH port. I long ago moved my real SSH server off to another port where it sees a whole lot less SSH traffic — essentially none. This makes the logs a whole lot more manageable. And (hopefully) Endlessh convinces attackers not to look around for an SSH server on another port.&lt;/p&gt;
+&lt;p&gt;How does it work? Endlessh exploits &lt;a href=&quot;https://tools.ietf.org/html/rfc4253#section-4.2&quot;&gt;a little paragraph in RFC 4253&lt;/a&gt;, the SSH protocol specification. Immediately after the TCP connection is established, and before negotiating the cryptography, both ends send an identification string:&lt;/p&gt;
+&lt;div class=&quot;highlighter-rouge&quot; readability=&quot;6&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;7&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;SSH-protoversion-softwareversion SP comments CR LF
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;The RFC also notes:&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;The server MAY send other lines of data before sending the version string.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;There is no limit on the number of lines, just that these lines must not begin with “SSH-“ since that would be ambiguous with the identification string, and lines must not be longer than 255 characters including CRLF. So &lt;strong&gt;Endlessh sends and &lt;em&gt;endless&lt;/em&gt; stream of randomly-generated “other lines of data”&lt;/strong&gt; without ever intending to send a version string. By default it waits 10 seconds between each line. This slows down the protocol, but prevents it from actually timing out.&lt;/p&gt;
+&lt;p&gt;This means Endlessh need not know anything about cryptography or the vast majority of the SSH protocol. It’s dead simple.&lt;/p&gt;
+&lt;h3 id=&quot;implementation-strategies&quot;&gt;Implementation strategies&lt;/h3&gt;
+&lt;p&gt;Ideally the tarpit’s resource footprint should be as small as possible. It’s just a security tool, and the server does have an actual purpose that doesn’t include being a tarpit. It should tie up the attacker’s resources, not the server’s, and should generally be unnoticeable. (Take note all those who write the awful “security” products I have to tolerate at my day job.)&lt;/p&gt;
+&lt;p&gt;Even when many clients have been trapped, Endlessh spends more than 99.999% of its time waiting around, doing nothing. It wouldn’t even be accurate to call it I/O-bound. If anything, it’s &lt;em&gt;timer-bound&lt;/em&gt;, waiting around before sending off the next line of data. &lt;strong&gt;The most precious resource to conserve is &lt;em&gt;memory&lt;/em&gt;.&lt;/strong&gt;&lt;/p&gt;
+&lt;h4 id=&quot;processes&quot;&gt;Processes&lt;/h4&gt;
+&lt;p&gt;The most straightforward way to implement something like Endlessh is a fork server: accept a connection, fork, and the child simply alternates between &lt;code class=&quot;highlighter-rouge&quot;&gt;sleep(3)&lt;/code&gt; and &lt;code class=&quot;highlighter-rouge&quot;&gt;write(2)&lt;/code&gt;:&lt;/p&gt;
+&lt;div class=&quot;highlighter-rouge&quot; readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;10&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;for (;;) {
+    ssize_t r;
+    char line[256];
+
+    sleep(DELAY);
+    generate_line(line);
+    r = write(fd, line, strlen(line));
+    if (r == -1 &amp;amp;&amp;amp; errno != EINTR) {
+        exit(0);
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;A process per connection is a lot of overhead when connections are expected to be up hours or even weeks at a time. An attacker who knows about this could exhaust the server’s resources with little effort by opening up lots of connections.&lt;/p&gt;
+&lt;h4 id=&quot;threads&quot;&gt;Threads&lt;/h4&gt;
+&lt;p&gt;A better option is, instead of processes, to create a thread per connection. On Linux &lt;a href=&quot;https://nullprogram.com/blog/2015/05/15/&quot;&gt;this is practically the same thing&lt;/a&gt;, but it’s still better. However, you still have to allocate a stack for the thread and the kernel will have to spend some resources managing the thread.&lt;/p&gt;
+&lt;h4 id=&quot;poll&quot;&gt;Poll&lt;/h4&gt;
+&lt;p&gt;For Endlessh I went for an even more lightweight version: a single-threaded &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt; server, analogous to stackless green threads. The overhead per connection is about as low as it gets.&lt;/p&gt;
+&lt;p&gt;Clients that are being delayed are not registered in &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt;. Their only overhead is the socket object in the kernel, and another 78 bytes to track them in Endlessh. Most of those bytes are used only for accurate logging. Only those clients that are overdue for a new line are registered for &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;When clients are waiting, but no clients are overdue, &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt; is essentially used in place of &lt;code class=&quot;highlighter-rouge&quot;&gt;sleep(3)&lt;/code&gt;. Though since it still needs to manage the &lt;em&gt;accept&lt;/em&gt; server socket, it (almost) never actually waits on &lt;em&gt;nothing&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;There’s an option to limit the total number of client connections so that it doesn’t get out of hand. In this case it will stop polling the accept socket until a client disconnects. I probably shouldn’t have bothered with this option and instead relied on &lt;code class=&quot;highlighter-rouge&quot;&gt;ulimit&lt;/code&gt;, a feature already provided by the operating system.&lt;/p&gt;
+&lt;p&gt;I could have used epoll (Linux) or kqueue (BSD), which would be much more efficient than &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt;. The problem with &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt; is that it’s constantly registering and unregistering Endlessh on each of the overdue sockets each time around the main loop. This is by far the most CPU-intensive part of Endlessh, and it’s all inflicted on the kernel. Most of the time, even with thousands of clients trapped in the tarpit, only a small number of them at polled at once, so I opted for better portability instead.&lt;/p&gt;
+&lt;p&gt;One consequence of not polling connections that are waiting is that disconnections aren’t noticed in a timely fashion. This makes the logs less accurate than I like, but otherwise it’s pretty harmless. Unforunately even if I wanted to fix this, the &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt; interface isn’t quite equipped for it anyway.&lt;/p&gt;
+&lt;h4 id=&quot;raw-sockets&quot;&gt;Raw sockets&lt;/h4&gt;
+&lt;p&gt;With a &lt;code class=&quot;highlighter-rouge&quot;&gt;poll(2)&lt;/code&gt; server, the biggest overhead remaining is in the kernel, where it allocates send and receive buffers for each client and manages the proper TCP state. The next step to reducing this overhead is Endlessh opening a &lt;em&gt;raw socket&lt;/em&gt; and speaking TCP itself, bypassing most of the operating system’s TCP/IP stack.&lt;/p&gt;
+&lt;p&gt;Much of the TCP connection state doesn’t matter to Endlessh and doesn’t need to be tracked. For example, it doesn’t care about any data sent by the client, so no receive buffer is needed, and any data that arrives could be dropped on the floor.&lt;/p&gt;
+&lt;p&gt;Even more, raw sockets would allow for some even nastier tarpit tricks. Despite the long delays between data lines, the kernel itself responds very quickly on the TCP layer and below. ACKs are sent back quickly and so on. An astute attacker could detect that the delay is artificial, imposed above the TCP layer by an application.&lt;/p&gt;
+&lt;p&gt;If Endlessh worked at the TCP layer, it could &lt;a href=&quot;https://nyman.re/super-simple-ssh-tarpit/&quot;&gt;tarpit the TCP protocol itself&lt;/a&gt;. It could introduce artificial “noise” to the connection that requires packet retransmissions, delay ACKs, etc. It would look a lot more like network problems than a tarpit.&lt;/p&gt;
+&lt;p&gt;I haven’t taken Endlessh this far, nor do I plan to do so. At the moment attackers either have a hard timeout, so this wouldn’t matter, or they’re pretty dumb and Endlessh already works well enough.&lt;/p&gt;
+&lt;h3 id=&quot;asyncio-and-other-tarpits&quot;&gt;asyncio and other tarpits&lt;/h3&gt;
+&lt;p&gt;Since writing Endless &lt;a href=&quot;https://nullprogram.com/blog/2019/03/10/&quot;&gt;I’ve learned about Python’s &lt;code class=&quot;highlighter-rouge&quot;&gt;asycio&lt;/code&gt;&lt;/a&gt;, and it’s actually a near perfect fit for this problem. I should have just used it in the first place. The hard part is already implemented within &lt;code class=&quot;highlighter-rouge&quot;&gt;asyncio&lt;/code&gt;, and the problem isn’t CPU-bound, so being written in Python &lt;a href=&quot;https://nullprogram.com/blog/2019/02/24/&quot;&gt;doesn’t matter&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Here’s a simplified (no logging, no configuration, etc.) version of Endlessh implemented in about 20 lines of Python 3.7:&lt;/p&gt;
+&lt;div class=&quot;language-py highlighter-rouge&quot; readability=&quot;9.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;14&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;asyncio&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;random&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;handler&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;_reader&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;try&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'&lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\r\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;%&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;randint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;**&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;drain&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;except&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ConnectionResetError&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;pass&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;start_server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;handler&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'0.0.0.0'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2222&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;with&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serve_forever&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;Since Python coroutines are stackless, the per-connection memory overhead is comparable to the C version. So it seems asycio is perfectly suited for writing tarpits! Here’s an HTTP tarpit to trip up attackers trying to exploit HTTP servers. It slowly sends a random, endless HTTP header:&lt;/p&gt;
+&lt;div class=&quot;language-py highlighter-rouge&quot; readability=&quot;10.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;16&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;asyncio&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;random&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;handler&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;_reader&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'HTTP/1.1 200 OK&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\r\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;try&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;while&lt;/span&gt; &lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sleep&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;5&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;header&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;randint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;**&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;value&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;random&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;randint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;**&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;write&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'X-&lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;x: &lt;/span&gt;&lt;span class=&quot;si&quot;&gt;%&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\r\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;%&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;header&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;value&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+            &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;writer&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;drain&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;except&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ConnectionResetError&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;k&quot;&gt;pass&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;():&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;start_server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;handler&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;'0.0.0.0'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;8080&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;with&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;await&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;server&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;serve_forever&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;asyncio&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;run&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;Try it out for yourself. Firefox and Chrome will spin on that server for hours before giving up. I have yet to see curl actually timeout on its own in the default settings (&lt;code class=&quot;highlighter-rouge&quot;&gt;--max-time&lt;/code&gt;/&lt;code class=&quot;highlighter-rouge&quot;&gt;-m&lt;/code&gt; does work correctly, though).&lt;/p&gt;
+&lt;p&gt;Parting exercise for the reader: Using the examples above as a starting point, implement an SMTP tarpit using asyncio. Bonus points for using TLS connections and testing it against real spammers.&lt;/p&gt;
+&lt;ol class=&quot;references print-only&quot;/&gt;&lt;nav class=&quot;no-print&quot;&gt;
+&lt;/nav&gt;
+</description>
+<pubDate>Fri, 22 Mar 2019 19:22:13 +0000</pubDate>
+<dc:creator>stargrave</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://nullprogram.com/blog/2019/03/22/</dc:identifier>
+</item>
+<item>
+<title>Bitcoin ETF research finds that 95% of Bitcoin volume is fake</title>
+<link>https://twitter.com/BitwiseInvest/status/1109114656944209921</link>
+<guid isPermaLink="true" >https://twitter.com/BitwiseInvest/status/1109114656944209921</guid>
+<description>17/ And, when you remove fake volume, CME and CBOE futures volume is significant ($91M), especially compared to the real spot volume (35% for Feb 2019). 
+
+This is good news because it means CME— a regulated, surveilled market— is of material size, which important for an ETF. &lt;a href=&quot;https://t.co/pVqMqPSZkt&quot; data-pre-embedded=&quot;true&quot; rel=&quot;nofollow&quot; data-entity-id=&quot;1109105122917912576&quot; dir=&quot;ltr&quot; data-url=&quot;https://twitter.com/BitwiseInvest/status/1109114706688700418/photo/1&quot; data-tco-id=&quot;pVqMqPSZkt&quot; class=&quot;twitter_external_link dir-ltr tco-link has-expanded-path&quot; target=&quot;_top&quot; data-expanded-path=&quot;/BitwiseInvest/status/1109114706688700418/photo/1&quot;&gt;pic.twitter.com/pVqMqPSZkt&lt;/a&gt;</description>
+<pubDate>Fri, 22 Mar 2019 18:43:08 +0000</pubDate>
+<dc:creator>mlerner</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://mobile.twitter.com/BitwiseInvest/status/1109114656944209921</dc:identifier>
+</item>
+<item>
+<title>Redis streams as a pure data structure</title>
+<link>http://antirez.com/news/128</link>
+<guid isPermaLink="true" >http://antirez.com/news/128</guid>
+<description>&lt;section id=&quot;newslist&quot;&gt;&lt;article data-news-id=&quot;128&quot;&gt;
+&lt;/article&gt;&lt;/section&gt;&lt;article class=&quot;comment&quot; data-comment-id=&quot;128-&quot; id=&quot;128-&quot; readability=&quot;57.740544936966&quot;&gt;&lt;span class=&quot;info&quot;&gt;&lt;span class=&quot;username&quot;&gt;&lt;a href=&quot;http://antirez.com/user/antirez&quot;&gt;antirez&lt;/a&gt;&lt;/span&gt; 8 hours ago. 27295 views.&lt;/span&gt;
+&lt;pre&gt;
+The new Redis data structure introduced in Redis 5 under the name of “Streams” generated quite some interest in the community. Soon or later I want to run a community survey, talking with users having production use cases, and blogging about it. Today I want to address another issue: I’m starting to suspect that many users are only thinking at Streams as a way to solve Kafka(TM)-alike use cases. Actually the data structure was designed to *also* work in the context of messaging with producers and consumers, but to think that Redis Streams are just good for that is incredibly reductive. Streaming is a terrific pattern and “mental model” that can be applied when designing systems with great success, but Redis Streams, like most Redis data structures, are more general, and can be used to model dozen of different unrelated problems. So in this blog post I’ll focus on Streams as a pure data structure, completely ignoring its blocking operations, consumer groups, and all the messaging parts.
+
+## Streams are CSV files on steroids
+
+If you want to log a series of structured data items and decided that databases are overrated after all, you may say something like: let’s just open a file in append only mode, and log every row as a CSV (Comma Separated Value) item:
+
+(open data.csv in append only)
+time=1553096724033,cpu_temp=23.4,load=2.3
+time=1553096725029,cpu_temp=23.2,load=2.1
+
+Looks simple and people did this for ages and still do: it’s a solid pattern if you know what you are doing. But what is the in-memory equivalent of that? Memory is more powerful than an append only file and can automagically remove the limitations of  a CSV file like that:
+
+1. It’s hard (inefficient) to do range queries here.
+
+2. There is too much redundant information: the time is almost the same in every entry and the fields are duplicated. At the same time removing it will make the format less flexible, if I want to switch to a different set of fields.
+
+3. Item offsets are just the byte offset in the file: if we change the file structure the offset will be wrong, so there is no actual true concept of primary ID here. Entries are basically not univocally addressed in some way.
+
+4. I can’t remove entries, but only mark them as no longer valid without the ability of garbage collecting, if not by rewriting the log. Log rewriting usually sucks for several reasons and if it can be avoided, it’s good.
+
+Still such log of CSV entries is also great in some way: there is no fixed structure and fields may change, is trivial to generate, and after all is quite compact as well. The idea with Redis Streams was to retain the good things, but go over the limitations. The result is a hybrid data structure very similar to Redis Sorted Sets: they *feel like* a fundamental data structure, but to get such an effect, internally it uses multiple representations.
+
+## Streams 101 (you may skip that if you know already Redis Stream basics)
+
+Redis Streams are represented as delta-compressed macro nodes that are linked together by a radix tree. The effect is to be able to seek to random entries in a very fast way, to obtain ranges if needed, remove old items to create a capped stream, and so forth. Yet our interface to the programmer is very similar to a CSV file:
+
+&amp;gt; XADD mystream * cpu-temp 23.4 load 2.3
+&quot;1553097561402-0&quot;
+&amp;gt; XADD mystream * cpu-temp 23.2 load 2.1
+&quot;1553097568315-0&quot;
+
+As you can see from the example above the XADD command auto generates and returns the entry ID, which is monotonically incrementing and has two parts: &amp;lt;time&amp;gt;-&amp;lt;counter&amp;gt;. The time is in milliseconds and the counter increases for entries generated in the same milliseconds. 
+
+So the first new abstraction on top of the “append only CSV file” idea is that, since we used the asterisk as the ID argument of XADD, we get the entry ID for free from the server. Such ID is not only useful to point to a specific item inside a stream, it’s also related to the time when the entry was added to the stream. In fact with XRANGE it is possible to perform range queries or fetch single items:
+
+&amp;gt; XRANGE mystream 1553097561402-0 1553097561402-0
+1) 1) &quot;1553097561402-0&quot;
+   2) 1) &quot;cpu-temp&quot;
+      2) &quot;23.4&quot;
+      3) &quot;load&quot;
+      4) &quot;2.3&quot;
+
+In this case I used the same ID as the start and the stop of the range in order to identify a single element. However I can use any range, and a COUNT argument to limit the number of results. Similarly there is no need to specify full IDs as range, I can just use the millisecond unix time part of the IDs, to get elements in a given range of time:
+
+&amp;gt; XRANGE mystream 1553097560000 1553097570000
+1) 1) &quot;1553097561402-0&quot;
+   2) 1) &quot;cpu-temp&quot;
+      2) &quot;23.4&quot;
+      3) &quot;load&quot;
+      4) &quot;2.3&quot;
+2) 1) &quot;1553097568315-0&quot;
+   2) 1) &quot;cpu-temp&quot;
+      2) &quot;23.2&quot;
+      3) &quot;load&quot;
+      4) &quot;2.1&quot;
+
+For now there is no need to show you more Streams API, there is the Redis documentation for that. For now let’s just focus on that usage pattern: XADD to add stuff, XRANGE (but also XREAD) in order to fetch back ranges (depending on what you want to do), and let’s see why I claim Streams are so powerful as a data structure.
+
+However if you want to learn more about Redis Streams and their API, make sure to visit the tutorial here: &lt;a rel=&quot;nofollow&quot; href=&quot;https://redis.io/topics/streams-intro&quot;&gt;https://redis.io/topics/streams-intro&lt;/a&gt;
+
+## Tennis players
+
+A few days ago I was modeling an application with a friend of mine which is learning Redis those days: an app in order to keep track of local tennis courts, local players and matches. The way you model players in Redis is quite obvious, a player is a small object, so an Hash is all you need, with key names like player:&amp;lt;id&amp;gt;. As you model the application data further, to use Redis as its primary, you immediately realize you need a way to track the games played in a given tennis club. If player:1 and player:2 played a game, and player 1 won, we could write the following entry in a stream:
+
+&amp;gt; XADD club:1234.matches * player-a 1 player-b 2 winner 1
+&quot;1553254144387-0&quot;
+
+With this simple operation we have:
+
+1. A unique identifier of the match: the ID in the stream.
+2. No need to create an object in order to identify a match.
+3. Range queries for free to paginate the matches, or check the matches played in a given moment in the past.
+
+Before Streams we needed to create a sorted set scored by time: the sorted set element would be the ID of the match, living in a different key as a Hash value. This is not just more work, it’s also an incredible amount of memory wasted. More, much more you could guess (see later).
+
+For now the point to show is that Redis Streams are kinda of a Sorted Set
+in append only mode, keyed by time, where each element is a small Hash. And in its simplicity this is a revolution in the context of modeling for Redis.
+
+## Memory usage
+
+The above use case is not just a matter of a more solid pattern. The memory cost of the Stream solution is so different compared to the old approach of having a Sorted Set + Hash for every object that makes certain things that were not viable, now perfectly fine.
+
+Those are the numbers for storing one million of matches in the configurations exposed previously:
+
+Sorted Set + Hash memory usage = 220 MB (242 RSS)
+Stream memory usage                  = 16.8 MB (18.11 RSS)
+
+This is more than an order of magnitude difference (13 times difference exactly), and it means that use cases that yesterday were too costly for in-memory now are perfectly viable. The magic is all in the representation of Redis Streams: the macro nodes can contain several elements that are encoded in a data structure called listpack in a very compact way. Listpacks will take care, for instance, to encode integers in binary form even if they are semantically strings. On top of that, we then apply delta compression and same-fields compression. Yet we are able to seek by ID or time because such macro nodes are linked in the radix tree, which was also designed to use little memory. All these things together account for the low memory usage, but the interesting part is that semantically the user does not see any of the implementation details making Streams efficient.
+
+Now let’s do some simple math. If I can store 1 million entries in about 18 MB of memory, I can store 10 millions in 180 MB, and 100 millions in 1.8 GB. With just 18 GB of memory I can have 1 billion items.
+
+## Time series
+
+One important thing to note is, in my opinion, how the usage above where we used a Stream to represent a tennis match was semantically *very different* than using a Redis Stream for a time series. Yes, logically we are still logging some kind of event, but one fundamental difference is that in one case we use the logging and the creation of entries in order to render objects. While in the case of time series, we are just metering something happening externally, that does not really represent an object. You may think that this difference is trivial but it’s not. It is important for Redis users to build the idea that Redis Streams can be used in order to create small objects that have a total order, and assign IDs to such objects.
+
+However even the most basic use case of time series is, obviously, a huge one here, because before Streams Redis was a bit hopeless in regard to such use case. The memory characteristics and flexibility of streams, plus the ability to have capped streams (see the XADD options), is a very important tool in the hands of the developer.
+
+## Conclusions
+
+Streams are flexible and have lots of use cases, however I wanted to take this blog post short to make sure that there is a clear take-home message in the above examples and analysis of the memory usage. Perhaps this was already obvious to many readers, but talking with people in the last months gave me the feeling that there was a strong association between Streams and the streaming use case, like if the data structure was only good at that. That’s not the case :-)
+&lt;/pre&gt;&lt;/article&gt;
+&lt;noscript readability=&quot;1.15625&quot;&gt;
+&lt;p&gt;Please enable JavaScript to view the &lt;a href=&quot;http://disqus.com/?ref_noscript&quot;&gt;comments powered by Disqus.&lt;/a&gt;&lt;/p&gt;
+&lt;/noscript&gt; &lt;a href=&quot;http://disqus.com&quot; class=&quot;dsq-brlink&quot;&gt;blog comments powered by &lt;span class=&quot;logo-disqus&quot;&gt;Disqus&lt;/span&gt;&lt;/a&gt;</description>
+<pubDate>Fri, 22 Mar 2019 15:13:21 +0000</pubDate>
+<dc:creator>itamarhaber</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://antirez.com/news/128</dc:identifier>
+</item>
+<item>
+<title>Defining a Distinguished Engineer</title>
+<link>https://blog.jessfraz.com/post/defining-a-distinguished-enginner/</link>
+<guid isPermaLink="true" >https://blog.jessfraz.com/post/defining-a-distinguished-enginner/</guid>
+<description>&lt;h2&gt;Defining a Distinguished Engineer&lt;/h2&gt;&lt;p&gt;Thursday, March 21, 2019&lt;/p&gt;
+&lt;p&gt;I learned a lot about myself and the way big companies are organized over the past year or so. I had mentioned a bit in a &lt;a href=&quot;https://blog.jessfraz.com/post/government-medicine-capitalism/&quot;&gt;previous blog post&lt;/a&gt; and &lt;a href=&quot;https://weirdtrickmafia.fm/post/pilot/&quot;&gt;podcast&lt;/a&gt; about “the N + 1 shithead problem” (from &lt;a href=&quot;https://www.youtube.com/watch?v=1KeYzjILqDo&quot;&gt;Bryan Cantrill’s talk on leadership&lt;/a&gt;). To reiterate, the “N +1 shithead problem” occurs when you are demotivated by seeing people who are a level above you behave poorly, or more bluntly when they behave like a shithead. I know from experience what a huge demotivator this is and after talking to several other folks I realized this is quite common.&lt;/p&gt;
+&lt;p&gt;When faced with this demotivator, I found myself thinking “why would I want to be at their level, when once I get there I’ll just be one amongst the dipshits.” It’s a horrible feeling to have and I’d love to have a model that resembles what I think of as a distinguished engineer or technical fellow.&lt;/p&gt;
+&lt;p&gt;In this post I will define what it means to me to be a distinguished engineer or technical fellow and maybe others that agree will modify their ladders to incentivize people to resemble these qualities.&lt;/p&gt;
+&lt;h2 id=&quot;technical-leader&quot;&gt;Technical Leader&lt;/h2&gt;
+&lt;p&gt;The first thing people think of when they think of a distinguished engineer is that they are a technical leader. I fully agree. A technical leader should understand all parts of a system. They can also be dropped into a new system and pick up the way it is architected and designed with relative ease. I think this is an important distinction to make. It’s good to be an expert in a field, but only being an expert is limiting. It’s also important to understand the full picture and that takes general knowledge. I think having a general knowledge of things outside your area of expertise is key if you choose to gain expertise in something.&lt;/p&gt;
+&lt;h3 id=&quot;value-learning&quot;&gt;Value learning&lt;/h3&gt;
+&lt;p&gt;A technical leader should always realize that there is more to learn. One cannot be an expert in everything and you can have a general knowledge of most things without fully understanding the details within. A technical leader should always strive to continue to learn and persuade others to continue to learn as well.&lt;/p&gt;
+&lt;h3 id=&quot;empower-others&quot;&gt;Empower others&lt;/h3&gt;
+&lt;p&gt;A technical leader should build up others and empower their colleagues to do things that are more challenging than what they might think they are capable of. This is key for growing other members of an organization. I personally believe you don’t need a high title to take on a hard task, you just need the support and faith that you are capable of handling it. That support should come from the distinguished engineer and be reflected in their behavior towards others.&lt;/p&gt;
+&lt;p&gt;A technical leader should also make time for growing and mentoring others. They should be approachable and communicate with their peers and colleagues in a way that makes them approachable. They should welcome newcomers to the team and treat them as peers from day one.&lt;/p&gt;
+&lt;h3 id=&quot;give-constructive-technical-criticism&quot;&gt;Give constructive technical criticism&lt;/h3&gt;
+&lt;p&gt;A distinguished engineer should never tear others down but they should be capable of giving constructive criticism on technical work. This does not mean finding something wrong just to prove their brilliance; no, that would make them the brilliant jerk. Constructive criticism means teaching others to make their work better when there are problems, while also encouraging them to iterate and empowering them to succeed.&lt;/p&gt;
+&lt;h3 id=&quot;have-strong-opinions-loosely-held&quot;&gt;Have strong opinions loosely held&lt;/h3&gt;
+&lt;p&gt;A technical leader should be able to have strong opinions loosely held on designs and architecture. They do not need to have opinions on everything, that would be pedantic. Technical leaders should be able to use their experience to help others succeed, while also empowering others to own solutions. Technical leaders should not pass down solutions to problems but allow others to learn by letting others come up with solutions themselves. This is where good constructive criticism (from above) can come into play.&lt;/p&gt;
+&lt;h3 id=&quot;great-communicator-and-bridge&quot;&gt;Great communicator and bridge&lt;/h3&gt;
+&lt;p&gt;A technical leader should have strong communication skills and be able to articulate the “why” of a problem as well as articulate the technical details of designs. They should never communicate in a derogatory manner. They should always communicate to others as peers and colleagues.&lt;/p&gt;
+&lt;p&gt;At times, technical leaders will need to act as a bridge between teams. It is really important to be able to clearly communicate then as well as always.&lt;/p&gt;
+&lt;h3 id=&quot;humility-and-empathy&quot;&gt;Humility and empathy&lt;/h3&gt;
+&lt;p&gt;A technical leader should not be driven by ego but by a constant urge to learn and grow both themselves and their colleagues. They should have empathy for others and portray kindness towards their peers and colleagues.&lt;/p&gt;
+&lt;h3 id=&quot;prioritize-shipping-and-decisiveness&quot;&gt;Prioritize shipping and decisiveness&lt;/h3&gt;
+&lt;p&gt;A technical leader should value shipping and decisiveness. They should not be susceptible to analysis paralysis. At the end of the day most people have jobs to get things out the door and this should be a priority. Of course, shipping should not come with the trade off of burning out a team or setting the company on fire.&lt;/p&gt;
+&lt;h3 id=&quot;customer-focused&quot;&gt;Customer focused&lt;/h3&gt;
+&lt;p&gt;Technical leaders should always seek feedback from their customers. This might be the internal customers of their infrastructure or external customers if they are on a product team. The best technical leaders are capable of empathizing with customers and iterating quickly on customer feedback.&lt;/p&gt;
+&lt;h3 id=&quot;build-resilient-systems&quot;&gt;Build resilient systems&lt;/h3&gt;
+&lt;p&gt;A part of being a technical leader is having the experience of building multiple systems in the past. Distinguished engineers should be able to anticipate various failures from their past experiences and build systems that will not create the same failures. Of course no system is perfect so they should be able to learn from the failures they cannot anticipate as well. This is a cycle that they can then use when building the next system.&lt;/p&gt;
+&lt;h3 id=&quot;value-quality-performance-and-security&quot;&gt;Value quality, performance, and security&lt;/h3&gt;
+&lt;p&gt;Great technical leaders value quality, performance, and security in what they build. They stay up to date on advancements and research in technology so that they might be able to use new techniques for bettering their solutions. Technical leaders should also build with respect for users and their privacy.&lt;/p&gt;
+&lt;h3 id=&quot;value-maintainability&quot;&gt;Value maintainability&lt;/h3&gt;
+&lt;p&gt;Technical leaders should value writing code that is easy to maintain and easy to understand. They should value unit and integration tests as well as making sure if a bug is fixed it has a test to make sure there is not a regression. Technical leaders should use code comments, not as a garnish, but to denote things a reader would need to know. This could be details of a code section that fixes a specific bug or maybe reasoning behind why something is written a certain way. Documenting context is super valuable and helpful for maintainability.&lt;/p&gt;
+
+&lt;p&gt;Good technical leaders are also leaders in the outside communities. This can include giving talks on various things they have built as well as mentoring others in the community or the workplace.&lt;/p&gt;
+
+&lt;p&gt;If you silo yourself to only learning within your company, you are missing out on a world of experiences and expertise different than yours from the external community. Technical leaders realize this and place importance on learning from the larger world of computing than just their solo.&lt;/p&gt;
+&lt;h3 id=&quot;value-listening-and-be-open-to-feedback&quot;&gt;Value listening and be open to feedback&lt;/h3&gt;
+&lt;p&gt;By gaining feedback and making yourself visible to an external community, leaders avoid a dunning-kruger like effect of only growing inside an echo chamber. It is always valuable to see where the rest of the industry is focusing and how technical leaders at other companies are solving problems. Technical leaders realize that there is much to learn from people with different experiences than their own. They should always be open to listening to others.&lt;/p&gt;
+&lt;h3 id=&quot;humility&quot;&gt;Humility&lt;/h3&gt;
+&lt;p&gt;Technical leaders should always remain humble and modest. The best technical leaders know that it’s not possible for them to know &lt;em&gt;everything&lt;/em&gt; and will prioritize keeping an open mind to always be learning.&lt;/p&gt;
+&lt;h3 id=&quot;call-upon-other-experts&quot;&gt;Call upon other experts&lt;/h3&gt;
+&lt;p&gt;The best technical leaders know when they need to call on experts in specific areas for help or feedback on certain designs or architecture. By participating in the external community, leaders form strong networks and bonds with fellow engineers they can call on when they need them. Technical leaders should always be eager to use these relationships when they need them or introduce others to these folks if they could use their expertise.&lt;/p&gt;
+&lt;h3 id=&quot;value-research&quot;&gt;Value research&lt;/h3&gt;
+&lt;p&gt;Along with being able to call upon other experts, technical leaders should value well researched solutions. They should strive to learn from prior art.&lt;/p&gt;
+&lt;h2 id=&quot;have-fun&quot;&gt;Have fun&lt;/h2&gt;
+&lt;p&gt;Always make sure to have fun and not take yourself too seriously!&lt;/p&gt;
+&lt;p&gt;These are just a few of the things I think define a strong technical leader and engineer. I am sure I will grow this list as I personally grow myself every day.&lt;/p&gt;
+&lt;p&gt;Most importantly you must actually &lt;em&gt;do&lt;/em&gt; these things. Actions speak louder than words.&lt;/p&gt;
+</description>
+<pubDate>Fri, 22 Mar 2019 15:06:54 +0000</pubDate>
+<dc:creator>johns</dc:creator>
+<og:title>Defining a Distinguished Engineer</og:title>
+<og:url>https://blog.jessfraz.com/post/defining-a-distinguished-engineer/</og:url>
+<og:image>/img/share.png</og:image>
+<og:description>A summary of how I would define a distinguished engineer or technical fellow.</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.jessfraz.com/post/defining-a-distinguished-engineer/</dc:identifier>
+</item>
+<item>
+<title>The Boombox Incident: removing bald people from photos</title>
+<link>https://matthewbilyeu.com/blog/2019-03-21/the-boombox-incident</link>
+<guid isPermaLink="true" >https://matthewbilyeu.com/blog/2019-03-21/the-boombox-incident</guid>
+<description>&lt;p&gt;&lt;span&gt;Written by&lt;/span&gt; Matt Bilyeu&lt;br/&gt;&lt;span&gt;on &lt;/span&gt;&lt;time datetime=&quot;2019-03-21 20:00:00 -0400&quot;&gt;March 21, 2019&lt;/time&gt;&lt;/p&gt;
+
+
+&lt;p&gt;In &lt;em&gt;Seinfeld&lt;/em&gt; episode &lt;a href=&quot;https://www.youtube.com/watch?v=pSB3HdmLcY4&quot;&gt;#163&lt;/a&gt;, “The Slicer”, George has just landed a cushy job at Kruger Industrial Smoothing, when he sees himself in the background of a family photo on his new boss’s desk.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://matthewbilyeu.com/blog/assets/boombox/kruger-family-untouched.png&quot; alt=&quot;kruger-family-untouched&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;George is instantly reminded of the “boombox incident”, in which he had, years earlier, embarrassed himself in front of the Kruger family.&lt;/p&gt;
+&lt;p&gt;Later, upon hearing about the photo, Kramer suggests that George sneak the photo off to have himself airbrushed out of the picture, so that Kruger doesn’t remember the incident and fire George.&lt;/p&gt;
+&lt;p&gt;George enacts the plan and things are going fine until he receives the touched-up photo: the clerk has removed Kruger from the family photo instead of George.&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;kruger_family_airbrushed&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/kruger-family-airbrushed.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;The clerk mistook Kruger in the photo for George, since in the picture George had hair but Kruger was bald. Removing the only bald person from the photo was a pretty reasonable thing for the photo store clerk to do. I figured this is something that photo editors have to do frequently, so I decided to automate it.&lt;/p&gt;
+&lt;p&gt;The process for removing bald people from photos is as follows:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;detect faces in an image using off-the-shelf tools&lt;/li&gt;
+&lt;li&gt;for each face
+&lt;ul&gt;&lt;li&gt;roughly locate the forehead/hair region&lt;/li&gt;
+&lt;li&gt;get the dominant color of the face and of the top of the head&lt;/li&gt;
+&lt;li&gt;compare the two colors&lt;/li&gt;
+&lt;li&gt;consider a bald subject to be one where the two colors are very close, i.e. the top of the head is the same color as the face (skin tone)&lt;/li&gt;
+&lt;li&gt;attempt to inpaint the region containing the bald individual&lt;/li&gt;
+&lt;/ul&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;face-detection&quot;&gt;Face detection&lt;/h2&gt;
+&lt;p&gt;Face detection in OpenCV can be accomplished with a &lt;a href=&quot;https://docs.opencv.org/3.0-beta/doc/tutorials/objdetect/cascade_classifier/cascade_classifier.html&quot;&gt;cascade classifier&lt;/a&gt;. A pre-trained model from the &lt;a href=&quot;https://github.com/opencv/opencv/tree/master/data/haarcascades&quot;&gt;OpenCV data repository&lt;/a&gt; is made available. The underlying algorithm at play is the &lt;a href=&quot;frameworkhttps://en.wikipedia.org/wiki/Viola%E2%80%93Jones_object_detection_framework#Cascade_architecture&quot;&gt;Viola-Jones object detection framework&lt;/a&gt;, which uses a coarse-to-fine cascade of Haar-feature matching to identify human faces.&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;haar_features&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/haar.png&quot;/&gt;&lt;/p&gt;
+&lt;div class=&quot;language-python highlighter-rouge&quot; readability=&quot;17&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;29&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;n&quot;&gt;face_cascade&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;CascadeClassifier&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'./haarcascade_frontalface_default.xml'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;detect_faces&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;image&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;image&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;shape&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;gray&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cvtColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;image&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;COLOR_BGR2GRAY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;min_size&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;0.12&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    
+    &lt;span class=&quot;n&quot;&gt;faces&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_cascade&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;detectMultiScale&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;gray&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;scaleFactor&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;1.1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;minNeighbors&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;minSize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;min_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;min_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;flags&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cv&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;CV_HAAR_SCALE_IMAGE&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;faces&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;g_and_k_img&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;imread&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;'./input_images/george-and-kruger.jpg'&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;copy&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;g_and_k_img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;detect_faces&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;g_and_k_img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;rectangle&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;255&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;img alt=&quot;george_and_kruger_detection&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/george-and-kruger-detection.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;seinfeld_detection&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/seinfeld-detection.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;forehead-region&quot;&gt;Forehead region&lt;/h2&gt;
+&lt;p&gt;Once the faces in a photo have been located, we need to examine just above each face region to determine whether the person is bald or has hair. This approach assumes, of course, that the faces are oriented vertically. A better method might be to locate the eyes and/or mouth using other cascade classifiers and then approximate the forehead position from there.&lt;/p&gt;
+&lt;div class=&quot;language-python highlighter-rouge&quot; readability=&quot;11.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;18&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;forehead_region&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_loc&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;img_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;shape&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[:&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;h&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_loc&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fore_w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.33&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fore_h&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;h&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;0.25&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fore_x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;min&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fore_w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;//&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fore_y&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;max&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;y&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fore_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fore_y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fore_y&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fore_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; 
+               &lt;span class=&quot;n&quot;&gt;fore_x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fore_x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;fore_w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+               &lt;span class=&quot;p&quot;&gt;:]&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;img alt=&quot;elaine_forehead_detail&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/elaine-forehead-detail.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;dominant-color&quot;&gt;Dominant color&lt;/h2&gt;
+&lt;p&gt;The algorithm presented here compares the color in the forehead/top-of-head region to that of the face region. To find the dominant color, we can use &lt;a href=&quot;https://docs.opencv.org/3.0-beta/doc/py_tutorials/py_ml/py_kmeans/py_kmeans_opencv/py_kmeans_opencv.html&quot;&gt;k-means clustering&lt;/a&gt;. This quantizes all pixel BGR values to be one of &lt;em&gt;k&lt;/em&gt; colors, and we chose the most frequent. Simply averaging all colors in the image can also work well (and is faster) if the region is tightly bound.&lt;/p&gt;
+&lt;div class=&quot;language-python highlighter-rouge&quot; readability=&quot;13.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;22&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;dominant_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;c1&quot;&gt;# via https://docs.opencv.org/3.0-beta/doc/py_tutorials/py_ml/py_kmeans/py_kmeans_opencv/py_kmeans_opencv.html
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;Z&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;reshape&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;((&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Z&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;float32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Z&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    
+    &lt;span class=&quot;c1&quot;&gt;# define criteria, number of clusters(K) and apply kmeans()
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;criteria&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;TERM_CRITERIA_EPS&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;TERM_CRITERIA_MAX_ITER&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;200&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mf&quot;&gt;1.0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;K&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;3&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;labels&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;palette&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;kmeans&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;Z&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;K&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;criteria&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;KMEANS_RANDOM_CENTERS&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+   
+    &lt;span class=&quot;c1&quot;&gt;# via https://stackoverflow.com/a/43111221
+&lt;/span&gt;    &lt;span class=&quot;n&quot;&gt;_&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;counts&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;unique&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;labels&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;return_counts&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;bp&quot;&gt;True&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;dominant&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;palette&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;argmax&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;counts&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;uint8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;dominant&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;table&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;img alt=&quot;elaine_face_color&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/elaine-face-color.png&quot;/&gt;&lt;/td&gt;
+&lt;td&gt;&lt;img alt=&quot;elaine_hair_color&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/elaine-hair-color.png&quot;/&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h2 id=&quot;bald&quot;&gt;Bald?&lt;/h2&gt;
+&lt;p&gt;With the dominant color for each subject’s face and hair regions obtained, we can compare the values to determine baldness. &lt;a href=&quot;http://hanzratech.in/2015/01/16/color-difference-between-2-colors-using-python.html&quot;&gt;Comparing colors programatically&lt;/a&gt; is not as simple as taking the Euclidean distance of the BGR color vectors, because the resultant differences don’t correspond well to human color difference perception. A better distance metric is &lt;a href=&quot;https://en.wikipedia.org/wiki/Color_difference#CIELAB_.CE.94E.2A&quot;&gt;ΔE* in the CIE Lab color space&lt;/a&gt;. I used the &lt;a href=&quot;https://python-colormath.readthedocs.io/en/latest/&quot;&gt;colormath&lt;/a&gt; package to perform those distance calculations.&lt;/p&gt;
+&lt;p&gt;We compare the color difference to a threshold, and this heuristic is the baldness detection. It probably gives false positives for subjects with hair color close to their skin tone.&lt;/p&gt;
+&lt;div class=&quot;language-python highlighter-rouge&quot; readability=&quot;13.5&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;22&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;c1&quot;&gt;# via http://hanzratech.in/2015/01/16/color-difference-between-2-colors-using-python.html
+&lt;/span&gt;&lt;span class=&quot;kn&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;colormath.color_objects&lt;/span&gt; &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sRGBColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;LabColor&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;colormath.color_conversions&lt;/span&gt; &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;convert_color&lt;/span&gt;
+&lt;span class=&quot;kn&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;nn&quot;&gt;colormath.color_diff&lt;/span&gt; &lt;span class=&quot;kn&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;delta_e_cie2000&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;is_bald&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;thresh&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;40&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;face_img&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_region&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;forehead_img&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;forehead_region&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;face_color&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dominant_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;face_img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;forehead_color&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dominant_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;forehead_img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;face_rgb&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sRGBColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;face_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;face_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;fore_rgb&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sRGBColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;forehead_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;forehead_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;forehead_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;])&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;delta&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;delta_e_cie2000&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;convert_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;face_rgb&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;LabColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;convert_color&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;fore_rgb&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;LabColor&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;delta&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;thresh&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;table&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;img alt=&quot;low_delta&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/low-delta.png&quot;/&gt;&lt;/td&gt;
+&lt;td&gt;&lt;img alt=&quot;high_delta&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/high-delta.png&quot;/&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;img alt=&quot;final_detection_0&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/final-detection-0.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;final_detection_1&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/final-detection-1.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img alt=&quot;final_detection_2&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/final-detection-2.png&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;inpainting&quot;&gt;Inpainting&lt;/h2&gt;
+&lt;p&gt;Now that bald individuals have been identified, they can be removed from the image. OpenCV has an &lt;a href=&quot;https://docs.opencv.org/3.3.1/df/d3d/tutorial_py_inpainting.html&quot;&gt;&lt;code class=&quot;highlighter-rouge&quot;&gt;inpainting&lt;/code&gt;&lt;/a&gt; function, which is really only meant for removing small strokes from an image. The results of applying it here are…not ideal.&lt;/p&gt;
+&lt;div class=&quot;language-python highlighter-rouge&quot; readability=&quot;18&quot;&gt;
+&lt;div class=&quot;highlight&quot; readability=&quot;31&quot;&gt;
+&lt;pre class=&quot;highlight&quot;&gt;
+&lt;code&gt;&lt;span class=&quot;k&quot;&gt;def&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;rm_bald&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;copy&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;img_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;shape&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[:&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+    
+    &lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt; &lt;span class=&quot;ow&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;bald_locs&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;b&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;img_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;shape&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[:&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;mask&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;zeros&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[:,:,&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;shape&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;np&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;uint8&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;mask&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;max&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;50&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;min&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;max&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;min&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;mask&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;max&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;min&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img_h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;y&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;+&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mf&quot;&gt;2.5&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;h&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)),&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;max&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;-&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;//&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;):&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;min&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;img_w&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;x&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;w&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;w&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;/&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;2&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+        &lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;inpaint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;mask&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;10&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;cv2&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;INPAINT_TELEA&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tmp&lt;/span&gt;
+&lt;/code&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;img alt=&quot;inpainted_result&quot; src=&quot;https://matthewbilyeu.com/blog/assets/boombox/inpainted-result.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;References:&lt;/p&gt;
+</description>
+<pubDate>Fri, 22 Mar 2019 12:47:20 +0000</pubDate>
+<dc:creator>mbil</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://matthewbilyeu.com/blog/2019-03-21/the-boombox-incident</dc:identifier>
+</item>
+<item>
+<title>South Korea accepts geothermal plant probably caused destructive quake</title>
+<link>https://www.nature.com/articles/d41586-019-00959-4</link>
+<guid isPermaLink="true" >https://www.nature.com/articles/d41586-019-00959-4</guid>
+<description>&lt;div class=&quot;content position-relative cleared clear mq1200-padded&quot; data-component=&quot;article-container&quot; role=&quot;main&quot;&gt;
+&lt;header class=&quot;article-item__header clear cleared pull--both&quot;&gt;&lt;div class=&quot;article__type&quot;&gt;NEWS
+&lt;div class=&quot;ml10 article__date&quot;&gt;&lt;time itemprop=&quot;datePublished&quot;&gt;22 March 2019&lt;/time&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;article-item__teaser-text serif&quot;&gt;The nation’s energy ministry expressed ‘deep regret’, and said it would dismantle the experimental plant.&lt;/div&gt;
+&lt;/header&gt;
+&lt;div class=&quot;bordered-container clear cleared pull--both&quot;&gt;
+&lt;div id=&quot;author-affiliations&quot; class=&quot;tab-group text14&quot; role=&quot;tablist&quot; data-test=&quot;author-affiliations&quot; data-tab-group=&quot;&quot;&gt;
+&lt;div class=&quot;cleared&quot;&gt;
+&lt;div id=&quot;author-affiliation-news-0&quot; class=&quot;tab-box js-box-wrapper&quot;&gt;
+&lt;h3 id=&quot;author-affiliation-news-0-head&quot; data-track=&quot;click&quot; data-track-label=&quot;view author info&quot; class=&quot;sans-serif strong tab tab-skin&quot; role=&quot;tab&quot; aria-controls=&quot;author-affiliation-news-0-content&quot; data-tooltip=&quot;Show author information&quot;&gt;Mark Zastrow&lt;/h3&gt;
+&lt;div id=&quot;author-affiliation-news-0-content&quot; class=&quot;tab-content pin-right grid grid-12 last&quot; role=&quot;tabpanel&quot;&gt;
+&lt;div class=&quot;pa10&quot; aria-labelledby=&quot;author-affiliation-news-0-head&quot;&gt;
+&lt;div class=&quot;clear cleared&quot;&gt;
+&lt;div class=&quot;align-left&quot;&gt;
+&lt;h4 class=&quot;sans-serif&quot;&gt;Search for this author in:&lt;/h4&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;align-left&quot;&gt;
+&lt;div class=&quot;article__body serif cleared&quot;&gt;
+&lt;div class=&quot;embed intensity--high&quot;&gt;&lt;img class=&quot;figure__image&quot; alt=&quot;Bricks and debris from damaged buildings lie on the ground in front of a damaged car in Pohang, South Korea&quot; data-src=&quot;//media.nature.com/w800/magazine-assets/d41586-019-00959-4/d41586-019-00959-4_16566008.jpg&quot;/&gt;&lt;noscript&gt;
+&lt;p&gt;&lt;img class=&quot;&quot; alt=&quot;Bricks and debris from damaged buildings lie on the ground in front of a damaged car in Pohang, South Korea&quot; src=&quot;https://media.nature.com/w800/magazine-assets/d41586-019-00959-4/d41586-019-00959-4_16566008.jpg&quot;/&gt;&lt;/p&gt;
+&lt;/noscript&gt;
+&lt;p class=&quot;figure__caption sans-serif&quot;&gt;&lt;span class=&quot;mr10&quot;&gt;A 2017 earthquake in Pohang, South Korea has been linked to a geothermal plant.&lt;/span&gt;&lt;span&gt;Credit: Yonhap/EPA-EFE/Shutterstock&lt;/span&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;A South Korean government panel has concluded that a magnitude-5.4 earthquake that struck the city of Pohang on 15 November 2017 was probably caused by an experimental geothermal power plant. The panel was convened under presidential orders and released its findings on 20 March.&lt;/p&gt;
+&lt;p&gt;Unlike conventional geothermal plants, which extract energy directly from hot underground water or rock, the Pohang power plant injected fluid at high pressure into the ground to fracture the rock and release heat — a technology known as an enhanced geothermal system. This pressure caused small earthquakes that affected nearby faults, and eventually triggered the bigger 2017 quake, the panel found.&lt;/p&gt;
+&lt;p&gt;The quake was the nation’s second strongest and its most destructive on modern record — it injured 135 people and caused an estimated 300 billion won (US$290 million) in damage. The nation’s Ministry of Trade, Industry and Energy, which had provided funding for the plant, said in a statement that it accepts the panel’s findings and “expresses deep regret” to the citizens of Pohang who were harmed by the event.&lt;/p&gt;
+&lt;p&gt;The ministry announced that it would dismantle the power plant, restore the site to its original condition, and invest 225.7 billion won to repair infrastructure in the hardest-hit area. The results support the findings of a pair of studies published in &lt;em&gt;Science&lt;/em&gt;&lt;sup&gt;&lt;a href=&quot;https://www.nature.com/articles/d41586-019-00959-4#ref-CR1&quot;&gt;1&lt;/a&gt;&lt;/sup&gt;&lt;sup&gt;,&lt;/sup&gt;&lt;sup&gt;&lt;a href=&quot;https://www.nature.com/articles/d41586-019-00959-4#ref-CR2&quot;&gt;2&lt;/a&gt;&lt;/sup&gt; last year, which suggested the plant as a likely cause of the quake.&lt;/p&gt;
+&lt;p&gt;Earthquakes have been linked to geothermal power plant in other parts of the world. But the Pohang quake is by far the strongest ever tied to this kind of plant — 1,000 times mightier than a magnitude-3.4 quake triggered by a plant in Basel, Switzerland, in 2006.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class=&quot;emphasis&quot;&gt;doi: 10.1038/d41586-019-00959-4&lt;/div&gt;
+
+&lt;div id=&quot;references&quot; class=&quot;references&quot; data-toggle=&quot;anchor-links-section&quot; data-label=&quot;References&quot; data-concertina=&quot;true&quot;&gt;
+&lt;section aria-labelledby=&quot;Bib1&quot;&gt;&lt;div class=&quot;serif article-section js-article-section cleared clear&quot; id=&quot;Bib1-section&quot;&gt;
+&lt;h2 class=&quot;js-section-title section-title strong position-relative tighten-line-height background-gray-light pt20 pb6 pl0 pr20 standard-space-below small-space-above mq640-pt10 mq640-pb10 mq640-pl20 mq640-mt0 mq640-ml-20 mq640-mr-20 extend-left&quot; id=&quot;Bib1&quot;&gt;References&lt;/h2&gt;
+&lt;div class=&quot;pl20 mq875-pl0 js-collapsible-section&quot; id=&quot;Bib1-content&quot;&gt;
+&lt;div data-container-section=&quot;references&quot;&gt;
+&lt;ol class=&quot;clean-list ma0 standard-space-below indented-list&quot; data-test=&quot;references-list&quot;&gt;&lt;li class=&quot;small-space-below border-gray-medium border-bottom-1 position-relative js-ref-item&quot; itemprop=&quot;citation&quot; itemscope=&quot;itemscope&quot; itemtype=&quot;http://schema.org/Article&quot; data-test=&quot;citation&quot;&gt;&lt;span class=&quot;indented-counter serif h2 tighten-line-height text-right position-absolute grade-c-hide&quot;&gt;1.&lt;/span&gt;
+&lt;p class=&quot;tiny-space-below&quot; id=&quot;ref-CR1&quot;&gt;Grigoli, F. &lt;em&gt;et al.&lt;/em&gt; &lt;em&gt;Science&lt;/em&gt; &lt;strong&gt;360&lt;/strong&gt;, 1003–1006 (2018).&lt;/p&gt;
+&lt;/li&gt;
+&lt;li class=&quot;small-space-below border-gray-medium border-bottom-1 position-relative js-ref-item&quot; itemprop=&quot;citation&quot; itemscope=&quot;itemscope&quot; itemtype=&quot;http://schema.org/Article&quot; data-test=&quot;citation&quot;&gt;&lt;span class=&quot;indented-counter serif h2 tighten-line-height text-right position-absolute grade-c-hide&quot;&gt;2.&lt;/span&gt;
+&lt;p class=&quot;tiny-space-below&quot; id=&quot;ref-CR2&quot;&gt;Kim, K.-H. &lt;em&gt;et al.&lt;/em&gt; &lt;em&gt;Science&lt;/em&gt; &lt;strong&gt;360&lt;/strong&gt;, 1007–1009 (2018).&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;p class=&quot;hide-print text-right&quot;&gt;&lt;a href=&quot;https://www.nature.com/articles/d41586-019-00959-4-references.ris&quot; class=&quot;text14 sans-serif strong&quot; data-track=&quot;click&quot; data-track-action=&quot;download citation references&quot; data-track-category=&quot;article body&quot; data-track-label=&quot;link&quot;&gt;Download references&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/section&gt;&lt;/div&gt;
+
+&lt;aside class=&quot;c-latest-content mt40 hide-print&quot; data-simple-tab=&quot;&quot; data-tab-group=&quot;&quot; data-component-id=&quot;latest-news&quot; data-track=&quot;in-view&quot; data-track-action=&quot;in-view&quot; data-track-category=&quot;latest content&quot; data-track-label=&quot;visible&quot;&gt;&lt;div id=&quot;latest-content&quot; role=&quot;tablist&quot;&gt;
+&lt;p class=&quot;serif strong&quot;&gt;Latest on:&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;/aside&gt;&lt;div class=&quot;nature-briefing nature-briefing--article cleared hide-print&quot; data-component-id=&quot;nature-briefing-box&quot; data-track=&quot;in-view&quot; data-track-action=&quot;in-view&quot; data-track-category=&quot;nature briefing&quot; data-track-label=&quot;box visible&quot;&gt;
+&lt;header class=&quot;nature-briefing__header&quot;&gt;&lt;span class=&quot;visually-hidden&quot;&gt;Nature Briefing&lt;/span&gt;&lt;/header&gt;&lt;div class=&quot;pa10 pt20&quot;&gt;
+&lt;p class=&quot;serif nature-briefing__slogan mr30&quot;&gt;&lt;strong&gt;Sign up for the daily &lt;span class=&quot;emphasis&quot;&gt;Nature Briefing&lt;/span&gt; email newsletter&lt;/strong&gt;&lt;/p&gt;
+&lt;p class=&quot;sans-serif nature-briefing__standfirst mr30&quot;&gt;Stay up to date with what matters in science and why, handpicked from &lt;span class=&quot;emphasis&quot;&gt;Nature&lt;/span&gt; and other publications worldwide.&lt;/p&gt;
+&lt;p class=&quot;cleared&quot;&gt;&lt;a class=&quot;nature-briefing__link&quot; data-track-category=&quot;nature briefing&quot; data-track=&quot;click&quot; data-track-label=&quot;nature briefing article link&quot; target=&quot;_blank&quot; rel=&quot;noreferrer noopener&quot; href=&quot;https://www.nature.com/briefing/signup/&quot;&gt;Sign Up&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;aside class=&quot;article__aside align-right&quot;&gt;&lt;div class=&quot;related-content shrink--aside hide-print&quot;&gt;
+&lt;h3 class=&quot;aside__title sans-serif&quot;&gt;Related Articles&lt;/h3&gt;
+&lt;/div&gt;
+
+&lt;div id=&quot;div-gpt-ad-right-2&quot; class=&quot;div-gpt-ad advert medium-rectangle js-ad text-center hide-print grade-c-hide&quot; data-gpt-unitpath=&quot;/285/nature.com/article&quot; data-gpt-sizes=&quot;300x250&quot; data-gpt-targeting=&quot;pos=right;artid=/articles/d41586-019-00959-4;path=/articles/d41586-019-00959-4&quot;&gt;&lt;noscript&gt;
+&lt;p&gt;&lt;a href=&quot;https://pubads.g.doubleclick.net/gampad/jump?iu=/285/nature.com/article&amp;amp;sz=300x250&amp;amp;c=-20867124&amp;amp;t=pos%3Dright%26artid%3D/articles/d41586-019-00959-4&quot;&gt;&lt;img data-test=&quot;gpt-advert-fallback-img&quot; src=&quot;https://pubads.g.doubleclick.net/gampad/ad?iu=/285/nature.com/article&amp;amp;sz=300x250&amp;amp;c=-20867124&amp;amp;t=pos%3Dright%26artid%3D/articles/d41586-019-00959-4&quot; alt=&quot;Advertisement&quot; width=&quot;300&quot; height=&quot;250&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/noscript&gt;&lt;/div&gt;
+&lt;/aside&gt;&lt;/div&gt;
+</description>
+<pubDate>Fri, 22 Mar 2019 12:32:53 +0000</pubDate>
+<dc:creator>bookofjoe</dc:creator>
+<og:url>http://www.nature.com/articles/d41586-019-00959-4</og:url>
+<og:type>article</og:type>
+<og:title>South Korea accepts geothermal plant probably caused destructive quake</og:title>
+<og:description>The nation’s energy ministry expressed ‘deep regret’, and said it would dismantle the experimental plant.</og:description>
+<og:image>https://media.nature.com/lw1024/magazine-assets/d41586-019-00959-4/d41586-019-00959-4_16566004.jpg</og:image>
+<dc:language>EN</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.nature.com/articles/d41586-019-00959-4</dc:identifier>
+</item>
+<item>
 <title>At $75K, housing a prisoner in California now costs more than a year at Harvard</title>
 <link>https://www.latimes.com/local/lanow/la-me-prison-costs-20170604-htmlstory.html</link>
 <guid isPermaLink="true" >https://www.latimes.com/local/lanow/la-me-prison-costs-20170604-htmlstory.html</guid>
@@ -182,16 +767,16 @@
 <description>&lt;tr readability=&quot;0.58823529411765&quot;&gt;&lt;td bgcolor=&quot;#FF6600&quot;&gt;
 &lt;/td&gt;
 &lt;/tr&gt;&lt;tr id=&quot;pagespace&quot; title=&quot;Tell HN: Google removing Gmail access from IFTTT&quot;&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;10.452631578947&quot;&gt;&lt;td&gt;
-&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;6.9684210526316&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;19458172&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;10.494055482166&quot;&gt;&lt;td&gt;
+&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;6.996036988111&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;19458172&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
 &lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
 &lt;center&gt;
 
 &lt;/center&gt;
 &lt;/td&gt;
 &lt;td class=&quot;title&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=19458172&quot; class=&quot;storylink&quot;&gt;Tell HN: Google removing Gmail access from IFTTT&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;0.75&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_19458172&quot;&gt;218 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=pgrote&quot; class=&quot;hnuser&quot;&gt;pgrote&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=19458172&quot;&gt;17 hours ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_19458172&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=19458172&amp;amp;goto=item%3Fid%3D19458172&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Tell%20HN%3A%20Google%20removing%20Gmail%20access%20from%20IFTTT&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Tell%20HN%3A%20Google%20removing%20Gmail%20access%20from%20IFTTT&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=19458172&amp;amp;auth=7d0d435a24f2a56e95b7c23ffe1dcac6886c4415&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=19458172&quot;&gt;111 comments&lt;/a&gt;&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;0.77922077922078&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
+&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_19458172&quot;&gt;223 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=pgrote&quot; class=&quot;hnuser&quot;&gt;pgrote&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=19458172&quot;&gt;1 day ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_19458172&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=19458172&amp;amp;goto=item%3Fid%3D19458172&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Tell%20HN%3A%20Google%20removing%20Gmail%20access%20from%20IFTTT&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Tell%20HN%3A%20Google%20removing%20Gmail%20access%20from%20IFTTT&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=19458172&amp;amp;auth=7d0d435a24f2a56e95b7c23ffe1dcac6886c4415&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=19458172&quot;&gt;117 comments&lt;/a&gt;&lt;/td&gt;
 &lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
 &lt;/tr&gt;&lt;tr readability=&quot;21.5&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
 &lt;td readability=&quot;22&quot;&gt;Hello,
@@ -216,227 +801,6 @@
 <dc:creator>pgrote</dc:creator>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://news.ycombinator.com/item?id=19458172</dc:identifier>
-</item>
-<item>
-<title>So you want your app/website to work in China</title>
-<link>https://chanind.github.io/china/2019/01/19/launching-an-app-or-website-in-china.html</link>
-<guid isPermaLink="true" >https://chanind.github.io/china/2019/01/19/launching-an-app-or-website-in-china.html</guid>
-<description>&lt;p&gt;Wait, what do you mean make my app/site &lt;em&gt;work&lt;/em&gt; in China? I don’t have to do anything to make my app work in the US or Singapore or Kenya or anywhere else, and I didn’t make the Chinese government angry, so it should just work in China, right? Sadly, it’s not so simple. If your app/website servers aren’t hosted from within China, then, for all intents and purposes, it’s blocked. I mean, it will probably technically load, but will be excruciatingly, unusably slow. And sometimes it will just not load at all for hours at a time. This is true for all services hosted outside of the firewall, even in Hong Kong.&lt;/p&gt;
-&lt;h3 id=&quot;the-firewall&quot;&gt;The Firewall&lt;/h3&gt;
-&lt;p&gt;Any time a request needs to go from within China to the outside world, or from the outside world into China, the request crosses the Chinese Great Firewall. When this happens, there’s a lot of latency that gets added, and there’s a high chance the request will randomly fail. Requests through the firewall may appear to work most of the time, but then suddenly get fully blocked for several hours. The firewall doesn’t seem like it’s implemented uniformly across China either, so it’s possible that if you test in Shanghai your request may go through but a user in Changsha will have their requests blocked.&lt;/p&gt;
-&lt;p&gt;Basically, if requests need to pass through the firewall to reach your servers outside of China you’re in for a bad time.&lt;/p&gt;
-&lt;h3 id=&quot;icp-license&quot;&gt;ICP License&lt;/h3&gt;
-&lt;p&gt;If you want to have any infrastructure working in China, you need to apply for an &lt;a href=&quot;https://en.wikipedia.org/wiki/ICP_license&quot;&gt;ICP license&lt;/a&gt; from the Chinese government. All the techniques below require that you have this license. It’s quite a pain to apply for, and takes several months, but there’s no way around it. You can find more info about registering for an ICP license &lt;a href=&quot;https://webdesign.tutsplus.com/articles/chinese-icp-licensing-what-why-and-how-to-get-hosted-in-china--cms-23193&quot;&gt;here&lt;/a&gt;. Alicloud also has a lot of info on registering for an ICP &lt;a href=&quot;https://www.alibabacloud.com/icp&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
-&lt;h3 id=&quot;option-1-cloudflare-china-acceleration&quot;&gt;Option 1: Cloudflare China Acceleration&lt;/h3&gt;
-&lt;p&gt;The easiest option to get your services working in China is to go use &lt;a href=&quot;https://www.cloudflare.com/network/china/&quot;&gt;Cloudflare’s China acceleration&lt;/a&gt;. Cloudflare partnered with Baidu to extend their acceleration network with points inside of China itself. Going through this method allows requests into and out of China to bypass the firewall, so your service will be fast. Cloudflare China acceleration requires an enterprise account though, so it’s going to be pricey.&lt;/p&gt;
-&lt;p&gt;Using Cloudflare does effectively allow you to host your infrastructure outside of China, but depending on your business it might not be entirely legal. That’s because China has strict &lt;a href=&quot;https://www.chinalawblog.com/2018/05/china-data-protection-regulations-cdpr.html&quot;&gt;data protection laws&lt;/a&gt;, and in many cases you must store Chinese users’ data inside of China. If you’re not a huge company or don’t have much sensitive data on Chinese users this may not be an issue, but it’s something to be aware of.&lt;/p&gt;
-&lt;p&gt;If most of your customers are outside of China and you just want to make sure your app/website loads quickly in China, then this is likely the best option for you.&lt;/p&gt;
-&lt;h3 id=&quot;option-2-make-a-separate-chinese-version-of-your-appwebsite&quot;&gt;Option 2: Make a Separate Chinese Version of your App/Website&lt;/h3&gt;
-&lt;p&gt;The most direct way to make your app/website work in China is, of course, to host your servers themselves in China. You can do that using a Chinese cloud provider like &lt;a href=&quot;https://alibabacloud.com&quot;&gt;Alicloud&lt;/a&gt; or &lt;a href=&quot;https://cloud.tencent.com&quot;&gt;Tencent cloud&lt;/a&gt;, or using the &lt;a href=&quot;https://www.amazonaws.cn/en/&quot;&gt;AWS China region&lt;/a&gt;. If you use AWS, you should be aware that the China region requires setting up a different account, and isn’t even run by Amazon!&lt;/p&gt;
-&lt;p&gt;The most technically correct way to be in compliance with the Chinese government’s &lt;a href=&quot;https://www.chinalawblog.com/2018/05/china-data-protection-regulations-cdpr.html&quot;&gt;data protection laws&lt;/a&gt; is to have a separate Chinese version of your app/website and run a separate version of your infrastructure in China. This allows all data for your Chinese users to stay in China and not be transferred abroad. No requests ever have to cross the firewall, so everything remains fast. Of course, it’s practically quite annoying to run 2 separate but identical versions of your infrastructure and apps.&lt;/p&gt;
-&lt;h3 id=&quot;option-3-proxy-requests-on-a-chinese-cloud-provider&quot;&gt;Option 3: Proxy Requests on a Chinese Cloud Provider&lt;/h3&gt;
-&lt;p&gt;Chinese cloud providers like &lt;a href=&quot;https://alibabacloud.com&quot;&gt;Alicloud&lt;/a&gt; and &lt;a href=&quot;https://cloud.tencent.com&quot;&gt;Tencent cloud&lt;/a&gt; have fast connections between their datacenters through the firewall that you can make use of. You can create a VPC inside of China and a VPC outside of China and then connect them using a form of VPC peering. This gives you a high-speed connection through the firewall which you can use to proxy requests. If you host your main infrastructure in a Chinese region then you’ll be in compliance with China’s &lt;a href=&quot;https://www.chinalawblog.com/2018/05/china-data-protection-regulations-cdpr.html&quot;&gt;data protection laws&lt;/a&gt;, while still being able to serve requests outside of China via the proxied connection.&lt;/p&gt;
-&lt;h3 id=&quot;option-4-use-a-chinese-cloud-provider-acceleration-service&quot;&gt;Option 4: Use a Chinese Cloud Provider Acceleration Service&lt;/h3&gt;
-&lt;p&gt;If you’re hosting your infrastructure on &lt;a href=&quot;https://alibabacloud.com&quot;&gt;Alicloud&lt;/a&gt; or &lt;a href=&quot;https://cloud.tencent.com&quot;&gt;Tencent cloud&lt;/a&gt; in China, you can accelerate requests to your infrastructure globally using their acceleration services. These work similarly to the Cloudflare option above, but in reverse. Alicloud calls their service &lt;a href=&quot;https://www.alibabacloud.com/help/product/55629.htm&quot;&gt;Global Acceleration&lt;/a&gt;, and Tencent cloud calls their &lt;a href=&quot;https://intl.cloud.tencent.com/product/gaap&quot;&gt;GAAP&lt;/a&gt;. This allows users globally to make requests to your servers in China and still have them be fast.&lt;/p&gt;
-&lt;h3 id=&quot;3rd-party-services&quot;&gt;3rd Party Services&lt;/h3&gt;
-&lt;p&gt;No matter which option you go with, you still need to test that your service is working in China. Even if you’re running on Chinese infrastructure or using Cloudflare China acceleration you may still be relying on APIs that aren’t supported in China, like Facebook Login or Google Recaptcha. If your server in China needs to make API calls to services that aren’t optimized in China you may find that a lot of those requests fail as well.&lt;/p&gt;
-&lt;h3 id=&quot;good-luck&quot;&gt;Good luck!&lt;/h3&gt;
-</description>
-<pubDate>Thu, 21 Mar 2019 21:48:27 +0000</pubDate>
-<dc:creator>chanind</dc:creator>
-<og:title>So you want your app/website to work in China…</og:title>
-<og:description>Wait, what do you mean make my app/site work in China? I don’t have to do anything to make my app work in the US or Singapore or Kenya or anywhere else, and I didn’t make the Chinese government angry, so it should just work in China, right? Sadly, it’s not so simple. If your app/website servers aren’t hosted from within China, then, for all intents and purposes, it’s blocked. I mean, it will probably technically load, but will be excruciatingly, unusably slow. And sometimes it will just not load at all for hours at a time. This is true for all services hosted outside of the firewall, even in Hong Kong.</og:description>
-<og:url>https://chanind.github.io/china/2019/01/19/launching-an-app-or-website-in-china.html</og:url>
-<og:type>article</og:type>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://chanind.github.io/china/2019/01/19/launching-an-app-or-website-in-china.html</dc:identifier>
-</item>
-<item>
-<title>VC Starter Kit</title>
-<link>https://vcstarterkit.com/</link>
-<guid isPermaLink="true" >https://vcstarterkit.com/</guid>
-<description>What else are you going to spend your management fees on? 2 and 20 can only buy so many wine bottles.&lt;p&gt;Besides like many venture backed businesses, profits aren't really the goal for us. The profits of this sale will go to &lt;a href=&quot;https://allraise.org&quot;&gt;All Raise&lt;/a&gt;, an organization dedicated to diversity in funders &amp;amp; founders.&lt;/p&gt;</description>
-<pubDate>Thu, 21 Mar 2019 21:45:53 +0000</pubDate>
-<dc:creator>vinnyglennon</dc:creator>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://vcstarterkit.com/</dc:identifier>
-</item>
-<item>
-<title>Repl.it GFX: Native graphics development in the browser</title>
-<link>https://repl.it/site/blog/gfx?ref=updates</link>
-<guid isPermaLink="true" >https://repl.it/site/blog/gfx?ref=updates</guid>
-<description>&lt;p&gt;At Repl.it we live and breathe making software creation easier. With our &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/site/blog/platform&quot;&gt;programming environment&lt;/a&gt;, you could start coding in your favorite language in seconds. With &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/site/blog/deploy&quot;&gt;live deployments&lt;/a&gt;, we made web hosting a breeze. With &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/site/blog/multi&quot;&gt;Multiplayer&lt;/a&gt;, we've removed the drudgery from coding with friends. And today, we're excited to bring native GUI applications and game development to the browser.&lt;/p&gt;
-&lt;p&gt;Before we go on, you have to see this in action: Just run the repl below, wait a few seconds for it to load, focus on the output window and start playing Tetris in Pygame:&lt;/p&gt;
-
-&lt;p&gt;Let's take it up a notch and boot up this nifty desktop app we all love (might take up to a minute to load but then can be done recursively):&lt;/p&gt;
-
-&lt;h2 id=&quot;why&quot;&gt;Why&lt;/h2&gt;
-&lt;p&gt;We believe in the plurality and diversity of developer communities. That's why we spend countless days, weeks, and months working on features that can work cross language. We want programmers from all backgrounds, regardless of their language, to be able to code games and apps with ease. Plus, supporting native graphics opens us up to a wealth of frameworks, games, and educational material! We're particularly excited about supporting Pygame and Java Swing.&lt;/p&gt;
-&lt;h2 id=&quot;game-jam&quot;&gt;Game Jam&lt;/h2&gt;
-&lt;p&gt;We wanted to give you a reason to try out our new GUI capabilities, so we kicked off our very first &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/jam&quot;&gt;game jam&lt;/a&gt; on March 18th. It closes on April 18th, so there’s still plenty of time to show us what you can do. As for the winner? The grand prize is 1BTC ($4,031 at the time of writing).&lt;/p&gt;
-&lt;p&gt;&lt;img width=&quot;50%&quot; src=&quot;https://repl.it/public/images/jam/bling-robot.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;technology&quot;&gt;Technology&lt;/h2&gt;
-&lt;p&gt;We like to release early and often. So while this works, and we're proud of what we've done, there's still a long way to go. Right now, we're piping the X Window system through VNC through WebSockets to your browser, which is not the most efficient way to do this — we have a lot of ideas on how we could improve it.&lt;/p&gt;
-&lt;p&gt;To stay true to our &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/platform&quot;&gt;adaptive IDE&lt;/a&gt; principle — the IDE should &quot;do the right thing&quot; when you need it — we use &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/site/blog/stderr&quot;&gt;LD_PRELOAD&lt;/a&gt; to figure out when an application is trying to open a window and then we start X in the background and reveal the screen in the environment. This has the effect of delighting our users:&lt;/p&gt;
-&lt;blockquote class=&quot;twitter-tweet tw-align-center&quot; data-lang=&quot;en&quot; readability=&quot;2.4825174825175&quot;&gt;
-&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot;&gt;Awesome! Plotting on &lt;a href=&quot;https://t.co/DcPy3gZFUO&quot;&gt;https://t.co/DcPy3gZFUO&lt;/a&gt; using GR and &lt;a href=&quot;https://twitter.com/hashtag/JuliaLang?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#JuliaLang&lt;/a&gt;. &lt;a href=&quot;https://t.co/K4GPBjOZgR&quot;&gt;pic.twitter.com/K4GPBjOZgR&lt;/a&gt;&lt;/p&gt;
-— Josef Heinen (@josef_heinen) &lt;a href=&quot;https://twitter.com/josef_heinen/status/1104288994110644224?ref_src=twsrc%5Etfw&quot;&gt;March 9, 2019&lt;/a&gt;&lt;/blockquote&gt;
-&lt;p&gt;Finally, depending on how far you are from our data center (US-central) you might feel a delay, which we're also working on making better by replicating our data center (watch out &lt;a target=&quot;_blank&quot; href=&quot;https://store.google.com/magazine/stadia&quot;&gt;Google Stadia&lt;/a&gt;).&lt;/p&gt;
-&lt;p&gt;Please leave us &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/feedback&quot;&gt;feedback&lt;/a&gt; so we can improve. Or come &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/jobs&quot;&gt;work with us&lt;/a&gt; so we can make it better together.&lt;/p&gt;
-&lt;h2 id=&quot;get-started&quot;&gt;Get started&lt;/h2&gt;
-&lt;p&gt;Early reception has been tremendous, and replers have been building amazing things. Take a look at some of the submissions in our &lt;a target=&quot;_blank&quot; href=&quot;https://repl.it/talk/challenge&quot;&gt;game jam&lt;/a&gt; or give it a spin yourself:&lt;/p&gt;
-&lt;p&gt;We're supporting these frameworks out of the box, but very soon, we'll roll this out to all of our languages. If you're impatient, then you can use our base image to Install (pkg-install) and run your framework.&lt;/p&gt;
-&lt;p&gt;Happy game development!&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Mar 2019 21:07:13 +0000</pubDate>
-<dc:creator>starbugs</dc:creator>
-<og:title>Repl.it GFX: Native graphics development in the browser</og:title>
-<og:description>At Repl.it we live and breathe making software creation easier. With our programming environment, you could start coding in your favorite language in seconds.…</og:description>
-<og:type>article</og:type>
-<og:image>https://repl.it/public/images/blog/gfx.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://repl.it/site/blog/gfx?ref=updates</dc:identifier>
-</item>
-<item>
-<title>A Julia Interpreter and Debugger</title>
-<link>https://julialang.org/blog/2019/03/debuggers</link>
-<guid isPermaLink="true" >https://julialang.org/blog/2019/03/debuggers</guid>
-<description>&lt;p class=&quot;metadata&quot;&gt;&lt;span class=&quot;timestamp&quot;&gt;19 Mar 2019&lt;/span&gt;  |  &lt;span class=&quot;author&quot;&gt;&lt;a href=&quot;https://github.com/timholy&quot;&gt;Tim Holy&lt;/a&gt;, &lt;a href=&quot;https://github.com/KristofferC&quot;&gt;Kristoffer Carlsson&lt;/a&gt;, &lt;a href=&quot;https://github.com/pfitzseb&quot;&gt;Sebastian Pfitzner&lt;/a&gt;, &lt;a href=&quot;https://github.com/Keno&quot;&gt;Keno Fischer&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;The authors are pleased to announce the release of a fully-featured debugger for Julia. You can now easily debug and introspect Julia code in a variety of ways:&lt;/p&gt;
-&lt;ul readability=&quot;1.9792207792208&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;Step into functions and manually walk through your code while inspecting its state&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;Set breakpoints and trap errors, allowing you to discover what went wrong at the point of trouble&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;Interactively update and replace existing code to rapidly fix bugs in place without restarting&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;Use the full-featured IDE in &lt;a href=&quot;http://junolab.org/&quot; title=&quot;Juno&quot;&gt;Juno&lt;/a&gt; to bundle all these features together in an easy to use graphical interface&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;The debugger is itself a collection of tools that enable those features. The core is powered by &lt;a href=&quot;https://github.com/JuliaDebug/JuliaInterpreter.jl&quot; title=&quot;JuliaInterpreter&quot;&gt;an interpreter&lt;/a&gt; that can faithfully run Julia code while allowing various front-ends to control its execution. Each front-end is its own package: &lt;a href=&quot;http://junolab.org/&quot; title=&quot;Juno&quot;&gt;Juno&lt;/a&gt; incorporates the debugger into its IDE, &lt;a href=&quot;https://github.com/timholy/Rebugger.jl&quot; title=&quot;Rebugger&quot;&gt;Rebugger&lt;/a&gt; provides a REPL text UI, and the traditional step/next/continue command-line interface is provided by &lt;a href=&quot;https://github.com/JuliaDebug/Debugger.jl&quot; title=&quot;Debugger&quot;&gt;Debugger&lt;/a&gt;. All these new debugging capabilities seamlessly integrate with &lt;a href=&quot;https://github.com/timholy/Revise.jl&quot; title=&quot;Revise&quot;&gt;Revise&lt;/a&gt;, so that you can continuously analyze and modify code in a single session.&lt;/p&gt;
-
-&lt;p&gt;To orient potential users to the debugger front-ends, here we include a couple of screen shots that highlight the new capabilities.&lt;/p&gt;
-&lt;h2 id=&quot;juno&quot;&gt;Juno&lt;/h2&gt;
-&lt;p&gt;Juno provides a rich user interface around the interpreter and allows you to set breakpoints and step through directly in the source code. The debugger REPL can execute arbitrary code in a local context and the Workspace allows you to inspect local variables. The screenshot below shows a small debugging session for &lt;code class=&quot;highlighter-rouge&quot;&gt;gcd&lt;/code&gt;:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://julialang.org/images/blog/2019-03-19-debuggers/juno.png&quot; alt=&quot;Juno&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;The &lt;code class=&quot;highlighter-rouge&quot;&gt;Juno.@run&lt;/code&gt; macro interprets your code and drops you in a debugging session if it hits a breakpoint, while &lt;code class=&quot;highlighter-rouge&quot;&gt;Juno.@enter&lt;/code&gt; allows you to step through starting from the first line.&lt;/p&gt;
-&lt;h2 id=&quot;debugger-and-rebugger&quot;&gt;Debugger and Rebugger&lt;/h2&gt;
-&lt;p&gt;If you have a different favorite editor than Atom—or sometimes work in remote sessions through a console interface—you can alternatively perform debugging via the REPL. There are two REPL interfaces: Debugger offers a “step, next, continue” interface similar to debuggers like &lt;code class=&quot;highlighter-rouge&quot;&gt;gdb&lt;/code&gt;, whereas Rebugger aims to provide a console interface that is reminiscent of an IDE. Debugger has some capabilities that none of the other interfaces offer (e.g., very fine-grained control over stepping, the ability to execute the generator of generated functions, etc.), so it should be your go-to choice for particularly difficult cases. Below is a screenshot of a short session using Debugger.jl, showing some of its features:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://julialang.org/images/blog/2019-03-19-debuggers/debugger_jl_screenshot.png&quot; alt=&quot;Debugger.jl&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;In the screenshot, the function &lt;code class=&quot;highlighter-rouge&quot;&gt;closestpair&lt;/code&gt; is debugged by prepending the call with the &lt;code class=&quot;highlighter-rouge&quot;&gt;@enter&lt;/code&gt; macro. Execution is then suspended on the first line of the function (line 4) and it is possible to see a breakpoint on line 8. Upon running the command &lt;code class=&quot;highlighter-rouge&quot;&gt;c&lt;/code&gt; (short for “continue”), execution is resumed until a breakpoint is encountered. At this point, the command &lt;code class=&quot;highlighter-rouge&quot;&gt;fr&lt;/code&gt; (short for “frame”) shows all the local variables and their values at the point where the execution of the code suspended due to the breakpoint. Finally, a “Julia REPL mode” is entered using the &lt;code class=&quot;highlighter-rouge&quot;&gt;`&lt;/code&gt; key. This gives a normal Julia REPL mode with the addition that the local variables are available.&lt;/p&gt;
-&lt;p&gt;Rebugger enters calls via a key binding. To try it, type &lt;code class=&quot;highlighter-rouge&quot;&gt;gcd(10, 20)&lt;/code&gt; and &lt;em&gt;without hitting enter&lt;/em&gt; type Meta-i (Esc-i, Alt-i, or option-i). After a short pause the display should update; type &lt;code class=&quot;highlighter-rouge&quot;&gt;?&lt;/code&gt; to see the possible actions:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://julialang.org/images/blog/2019-03-19-debuggers/rebugger_interpret.png&quot; alt=&quot;Rebugger&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Rebugger also features an “edit” interface. For more information, see &lt;a href=&quot;https://timholy.github.io/Rebugger.jl/dev/&quot;&gt;Rebugger’s documentation&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;With several packages making their initial debut, and some old ones getting new capabilities, we felt it would be appropriate to provide an overview of the underpinnings of the new ecosystem.&lt;/p&gt;
-&lt;h2 id=&quot;juliainterpreter&quot;&gt;JuliaInterpreter&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/JuliaDebug/JuliaInterpreter.jl&quot; title=&quot;JuliaInterpreter&quot;&gt;JuliaInterpreter&lt;/a&gt; is the lynch pin of the entire stack; it contains the logic needed to evaluate and inspect running Julia code. An &lt;a href=&quot;https://en.wikipedia.org/wiki/Interpreter_(computing)&quot;&gt;interpreter&lt;/a&gt; lends itself naturally to step-wise code evaluation and the implementation of breakpoints.&lt;/p&gt;
-&lt;p&gt;JuliaInterpreter descended from an original package &lt;a href=&quot;https://github.com/JuliaDebug/ASTInterpreter2.jl&quot;&gt;ASTInterpreter2&lt;/a&gt; written by Keno Fischer. In its original form (prior to Jan 2019), ASTInterpreter2 was a fairly small but sophisticated package, capable of handling many advanced aspects of Julia’s internal representation of code. It was in need of updating to the many changes in Julia 1.0, although most of that work had already been done by &lt;a href=&quot;https://github.com/Roboneet&quot;&gt;Neethu Joy&lt;/a&gt; in late 2018. When we began our own efforts, we finished the updates and decided to extend it in many ways:&lt;/p&gt;
-&lt;ul readability=&quot;36.196786016352&quot;&gt;&lt;li readability=&quot;6&quot;&gt;
-&lt;p&gt;JuliaInterpreter became recursive-by-default, interpreting calls all the way down to the &lt;code class=&quot;highlighter-rouge&quot;&gt;ccall&lt;/code&gt;s, intrinsic functions, and builtin functions that define Julia’s lowest levels. By running virtually all code through the interpreter, it became more straightforward to implement breakpoints and trap errors.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;14.389623601221&quot;&gt;
-&lt;p&gt;JuliaInterpreter received numerous performance enhancements, and now can run step-wise through code at roughly 50× its original speed. These optimizations reduce—but come nowhere close to eliminating—the most serious disadvantage of running all code in the interpreter: slow performance. It is hoped that the performance gap between compiled and interpreted code, which can be many orders of magnitude, will narrow in the coming months. However, the interpreter will always be slower than compiled code.&lt;/p&gt;
-&lt;p&gt;It’s also worth noting that there are cases where the interpreter feels faster, at least on initial execution. Julia’s JIT compiler produces excellent results, but all that code-analysis takes time; there is interest in exploring whether running more code in the interpreter could reduce latency, a.k.a. the “time to first plot” problem. JuliaInterpreter is a potential tool for exploring that trade off, and it appears that &lt;a href=&quot;https://github.com/JuliaDebug/JuliaInterpreter.jl/issues/44&quot;&gt;not much additional work would be needed&lt;/a&gt;.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;35.156428119063&quot;&gt;
-&lt;p&gt;JuliaInterpreter gained the ability to interpret “top-level code”, for example the code used to define packages and create test suites. This was a major change, partly because top-level code uses an expanded vocabulary, but mostly because top-level code can define new modules, structures, and methods, which in turn introduces the need to manage “world age,” the counter that determines the visibility of methods to callers. (If this fails, you see errors like “method is too new to be called…”).&lt;/p&gt;
-&lt;p&gt;Supporting top-level code allowed JuliaInterpreter to achieve two goals: the ability to serve as the foundation of new code-parsing abilities for Revise, and the ability to run test suites originally designed for compiled Julia code. Once we had top-level execution partially working, we &lt;a href=&quot;https://github.com/JuliaDebug/JuliaInterpreter.jl/issues/13&quot;&gt;decided&lt;/a&gt; to evaluate JuliaInterpreter against the most extensive single test suite available, that of Julia itself. This revealed dozens of bugs in areas like the calling of C libraries (&lt;code class=&quot;highlighter-rouge&quot;&gt;ccall&lt;/code&gt;, &lt;code class=&quot;highlighter-rouge&quot;&gt;@cfunction&lt;/code&gt;, and &lt;code class=&quot;highlighter-rouge&quot;&gt;cglobal&lt;/code&gt;), &lt;code class=&quot;highlighter-rouge&quot;&gt;llvmcall&lt;/code&gt;, keyword-argument functions, generated functions, anonymous functions, &lt;code class=&quot;highlighter-rouge&quot;&gt;struct&lt;/code&gt; definitions, global variables, the handling of try/catch, locks and threads, and the treatment of &lt;code class=&quot;highlighter-rouge&quot;&gt;@eval&lt;/code&gt;ed code. Some of these problems were isolated for us from the test suite failures by two additional contributors, &lt;a href=&quot;https://github.com/GunnarFarneback&quot;&gt;Gunnar Farnebäck&lt;/a&gt; and &lt;a href=&quot;https://github.com/macd&quot;&gt;Don MacMillen&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;As of this writing, most of the cleanly-isolated problems have been fixed. While we are still far from perfect, the pursuit of such a demanding goal has contributed extensively to the robustness of these young packages.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;11&quot;&gt;
-&lt;p&gt;JuliaInterpreter gained support for breakpoints. While not strictly a feature of interpreters, they are necessary to build a capable debugger and can be viewed as an additional form of control-flow within the interpreter itself. These breakpoints can be set manually with functions &lt;code class=&quot;highlighter-rouge&quot;&gt;breakpoint&lt;/code&gt; and a macro &lt;code class=&quot;highlighter-rouge&quot;&gt;@breakpoint&lt;/code&gt;, manipulated in Juno, Rebugger, or Debugger, or added directly to code with the &lt;code class=&quot;highlighter-rouge&quot;&gt;@bp&lt;/code&gt; macro. Existing breakpoints can be &lt;code class=&quot;highlighter-rouge&quot;&gt;disable&lt;/code&gt;d, &lt;code class=&quot;highlighter-rouge&quot;&gt;enable&lt;/code&gt;d, or &lt;code class=&quot;highlighter-rouge&quot;&gt;remove&lt;/code&gt;d. We support setting of breakpoints at specific source lines or on entry to a specific method, conditional and unconditional breakpoints, and can automatically trap errors as if they were manually-set breakpoints.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;To explore the interpreter in its own right, you can start like this:&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot; readability=&quot;6.5&quot;&gt;
-&lt;div class=&quot;highlight&quot; readability=&quot;8&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;using JuliaInterpreter
-A = rand(1:10, 5)
-@interpret sum(A)
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;If all is working well, you should see the same answer you get from running &lt;code class=&quot;highlighter-rouge&quot;&gt;sum(A)&lt;/code&gt; without &lt;code class=&quot;highlighter-rouge&quot;&gt;@interpret&lt;/code&gt;.&lt;/p&gt;
-&lt;h2 id=&quot;loweredcodeutils&quot;&gt;LoweredCodeUtils&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/JuliaDebug/LoweredCodeUtils.jl&quot; title=&quot;LoweredCodeUtils&quot;&gt;LoweredCodeUtils&lt;/a&gt; is the most specialized and opaque of the new packages. Its purpose is to build links between multiple cooperating methods. For example, the seemingly-simple definition&lt;/p&gt;
-&lt;div class=&quot;highlighter-rouge&quot; readability=&quot;7&quot;&gt;
-&lt;div class=&quot;highlight&quot; readability=&quot;9&quot;&gt;
-&lt;pre class=&quot;highlight&quot;&gt;
-&lt;code&gt;mymethod(x, y=0; z=&quot;Hello&quot;, msg=&quot;world&quot;) = 1
-&lt;/code&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;actually creates 5 methods: one “body method” (here, simply returning &lt;code class=&quot;highlighter-rouge&quot;&gt;1&lt;/code&gt;), two “positional-argument” methods (ones that do not accept any keyword arguments), and two “keyword function” methods (ones that get called when you supply at least one keyword argument, then fill in defaults and standardize order). Because all five of these arise from the same user-supplied expression, they need to be implicitly linked in order to provide a satisfying user experience. In particular, changes to source files cause the line numbers of compiled methods to become outdated; if we didn’t correct that, Juno might open a file to the outdated line number when stepping through code. LoweredCodeUtils does the source-level analysis to discover these associations and handle differences that arise when parsing the same file multiple times.&lt;/p&gt;
-&lt;p&gt;If you ever wanted to be able to parse Julia code and extract the signatures of the methods it defines (without redefining the methods), LoweredCodeUtils is the package for you.&lt;/p&gt;
-&lt;h2 id=&quot;codetracking&quot;&gt;CodeTracking&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/timholy/CodeTracking.jl&quot; title=&quot;CodeTracking&quot;&gt;CodeTracking&lt;/a&gt; was designed to act as a simple, lightweight “query API” for retrieving data from &lt;a href=&quot;https://github.com/timholy/Revise.jl&quot; title=&quot;Revise&quot;&gt;Revise&lt;/a&gt;. Essentially, LoweredCodeUtils performs analysis, Revise manages changes that occur over time, and CodeTracking informs the rest of the world. For CodeTracking to do anything interesting, you need to be running Revise; to allow CodeTracking to be a lightweight dependency, it relies on Revise to populate its own internal variables.&lt;/p&gt;
-&lt;p&gt;See &lt;a href=&quot;https://github.com/timholy/CodeTracking.jl&quot; title=&quot;CodeTracking&quot;&gt;CodeTracking’s README&lt;/a&gt; for more information.&lt;/p&gt;
-&lt;h2 id=&quot;revise-and-rebugger&quot;&gt;Revise and Rebugger&lt;/h2&gt;
-&lt;p&gt;Thanks to a rewrite based on JuliaInterpreter, Revise and Rebugger are better (in some cases, much better) at their core tasks. In particular, if you used an earlier version of Rebugger, you may have noticed that it was defeated by many language constructs (e.g., functions containing keyword arguments, &lt;code class=&quot;highlighter-rouge&quot;&gt;@eval&lt;/code&gt;-generated methods, etc). Most of the underlying causes were resolved by LoweredCodeUtils, which is in turn used by Revise, which then feeds the necessary data to CodeTracking for consumption by Rebugger. As one measure of the difference, of the more than 10,000 methods in Base, Revise 1.1.0 fails to capture 1,425 method signatures (a failure rate of 13%). In contrast, Revise 2.0.0 misses only 10 (&amp;lt;0.1%).&lt;/p&gt;
-&lt;p&gt;Consequently, in addition to the new “interpret” interface, the new Rebugger is much better at its original “edit” interface, too.&lt;/p&gt;
-&lt;p&gt;Revise (and consequently Rebugger) has also gained some other new abilities, like handling methods defined at the REPL. In the longer term, the deep analysis of code permitted by JuliaInterpreter and LoweredCodeUtils may support features that were formerly out of reach.&lt;/p&gt;
-
-&lt;p&gt;This has been only a high-level overview. Some of the individual packages have extensive documentation, and interested readers are encouraged to work through it. For anyone looking to develop a deeper understanding of the internals of Julia’s code, the new packages provide a powerful set of tools for introspection and analysis. And of course, we hope that the new debugging capabilities further accelerate Julia’s rapid development, and make it that much more fun of a language to use.&lt;/p&gt;
-&lt;hr/&gt;</description>
-<pubDate>Thu, 21 Mar 2019 18:27:30 +0000</pubDate>
-<dc:creator>one-more-minute</dc:creator>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://julialang.org/blog/2019/03/debuggers</dc:identifier>
-</item>
-<item>
-<title>Show HN: A Color Picker I Made</title>
-<link>https://colorsupplyyy.com/app</link>
-<guid isPermaLink="true" >https://colorsupplyyy.com/app</guid>
-<description>[unable to retrieve full-text content]
-&lt;p&gt;Article URL: &lt;a href=&quot;https://colorsupplyyy.com/app&quot;&gt;https://colorsupplyyy.com/app&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=19455441&quot;&gt;https://news.ycombinator.com/item?id=19455441&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Points: 520&lt;/p&gt;
-&lt;p&gt;# Comments: 102&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Mar 2019 18:08:24 +0000</pubDate>
-<dc:creator>mtgentry</dc:creator>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://colorsupplyyy.com/app</dc:identifier>
-</item>
-<item>
-<title>EU businesses sign open letter against copyright directive articles 11 and 13</title>
-<link>https://nextcloud.com/blog/130-eu-businesses-sign-open-letter-against-copyright-directive-art-11-13/</link>
-<guid isPermaLink="true" >https://nextcloud.com/blog/130-eu-businesses-sign-open-letter-against-copyright-directive-art-11-13/</guid>
-<description>&lt;p&gt;Dear Members of the European Parliament,&lt;/p&gt;
-&lt;div&gt;The companies signing this letter to the European Parliament are urging you to &lt;strong&gt;vote against Articles 11 and 13&lt;/strong&gt; of the proposed copyright directive. The text of the trilogue agreement would &lt;strong&gt;harm the European economy&lt;/strong&gt; and seriously undermine the ability of European businesses to compete with big Internet giants like Google.
-&lt;p&gt;We &lt;strong&gt;support the goal of the legislation&lt;/strong&gt; to protect the rights of creators and publishers, but &lt;strong&gt;the proposed measures are inadequate&lt;/strong&gt; to reap these benefits and also fail to strike a fair balance between creators and all other parts of society. The success of our business enterprises will be &lt;strong&gt;seriously jeopardized&lt;/strong&gt; by these heavy-handed EU regulations.&lt;/p&gt;
-&lt;p&gt;Especially Article 13 is dangerously experimenting with the core foundation of the Internet’s ecosystem. Making companies directly liable for the content of their users forces these businesses to make billions of legal decisions about the legality of content. Most companies are neither equipped nor capable of implementing the automatic content filtering mechanisms this requires, which are expensive and prone to error.&lt;/p&gt;
-&lt;p&gt;Article 11 is creating a completely new intellectual property right for press publishers. The experience with similar laws in Germany and Spain raises serious doubts about the expected benefits, while the negative impact would be very real. An additional layer of exclusive rights would make it harder to clear the necessary legal hurdles to start new projects. &lt;strong&gt;It will make entrepreneurs more hesitant to just launch new projects.&lt;/strong&gt; Europe would lose any chance to play a significant role on the world stage. Startups that build services based on aggregated online information would go out of business, and every company that publishes press summaries of their appearance in the media would be in violation of this law.&lt;/p&gt;
-&lt;p&gt;Although the purpose of these regulations is to limit the powers of big US Internet companies like Google or Facebook, the proposed legislation would end up having the opposite effect. Article 13 requires filtering of massive amounts of data, requiring technology only the Internet giants have the resources to build. &lt;strong&gt;European companies will be thus forced to hand over their data to them, jeopardizing the independence of the European tech industry as well as the privacy of our users.&lt;/strong&gt; European companies like ours will be hindered in their ability to compete or will have to abandon certain markets completely.&lt;/p&gt;
-&lt;p&gt;Given all of these issues it is noteworthy that the final trilogue agreement lacks meaningful safeguards for small and medium enterprises. The broad scope of this law would most likely lead to less new companies being founded in Europe and existing companies moving their headquarters out of Europe. &lt;strong&gt;For all those reasons we urge every pro-Startup politician to vote against Article 11 and Article 13.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Sincerely,&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;Frank Karlitschek, Founder &amp;amp; CEO, Nextcloud GmbH, Germany&lt;br/&gt;Jutta Steiner, CEO &amp;amp; Founder, Parity, United Kingdom&lt;br/&gt;Alan Duric, CTO/COO and Co-Founder, Wire, Switzerland&lt;br/&gt;Jon Karlung, CEO Bahnhof AB, Sweden&lt;br/&gt;Stefan Lingler, CTO, finderly Gmbh, Austria&lt;br/&gt;Philippe Kalaf, CEO, Collabora Limited, United Kingdom&lt;br/&gt;Till Faida, CEO, eyeo GmbH, Germany&lt;br/&gt;Cătălin Frâncu, Founder, dexonline.ro, Romania&lt;br/&gt;Ruth Schöllhammer, Chairwoman of the Managing Board, Deutscher Gründerverband, Germany&lt;br/&gt;Sam Tuke, CEO, phpList, United Kingdom&lt;br/&gt;Peter Ganten, Founder and CEO, Univention &amp;amp; Chairman, Open Source Business Alliance, Germany&lt;br/&gt;p≡p Security SA, Luxembourg&lt;br/&gt;Lenard Koschwitz, Senior Director Global Policy, Allied for Startups, EU/Global&lt;br/&gt;Erik Muttersbach, CTO, FreightHub, Germany&lt;br/&gt;Nitrokey UG, Germany&lt;br/&gt;Dom Hallas, Executive Director, The Coalition for a Digital Economy (COADEC), United Kingdom&lt;br/&gt;Tobias Gerlinger, CEO, Owncloud, Germany&lt;br/&gt;Adela Zábražná, Executive Manager, SAPIE – The Slovak Alliance for Innovation Economy, Slovakia&lt;br/&gt;Travis Todd, Co-founder, Silicon Allee, Germany&lt;br/&gt;Harald Kapper, CEO, Kapper Network-Communications GmbH, Austria&lt;br/&gt;Tim Pritlove, Owner, Metaebene Personal Media, Germany&lt;br/&gt;Bernd Hilmar, CEO, VIRTEXXA Cloud Services SRL, Romania&lt;br/&gt;Frank J. Dürring, Dipl.-Inf. (FH), CEO, condero Aktiengesellschaft, Germany&lt;br/&gt;Markus Raunig, Managing Director, AustrianStartups, Austria&lt;br/&gt;Mirko Lorenz, Co-founder and Co-CEO, Datawrapper, Germany&lt;br/&gt;Brian Joseph, CEO, Kopano BV, Netherlands&lt;br/&gt;Dr. Detlef Oertel and Erol Ülükmen, Managing Directors, uib gmbh, Germany&lt;br/&gt;Julia Szopa, President of the Board, Startup Poland, Poland&lt;br/&gt;Paolo Vecchi,CEO, Omnis Cloud, Luxembourg&lt;br/&gt;Timo Hetzel, Managing Director, Undsoversum GmbH, Germany&lt;br/&gt;Maddalena Falzoni, CEO, MaadiX, Spain&lt;br/&gt;Ralf Becker, CEO, Birgit Becker, CEO, Egroupware GmbH, Germany&lt;br/&gt;Gianmarco Carnovale, Chairman, Roma Startup, Italy&lt;br/&gt;Ulrich Brandner, CEO, CIB software GmbH, Germany&lt;br/&gt;Steffen Weber, CEO, ComputerBase GmbH, Germany&lt;br/&gt;evenly GmbH, Germany&lt;br/&gt;Pierre Beyssac, CEO &amp;amp; Founder, Eriomem.net, France&lt;br/&gt;Stefan Scholz, CEO, Zellwerk GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Schallert.com e.U., Austria&lt;br/&gt;Factory, Germany&lt;br/&gt;Nicolas Chauvat, CEO, Logilab, France&lt;br/&gt;Maik Aussendorf, Managing Director, Bareos GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Richard Marx, COO, Assanti Insurance Technologies, Netherlands&lt;br/&gt;Philippe Hemmel, President, Arawa, France&lt;br/&gt;Fabio Natali, Director, Reckon Digital, United Kingdom&lt;br/&gt;Sebastian Jabbusch, Founder and CEO, Public Impact UG, Germany&lt;br/&gt;Labarama, Austria&lt;br/&gt;Mario Behling, CEO, OpnTec GmbH, Germany&lt;br/&gt;Daniel Hansson, Founder and Owner, T&amp;amp;M Hansson IT AB, Sweden&lt;br/&gt;Lars Fassmann, Founder and CEO, chemmedia AG, Germany&lt;br/&gt;Alexander Todorov, CEO, Open Technologies Bulgaria, Ltd, Bulgaria&lt;br/&gt;Dr. Detlef Hühnlein, CEO, ecsec GmbH, Germany&lt;br/&gt;Tom Knienieder, CEO, peaknetworks e.U., Austria&lt;br/&gt;Karsten Klein, CEO, metaeffekt GmbH, Germany&lt;br/&gt;Thierry Leblond, CEO, Scille, France&lt;br/&gt;Dirk Ahrnke, Managing Director, it:25, Germany&lt;br/&gt;Gerhard Sternath, CEO/CFO, LINBIT HA-Solutions GmbH, Austria&lt;br/&gt;Bernhard Reiter, Managing Director, Intevation GmbH, Germany&lt;br/&gt;Alexey Volkov, Founder and CEO, On My Disk, Slovenia&lt;br/&gt;Marcel van Duijvendijk, CEO, Wind Engineering Solutions, Netherlands&lt;br/&gt;Bozena Jarosz, CEO, SecN UG, Germany&lt;br/&gt;Dr.ir Rick van Rein, CTO, OpenFortress B.V., Netherlands&lt;br/&gt;Dirk Kutsche, CEO, pro-ite GmbH, Germany&lt;br/&gt;Anne Dillard, Pierre Fumet &amp;amp; Cyril Lacoux, Managing Directors, EASTER-EGGS, France&lt;br/&gt;Felix Arndt, CEO, fnordserver, Germany&lt;br/&gt;Oscar Ortega, CEO, BTACTIC, Spain&lt;br/&gt;Clemens Toennies, CEO, Blue Systems GmbH, Germany&lt;br/&gt;Ajdin Gazija, CEO and Christian Machalitzky, CTO, NOBUGS IT GmbH, Austria&lt;br/&gt;Dirk Breunich, CEO, Donner &amp;amp; Doria Werbeagentur GmbH, Germany&lt;br/&gt;Dennis Pennings, CTO, Good Cloud BV, Netherlands&lt;br/&gt;Silvina Furnadzhieva, CEO, Double Click Systems Ltd., Bulgaria&lt;br/&gt;Samuel John, CEO, OtoJig GmbH, Germany&lt;br/&gt;Marius Quabeck, CEO, NerdZoom Media, Germany&lt;br/&gt;Martin Wiederkehr, CEO &amp;amp; Partner, Ops One AG, Switzerland&lt;br/&gt;Mario Peshev, CEO, DevriX Ltd., Bulgaria&lt;br/&gt;Steffen Lindner, CEO, Portknox.net, Germany&lt;br/&gt;Tada.city, Netherlands&lt;br/&gt;Omnis Systems Ltd, United Kingdom&lt;br/&gt;Alexander Nimmervoll, Managing Director, Generalize-IT Solutions OG, Austria&lt;br/&gt;Nadine Nüsse, CCO, Innovo Cloud GmbH, Germany&lt;br/&gt;Christopher Neal, Director, Twist Development Limited, United Kingdom&lt;br/&gt;Werner Klinger, CEO, Neodiffusion, France&lt;br/&gt;Liane Hampe, Managing Director, xmera e.K., Germany&lt;br/&gt;Markus Frei, Managing Director, Linuxfabrik, Switzerland&lt;br/&gt;Dr. Richard Heigl, Co-Founder and CEO, Hallo Welt! GmbH, Germany&lt;br/&gt;Sander Venema, Owner, Asteroid Interactive, Netherlands&lt;br/&gt;Harald Dittmar, CEO, sys-pro GmbH, Germany&lt;br/&gt;Daniel Huhardeaux, CEO, TOOTAi, France&lt;br/&gt;Johan Poortvliet, Owner, Adjoadvies bv, Netherlands&lt;br/&gt;Philipp Süß, Managing Owner, Ingenieurbüro Süß &amp;amp; friends, Germany&lt;br/&gt;Patricia Moncorgé, CEO, Editions D-BookeR, France&lt;br/&gt;Ralf Guttmann, CEO, Hyperspace GmbH, Germany&lt;br/&gt;Patrick Babonneau, CTO, Eralog, France&lt;br/&gt;Thomas Michalak, Owner, Nimmerland Nextcloud Service, Germany&lt;br/&gt;Huib Verweij, Owner, X-Scale, Netherlands&lt;br/&gt;Nicolas Lantz, Founder and CEO, UBICORE, France&lt;br/&gt;Oliver Breidenbach, Director (CEO), Boinx Software Ltd., Germany&lt;br/&gt;360ict, Netherlands&lt;br/&gt;Just Software AG, Germany&lt;br/&gt;Frédéric Da Vitoria, Owner, FDV Informatique, France&lt;br/&gt;Stefan Vartolomeev, CEO &amp;amp; Founder, Pisateli BG, Bulgaria&lt;br/&gt;Claudia Behr, Owner, computer &amp;amp; communication, Austria&lt;br/&gt;Johan Bernhardsson, CEO, Kafit AB, Sweden&lt;br/&gt;Clara Guinea Jaime, CEO, WIKIVITAS SL, Spain&lt;br/&gt;Holger Schlichting, Managing Director, PRAXISFELD GmbH, Germany&lt;br/&gt;Romain Hurdequint, Founder, The Daily Board Co., France&lt;br/&gt;Jörg Günther, Main shareholder, AFI Solutions GmbH, Germany&lt;br/&gt;Oslandia, France&lt;br/&gt;Ingo Wichmann, CEO, Linuxhotel GmbH, Germany&lt;br/&gt;Inventia Plus S.L., Spain&lt;br/&gt;Jérémie Lesage, Company Manager, JECI SARL, France&lt;br/&gt;Philip Bräunlich, Managing Director, Gerrit van Aaken, Managing Director, whitespace GmbH, Germany&lt;br/&gt;Reinhold Baudisch, CEO, Michael Doberer, CEO, durchblicker.at, Austria&lt;br/&gt;Robert Gavin, Managing Partner, Sören Tschiersch, Managing Partner, Flens IT Solutions GmbH, Germany&lt;br/&gt;Hal Hughes, Director, TeeBase UK Ltd., United Kingdom&lt;br/&gt;Sebastian Software GmbH, Germany&lt;br/&gt;Florent Manens, CEO, BeeZim, France&lt;br/&gt;Linnart Unger, Founder and Managing Director, Studio GOOD digital GmbH, Germany&lt;br/&gt;Ing. Mag. Dr. Vincenz Leichtfried, CEO, LV7 Media Services, Austria&lt;br/&gt;Mark Heckes, Managing Director, complingua GmbH, Germany&lt;br/&gt;Andrej Stojanovič, CEO, A-com spletne storitve, Slovenia&lt;br/&gt;Ingomar Otter, Director Technology &amp;amp; Innovation, Valtech Mobility GmbH, Germany&lt;br/&gt;Josef Mayerhofer, Executive Director, WVNET, Austria&lt;br/&gt;Bär Tiger Wolf GmbH, Germany&lt;br/&gt;Julien Fastré, Administrator, Champs Libres Cooperative SCRLFS, Belgium&lt;br/&gt;fullstax GmbH &amp;amp; CO. KG, Germany&lt;br/&gt;Bauspenglerei Sukup-Groetzer OG, Austria&lt;br/&gt;Biker-Boarder, Germany&lt;br/&gt;Autonom Health GesundheitsbildungsGmbH, Austria&lt;br/&gt;Nerdlichter AG, Germany&lt;br/&gt;Tripple Internet Content Services, Austria&lt;br/&gt;Yaltik, France&lt;br/&gt;Konrad Koch, CTO, pantaBio AG, Germany&lt;br/&gt;Nicolas Ducoulombier, Founder and CEO, Sébastien Ducoulombier, Founder and CEO, Julien Steinhauser, CEO, Les Développements Durables, France&lt;br/&gt;Ansgar H. Licher, Co-Founder &amp;amp; CEO, Martin Werthmöller, Co-Founder &amp;amp; CTO, Lwsystems GmbH &amp;amp; Co. KG, Germany&lt;/em&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;hr/&gt;
-Since publication earlier this week, nearly 100 companies have added their signature.
-&lt;p&gt;Want to show the support of your company, too? We will add them to a list below. Please fill in the form on our &lt;a class=&quot;hyperlink&quot; href=&quot;https://nextcloud.com/press/pr20190319&quot;&gt;press release page!&lt;/a&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;div&gt;
-
-&lt;p&gt;&lt;em&gt;Mathias Bartholomäus, CEO and founder, studio.201 software GmbH, Germany&lt;br/&gt;Tomas Vondra, Technical director, Home at Cloud, Czech Republic&lt;br/&gt;Marcus Toth, CEO, Beamy Lake GmbH, Austria&lt;br/&gt;Christopher Atlan, Owner, Letter Opener GmbH, Austria&lt;br/&gt;Dennis Nissen, CEO, naymspace GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Max Seelemann, Co-Founder &amp;amp; Executive Director, Ulysses GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Torsten Markmann, Managing Director, Uplinked UG, Germany&lt;br/&gt;Pavel Volk, Owner, Pavel Volk – Bischofstein, Czech Republic&lt;br/&gt;Reinblau eG, Germany&lt;br/&gt;Błażej Sołtowski, CEO &amp;amp; Co-Founder, MLabs sp. z o.o., Poland&lt;br/&gt;Dennis Nissen, CEO, naymspace software GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Maik Derstappen, CEO, Derico, Germany&lt;br/&gt;Peter Faxe Lachenmair, Owner, lachenmair.info – it consulting, Germany&lt;br/&gt;Redon Skikuli, Business Development, Collective68, Albania&lt;br/&gt;Aris Ntatsis, CEO, Onscreen Web Services, Greece&lt;br/&gt;Nikos Roussos, Founder, Autoverse, Greece&lt;br/&gt;Eduardo Díaz Comellas, CEO, Ultreia Comunicaciones, SL, Spain&lt;br/&gt;Ricardo Cristof Remmert-Fontes, Owner, Midvinter Holzhandwerk, Germany&lt;br/&gt;Youthweb e.V., Germany&lt;br/&gt;Elio Quoshi, Founder, Ura Design, Albania&lt;br/&gt;Jérôme Marchini, founder, paquerette.eu, France&lt;br/&gt;Pedro Fernandes, Founder, TugaTech, Portugal&lt;br/&gt;Fabian Spielberger, CEO, Pepper Media Holding GmbH, Germany&lt;br/&gt;Jasir Baftijari, Founder, JABA e.K., Germany&lt;br/&gt;Ole Emken, Co-Founder &amp;amp; CEO, medienweite GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;Daniel Weingart, Freelancer, Medien &amp;amp; Design, Germany&lt;br/&gt;Christian Steiauf, Sales Manager, Endpoint Protector GmbH, Germany&lt;br/&gt;Pierre Chevalier, géologue et informaticien, Sémofi, France&lt;br/&gt;Bastian Allgeier, CEO, Bastian Allgeier GmbH, Germany&lt;br/&gt;Julian Mair, Co-Founder, Hotel Tirolerhof des Mair Manfred &amp;amp; Co. KG, Italy&lt;br/&gt;David Lopez, SerenaMail, Spain&lt;br/&gt;Speed U Up, Austria&lt;br/&gt;Daniel Bönisch, Founder and CEO, UEBERBIT GmbH, Germany&lt;br/&gt;Jacobo Vidal, Co-Founder &amp;amp; CEO, Arengu, Spain&lt;br/&gt;Michael Wegge, CEO &amp;amp; Founder, Firesource UG, Germany&lt;br/&gt;Benjamin Schröter – CEO, Founder &amp;amp; Wolfram Bernhardt – CEO, Founder, Rhein-Spree Software Engineering GmbH, Germany&lt;br/&gt;Valentin Born, owner, born2webdesign, Germany&lt;br/&gt;Arnaud Launay, CEO, Cusae, France&lt;br/&gt;Dr. Ingo Keck, CTO, Moringa Science Publishing UG, Germany&lt;br/&gt;Peter Faxe Lachenmair, owner, lachenmair.info – it consulting, Germany&lt;br/&gt;Georg Stefanowitsch, OHNE LIMIT, Germany&lt;br/&gt;Eleftherios Tzouanakis, owner, CretaDrive, Greece&lt;br/&gt;Peter Gierl (CTO), markt.de GmbH &amp;amp; Co KG, Germany&lt;br/&gt;Konrad Greilich, Thomas Möhle, Marius Hoppe (Founders), Bitkomplex UG (haftungsbeschränkt), Germany&lt;br/&gt;Damien Accorsi – Dirigeant, Algoo, France&lt;br/&gt;Markus Winzer, Prokurist, E. Winzer GmbH &amp;amp; Co KG, Austria&lt;br/&gt;Founder, Saber, UK&lt;br/&gt;Fernando Alava, owner, PixyBit SLU, Spain&lt;br/&gt;Xavier Colombel, CEO, Le Reacteur, France&lt;br/&gt;CEO &amp;amp; Co-founder, Tiptapp, Sweden&lt;br/&gt;Jerome Leclanche, Director, Goveni Limited, Ireland&lt;br/&gt;Florian Traverse, CTO and founder, RockSolead, France&lt;br/&gt;Christian Maas, Founder, myNFP, Germany&lt;br/&gt;Tillmann Carlos Bielefeld, CEO, Maerketing Europe OÜ, Estonia&lt;br/&gt;Evan Murs, owner, Opentruss – Ethicity, Ireland&lt;br/&gt;Kenny Levinsen, Founder and CEO, Levinsen Software IVS, Denmark&lt;br/&gt;Martijn Vos, founder, Vosdev, Netherlands&lt;br/&gt;Thomas Schweizer-Bolzonello, CEO, Intelliance, Estonia&lt;br/&gt;Founder, Screenaware UG, Germany&lt;br/&gt;Florian Wesch, CEO, inlua GmbH &amp;amp; Co. KG, Germany&lt;br/&gt;David Sinclair (CEO), Codebreeze, Sweden&lt;br/&gt;Loris Cuoghi, Founder &amp;amp; CTO, AArtificiale, France&lt;br/&gt;Vinay Sajip, Red Dove Consultants Limited, UK&lt;br/&gt;Andrea Borghi, CEO, W Key s.r.l., Italy&lt;br/&gt;Damjan Maticic, CEO, Koofr, Slovenia&lt;br/&gt;Dmitriy Akulov, CEO, PerfOps, Poland&lt;br/&gt;George Kastelakis, CEO, Ignimedia EE, Greece&lt;br/&gt;Rasmus Porsager, Founder, Porsager IVS, Denmark&lt;br/&gt;Sylvain Kerkour, CEO, Phaser Security France&lt;br/&gt;Stefan Keller, CEO, Keller &amp;amp; Neudecker GdbR, Germany&lt;br/&gt;Robin Jakobsson, Wavy AB, Sweden&lt;br/&gt;Bert Defoor founder, Gardica, Belgium&lt;br/&gt;Hakon Eide, CEO, Personal Software Ltd, UK&lt;br/&gt;CTO, DreamApply.com, Estonia&lt;br/&gt;Jan Rychter, Founder, PartsBox.io, Poland&lt;br/&gt;Bart van Bragt, Founder, Bokt.nl, Netherlands&lt;br/&gt;Dr. Bernd Niklas Klein, CTO, ZENNER IoT Solutions GmbH, Germany&lt;br/&gt;Johan Christenson, CEO, City Network, Sweden&lt;br/&gt;Dawid Wiktor, Founder &amp;amp; CEO, Media Scope Group, Estonia&lt;br/&gt;Ghislain Fabre, Open-Elearning, France&lt;br/&gt;Founder &amp;amp; CEO, Abilian SAS, France&lt;br/&gt;Patrick Broeckers, CEO, opwoco GmbH, Germany&lt;br/&gt;&lt;/em&gt;&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;&lt;a class=&quot;button button--white button--small&quot; href=&quot;https://nextcloud.com/press/pr20190319&quot;&gt;Press release&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Thu, 21 Mar 2019 17:57:26 +0000</pubDate>
-<dc:creator>zoobab</dc:creator>
-<og:title>130 EU businesses sign open letter against Copyright directive Art. 11 &amp; 13 – Nextcloud</og:title>
-<og:type>article</og:type>
-<og:url>http://nextcloud.com</og:url>
-<og:description>Nextcloud is an open source, self-hosted file share and communication platform. Access &amp; sync your files, contacts, calendars &amp; communicate and collaborate across your devices. You decide what happens with your data, where it is and who can access it!</og:description>
-<og:image>https://nextcloud.com/media/openletter_article13_social.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://nextcloud.com/blog/130-eu-businesses-sign-open-letter-against-copyright-directive-art-11-13/</dc:identifier>
 </item>
 </channel>
 </rss>
