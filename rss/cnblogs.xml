@@ -9,6 +9,372 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>可能是最全面的G1学习笔记 - javaadu</title>
+<link>http://www.cnblogs.com/javaadu/p/10713956.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/javaadu/p/10713956.html</guid>
+<description>&lt;h3 id=&quot;引子&quot;&gt;引子&lt;/h3&gt;
+&lt;p&gt;最近遇到很多朋友过来咨询G1调优的问题，我自己去年有专门学过一次G1，但是当时只是看了个皮毛，因此自己也有不少问题。总体来讲，对于G1我有几个疑惑，希望能够在这篇文章中得到解决。&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;G1出现的初衷是什么？&lt;/li&gt;
+&lt;li&gt;G1适合在什么场景下使用？&lt;/li&gt;
+&lt;li&gt;G1的trade-off是什么？&lt;/li&gt;
+&lt;li&gt;G1的详细过程？&lt;/li&gt;
+&lt;li&gt;如何理解G1的gc日志?&lt;/li&gt;
+&lt;li&gt;G1的调优思路？&lt;/li&gt;
+&lt;li&gt;G1和CMS的对比和选择？&lt;/li&gt;
+&lt;/ol&gt;&lt;h3 id=&quot;一基础知识&quot;&gt;一、基础知识&lt;/h3&gt;
+&lt;h4 id=&quot;初衷&quot;&gt;1. 初衷&lt;/h4&gt;
+&lt;p&gt;在G1提出之前，经典的垃圾收集器主要有三种类型：串行收集器、并行收集器和并发标记清除收集器，这三种收集器分别可以是满足Java应用三种不同的需求：内存占用及并发开销最小化、应用吞吐量最大化和应用GC暂停时间最小化，但是，上述三种垃圾收集器都有几个共同的问题：（1）所有针对老年代的操作必须扫描整个老年代空间；（2）新生代和老年代是独立的连续的内存块，必须先决定年轻代和老年代在虚拟地址空间的位置。&lt;/p&gt;
+&lt;h4 id=&quot;设计目标&quot;&gt;2. 设计目标&lt;/h4&gt;
+&lt;p&gt;G1是一种服务端应用使用的垃圾收集器，目标是用在&lt;strong&gt;多核、大内存&lt;/strong&gt;的机器上，它在大多数情况下可以实现指定的GC暂停时间，同时还能保持较高的吞吐量。&lt;/p&gt;
+&lt;h4 id=&quot;使用场景&quot;&gt;3. 使用场景&lt;/h4&gt;
+&lt;p&gt;G1适用于以下几种应用：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;可以像CMS收集器一样，允许垃圾收集线程和应用线程并行执行，即需要额外的CPU资源；&lt;/li&gt;
+&lt;li&gt;压缩空闲空间不会延长GC的暂停时间；&lt;/li&gt;
+&lt;li&gt;需要更易预测的GC暂停时间；&lt;/li&gt;
+&lt;li&gt;不需要实现很高的吞吐量&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;二g1的重要概念&quot;&gt;二、G1的重要概念&lt;/h3&gt;
+&lt;h4 id=&quot;分区region&quot;&gt;1. 分区（Region）&lt;/h4&gt;
+&lt;p&gt;G1采取了不同的策略来解决并行、串行和CMS收集器的碎片、暂停时间不可控制等问题——G1将整个堆分成相同大小的&lt;strong&gt;分区（Region）&lt;/strong&gt;，如下图所示。&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-09d482d0794827e6.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;G1的堆模型&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;每个分区都可能是年轻代也可能是老年代，但是在同一时刻只能属于某个代。&lt;br/&gt;年轻代、幸存区、老年代这些概念还存在，成为逻辑上的概念，这样方便复用之前分代框架的逻辑。在物理上不需要连续，则带来了额外的好处——有的分区内垃圾对象特别多，有的分区内垃圾对象很少，G1会优先回收垃圾对象特别多的分区，这样可以花费较少的时间来回收这些分区的垃圾，这也就是G1名字的由来，即首先收集垃圾最多的分区。&lt;/p&gt;
+&lt;p&gt;新生代其实并不是适用于这种算法的，依然是在新生代满了的时候，对整个新生代进行回收——整个新生代中的对象，要么被回收、要么晋升，至于新生代也采取分区机制的原因，则是因为这样跟老年代的策略统一，方便调整代的大小。&lt;/p&gt;
+&lt;p&gt;G1还是一种带压缩的收集器，在回收老年代的分区时，是将存活的对象从一个分区拷贝到另一个可用分区，这个拷贝的过程就实现了局部的压缩。每个分区的大小从1M到32M不等，但是都是2的冥次方。&lt;/p&gt;
+&lt;h4 id=&quot;收集集合cset&quot;&gt;2. 收集集合（CSet）&lt;/h4&gt;
+&lt;p&gt;一组可被回收的分区的集合。在CSet中存活的数据会在GC过程中被移动到另一个可用分区，CSet中的分区可以来自Eden空间、survivor空间、或者老年代。CSet会占用不到整个堆空间的1%大小。&lt;/p&gt;
+&lt;h4 id=&quot;已记忆集合rset&quot;&gt;3. 已记忆集合（RSet）&lt;/h4&gt;
+&lt;p&gt;RSet记录了其他Region中的对象引用本Region中对象的关系，属于points-into结构（谁引用了我的对象）。RSet的价值在于使得垃圾收集器不需要扫描整个堆找到谁引用了当前分区中的对象，只需要扫描RSet即可。&lt;/p&gt;
+&lt;p&gt;如下图所示，Region1和Region3中的对象都引用了Region2中的对象，因此在Region2的RSet中记录了这两个引用。&lt;br/&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-86d5381d1eaa4398.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;RSet的示意图&quot;/&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;摘一段R大的解释：G1 GC则是在points-out的card table之上再加了一层结构来构成points-into RSet：每个region会记录下到底哪些别的region有指向自己的指针，而这些指针分别在哪些card的范围内。 这个RSet其实是一个hash table，key是别的region的起始地址，value是一个集合，里面的元素是card table的index。 举例来说，如果region A的RSet里有一项的key是region B，value里有index为1234的card，它的意思就是region B的一个card里有引用指向region A。所以对region A来说，该RSet记录的是points-into的关系；而card table仍然记录了points-out的关系。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h4 id=&quot;snapshot-at-the-beginningsatb&quot;&gt;4. Snapshot-At-The-Beginning(SATB)&lt;/h4&gt;
+&lt;p&gt;SATB是维持并发GC的正确性的一个手段，G1GC的并发理论基础就是SATB，SATB是由Taiichi Yuasa为增量式标记清除垃圾收集器设计的一个标记算法。Yuasa的SATAB的标记优化主要针对标记-清除垃圾收集器的并发标记阶段。按照R大的说法：CMS的incremental update设计使得它在remark阶段必须重新扫描所有线程栈和整个young gen作为root；G1的SATB设计在remark阶段则只需要扫描剩下的satb_mark_queue。&lt;/p&gt;
+&lt;p&gt;SATB算法创建了一个对象图，它是堆的一个逻辑“快照”。标记数据结构包括了两个位图：previous位图和next位图。previous位图保存了最近一次完成的标记信息，并发标记周期会创建并更新next位图，随着时间的推移，previous位图会越来越过时，最终在并发标记周期结束的时候，next位图会将previous位图覆盖掉。&lt;br/&gt;下面我们以几个图例来描述SATB算法的过程：&lt;/p&gt;
+&lt;ol readability=&quot;5.5&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;在并发周期开始之前，NTAMS字段被设置到每个分区当前的顶部，并发周期启动后分配的对象会被放在TAMS之前（图里下边的部分），同时被明确定义为隐式存活对象，而TAMS之后（图里上边的部分）的对象则需要被明确地标记。&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-3bf82355da6e3693.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;初始标记过程中的一个堆分区&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;并发标记过程中的堆分区&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-baf374962ebc8fd6.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;并发标记过程中的对分区&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;位于堆分区的Bottom和PTAMS之间的对象都会被标记并记录在previous位图中；&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-727cd8d8ca8970c6.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;位于Bottom和PTAMS之间的对象都会被标记在previous位图中&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;位于堆分区的Top和PATMS之间的对象均为隐式存活对象，同时也记录在previous位图中；&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-36d3cd5cb655130a.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;隐式存活标记，是一种增量标记&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;-1&quot;&gt;
+&lt;p&gt;在重新标记阶段的最后，所有NTAMS之前的对象都会被标记&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-f2a131620f5a610e.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;重新标记&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;在并发标记阶段分配的对象会被分配到NTAMS之后的空间，它们会作为隐式存活对象被记录在next位图中。一次并发标记周期完成后，这个next位图会覆盖previous位图，然后将next位图清空。&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-db67d11a613ce4da.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;开始并发标记后的对象会被识别为隐式存活对象，放在next位图中&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;SATB是一个快照标记算法，在并发标记进行的过程中，垃圾收集器（Collecotr）和应用程序（Mutator）都在活动，如果一个对象还没被mark到，这时候Mutator就修改了它的引用，那么这时候拿到的快照就是不完整的了，如何解决这个问题呢?G1 GC使用了SATB write barrier来解决这个问题——在并发标记过程中，将该对象的旧的引用记录在一个SATB日志对列或缓冲区中。去翻G1的代码，却发现实际代码如下——只该对象入队列，并没有将整个修改过程放在写屏障之间完成。&lt;/p&gt;
+&lt;pre class=&quot;cpp&quot;&gt;
+&lt;code&gt;  // hotspot/src/share/vm/gc_implementation/g1/g1SATBCardTableModRefBS.hpp
+  // This notes that we don't need to access any BarrierSet data
+  // structures, so this can be called from a static context.
+  template &amp;lt;class T&amp;gt; static void write_ref_field_pre_static(T* field, oop newVal) {
+    T heap_oop = oopDesc::load_heap_oop(field);
+    if (!oopDesc::is_null(heap_oop)) {
+      enqueue(oopDesc::decode_heap_oop(heap_oop));
+    }
+  }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;enqueue的真正代码在&lt;code&gt;hotspot/src/share/vm/gc_implementation/g1/g1SATBCardTableModRefBS.cpp&lt;/code&gt;中，这里使用&lt;code&gt;JavaThread::satb_mark_queue_set().is_active()&lt;/code&gt;判断是否处于并发标记周期。&lt;/p&gt;
+&lt;pre class=&quot;cpp&quot;&gt;
+&lt;code&gt;void G1SATBCardTableModRefBS::enqueue(oop pre_val) {
+  // Nulls should have been already filtered.
+  assert(pre_val-&amp;gt;is_oop(true), &quot;Error&quot;);
+
+  if (!JavaThread::satb_mark_queue_set().is_active()) return;
+  Thread* thr = Thread::current();
+  if (thr-&amp;gt;is_Java_thread()) {
+    JavaThread* jt = (JavaThread*)thr;
+    //将旧值入队
+    jt-&amp;gt;satb_mark_queue().enqueue(pre_val);
+  } else {
+    MutexLockerEx x(Shared_SATB_Q_lock, Mutex::_no_safepoint_check_flag);
+    JavaThread::satb_mark_queue_set().shared_satb_queue()-&amp;gt;enqueue(pre_val);
+  }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;stab_mark_queue.enqueue方法首先尝试将以前的值记录在一个缓冲区中，如果这个缓冲区已经满了，就会将当期这个SATB缓冲区“退休”并放入全局列表中，然后再给线程分配一个新的SATB缓冲区。并发标记线程会定期检查和处理那些“被填满”的缓冲区。&lt;/p&gt;
+&lt;h3 id=&quot;三g1的过程&quot;&gt;三、G1的过程&lt;/h3&gt;
+&lt;h4 id=&quot;四个操作&quot;&gt;1. 四个操作&lt;/h4&gt;
+&lt;p&gt;G1收集器的收集活动主要有四种操作：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;新生代垃圾收集&lt;/li&gt;
+&lt;li&gt;后台收集、并发周期&lt;/li&gt;
+&lt;li&gt;混合式垃圾收集&lt;/li&gt;
+&lt;li&gt;必要时候的Full GC&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;第一、新生代垃圾收集的图例如下：&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-76a5c1ff8af26a1e.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Eden区耗尽的时候就会触发新生代收集，新生代垃圾收集会对整个新生代进行回收&lt;/li&gt;
+&lt;li&gt;新生代垃圾收集期间，整个应用STW&lt;/li&gt;
+&lt;li&gt;新生代垃圾收集是由多线程并发执行的&lt;/li&gt;
+&lt;li&gt;新生代收集结束后依然存活的对象，会被拷贝到一个新的Survivor分区，或者是老年代。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;G1设计了一个标记阈值，它描述的是总体Java堆大小的百分比，默认值是45，这个值可以通过命令&lt;code&gt;-XX:InitiatingHeapOccupancyPercent(IHOP)&lt;/code&gt;来调整，一旦达到这个阈值就回触发一次并发收集周期。注意：这里的百分比是针对整个堆大小的百分比，而CMS中的&lt;code&gt;CMSInitiatingOccupancyFraction&lt;/code&gt;命令选型是针对老年代的百分比。并发收集周期的图例如下：&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-3c606fba02f4cfb5.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在上图中有几个情况需要注意：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;新生代的空间占用情况发生了变化——在并发收集周期中，至少有一次（很可能是多次）新生代垃圾收集；&lt;/li&gt;
+&lt;li&gt;注意到一些分区被标记为X，这些分区属于老年代，它们就是标记周期找出的包含最多垃圾的分区（注意：它们内部仍然保留着数据）；&lt;/li&gt;
+&lt;li&gt;老年代的空间占用在标记周期结束后变得更多，这是因为在标记周期期间，新生代的垃圾收集会晋升对象到老年代，而且标记周期中并不会是否老年代的任何对象。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;第二、G1的并发标记周期包括多个阶段：&lt;br/&gt;并发标记周期采用的算法是我们前文提到的SATB标记算法，产出是找出一些垃圾对象最多的老年代分区。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;初始标记（initial-mark），在这个阶段，应用会经历STW，通常初始标记阶段会跟一次新生代收集一起进行，换句话说——既然这两个阶段都需要暂停应用，G1 GC就重用了新生代收集来完成初始标记的工作。在新生代垃圾收集中进行初始标记的工作，会让停顿时间稍微长一点，并且会增加CPU的开销。初始标记做的工作是设置两个TAMS变量（NTAMS和PTAMS）的值，所有在TAMS之上的对象在这个并发周期内会被识别为隐式存活对象；&lt;/li&gt;
+&lt;li&gt;根分区扫描（root-region-scan），这个过程不需要暂停应用，在初始标记或新生代收集中被拷贝到survivor分区的对象，都需要被看做是根，这个阶段G1开始扫描survivor分区，所有被survivor分区所引用的对象都会被扫描到并将被标记。survivor分区就是根分区，正因为这个，该阶段不能发生新生代收集，如果扫描根分区时，新生代的空间恰好用尽，新生代垃圾收集必须等待根分区扫描结束才能完成。如果在日志中发现根分区扫描和新生代收集的日志交替出现，就说明当前应用需要调优。&lt;/li&gt;
+&lt;li&gt;并发标记阶段（concurrent-mark），并发标记阶段是多线程的，我们可以通过&lt;code&gt;-XX:ConcGCThreads&lt;/code&gt;来设置并发线程数，默认情况下，G1垃圾收集器会将这个线程总数设置为并行垃圾线程数（&lt;code&gt;-XX:ParallelGCThreads&lt;/code&gt;）的四分之一；并发标记会利用trace算法找到所有活着的对象，并记录在一个bitmap中，因为在TAMS之上的对象都被视为隐式存活，因此我们只需要遍历那些在TAMS之下的；记录在标记的时候发生的引用改变，SATB的思路是在开始的时候设置一个快照，然后假定这个快照不改变，根据这个快照去进行trace，这时候如果某个对象的引用发生变化，就需要通过pre-write barrier logs将该对象的旧的值记录在一个SATB缓冲区中，如果这个缓冲区满了，就把它加到一个全局的列表中——G1会有并发标记的线程定期去处理这个全局列表。&lt;/li&gt;
+&lt;li&gt;重新标记阶段（remarking），重新标记阶段是最后一个标记阶段，需要暂停整个应用，G1垃圾收集器会处理掉剩下的SATB日志缓冲区和所有更新的引用，同时G1垃圾收集器还会找出所有未被标记的存活对象。这个阶段还会负责引用处理等工作。&lt;/li&gt;
+&lt;li&gt;清理阶段（cleanup），清理阶段真正回收的内存很小，截止到这个阶段,G1垃圾收集器主要是标记处哪些老年代分区可以回收，将老年代按照它们的存活度（liveness）从小到大排列。这个过程还会做几个事情：识别出所有空闲的分区、RSet梳理、将不用的类从metaspace中卸载、回收巨型对象等等。识别出每个分区里存活的对象有个好处是在遇到一个完全空闲的分区时，它的RSet可以立即被清理，同时这个分区可以立刻被回收并释放到空闲队列中，而不需要再放入CSet等待混合收集阶段回收；梳理RSet有助于发现无用的引用。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;第三、混合收集只会回收一部分老年代分区，下图是第一次混合收集前后的堆情况对比。&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-dea8413e90459945.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;混合收集会执行多次，一直运行到（几乎）所有标记点老年代分区都被回收，在这之后就会恢复到常规的新生代垃圾收集周期。当整个堆的使用率超过指定的百分比时，G1 GC会启动新一轮的并发标记周期。在混合收集周期中，对于要回收的分区，会将该分区中存活的数据拷贝到另一个分区，这也是为什么G1收集器最终出现碎片化的频率比CMS收集器小得多的原因——以这种方式回收对象，实际上伴随着针对当前分区的压缩。&lt;/p&gt;
+&lt;h4 id=&quot;两个模式&quot;&gt;2. 两个模式&lt;/h4&gt;
+&lt;p&gt;G1收集器的模式主要有两种：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Young GC（新生代垃圾收集）&lt;/li&gt;
+&lt;li&gt;Mixed GC（混合垃圾收集）&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;在R大的帖子中，给出了一个假象的G1垃圾收集运行过程，如下图所示，在结合上一小节的细节，就可以将G1 GC的正常过程理解清楚了。&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-d30169030aef1d08.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;巨型对象的管理&quot;&gt;3. 巨型对象的管理&lt;/h4&gt;
+&lt;p&gt;&lt;strong&gt;巨型对象&lt;/strong&gt;：在G1中，如果一个对象的大小超过分区大小的一半，该对象就被定义为&lt;strong&gt;巨型对象（Humongous Object）&lt;/strong&gt;。巨型对象时直接分配到老年代分区，如果一个对象的大小超过一个分区的大小，那么会直接在老年代分配两个连续的分区来存放该巨型对象。巨型分区一定是连续的，分配之后也不会被移动——没啥益处。&lt;/p&gt;
+&lt;p&gt;由于巨型对象的存在，G1的堆中的分区就分成了三种类型：新生代分区、老年代分区和巨型分区，如下图所示：&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-cd13ea552919353f.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;如果一个巨型对象跨越两个分区，开始的那个分区被称为“开始巨型”，后面的分区被称为“连续巨型”，这样最后一个分区的一部分空间是被浪费掉的，如果有很多巨型对象都刚好比分区大小多一点，就会造成很多空间的浪费，从而导致堆的碎片化。如果你发现有很多由于巨型对象分配引起的连续的并发周期，并且堆已经碎片化（明明空间够，但是触发了FULL GC），可以考虑调整&lt;code&gt;-XX:G1HeapRegionSize&lt;/code&gt;参数，减少或消除巨型对象的分配。&lt;/p&gt;
+&lt;p&gt;关于巨型对象的回收：在JDK8u40之前，巨型对象的回收只能在并发收集周期的清除阶段或FULL GC过程中过程中被回收，在JDK8u40（包括这个版本）之后，一旦没有任何其他对象引用巨型对象，那么巨型对象也可以在年轻代收集中被回收。&lt;/p&gt;
+&lt;h4 id=&quot;g1执行过程中的异常情况&quot;&gt;4. G1执行过程中的异常情况&lt;/h4&gt;
+&lt;h5 id=&quot;并发标记周期开始后的full-gc&quot;&gt;并发标记周期开始后的FULL GC&lt;/h5&gt;
+&lt;p&gt;G1启动了标记周期，但是在并发标记完成之前，就发生了Full GC，日志常常如下所示：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;51.408: [GC concurrent-mark-start]
+65.473: [Full GC 4095M-&amp;gt;1395M(4096M), 6.1963770 secs]
+ [Times: user=7.87 sys=0.00, real=6.20 secs]
+71.669: [GC concurrent-mark-abort]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;GC concurrent-mark-start开始之后就发生了FULL GC，这说明针对老年代分区的回收速度比较慢，或者说对象过快得从新生代晋升到老年代，或者说是有很多大对象直接在老年代分配。针对上述原因，我们可能需要做的调整有：调大整个堆的大小、更快得触发并发回收周期、让更多的回收线程参与到垃圾收集的动作中。&lt;/p&gt;
+&lt;h5 id=&quot;混合收集模式中的full-gc&quot;&gt;混合收集模式中的FULL GC&lt;/h5&gt;
+&lt;p&gt;在GC日志中观察到，在一次混合收集之后跟着一条FULL GC，这意味着混合收集的速度太慢，在老年代释放出足够多的分区之前，应用程序就来请求比当前剩余可分配空间大的内存。针对这种情况我们可以做的调整：增加每次混合收集收集掉的老年代分区个数；增加并发标记的线程数；提高混合收集发生的频率。&lt;/p&gt;
+&lt;h5 id=&quot;疏散失败转移失败&quot;&gt;疏散失败（转移失败）&lt;/h5&gt;
+&lt;p&gt;在新生代垃圾收集快结束时，找不到可用的分区接收存活下来的对象，常见如下的日志：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;60.238: [GC pause (young) (to-space overflow), 0.41546900 secs]&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这意味着整个堆的碎片化已经非常严重了，我们可以从以下几个方面调整：（1）增加整个堆的大小——通过增加&lt;code&gt;-XX:G1ReservePercent&lt;/code&gt;选项的值（并相应增加总的堆大小），为“目标空间”增加预留内存量;（2）通过减少 &lt;code&gt;-XX:InitiatingHeapOccupancyPercent&lt;/code&gt;提前启动标记周期；（3）&lt;br/&gt;你也可以通过增加&lt;code&gt;-XX:ConcGCThreads&lt;/code&gt;选项的值来增加并发标记线程的数目；&lt;/p&gt;
+&lt;h5 id=&quot;巨型对象分配失败&quot;&gt;巨型对象分配失败&lt;/h5&gt;
+&lt;p&gt;如果在GC日志中看到莫名其妙的FULL GC日志，又对应不到上述讲过的几种情况，那么就可以怀疑是巨型对象分配导致的，这里我们可以考虑使用&lt;code&gt;jmap&lt;/code&gt;命令进行堆dump，然后通过MAT对堆转储文件进行分析。关于堆转储文件的分析技巧，后续会有专门的文章介绍。&lt;/p&gt;
+&lt;h3 id=&quot;四g1的调优&quot;&gt;四、G1的调优&lt;/h3&gt;
+&lt;p&gt;G1的调优目标主要是在避免FULL GC和疏散失败的前提下，尽量实现较短的停顿时间和较高的吞吐量。关于G1 GC的调优，需要记住以下几点：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;不要自己显式设置新生代的大小（用&lt;code&gt;Xmn&lt;/code&gt;或&lt;code&gt;-XX:NewRatio&lt;/code&gt;参数），如果显式设置新生代的大小，会导致目标时间这个参数失效。&lt;/li&gt;
+&lt;li&gt;由于G1收集器自身已经有一套预测和调整机制了，因此我们首先的选择是相信它，即调整&lt;code&gt;-XX:MaxGCPauseMillis=N&lt;/code&gt;参数，这也符合G1的目的——让GC调优尽量简单，这里有个取舍：如果减小这个参数的值，就意味着会调小新生代的大小，也会导致新生代GC发生得更频繁，同时，还会导致混合收集周期中回收的老年代分区减少，从而增加FULL GC的风险。这个时间设置得越短，应用的吞吐量也会受到影响。&lt;/li&gt;
+&lt;li&gt;针对混合垃圾收集的调优。如果调整这期望的最大暂停时间这个参数还是无法解决问题，即在日志中仍然可以看到FULL GC的现象，那么就需要自己手动做一些调整，可以做的调整包括：&lt;/li&gt;
+&lt;/ol&gt;&lt;ul&gt;&lt;li&gt;调整G1垃圾收集的后台线程数，通过设置&lt;code&gt;-XX:ConcGCThreads=n&lt;/code&gt;这个参数，可以增加后台标记线程的数量，帮G1赢得这场你追我赶的游戏；&lt;/li&gt;
+&lt;li&gt;调整G1垃圾收集器并发周期的频率，如果让G1更早得启动垃圾收集，也可以帮助G1赢得这场比赛，那么可以通过设置&lt;code&gt;-XX:InitiatingHeapOccupancyPercent&lt;/code&gt;这个参数来实现这个目标，如果将这个参数调小，G1就会更早得触发并发垃圾收集周期。这个值需要谨慎设置：如果这个参数设置得太高，会导致FULL GC出现得频繁；如果这个值设置得过小，又会导致G1频繁得进行并发收集，白白浪费CPU资源。通过GC日志可以通过一个点来判断GC是否正常——在一轮并发周期结束后，需要确保堆剩下的空间小于InitiatingHeapOccupancyPercent的值。&lt;/li&gt;
+&lt;li&gt;调整G1垃圾收集器的混合收集的工作量，即在一次混合垃圾收集中尽量多处理一些分区，可以从另外一方面提高混合垃圾收集的频率。在一次混合收集中可以回收多少分区，取决于三个因素：（1）有多少个分区被认定为垃圾分区，&lt;code&gt;-XX:G1MixedGCLiveThresholdPercent=n&lt;/code&gt;这个参数表示如果一个分区中的存活对象比例超过n，就不会被挑选为垃圾分区，因此可以通过这个参数控制每次混合收集的分区个数，这个参数的值越大，某个分区越容易被当做是垃圾分区；（2）G1在一个并发周期中，最多经历几次混合收集周期，这个可以通过&lt;code&gt;-XX:G1MixedGCCountTarget=n&lt;/code&gt;设置，默认是8，如果减小这个值，可以增加每次混合收集收集的分区数，但是可能会导致停顿时间过长；（3）期望的GC停顿的最大值，由&lt;code&gt;MaxGCPauseMillis&lt;/code&gt;参数确定，默认值是200ms，在混合收集周期内的停顿时间是向上规整的，如果实际运行时间比这个参数小，那么G1就能收集更多的分区。&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;五g1的最佳实践&quot;&gt;五、G1的最佳实践&lt;/h3&gt;
+&lt;h4 id=&quot;关键参数项&quot;&gt;1. 关键参数项&lt;/h4&gt;
+&lt;ul readability=&quot;2.5&quot;&gt;&lt;li&gt;&lt;code&gt;-XX:+UseG1GC&lt;/code&gt;，告诉JVM使用G1垃圾收集器&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;-XX:MaxGCPauseMillis=200&lt;/code&gt;，设置GC暂停时间的目标最大值，这是个柔性的目标，JVM会尽力达到这个目标&lt;/li&gt;
+&lt;li readability=&quot;1&quot;&gt;
+&lt;p&gt;&lt;code&gt;-XX:INitiatingHeapOccupancyPercent=45&lt;/code&gt;，如果整个堆的使用率超过这个值，G1会触发一次并发周期。记住这里针对的是整个堆空间的比例，而不是某个分代的比例。&lt;/p&gt;
+&lt;h4 id=&quot;最佳实践&quot;&gt;2. 最佳实践&lt;/h4&gt;
+&lt;h5 id=&quot;不要设置年轻代的大小&quot;&gt;不要设置年轻代的大小&lt;/h5&gt;
+通过&lt;code&gt;-Xmn&lt;/code&gt;显式设置年轻代的大小，会干扰G1收集器的默认行为：&lt;/li&gt;
+&lt;li&gt;G1不再以设定的暂停时间为目标，换句话说，如果设置了年轻代的大小，就无法实现自适应的调整来达到指定的暂停时间这个目标&lt;/li&gt;
+&lt;li readability=&quot;4&quot;&gt;
+&lt;p&gt;G1不能按需扩大或缩小年轻代的大小&lt;/p&gt;
+&lt;h5 id=&quot;响应时间度量&quot;&gt;响应时间度量&lt;/h5&gt;
+&lt;p&gt;不要根据平均响应时间（ART）来设置&lt;code&gt;-XX:MaxGCPauseMillis=n&lt;/code&gt;这个参数，应该设置希望90%的GC都可以达到的暂停时间。这意味着90%的用户请求不会超过这个响应时间，记住，这个值是一个目标，但是G1并不保证100%的GC暂停时间都可以达到这个目标&lt;/p&gt;
+&lt;h4 id=&quot;g1-gc的参数选项&quot;&gt;3. G1 GC的参数选项&lt;/h4&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;24&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-XX:+UseG1GC&lt;/td&gt;
+&lt;td&gt;使用G1收集器&lt;/td&gt;
+&lt;td&gt;JDK1.8中还需要显式指定&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-XX:MaxGCPauseMillis=n&lt;/td&gt;
+&lt;td&gt;设置一个期望的最大GC暂停时间，这是一个柔性的目标，JVM会尽力去达到这个目标&lt;/td&gt;
+&lt;td&gt;200&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;5&quot;&gt;&lt;td&gt;-XX:InitiatingHeapOccupancyPercent=n&lt;/td&gt;
+&lt;td&gt;当整个堆的空间使用百分比超过这个值时，就会触发一次并发收集周期，记住是整个堆&lt;/td&gt;
+&lt;td&gt;45&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-XX:NewRatio=n&lt;/td&gt;
+&lt;td&gt;新生代和老年代的比例&lt;/td&gt;
+&lt;td&gt;2&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-XX:SurvivorRatio=n&lt;/td&gt;
+&lt;td&gt;Eden空间和Survivor空间的比例&lt;/td&gt;
+&lt;td&gt;8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-XX:MaxTenuringThreshold=n&lt;/td&gt;
+&lt;td&gt;对象在新生代中经历的最多的新生代收集，或者说最大的岁数&lt;/td&gt;
+&lt;td&gt;G1中是15&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-XX:ParallelGCThreads=n&lt;/td&gt;
+&lt;td&gt;设置垃圾收集器的并行阶段的垃圾收集线程数&lt;/td&gt;
+&lt;td&gt;不同的平台有不同的值&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-XX:ConcGCThreads=n&lt;/td&gt;
+&lt;td&gt;设置垃圾收集器并发执行GC的线程数&lt;/td&gt;
+&lt;td&gt;n一般是ParallelGCThreads的四分之一&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;3&quot;&gt;&lt;td&gt;-XX:G1ReservePercent=n&lt;/td&gt;
+&lt;td&gt;设置作为空闲空间的预留内存百分比，以降低目标空间溢出（疏散失败）的风险。默认值是 10%。增加或减少这个值，请确保对总的 Java 堆调整相同的量&lt;/td&gt;
+&lt;td&gt;10&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;-XX:G1HeapRegionSize=n&lt;/td&gt;
+&lt;td&gt;分区的大小&lt;/td&gt;
+&lt;td&gt;堆内存大小的1/2000，单位是MB，值是2的幂，范围是1MB到32MB之间&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;4&quot;&gt;&lt;td&gt;-XX:G1HeapWastePercent=n&lt;/td&gt;
+&lt;td&gt;设置您愿意浪费的堆百分比。如果可回收百分比小于堆废物百分比，JavaHotSpotVM不会启动混合垃圾回收周期（注意，这个参数可以用于调整混合收集的频率）。&lt;/td&gt;
+&lt;td&gt;JDK1.8是5&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;6&quot;&gt;&lt;td&gt;-XX:G1MixedGCCountTarget=8&lt;/td&gt;
+&lt;td&gt;设置并发周期后需要执行多少次混合收集，如果混合收集中STW的时间过长，可以考虑增大这个参数。（注意：这个可以用来调整每次混合收集中回收掉老年代分区的多少，即调节混合收集的停顿时间）&lt;/td&gt;
+&lt;td&gt;8&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;7&quot;&gt;&lt;td&gt;-XX:G1MixedGCLiveThresholdPercent=n&lt;/td&gt;
+&lt;td&gt;一个分区是否会被放入mix GC的CSet的阈值。对于一个分区来说，它的存活对象率如果超过这个比例，则改分区不会被列入mixed gc的CSet中&lt;/td&gt;
+&lt;td&gt;JDK1.6和1.7是65，JDK1.8是85&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h3 id=&quot;常见问题&quot;&gt;常见问题&lt;/h3&gt;
+&lt;ol readability=&quot;4.4795650095602&quot;&gt;&lt;li&gt;Young GC、Mixed GC和Full GC的区别？&lt;br/&gt;答：Young GC的CSet中只包括年轻代的分区，Mixed GC的CSet中除了包括年轻代分区，还包括老年代分区；Full GC会暂停整个引用，同时对新生代和老年代进行收集和压缩。&lt;/li&gt;
+&lt;li&gt;ParallelGCThreads和ConcGCThreads的区别？&lt;br/&gt;答：ParallelGCThreads指得是在STW阶段，并行执行垃圾收集动作的线程数，ParallelGCThreads的值一般等于逻辑CPU核数，如果CPU核数大于8，则设置为&lt;code&gt;5/8 * cpus&lt;/code&gt;，在SPARC等大型机上这个系数是5/16。；ConcGCThreads指的是在并发标记阶段，并发执行标记的线程数，一般设置为ParallelGCThreads的四分之一。&lt;/li&gt;
+&lt;li readability=&quot;1.9747340425532&quot;&gt;
+&lt;p&gt;write barrier在GC中的作用？如何理解G1 GC中write barrier的作用？&lt;br/&gt;写屏障是一种内存管理机制，用在这样的场景——当代码尝试修改一个对象的引用时，在前面放上写屏障就意味着将这个对象放在了写屏障后面。write barrier在GC中的作用有点复杂，我们这里以trace GC算法为例讲下：trace GC有些算法是并发的，例如CMS和G1，即用户线程和垃圾收集线程可以同时运行，即mutator一边跑，collector一边收集。这里有一个限制是：黑色的对象不应该指向任何白色的对象。如果mutator视图让一个黑色的对象指向一个白色的对象，这个限制就会被打破，然后GC就会失败。针对这个问题有两种解决思路：（1）通过添加read barriers阻止mutator看到白色的对象；（2）通过write barrier阻止mutator修改一个黑色的对象，让它指向一个白色的对象。write barrier的解决方法就是讲黑色的对象放到写write barrier后面。如果真得发生了white-on-black这种写需求，一般也有多种修正方法：增量得将白色的对象变灰，将黑色的对象重新置灰等等。我理解，增量的变灰就是CMS和G1里并发标记的过程，将黑色的对象重新变灰就是利用卡表或SATB的缓冲区将黑色的对象重新置灰的过程，当然会在重新标记中将所有灰色的对象处理掉。关于G1中write barrier的作用，可以参考&lt;a href=&quot;https://hllvm-group.iteye.com/group/topic/44381?page=3&quot;&gt;R大的这个帖子&lt;/a&gt;里提到的：&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-3abfa971618507fd.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;image.png&quot;/&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;2&quot;&gt;
+&lt;p&gt;G1里在并发标记的时候，如果有对象的引用修改，要将旧的值写到一个缓冲区中，这个动作前后会有一个write barrier，这段可否细说下？&lt;br/&gt;答：这块涉及到SATB标记算法的原理，SATB是指start at the beginning，即在并发收集周期的第一个阶段（初始标记）是STW的，会给所有的分区做个快照，后面的扫描都是按照这个快照进行；在并发标记周期的第二个阶段，并发标记，这是收集线程和应用线程同时进行的，这时候应用线程就可能修改了某些引用的值，导致上面那个快照不是完整的，因此G1就想了个办法，我把在这个期间对对象引用的修改都记录动作都记录下来，有点像mysql的操作日志。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;6.5&quot;&gt;
+&lt;p&gt;GC算法中的三色标记算法怎么理解？&lt;br/&gt;trace GC将对象分为三类：白色（垃圾收集器未探测到的对象）、灰色（活着的对象，但是依然没有被垃圾收集器扫描过）、黑色（活着的对象，并且已经被垃圾收集器扫描过）。垃圾收集器的工作过程，就是通过灰色对象的指针扫描它指向的白色对象，如果找到一个白色对象，就将它设置为灰色，如果某个灰色对象的可达对象已经全部找完，就将它设置为黑色对象。当在当前集合中找不到灰色的对象时，就说明该集合的回收动作完成，然后所有白色的对象的都会被回收。PS：这个问题来自参考资料17，我将原文也贴在下面：&lt;/p&gt;
+&lt;blockquote readability=&quot;12&quot;&gt;
+&lt;p&gt;For a tracing collector (marking or copying), one conceptually colours the data white (not yet seen by the collector), black (alive and scanned by the collector) and grey (alive but not yet scanned by the collector). The collector proceeds by scanning grey objects for pointers to white objects. The white objects found are turned grey, and the grey objects scanned are turned black. When there are no more grey objects, the collection is complete and all the white objects can be recycled.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;h3 id=&quot;参考资料&quot;&gt;参考资料&lt;/h3&gt;
+&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://blogs.oracle.com/poonam/understanding-g1-gc-logs&quot;&gt;Understanding G1 GC Logs&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.oracle.com/technetwork/articles/java/g1gc-1984535.html&quot;&gt;Garbage First Garbage Collector Tuning&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.oracle.com/technetwork/cn/articles/java/g1gc-1984535-zhs.html&quot;&gt;垃圾优先型回收器调优&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://docs.oracle.com/javase/8/docs/technotes/guides/vm/gctuning/g1_gc.html#garbage_first_garbage_collection&quot;&gt;Oracle的GC调优文档——G1&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.oracle.com/technetwork/java/javase/tech/g1-intro-jsp-135488.html&quot;&gt;The Garbage-First Garbage Collector&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://item.jd.com/11896988.html&quot;&gt;《Java性能权威指南》&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://item.jd.com/12154276.html&quot;&gt;《Java性能调优指南》&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.oracle.com/webfolder/technetwork/tutorials/obe/java/G1GettingStarted/index.html#summary&quot;&gt;G1入门，O记官网的PPT&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://tech.meituan.com/g1.html&quot;&gt;Java Hotspot G1 GC的一些关键技术&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://app.yinxiang.com/shard/s44/nl/9245418/fe5882c3-2fdf-440b-9a70-f6cf165979f4/&quot;&gt;G1 GC的论文&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://hllvm-group.iteye.com/group/topic/44381&quot;&gt;R大关于G1 GC的帖子&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.infoq.com/articles/tuning-tips-G1-GC&quot;&gt;Tips for Tuning the Garbage First Garbage Collector&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://item.jd.com/12154276.html&quot;&gt;Java性能调优指南&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://item.jd.com/11896988.html&quot;&gt;Java性能权威指南&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://stackoverflow.com/questions/35380827/g1-what-are-the-differences-between-mixed-gc-and-full-gc&quot;&gt;G1: What are the differences between mixed gc and full gc?&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.redhat.com/en/blog/part-1-introduction-g1-garbage-collector&quot;&gt;Part 1: Introduction to the G1 Garbage Collector&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.redhat.com/en/blog/collecting-and-reading-g1-garbage-collector-logs-part-2?source=author&amp;amp;term=22991&quot;&gt;Collecting and reading G1 garbage collector logs - part 2&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://www.iecc.com/gclist/GC-algorithms.html&quot;&gt;GC FAQ -- algorithms&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;hr/&gt;&lt;p&gt;本号专注于后端技术、JVM问题排查和优化、Java面试题、个人成长和自我管理等主题，为读者提供一线开发者的工作和成长经验，期待你能在这里有所收获。&lt;br/&gt;&lt;img src=&quot;https://upload-images.jianshu.io/upload_images/44770-7daebe9e48739106.jpg?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240&quot; alt=&quot;javaadu&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Mon, 15 Apr 2019 23:19:00 +0000</pubDate>
+<dc:creator>javaadu</dc:creator>
+<og:description>引子 最近遇到很多朋友过来咨询G1调优的问题，我自己去年有专门学过一次G1，但是当时只是看了个皮毛，因此自己也有不少问题。总体来讲，对于G1我有几个疑惑，希望能够在这篇文章中得到解决。 1. G1出现</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/javaadu/p/10713956.html</dc:identifier>
+</item>
+<item>
+<title>成为一个小的管理者 - 冰魄秋雨</title>
+<link>http://www.cnblogs.com/skyice/p/10714347.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/skyice/p/10714347.html</guid>
+<description>&lt;h3 id=&quot;成为一个小的管理者&quot;&gt;成为一个小的管理者&lt;/h3&gt;
+&lt;p&gt;对于入职场没几年的人来说，管理一个团队的机会比较少，大多是会有一个老大来管理自己，但是管理的能力确实我们需要好好的学习。对于程序员来说，逐渐的一部分的精力会花费到管理上来，不管自己愿不愿，毕竟到了一定阶段，我们都将会是一个独挡一面的人，但一个项目不太可能只有自己一个人，如果管理，如何协调周围的人，让项目快速起来。下面是自己一些经历和观察到其他管理者的一点经历。&lt;/p&gt;
+&lt;h4 id=&quot;一分解任务安排任务&quot;&gt;&lt;a id=&quot;1&quot;&gt;一、分解任务，安排任务&lt;/a&gt;&lt;/h4&gt;
+&lt;p&gt;项目会有许多功能，这些功能点之间的联系，如果进行关联上，至少自己心里有一个底。对一个团队来说，需要每个人有不同的分工，不可能所有人一起上，需要一起协调配合，那么最开始，如何分解任务就比较重要。举一个后台管理系统的项目。该项目一个OA系统，系统的功能是人员列表,考勤管理，工作事项等等。这些是一个功能点，然后接着根据需求文档和原型设计。&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;人员列表&lt;/td&gt;
+&lt;td&gt;人员查询列表&lt;/td&gt;
+&lt;td&gt;0.5天&lt;/td&gt;
+&lt;td&gt;小明&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;人员列表&lt;/td&gt;
+&lt;td&gt;人员录入页面&lt;/td&gt;
+&lt;td&gt;0.3天&lt;/td&gt;
+&lt;td&gt;小明&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;考勤管理&lt;/td&gt;
+&lt;td&gt;考勤显示页面&lt;/td&gt;
+&lt;td&gt;0.5天&lt;/td&gt;
+&lt;td&gt;小芳&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;考勤管理&lt;/td&gt;
+&lt;td&gt;考勤编辑&lt;/td&gt;
+&lt;td&gt;0.3天&lt;/td&gt;
+&lt;td&gt;小芳&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;上面仅仅做一个分解的过程，这种方式需要和小组成员一同交流，一起讨论这个功能和功能完成的时间。这种形式将一个项目分解成很多小的任务，并且有任务的时间，这样这个项目就有一个大概完成的时间点。具体如何安排，具体如何操作都可以一起讨论。&lt;/p&gt;
+&lt;p&gt;一个项目通过分解后，就可以将具体的任务安排给其他人，这种方式也能具体到个人，每个人就可以朝同一个目标去前进。&lt;/p&gt;
+&lt;h4 id=&quot;二协调工作和人员之间关系&quot;&gt;&lt;a id=&quot;2&quot;&gt;二、协调工作和人员之间关系&lt;/a&gt;&lt;/h4&gt;
+&lt;p&gt;协调工作和人员之间的关系，上诉分解任务之后，安排人员时，根据每个人的实际情况，安排具体的工作。开一个会讨论讨论，最后将其结果发布出来。但是变化赶不上计划，比如员工生病了，请了两天假，本来可以完成的项目，可能就因此延期，这个时候，就安排一下，进度比较快的员工，协调一下接受一下生病员工的工作。&lt;/p&gt;
+&lt;p&gt;这次某个员工多做了工作，那么在接下来的工作的时候，就可以少安排工作内容，或者安排一个学习新知识的任务等等，尽量做到相对公平。这个是需要自己对项目有一定的掌控能力，而不是让项目失去了自己掌控。&lt;/p&gt;
+&lt;p&gt;协调人员的之间的关系，毕竟作为一个工作年限长一些的人，可以多组织一些活动，让大家活动活动，吃个饭什么的，这样能够促进员工之间的信任。尽量让新人融入到新的环境中来，融入到这个小的环境中来。&lt;/p&gt;
+&lt;p&gt;可以安排大家一起攻坚一个新的技术，这样可以一起去探讨交流技术等等，或者是组织安排技术交流分享会，大家每周分享最近自己学习到新的知识。&lt;/p&gt;
+&lt;p&gt;协调自己与其他员工的关系，小的管理者暂还不属于自己管理，毕竟自己也还从事月技术工作，但是会安排其他人员的任务，有一点点权力。有时候这种管理者和员工之间的关系就很特别，或者是不太会去交流。需要多做一些努力去了解他是一个什么样的人，比如是一个爱专研技术，那么就可以聊聊技术，或者是将自己了解的新的技术分享给他。&lt;/p&gt;
+&lt;h4 id=&quot;三代码检查&quot;&gt;&lt;a id=&quot;3&quot;&gt;三、代码检查&lt;/a&gt;&lt;/h4&gt;
+&lt;p&gt;一般大的公司在提交代码的时候，会进行代码审查，但是我所在的公司还没有进行这样操作。不进行这种操作，并不代表代码审查，检查是不重要的，恰恰相反，如果作为一个对该项目的主导者，那么需要理解现在的项目是怎样的，需要大概的了解代码中的相关内容，有哪些合理的地方，哪些不合理的地方，并且将项目把控在一个合适的范围内，不让它失控。&lt;/p&gt;
+&lt;p&gt;代码检查不是究细节，一般按照了一定开发规范开发后，那么在不出大的偏差，就可以不需要修正。代码审查不仅需要去审查是否有错误，还需要去看这些代码是否符合规范，是否能够有优化的地方。&lt;/p&gt;
+&lt;h4 id=&quot;四解决问题&quot;&gt;&lt;a id=&quot;4&quot;&gt;四、解决问题&lt;/a&gt;&lt;/h4&gt;
+&lt;p&gt;因为是管事的，下面的人可以任性一点，可以脱卸责任，可以说这个不会。但是作为一个小小的管理者，不能说这做不出来，还不能说原因。而是大部分事情，是需要找方法去解决问题。&lt;/p&gt;
+&lt;p&gt;作为项目的负责人，项目中所有的事情，都应该去解决。自己不能解决的，需要协调资源的，就需要申请，需要找资源。因为自己是项目的负责人。&lt;/p&gt;
+&lt;p&gt;当明白这一点之后，就需要思考和明白如何去解决问题。解决问题可以靠自己的经验，但是很多时候是需要靠团队的。&lt;/p&gt;
+&lt;p&gt;当一个复杂的问题出现时，需要一个团队共同去攻坚。这个时候作为管事者，需要充当协调者，并且最后拍板。&lt;/p&gt;
+&lt;p&gt;如何解决问题，我观察和自己一些体会：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;摆正心态，大部分的问题总会有解决的方法，不能遇到问题，就将问题推卸掉。毕竟作为一个管事者，可能大部分的问题都会汇总到自己手上，自己不能找方法去解决，那么这个问题就会堆积。&lt;/li&gt;
+&lt;li&gt;发动自己和同事的能动性，遇到问题，一起面对，共同解决。可以一起开会讨论，将问题具体化，遇到的问题归类，是属于资源不够导致，还是这个BUG团队能力不够导致等等。然后根据不同类型去找解决问题的方法。&lt;/li&gt;
+&lt;/ol&gt;</description>
+<pubDate>Mon, 15 Apr 2019 16:25:00 +0000</pubDate>
+<dc:creator>冰魄秋雨</dc:creator>
+<og:description>成为一个小的管理者 '一、分解任务' '二、协调工作和人员之间关系' '三、代码检查' '四、解决问题' 对于入职场没几年的人来说，管理一个团队的机会比较少，大多是会有一个老大来管理自己，但是管理的能</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/skyice/p/10714347.html</dc:identifier>
+</item>
+<item>
+<title>The case for learned index structures - Sun Yongyue</title>
+<link>http://www.cnblogs.com/sunyongyue/p/learned_idx_structs.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/sunyongyue/p/learned_idx_structs.html</guid>
+<description>&lt;p&gt;17年的旧文，最近因为SageDB论文而重读。&lt;/p&gt;
+
+&lt;p&gt;文章主要思路是通过学习key的顺序、结构等来预测record在位置、存在与否等。效果方面，据称部分场景下，相对b-tree可以优化70%的内存占用。&lt;/p&gt;
+&lt;p&gt;最大价值其实在于使用ML或DL来优化（索引）系统这个新的方向。&lt;/p&gt;
+
+&lt;p&gt;Range Index&lt;/p&gt;
+
+&lt;p&gt;审视下btree查找完成的功能：输入一个key，每次选出一个可能的范围(分支节点)，直到最后命中(叶子节点)。这其实跟ML中模型类似。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/sunyongyue/334850/o_Bitmap.png&quot; alt=&quot;&quot; width=&quot;400&quot; height=&quot;203&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;换句话说，若能估算出数据的累积分布（记作F），那么查询key所在位置，也可以看成是 pos = F(key) * N 这样一个过程。&lt;/p&gt;
+&lt;p&gt;基于此，文章首先尝试了朴素的方案：使用tf训练并运行一个2层全连接的神经网络，每层32个单元，使用ReLU作为激发函数。&lt;/p&gt;
+&lt;p&gt; 然而这个方案运行效果很差，单次查找耗时比btree高了2个数量级。原因是多方面的：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;TF并不针对小数据集优化&lt;/li&gt;
+&lt;li&gt;单一的神经网络在最后的精细部分(last mile)，需要花费大量的计算与存储资源&lt;/li&gt;
+&lt;li&gt;btree的设计考量了内存优化等，而朴素方案显然还较为粗糙(全连接层)&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The RM-Index&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416000835502-1481840979.png&quot; alt=&quot;&quot; width=&quot;454&quot; height=&quot;286&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;针对上文朴素方案的问题，文章进行了一系列的优化。 &lt;/p&gt;
+&lt;p&gt;首先不再使用TF进行推断查找，而是开发发了一个叫LIF的框架，从TF模型中提取权重参数，直接生成专为小数据集优化的高效C++代码。&lt;/p&gt;
+&lt;p&gt;其次，使用RMI递归（而非单一）模型，在逐步缩小key的范围。由于每次问题被分解到小范围内进行，资源消耗得到改善的同时，模型的精度可以更好提升。RMI每层的输出是下一层的输入，有利于使用TPU/GPU进行优化。RMI中可以在不同的stage混合使用btree在内的不同类型模型来达到最佳效果，所以理论上不会比单纯的btree差。这个思路很ML，一个模型接一个模型:) &lt;/p&gt;
+&lt;p&gt;并且，由于模型实际上已经预测出key的位置（position），而不仅仅是范围（range），本文使用了两种新的查找算法（MBS、BQS）利用该信息来更高效地进行查找。&lt;/p&gt;
+&lt;p&gt;一连串的优化之后，模型的训练和运行有了明显的优化。其中，训练过程使用sgd只需要一次或少量的访问就可以。2亿条记录能在秒级完成。&lt;/p&gt;
+&lt;p&gt;对于整型数据集，相同内存占用时下，RMI经常能较btree有数倍性能提升。或者说性能相同时，内存占用会有数量级的优化。见下图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416000957407-638075584.png&quot; alt=&quot;&quot; width=&quot;552&quot; height=&quot;196&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在尽量公平相似的场景下，跟其他相关方案（FAST等）比也有明显优化：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416001029849-1105769321.png&quot; alt=&quot;&quot; width=&quot;551&quot; height=&quot;196&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在字符串场景下，优化场景不明显，原因可能在于字符串比较太耗时，model执行时间过长等。后者用TPU/GPU可能会有优化空间。&lt;/p&gt;
+
+&lt;p&gt;Point Index&lt;/p&gt;
+
+&lt;p&gt;point idx（hash索引）的优化基础在于，典型的数据冲突可能会有33%（如生日）。然而实际减少冲突和运行效果取决于两个主要方面：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;数据本身的分布情况。比如均匀分布场景下，learned idx不会比普通的随机hash函数好多少；&lt;/li&gt;
+&lt;li&gt;其他payload等&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;从文章的数据集来说，还是有效果的：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416001105042-1000082435.png&quot; alt=&quot;&quot; width=&quot;541&quot; height=&quot;170&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;Existence Index&lt;/p&gt;
+
+&lt;p&gt;存在性的索引，本文优化方面主要在于内存占用：10亿记录典型bloom filter需要1.76GB，如果要FPR为0.01%，则需要2.23GB。&lt;/p&gt;
+&lt;p&gt;前边在索引需要学习数据分布，而存在性索引，需要让合法的key相关，非法的key相关，而合法key与非法key间不相关。这其实就很像分类问题了。&lt;/p&gt;
+&lt;p&gt;另一方面，由于ML的特别，FPR下降时，FNR通常会上升。这跟bloom filter要求的FPR尽量小，FNR为0有冲突。解决方案是，在模型判断为false时，另行使用一个overflow bloom filter进行判断。由于bloom filter的大小于数据集相关，因为后接的bloom filter大小于FNR（即false部分相关），这要远小于传统方案中的大小。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416001133561-1804809781.png&quot; alt=&quot;&quot; width=&quot;381&quot; height=&quot;215&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;需要注意的是，该文章只研究了查询存在一定规律的场景，并在此这上建立模型。这在实际使用时要视业务场景而定。&lt;/p&gt;
+&lt;p&gt;在符合条件的情况下，1.7M条URL， 1. FPR 0.5%，FNR 55%时，2.04MB-&amp;gt;1.31MB，减少36% 2. FPR 0.1%，FNR 76%时，3.06MB-&amp;gt;2.59MB，减少15%。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/117546/201904/117546-20190416001208043-840646366.png&quot; alt=&quot;&quot; width=&quot;379&quot; height=&quot;291&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;Conclusion and Future Work&lt;/p&gt;
+
+&lt;p&gt;文章研究的是单一维度索引，如果能支持多维索引，对现实系统将会有更多帮助。&lt;/p&gt;
+&lt;p&gt;文章提到其价值时指出目前的索引是state-of-the-arts状态。有意思的是，ML和DL又何尝不是呢？:)&lt;/p&gt;
+
+</description>
+<pubDate>Mon, 15 Apr 2019 16:02:00 +0000</pubDate>
+<dc:creator>Sun Yongyue</dc:creator>
+<og:description>17年的旧文，最近因为SageDB论文而重读。 文章主要思路是通过学习key的顺序、结构等来预测record在位置、存在与否等。效果方面，据称部分场景下，相对b-tree可以优化70%的内存占用。 最</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/sunyongyue/p/learned_idx_structs.html</dc:identifier>
+</item>
+<item>
 <title>ELK(elasticsearch+kibana+logstash)搜索引擎(二)： elasticsearch基础教程 - waen</title>
 <link>http://www.cnblogs.com/buggeerWang/p/10714181.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/buggeerWang/p/10714181.html</guid>
@@ -417,7 +783,7 @@ class App extends Component {
 &lt;/pre&gt;&lt;/div&gt;
 &lt;p&gt;　　运行结果：&lt;/p&gt;
 
-&lt;p&gt;　　从这需求一中，我们可以看出，使用Lambda比使用匿名内部类代码更加简洁，同时，也可以理解为什么Lambda必须需要函数式接口的支持。我们假设Runnable中有两个方法，那么，“() -&amp;gt; System.out.println(Thread.currentThread().getName())”应该去找哪个方法去实现？&lt;/p&gt;
+&lt;p&gt;　　从需求一中，我们可以看出，使用Lambda比使用匿名内部类代码更加简洁，同时，也可以理解为什么Lambda必须需要函数式接口的支持。我们假设Runnable中有两个方法，那么，“() -&amp;gt; System.out.println(Thread.currentThread().getName())”应该去找哪个方法去实现？&lt;/p&gt;
 &lt;p&gt;　　从需求二的例子中，我们可以更加理解“一段可以传递的代码”这句话的含义。对数据的操作方法定义在Calculator接口中，而加、减、乘的具体实现代码在各自的方法中，并将这些实现作为参数传递给CalculatorTest类的operator()方法，最终返回操作结果。&lt;/p&gt;
 &lt;h2&gt;5、Lambda表达式的语法&lt;/h2&gt;
 &lt;h3&gt;5.1 Lambda表达式的语法结构&lt;/h3&gt;
@@ -628,58 +994,6 @@ User{username&lt;/span&gt;='西门吹雪', age=25&lt;span&gt;}
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/wuhenzhidu/p/lambda.html</dc:identifier>
-</item>
-<item>
-<title>云服务器内，nginx安装部署，Xshell，Xftp安装 - 梦里一米七八</title>
-<link>http://www.cnblogs.com/qq946487854/p/10714105.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/qq946487854/p/10714105.html</guid>
-<description>&lt;hr/&gt;&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;三丰云云服务器，安装nginx&lt;/li&gt;
-&lt;li&gt;nginx部署&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;p&gt;在宝塔面板，添加Nginx安装，一般进来会默认推荐安装几款软件，mysql等，暂时可以后面再装，先把nginx装上去，去感受将前端页面放到网址端口的feeling！&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1503301/201904/1503301-20190415232430407-1146395271.jpg&quot;/&gt;&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;nginx新增配置&lt;br/&gt;&lt;strong&gt;配置&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;hr/&gt;&lt;h3 id=&quot;配置代码域名暂时不用配注意的是root的路径一定要准确&quot;&gt;1. 配置代码（域名暂时不用配，注意的是root的路径一定要准确）&lt;/h3&gt;
-&lt;p&gt;如果是能进入nginx，但是404，那就是nginx路径没找到；&lt;br/&gt;如果是502，那就是木有开启nginx&lt;/p&gt;
-&lt;pre class=&quot;config&quot;&gt;
-&lt;code&gt; server {
-     listen       9999;
-#   server_name  test.com;
-    root  ..\first-test-vue\dist;
-    location ~ .*\.(gif|jpg|jpeg|png|bmp|swf|js|css)$ {
-        add_header Cache-Control no-store;
-    } 
-    error_page   500 502 503 504  /50x.html;
-    location = /50x.html {
-        root   html;
-        } 
-    }&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;hr/&gt;&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;Xshell安装&lt;/li&gt;
-&lt;li&gt;Xftp安装&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;h3 id=&quot;需要用到上次收到操作系统短信里的&quot;&gt;1. 需要用到上次收到操作系统短信里的&lt;/h3&gt;
-&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;操作系统密码&lt;/li&gt;
-&lt;li&gt;号码默认是root，ip是云服务器ip&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;h3 id=&quot;xftp文件传输&quot;&gt;2. Xftp文件传输&lt;/h3&gt;
-&lt;p&gt;直接找到本地项目路径，拖动到你想要放的操作系统路径里，然后稍微改动nginx路径。（我改的端口是9999）&lt;/p&gt;
-&lt;p&gt;然后，你在外网，搜索ip：9999（ip是你云服务器ip）&lt;br/&gt;就可以看到页面效果了&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;不过我写的确实是好水啊。。。。不喜勿喷，我也是纯当总结的，谢谢大佬们，还有我觉得博客园的markdown好像和作业部落的cmd markdown不是很像，应该是吧！&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-</description>
-<pubDate>Mon, 15 Apr 2019 15:25:00 +0000</pubDate>
-<dc:creator>梦里一米七八</dc:creator>
-<og:description>云服务器内，nginx安装部署，Xshell，Xftp安装</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/qq946487854/p/10714105.html</dc:identifier>
 </item>
 <item>
 <title>详解Java中的final关键字 - Heriam</title>
@@ -1680,82 +1994,6 @@ class B extends A
 <dc:identifier>http://www.cnblogs.com/magicxyx/p/10714072.html</dc:identifier>
 </item>
 <item>
-<title>给KVM添加新的磁盘 - Repetition_Maximum</title>
-<link>http://www.cnblogs.com/meizy/p/10714073.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/meizy/p/10714073.html</guid>
-<description>&lt;h2&gt;两种方案&lt;/h2&gt;
-&lt;h3&gt;1 添加虚拟磁盘文件&lt;/h3&gt;
-&lt;h3&gt;2 添加物理磁盘&lt;/h3&gt;
-&lt;h2&gt;硬件配置：&lt;/h2&gt;
-&lt;p&gt;物理主机（宿主机）：foundation&lt;/p&gt;
-&lt;p&gt;物理主机磁盘情况：&lt;/p&gt;
-&lt;p&gt;我们有三块物理磁盘，sda、sdb和sdc（这里都是SATA盘）。在给KVM添加物理硬盘前我们需要提前给物理硬盘分区。&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415230230437-731970923.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;KVM虚拟机：server&lt;/p&gt;
-&lt;p&gt;当前KVM虚拟机磁盘情况&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415230301642-784484884.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;h2&gt;需求：&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;1 /var/lib/libvirt/images/目录是我们KVM磁盘镜像集中管理的位置，我们需要在/var/lib/libvirt/images/下给server虚拟机创建名为server-vdc.qcow2的磁盘文件，大小为10G，作为server的sdc磁盘&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2 将物理主机foundation的物理磁盘/dev/sdb作为server的/dev/sda磁盘。如下&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415230420022-762180309.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h2&gt;1 添加虚拟磁盘文件的方式给KVM虚拟机添加磁盘&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;使用qemu-img create -f qcow2 /var/lib/libvirt/images/server-vdc.qcow2 10G创建磁盘文件&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;此处的虚拟磁盘文件位置在/var/lib/libvirt/images/下&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415230539927-256139470.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;然后我们使用virsh来加载磁盘&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;strong&gt;&amp;lt;disk type='file' device='disk'&amp;gt;&lt;/strong&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;driver name='qemu' type='qcow2' cache='none'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;source file='/var/lib/libvirt/images/server-vdc.qcow2'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;target dev='vdc' bus='virtio'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    &amp;lt;/disk&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415230631507-1904623901.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;然后保存并退出&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231022537-831297371.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h2&gt;2 添加物理磁盘到KVM虚拟机&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;直接使用virsh工具来添加&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt; &amp;lt;disk type='block' device='disk'&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;driver name='qemu' type='raw' cache='none' io='native'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;source dev='/dev/sdb1'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;target dev='sda' bus='sata'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;      &amp;lt;address type='drive' controller='0' bus='0' target='0' unit='0'/&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;    &amp;lt;/disk&amp;gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231112788-27397588.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;然后保存并退出&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231157007-1184885586.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h2&gt;验证&lt;/h2&gt;
-&lt;p&gt;&lt;strong&gt;重启虚拟机验证是否添加成功&lt;/strong&gt;&lt;/p&gt;
-&lt;h3&gt;列出server中的磁盘，我们能够明显看到多出了下面几个磁盘设备，暂时还没有分区。&lt;/h3&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231255567-473845308.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;贴一张server没有添加磁盘前的图好作对比&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231320717-1676250507.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;h3&gt;我们试着分别给/dev/sda和/dev/vdc磁盘设备创建分区&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;可以顺利创建分区，如下两图。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;给/dev/sda创建大小为10G的主分区&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231405397-1235472905.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;给/dev/vdc创建大小为10G的主分区&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231418077-1410187156.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;h3&gt;成功！&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;创建分区后我们再列出磁盘，可以看到如下的结果。到此我们给KVM成功添加了磁盘。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1599050/201904/1599050-20190415231625121-1400945858.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-
-&lt;p&gt;以上为个人的理解，如果有描述不当的地方还请大家指出，欢迎大家一起学习交流。&lt;/p&gt;
-
-</description>
-<pubDate>Mon, 15 Apr 2019 15:19:00 +0000</pubDate>
-<dc:creator>Repetition_Maximum</dc:creator>
-<og:description>给KVM添加新的磁盘 两种方案 1 添加虚拟磁盘文件 2 添加物理磁盘 硬件配置： 物理主机（宿主机）：foundation 物理主机磁盘情况： 我们有三块物理磁盘，sda、sdb和sdc（这里都是S</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/meizy/p/10714073.html</dc:identifier>
-</item>
-<item>
 <title>解决方案：如何防止数据重复插入？ - www.bysocket.com</title>
 <link>http://www.cnblogs.com/Alandre/p/10714048.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/Alandre/p/10714048.html</guid>
@@ -1844,56 +2082,6 @@ CONSTRAINT unique_sign_log UNIQUE (user_id,sign_id,sign_time)
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/Alandre/p/10714048.html</dc:identifier>
-</item>
-<item>
-<title>iOS面试题：你一般是如何优化你的APP的? - G_猿员</title>
-<link>http://www.cnblogs.com/zhuzi12345/p/10714046.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zhuzi12345/p/10714046.html</guid>
-<description>&lt;p&gt;一、首页启动速度&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;启动过程中做的事情越少越好（尽可能将多个接口合并）&lt;/li&gt;
-&lt;li&gt;不在UI线程上作耗时的操作（数据的处理在子线程进行，处理完通知主线程刷新）&lt;/li&gt;
-&lt;li&gt;在合适的时机开始后台任务（例如在用户指引节目就可以开始准备加载的数据）&lt;/li&gt;
-&lt;li&gt;尽量减小包的大小&lt;/li&gt;
-&lt;li&gt;优化方法：
-&lt;ul&gt;&lt;li&gt;量化启动时间&lt;/li&gt;
-&lt;li&gt;启动速度模块化&lt;/li&gt;
-&lt;li&gt;辅助工具（友盟，听云，Flurry）&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;二、页面浏览速度&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;json的处理（iOS 自带的NSJSONSerialization，Jsonkit，SBJson）&lt;/li&gt;
-&lt;li&gt;数据的分页（后端数据多的话，就要分页返回，例如网易新闻，或者 微博记录）&lt;/li&gt;
-&lt;li&gt;数据压缩（大数据也可以压缩返回，减少流量，加快反应速度）&lt;/li&gt;
-&lt;li&gt;内容缓存（例如网易新闻的最新新闻列表都是要缓存到本地，从本地加载，可以缓存到内存，或者数据库，根据情况而定）&lt;/li&gt;
-&lt;li&gt;延时加载tab（比如app有5个tab，可以先加载第一个要显示的tab，其他的在显示时候加载，按需加载）&lt;/li&gt;
-&lt;li&gt;算法的优化（核心算法的优化，例如有些app 有个 联系人姓名用汉语拼音的首字母排序）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;三、操作流畅度优化：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Tableview 优化（tableview cell的加载优化）&lt;/li&gt;
-&lt;li&gt;ViewController加载优化（不同view之间的跳转，可以提前准备好数据）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;四、数据库的优化：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;数据库设计上面的重构&lt;/li&gt;
-&lt;li&gt;查询语句的优化&lt;/li&gt;
-&lt;li&gt;分库分表（数据太多的时候，可以分不同的表或者库）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;五、服务器端和客户端的交互优化：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;客户端尽量减少请求&lt;/li&gt;
-&lt;li&gt;服务端尽量做多的逻辑处理&lt;/li&gt;
-&lt;li&gt;服务器端和客户端采取推拉结合的方式（可以利用一些同步机制）&lt;/li&gt;
-&lt;li&gt;通信协议的优化。（减少报文的大小）&lt;/li&gt;
-&lt;li&gt;电量使用优化（尽量不要使用后台运行）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;六、非技术性能优化&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;产品设计的逻辑性（产品的设计一定要符合逻辑，或者逻辑尽量简单，否则会让程序员抓狂，有时候用了好大力气，才可以完成一个小小的逻辑设计问题）&lt;/li&gt;
-&lt;li&gt;界面交互的规范（每个模块的界面的交互尽量统一，符合操作习惯）&lt;/li&gt;
-&lt;li&gt;代码规范（这个可以隐形带来app 性能的提高，比如 用if else 还是switch ，或者是用！还是 ＝＝）&lt;/li&gt;
-&lt;li&gt;code review（坚持code Review 持续重构代码。减少代码的逻辑复杂度）&lt;/li&gt;
-&lt;li&gt;日常交流（经常分享一些代码，或者逻辑处理中的坑）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;***&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;更多：&lt;a href=&quot;https://www.jianshu.com/p/c4ec36af8dad&quot; target=&quot;_blank&quot;&gt;iOS面试题大全&lt;/a&gt;（附答案）&lt;/strong&gt;&lt;/p&gt;
-</description>
-<pubDate>Mon, 15 Apr 2019 15:12:00 +0000</pubDate>
-<dc:creator>G_猿员</dc:creator>
-<og:description>一、首页启动速度 启动过程中做的事情越少越好（尽可能将多个接口合并） 不在UI线程上作耗时的操作（数据的处理在子线程进行，处理完通知主线程刷新） 在合适的时机开始后台任务（例如在用户指引节目就可以开始</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zhuzi12345/p/10714046.html</dc:identifier>
 </item>
 </channel>
 </rss>
