@@ -9,6 +9,880 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>JDK1.8-Java虚拟机运行时数据区域和HotSpot虚拟机的内存模型 - 炭烧生蚝</title>
+<link>http://www.cnblogs.com/tanshaoshenghao/p/10721256.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/tanshaoshenghao/p/10721256.html</guid>
+<description>&lt;ul&gt;&lt;li&gt;初学Java虚拟机几天, 被方法区, 永久代这些混杂的概念搞混了. 我觉得学习这部分知识应该把官方定义的虚拟机运行时数据区域和虚拟机内存结构分开叙述, 要不然容易误导.&lt;/li&gt;
+&lt;li&gt;本文先介绍官方文档规定的运行时数据区域, 然后以JDK1.8的HotSpot虚拟机为例, 介绍虚拟机的内存结构.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;ul&gt;&lt;li&gt;官方文档中规定的运行时数据区一共就几块: PC计数器, 虚拟机栈, 本地方法栈, 堆区, 方法区, 运行时常量池. 这里的官方规定是说, 如果你要做一个Java虚拟机的话, 必须要包含这几个区域, 但是这几个区域在你的虚拟机中是用哪块内存实现的, 这由虚拟机制作者决定.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;程序计数器&quot;&gt;程序计数器&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;The pc Register, 程序计数器. 如果了解过计算机系统, 对这个名词应该不陌生了, 它指向下一条指令的地址, 程序靠它跑起来.&lt;/li&gt;
+&lt;li&gt;Java虚拟机支持多线程, 每条线程都有自己的程序计数器.&lt;/li&gt;
+&lt;li&gt;如果当前线程正在执行一个Java方法, 它的计数器记录的是正在执行的Java虚拟机指令的地址. 如果执行的是本地方法(比如系统的C语言函数), 计数器中的值为空(Undefined).&lt;/li&gt;
+&lt;li&gt;正因为程序计数器记录的是指令地址, 所以它占用的空间较少, Java虚拟机规范中并没有规定这块内存有OutOfMemoryError(内存溢出)的情况.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&quot;java虚拟机栈&quot;&gt;Java虚拟机栈&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;Java Virtual Machine Stacks, Java虚拟机栈.&lt;/li&gt;
+&lt;li&gt;Java虚拟机栈是线程私有的, 生命周期与线程相同. 虚拟机栈存放栈帧, 栈帧用于存储局部变量表, 部分结果值, 方法的初始化参数和返回信息, 方法的执行通过栈帧的压栈和出栈实现.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;本地方法栈&quot;&gt;本地方法栈&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;本地方法栈和上面的虚拟机栈是相似的, 从名字也看出, 虚拟机方法栈是用来执行Java代码的, 而本地方法栈则是用来执行本地系统代码的, 比如C代码.&lt;/li&gt;
+&lt;li&gt;也因为规范中没有规定本地方法栈执行的代码, 如果想执行Java代码也是可以的, 我们可以看到Oracle官方的虚拟机HotSpot虚拟机把Java虚拟机栈和本地方法栈合二为一, 这么做避免了要为不同的语言设计栈, 提高了虚拟机的性能.&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;虚拟机栈和本地方法栈溢出&quot;&gt;虚拟机栈和本地方法栈溢出&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;那么当出现错误信息后, 我们在什么错误信息下可以去排查是否虚拟机栈和本地方法栈这两块内存出错呢? 这里以HotSpot虚拟机为例讲解(HotSpot把两块栈结构合在一起实现了), 在JDK1.8的虚拟机规范中对这两块栈空间可能出现的错误给出了相同的描述.&lt;/li&gt;
+&lt;li&gt;一: 如果一条线程所需要的内存大于虚拟机所分配给它的内存, 将抛出&lt;code&gt;StackOverflowError&lt;/code&gt;异常.&lt;/li&gt;
+&lt;li&gt;二: 如果栈内存可以扩展并尝试扩展时可用的内存不足, 或者创建新线程并为其分配栈内存时可能的内存不足, 会抛出&lt;code&gt;OutOfMemoryError&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;下面先演示第一个&lt;code&gt;StackOverflowError&lt;/code&gt;异常&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;//设置虚拟机参数 -Xss128k, 设置单个线程的栈空间大小为128k
+public class StackErrorTest1 {
+    private int stackLength = 1;
+
+    public void stackLeak(){
+         stackLength++;
+         stackLeak();
+    }
+
+    public static void main(String[] args) {
+        StackErrorTest1 set1 = new StackErrorTest1();
+        try{
+            set1.stackLeak();
+        }catch (Throwable e){
+            System.out.println(&quot;stack length:&quot; + set1.stackLength);
+            e.printStackTrace();
+        }
+    }
+}
+//输出异常信息
+stack length:1000
+java.lang.StackOverflowError
+    at jvm.StackErrorTest1.stackLeak(StackErrorTest1.java:7)
+    at jvm.StackErrorTest1.stackLeak(StackErrorTest1.java:8)
+    ...&lt;/code&gt;
+&lt;/pre&gt;
+&lt;ul&gt;&lt;li&gt;所以当遇到&lt;code&gt;StackOverflowError&lt;/code&gt;时可以考虑是否是是虚拟机的栈容量太小, 比如这里的无穷递归, 栈空间不够用. 当然生产环境中肯定不会写无穷递归, 这时可以通过设置-Xss参数调整单条线程的栈内存大小.&lt;/li&gt;
+&lt;li&gt;上面描述的栈内存可以扩展并尝试扩展时可用的内存不足导致出现&lt;code&gt;OutOfMemoryError&lt;/code&gt;的情况暂时没有好的演示代码, 在周志明的《深入理解Java虚拟机》中提到&quot;定义了大量本地变量,增大方法帧中本地变量表的长度, 结果仍抛出&lt;code&gt;StackOverflowError&lt;/code&gt;&quot;. 不知道是不是没有触发虚拟机动态扩充栈空间, 所以仍然判定是栈所需的空间超出了虚拟机规定的大小. 总结来说无论是栈帧太大还是栈空间太小都会抛出&lt;code&gt;StackOverflowError&lt;/code&gt;, 可以考虑调整-Xss参数.&lt;/li&gt;
+&lt;li&gt;上面还提到当创建新线程并分配新的栈空间时, 如果可用的内存不够, 会抛出&lt;code&gt;OutOfMemoryError&lt;/code&gt;异常, 下面是这种情况的代码演示.&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;public class StackErrorTest2 {
+
+    private void keepRunning(){
+        while(true){
+        }
+    }
+
+    public void stackLeakByThread(){
+        while(true){
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    keepRunning();
+                }
+            });
+            thread.start();
+        }
+    }
+
+    public static void main(String[] args){
+        StackErrorTest2 set2 = new StackErrorTest2();
+        set2.stackLeakByThread();
+    }
+}
+//运行结果, 来源《深入理解Java虚拟机》
+Exception in thread &quot;main&quot; java.lang.OutOfMemoryError: unable to create new native thread&lt;/code&gt;
+&lt;/pre&gt;
+&lt;ul&gt;&lt;li&gt;这段代码也来自深入理解jvm, 书中也说明跑这段代码要小心, 因为Java的线程是映射到内核线程上的, 果不其然我的机子一跑就死机了.&lt;/li&gt;
+&lt;li&gt;问什么会出现这样的错误? 32位Windows系统分配给一个进程的内存最大为2GB(32位能寻址4GB地址空间, 除去内核的空间剩2GB, 64位则大得多). 这2GB减去最大堆容量, 减去方法区的容量, 剩下的就是虚拟机栈和本地方法区栈的内存空间了. (补充: PC计数器占的空间很小, 运行时常量池在方法区中, HotSpot中虚拟机栈和本地方法栈一起实现, 所以能分成这么三大块内存).&lt;/li&gt;
+&lt;li&gt;了解了三大块内存区后(HotSpot下), 解决思路也出来了: 1. 减小最大堆内存, 腾出更多位置给栈空间. 2. 如果程序的线程数量不可以减少, 那么就看看是否可以减少每条线程的栈内存.&lt;/li&gt;
+&lt;li&gt;当然用一台配置高的机器, 该用64位的Java虚拟机也是一种方法.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;java堆&quot;&gt;Java堆&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;Java堆是随着虚拟机的启动而创建的, 用于存放对象实例, 所有的对象实例和数组都在堆内存分配, 它被所有线程共享. Java堆是Java虚拟机管理的内存中最大的一块, 也是垃圾回收器管理的主要区域. 从内存回收的角度看, Java堆内存还可以被继续划分, 并且和具体的虚拟机实现有关.&lt;/li&gt;
+&lt;li&gt;当前主流的虚拟机都是支持堆内存动态扩展的, 就是说当堆内存的大不够时, 它会扩充容量; 当不要太多的空间时, 它能自己进行压缩. 我们可以人为地通过-Xmx和-Xms设定堆内存的最大值和最小值(初始大小). 如果我们把-Xmx和-Xms设置为相同的值, 就等同于设定了固定大小的Java堆. (这是gc调优的一种手段)&lt;/li&gt;
+&lt;li&gt;若堆内存分配内存时发现已经没有更过可用空间时, 会抛出&lt;code&gt;OutOfMemoryError&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;演示堆内存溢出&quot;&gt;演示堆内存溢出&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;堆内存是存放对象实例的地方, 这个应该比较好理解, 直接上代码&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;/**
+ * VM Args: -Xms20m -Xmx20m
+ */
+public class HeapErrorTest {
+    static class Object{
+    }
+
+    public static void main(String[] args) {
+        List&amp;lt;Object&amp;gt; list = new ArrayList&amp;lt;&amp;gt;();
+        while(true){
+            list.add(new Object());
+        }
+    }
+}
+//运行结果
+Exception in thread &quot;main&quot; java.lang.OutOfMemoryError: Java heap space
+    at java.util.Arrays.copyOf(Arrays.java:3210)
+    at java.util.Arrays.copyOf(Arrays.java:3181)&lt;/code&gt;
+&lt;/pre&gt;
+&lt;ul&gt;&lt;li&gt;由结果可以看到当堆内存溢出后除了有&lt;code&gt;java.lang.OutOfMemoryError&lt;/code&gt;外, 还会提示&lt;code&gt;Java heap space&lt;/code&gt;. 在这个例子中, 我们明确地知道了是由于堆内存不够大而造成的溢出. 然而在生产环境中, 当系统报出堆内存溢出时, 我们首先要搞清楚是因为内存泄漏导致的内存溢出, 还是纯粹的内存溢出.&lt;/li&gt;
+&lt;li&gt;内存溢出指的是分配内存的时候, 没有足够的空间供其使用. 内存泄漏指的是在分配一块内存使用完后没有释放, 在Java中对应的场景是没有被垃圾回收器回收. 一点点的内存泄漏用户可能感受不到, 但是当泄漏的内存积少成多的时候, 会耗尽内存, 导致内存溢出.&lt;/li&gt;
+&lt;li&gt;有一些常用的分析内存溢出的手段和工具, 这里就不详细叙述了, 可以参考书籍或网上的资料. 当我们判断是内存泄漏导致的溢出后, 可以根据工具定位出现泄漏的代码位置; 如果不存在泄漏只是单纯的溢出的话, 可以通过设置虚拟参数调整堆内存大小(前提是机器的配置能够支持相应的内存大小), 或者看看代码中是否存在一些生命周期很长的对象实例, 看看能否作出修改.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;方法区&quot;&gt;方法区&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;方法区用于存储以被虚拟机加载的类信息, 常量, 静态变量, 即时编译器编译后的代码数据等, 它是所有线程共享的. 虚拟机规范中说方法区在逻辑上是堆的一部分, 但是它的别名叫&quot;non-Heap&quot;也就是非堆的意思, 表明它和堆内存是两块独立的内存. 至于说在逻辑上是堆区的一部分, 是因为在物理实现上, 方法区的内存地址包含于堆中, 所以说是逻辑上的一部分, 实际用的时候是完全不同的部分. 这么设计可能是因为便于垃圾收集器统一管理吧.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;运行时常量池&quot;&gt;运行时常量池&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;运行时常量池的内存由方法区分配, 也就是说它属于方法区的一部分. 它用于存储Class文件中的类版本, 字段, 方法, 接口和常量池等, 也用于存放编译期生成的各种字面量和符号引用.&lt;/li&gt;
+&lt;li&gt;运行时常量池区别于Class文件常量池的一个重要特征是具备动态特性. 也就说并非在Class文件中定义的常量才能进入运行时常量池, 在程序运行的过程中也有可能将新的常量放入池中.&lt;/li&gt;
+&lt;/ul&gt;&lt;h3 id=&quot;演示方法区溢出&quot;&gt;演示方法区溢出&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;演示方法区溢出和堆区的思路一样, 不断往方法堆中加入东西使其溢出. 只是方法区中保存的是类信息, 我们通过不断动态生成类演示&lt;/li&gt;
+&lt;li&gt;本代码示例来源于深入理解jvm, 但是其中的参数需要改变, 该书的最新版本是基于JDK1.7的, JDK1.7中方法区是在永久代中实现的, 而JDK1.8中已经没有永久代了, 方法区中Metaspace元数据区中, 通过设置&lt;code&gt;-XX:MetaspaceSize&lt;/code&gt;和&lt;code&gt;-XX:MaxMetaspaceSize&lt;/code&gt;来指定方法区的大小&lt;/li&gt;
+&lt;/ul&gt;&lt;pre&gt;
+&lt;code&gt;/**
+ * VM Args: -XX:MetaspaceSize=10m -XX:MaxMetaspaceSize=10m
+ */
+public class MethodAreaTest {
+
+    static class Object{
+    }
+
+    public static void main(String[] args) {
+        int count = 0;
+        while (true) {
+            Enhancer enhancer = new Enhancer();
+            enhancer.setSuperclass(Object.class);
+            enhancer.setUseCache(false);
+            enhancer.setCallback(new MethodInterceptor() {
+                @Override
+                public java.lang.Object intercept(java.lang.Object o, Method method, java.lang.Object[] objects, MethodProxy methodProxy) throws Throwable {
+                    return methodProxy.invokeSuper(objects, objects);
+                }
+            });
+            enhancer.create();
+            System.out.println(++count);
+        }
+    }
+}
+
+运行结果:
+Caused by: java.lang.OutOfMemoryError: Metaspace
+    at java.lang.ClassLoader.defineClass1(Native Method)
+    at java.lang.ClassLoader.defineClass(ClassLoader.java:763)
+    ... 8 more&lt;/code&gt;
+&lt;/pre&gt;
+
+
+&lt;ul&gt;&lt;li&gt;在介绍完Java虚拟机运行时数据区域后, 接着以HotSpot虚拟机为例介绍虚拟机内存模型.&lt;/li&gt;
+&lt;li&gt;首先有一个&lt;strong&gt;重要的概念&lt;/strong&gt;要搞清楚, 要不然容易犯晕.&lt;/li&gt;
+&lt;li&gt;在前面介绍Java运行时数据区域时我们谈到PC计数器, 虚拟机栈, 本地方法栈这3块内存都是线程私有的, 它们的随线程的创建而分配, 随线程的结束而释放, 也就是说Java虚拟机是明确知道这三块内存是什么时候该被回收的, 只要线程没执行完就不能回收, 否则线程跑不起来.&lt;/li&gt;
+&lt;li&gt;而我们在谈论虚拟机的内存模型时, 通常要和垃圾回收结合在一起讨论. 既然上面的三块内存回收的时间已定, 暂时不需要过多考虑, 虚拟机分配内存时给它们留有空间就行.&lt;/li&gt;
+&lt;li&gt;但另外的两块内存堆内存和方法区则不一样, 它们是所有线程共享的, 在这里面内存的分配和释放具有不确定性. 比如说在多态的情况下, 一个接口对应的实现类不同, 具体的实现方法也不同, 虚拟机只有在程序运行的过程中才知道要创建哪些对象, 这部分内存的分配和释放都是动态的, 垃圾收集器关注的也是这部分的内容.&lt;/li&gt;
+&lt;li&gt;所以说我们后续描述的虚拟机内存模型是建立在Java堆内存和方法区上的.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;jvm实现的堆内存和方法区&quot;&gt;JVM实现的堆内存和方法区&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;正如上述所说, 当谈论JVM的内存结构时, 讨论的重点就由整个运行时数据区域转为对堆内存和方法区的讨论, 因为这两部分是垃圾回收的重点区域(如果两者要比较的话, 重点收集区域是堆区).&lt;/li&gt;
+&lt;li&gt;而HotSpot虚拟机的内存结构由三大部分组成: 新生代, 老年代和元数据区(JDK1.7及以前叫老年代). 其中新生代和老年代是虚拟机规范中Java堆内存的实现, 元数据区是规范中方法区的实现. 在讲述为什么这么定义之前, 先明确这个关系对于理解概念是很重要的, 下面有幅图帮助理解.&lt;/li&gt;
+&lt;/ul&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/tanshaoshenghao/1426602/o_jvm3.png&quot;/&gt;&lt;ul&gt;&lt;li&gt;这里有个小失误, 题目中明明讲的是JDK1.8, 为什么还提永久代呢? 由于永久代存在的时间长, 永久代的说法经过这么多年可能已经深入人心, 所以先并列讲, 要知道永久代和元数据区是有本质的差别的, 这留到后面讲, 先认清概念.&lt;/li&gt;
+&lt;li&gt;希望图片加描述能够帮助你立即规范定义的数据区域和JVM内存结构之间的关系. 下面将对HotSpot虚拟机的内存模型做进一步分析.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;新生代和老年代.&quot;&gt;新生代和老年代.&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;Java堆内存被实现为新生代和老年代, 是为了更方便地进行垃圾回收. 我们知道对象是存储在堆内存中的, 从字面上理解新生代就是新创建的对象区域, 老年代就是使用多次生命周期长的对象区域. 新生代对象生命周期通常较短, 很多用完即可以释放; 老年代对象的生命周期较长, 可能在整个程序的运行过程中都是有用的.&lt;/li&gt;
+&lt;li&gt;由于新对象和老对象具有不同的性质, 为对这两种对象设计的垃圾回收算法也不同, 所以要把它们分开.&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;新生代中的内存划分&quot;&gt;新生代中的内存划分&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;新生代的内存被分为一个Eden区和两个Survivor区. 为了讲述为什么要这么分, 需简单引入垃圾回收算法.&lt;/li&gt;
+&lt;li&gt;首先最基础, 最简单的垃圾回收算法叫标记-清除算法. 算法流程和算法名完全一致: 首先标记出哪些是可以回收的对象, 标记完后把对象清除. 如果按照这么个流程, 新生代应该就是一块简单的内存就行, 现实结论告诉我们这个算法是可以优化的.&lt;/li&gt;
+&lt;li&gt;标记清除算法的不足在于一块完整的内存在经过标记-清除算法后有些内存会被释放掉, 这时会造成内存空间不连续, 可能不能够存放一些较大的对象.&lt;/li&gt;
+&lt;li&gt;标记-清除算法的升级版是复制算法, 它在标记-清除的思路上作出了些改变. 首先将内存分为两块, 当创建新对象分配内存的时候只用两块中的一块A. 当进行垃圾回收的时候只对有对象的一块A内存使用标记-清除算法进行回收, 回收后剩余的存活对象从内存A移到另一块空的内存B中, 这样A内存重新变为空内存, 继续重复此分配回收过程. 这个算法似乎更好一些, 但是也只是两块内存, 说明还不是现实中的最优解.&lt;/li&gt;
+&lt;li&gt;考虑新的算法, 把内存分配成均等两块, 等同于能够使用的内存变为原来的二分之一了, 根据IBM专门部分研究新生代中百分之98%的对象都是&quot;朝生夕死&quot;的, 也就是说在进行垃圾回收时98%的对象都被回收掉, 只有2%会从A内存移动到B内存. 这么一想我们把两块内存割为相同的两块是不是有点太亏了?&lt;/li&gt;
+&lt;li&gt;下面揭晓答案: HotSpot虚拟机回收虚拟机时使用的是复制算法, 但是它分成三块内存, 一个占80%内存的Eden区(堆内存), 两个分别占10%的Survivor区. 具体操作是这样的: 程序运行时, 用Eden区和一个Survivor区A存放新创建的对象. 当发生垃圾回收时, 把存活下来的对象(很少)复制到另一块Survivor区B中, 使得Eden区和Survivor区A重新为空, 然后继续重复这个分配回收的过程.&lt;/li&gt;
+&lt;li&gt;所以说详细点的Jvm的内存模型是下面这样的&lt;/li&gt;
+&lt;/ul&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/tanshaoshenghao/1426602/o_jvm4.png&quot;/&gt;&lt;h2 id=&quot;由jdk1.7及以前的永久代到jdk1.8的元数据区&quot;&gt;由JDK1.7及以前的永久代到JDK1.8的元数据区&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;搞定完堆区在JVM内存模型中的实现, 下面谈论方法区的实现.&lt;/li&gt;
+&lt;li&gt;在JDK1.7及以前, JVM使用永久代来实现方法区. 这里用&quot;实现&quot;二字是经过斟酌的, 因为永久代并不等同于方法区. 从名字也可以看出它和新生代, 老年代是一脉相承的, 逻辑上是一体的, 命名为永久代是因为这部分内存很少几乎不被回收. 这一很少几乎不被回收的特性正好对应方法区中存储的类信息, 常量, 静态变量等元素. 所以说用永久代来实现方法区.&lt;/li&gt;
+&lt;li&gt;但是用永久代来实现方法区并不是最优解, 比如容易出现内存溢出问题(具体分析去除永久代, 改用Metaspace的原因可以参考文章末尾所列出的资料). 在JDK1.8中JVM改为使用元数据区来实现方法区.&lt;/li&gt;
+&lt;li&gt;元数据区和永久代有着本质的区别, 永久代属于虚拟机内存的一部分, 也就是说当在操作系统中启动虚拟机进程时为它分配了一块内存, 而虚拟机为永久代分配内存时用的是它自己分配得的内存.&lt;/li&gt;
+&lt;li&gt;而元数据区Metaspace是直接在本地内存(Native Memory)中申请的, 这样元数据区的大小(方法区大小)只会受本地内存大小限制, 和虚拟机进程所分得内存无关.&lt;/li&gt;
+&lt;li&gt;所以最后JVM内存模型图的终极版应该是这样子&lt;/li&gt;
+&lt;/ul&gt;&lt;img src=&quot;https://www.cnblogs.com/images/cnblogs_com/tanshaoshenghao/1426602/o_jvm.png&quot;/&gt;&lt;ul&gt;&lt;li&gt;到此为止, 本篇结束, 希望对你有帮助.&lt;/li&gt;
+&lt;/ul&gt;
+</description>
+<pubDate>Tue, 16 Apr 2019 23:42:00 +0000</pubDate>
+<dc:creator>炭烧生蚝</dc:creator>
+<og:description>[TOC] 介绍 初学Java虚拟机几天, 被方法区, 永久代这些混杂的概念搞混了. 我觉得学习这部分知识应该把官方定义的虚拟机运行时数据区域和虚拟机内存结构分开叙述, 要不然容易误导. 本文先介绍官</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/tanshaoshenghao/p/10721256.html</dc:identifier>
+</item>
+<item>
+<title>TiDB show processlist命令源码分析 - mantu</title>
+<link>http://www.cnblogs.com/mantu/p/10721122.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/mantu/p/10721122.html</guid>
+<description>&lt;p data-source-line=&quot;2&quot;&gt;因为丰巢自去年年底开始在推送平台上尝试了TiDB，最近又要将承接丰巢所有交易的支付平台切到TiDB上。我本人一直没有抽出时间对TiDB的源码进行学习，最近准备开始一系列的学习和分享。由于我本人没有数据库相关的经验，本着学习的心态和大家一起探讨，欢迎高手随时指正。总结一下本次学习分享的目的：&lt;/p&gt;
+&lt;ul data-source-line=&quot;3&quot;&gt;&lt;li&gt;丰巢把最重要的两个基础业务都放到了TiDB上，后续应该会有更多的核心系统跑在TiDB上，我们丰巢中间件团队作为引入TiDB到丰巢的推动人和执行者，对于TiDB的稳定性和突发事件的处理，一定要做足功课；&lt;/li&gt;
+&lt;li&gt;以TiDB为代表的newsql代表的是现在和未来，作为个人来说，有着充足的动力去学习；&lt;/li&gt;
+&lt;li&gt;我们不满足于只是作为TiDB的使用者，我们需要在TiDB上定制开发对于丰巢更有意义的模块，如果能给社区做贡献，那更是非常棒的一件事；&lt;/li&gt;
+&lt;/ul&gt;&lt;p data-source-line=&quot;7&quot;&gt;言归正传，说一下本文的产生原因：去年我们在推送平台上使用TiDB的过程中，就发现老版本的TiDB是无法通过外部手段kill调用慢查询的，而慢查询的危害对于数据库来说会有致命的风险，后来pingcap公司在2.1版本(具体的版本参见TiDB的说明)中增加了show processlist和kill tidb命令，但是因为TiDB本身是无状态的，这两个命令属于单机命令，在使用的过程中，大家还是要提前做好准备，要直连到具体的TiDB的server上才可使用，不要通过nginx等服务进行转发请求，到时不但不能解决问题，还有可能带来意外的风险。今天第一章，我们先来看一下show processlist这个比较简单的命令的源码，下一章，我们再分析kill tidb这个命令。&lt;/p&gt;
+
+&lt;h2 id=&quot;环境信息&quot; data-source-line=&quot;9&quot;&gt;环境信息&lt;/h2&gt;
+&lt;ul data-source-line=&quot;10&quot;&gt;&lt;li&gt;软件：TiDB2.1.7、PD2.1.4、TiKV2.1.4；&lt;/li&gt;
+&lt;li&gt;硬件：为了随时调试，TiDB跑在本机的mac上、PD和TiKV跑在linux虚拟机上；&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;操作过程&quot; data-source-line=&quot;12&quot;&gt;操作过程&lt;/h2&gt;
+&lt;ul data-source-line=&quot;13&quot;&gt;&lt;li&gt;打开一个直连TiDB的客户端，输入命令：show PROCESSLIST；&lt;/li&gt;
+&lt;li&gt;客户端会输出下图的列表；&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1003073/201904/1003073-20190417003547932-2079178319.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p data-source-line=&quot;16&quot;&gt;上面的列表中展示了当前TiDB正在处理每个连接的sql语句详情。&lt;/p&gt;
+&lt;h2 id=&quot;问题&quot; data-source-line=&quot;17&quot;&gt;问题&lt;/h2&gt;
+&lt;p data-source-line=&quot;18&quot;&gt;在我分析源码之前，我问了自己本次分析源码要搞清楚的两个问题，在这里和大家分享一下：&lt;/p&gt;
+&lt;ul data-source-line=&quot;19&quot;&gt;&lt;li&gt;show processlist到底是不是单机的命令，和TiKV、PD有没有啥关系？&lt;/li&gt;
+&lt;li&gt;kill tidb需要使用的id字段到底代表的是什么？&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;接收命令&quot; data-source-line=&quot;21&quot;&gt;接收命令&lt;/h2&gt;
+&lt;p data-source-line=&quot;22&quot;&gt;首先，启动TiDB server.代码在tidb-server/main.go里面，主要方法是：runServer方法&lt;/p&gt;
+&lt;pre data-source-line=&quot;23&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-selector-tag&quot;&gt;func &lt;span class=&quot;hljs-selector-tag&quot;&gt;runServer() {
+        &lt;span class=&quot;hljs-attribute&quot;&gt;err := svr.&lt;span class=&quot;hljs-built_in&quot;&gt;Run()
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;28&quot;&gt;再来看一下：server/server.go源码：&lt;/p&gt;
+&lt;pre data-source-line=&quot;29&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(s *Server) &lt;span class=&quot;hljs-title&quot;&gt;Run&lt;span class=&quot;hljs-params&quot;&gt;() &lt;span class=&quot;hljs-title&quot;&gt;error {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for {
+                conn, err := s.listener.Accept()
+                &lt;span class=&quot;hljs-keyword&quot;&gt;go s.onConn(conn)
+        }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;37&quot;&gt;重点代码是监听端口，并创建连接，启动另一协程去服务新来的连接，接下来再看看server.go中的onConn方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;38&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-selector-tag&quot;&gt;func (&lt;span class=&quot;hljs-selector-tag&quot;&gt;s *&lt;span class=&quot;hljs-selector-tag&quot;&gt;Server) &lt;span class=&quot;hljs-selector-tag&quot;&gt;onConn(&lt;span class=&quot;hljs-selector-tag&quot;&gt;c &lt;span class=&quot;hljs-selector-tag&quot;&gt;net&lt;span class=&quot;hljs-selector-class&quot;&gt;.Conn) {
+        &lt;span class=&quot;hljs-attribute&quot;&gt;conn := s.&lt;span class=&quot;hljs-built_in&quot;&gt;newConn(c)
+        conn.&lt;span class=&quot;hljs-built_in&quot;&gt;Run()
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;44&quot;&gt;其中，s.newConn方法会将net. Conn连接包装成clientConn连接，并分配在这个TiDB server下唯一的connectionID，此connectionID为原子变量，每次新连接自增加1，我们先记住这个id，后面分析的时候会用到它。我们来看看server/conn.go下的Run方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;46&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(cc *clientConn) &lt;span class=&quot;hljs-title&quot;&gt;Run&lt;span class=&quot;hljs-params&quot;&gt;() {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for {
+                data, err := cc.readPacket()
+                cc.dispatch(data) 
+        }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;54&quot;&gt;Run方法主要就是不断的轮训读取clientConn中的内容，并将它交给dispatch方法进行下面的分析及返回结果操作，至此关于接收show processlist命令部分已经分析完毕，当然其它的sql语句也是经过这个过程进入到dispatch方法中的。&lt;/p&gt;
+&lt;h2 id=&quot;show-processlist的构建executor&quot; data-source-line=&quot;55&quot;&gt;show processlist的构建Executor&lt;/h2&gt;
+&lt;p data-source-line=&quot;56&quot;&gt;接着分析dispatch方法在处理show processlist命令的流程：&lt;/p&gt;
+&lt;pre data-source-line=&quot;57&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(cc *clientConn) &lt;span class=&quot;hljs-title&quot;&gt;dispatch&lt;span class=&quot;hljs-params&quot;&gt;(data []byte) &lt;span class=&quot;hljs-title&quot;&gt;error {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;switch cmd {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;case mysql.ComQuery: 
+                &lt;span class=&quot;hljs-keyword&quot;&gt;return cc.handleQuery(ctx1, hack.&lt;span class=&quot;hljs-built_in&quot;&gt;String(data))
+        }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;65&quot;&gt;show processlist命令属于mysql.ComQuery，因此流程会走到handleQuery方法里面，我们来看一下：&lt;/p&gt;
+&lt;pre data-source-line=&quot;66&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(cc *clientConn) &lt;span class=&quot;hljs-title&quot;&gt;handleQuery&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context, sql &lt;span class=&quot;hljs-keyword&quot;&gt;string) &lt;span class=&quot;hljs-params&quot;&gt;(err error) {
+        rs, err := cc.ctx.Execute(ctx, sql)
+        err = cc.writeResultset(ctx, rs[&lt;span class=&quot;hljs-number&quot;&gt;0], &lt;span class=&quot;hljs-literal&quot;&gt;false, &lt;span class=&quot;hljs-number&quot;&gt;0, &lt;span class=&quot;hljs-number&quot;&gt;0)
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;72&quot;&gt;handleQuery中处理show processlist命令的重点代码就是上面的两行，我们先来看一下server/driver_tidb.go中的Execute方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;73&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;rsList, err := tc&lt;span class=&quot;hljs-selector-class&quot;&gt;.session&lt;span class=&quot;hljs-selector-class&quot;&gt;.Execute(ctx, sql)
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;76&quot;&gt;Execute中的重点就是调用session/session.go中的Execute方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;77&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(s *session) &lt;span class=&quot;hljs-title&quot;&gt;execute&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context, sql &lt;span class=&quot;hljs-keyword&quot;&gt;string) &lt;span class=&quot;hljs-params&quot;&gt;(recordSets []sqlexec.RecordSet, err error) {
+        s.PrepareTxnCtx(ctx)
+        stmtNodes, warns, err := s.ParseSQL(ctx, sql, charsetInfo, collation)
+        compiler := executor.Compiler{Ctx: s}
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for _, stmtNode := &lt;span class=&quot;hljs-keyword&quot;&gt;range stmtNodes {
+                recordSets, err = s.executeStatement(ctx, connID, stmtNode, stmt, recordSets); 
+        }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;87&quot;&gt;上面的execute方法中会对sql语句进行处理及制定执行计划，处理完成后调用executeStatement方法，executeStatement中的重点方法是runStmt：&lt;/p&gt;
+&lt;pre data-source-line=&quot;88&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-symbol&quot;&gt;recordSet, err := runStmt(ctx, s, &lt;span class=&quot;hljs-keyword&quot;&gt;stmt)
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;91&quot;&gt;我们再来看看session/tidb.go中的runStmt方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;92&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;func runStmt(ctx context&lt;span class=&quot;hljs-selector-class&quot;&gt;.Context, sctx sessionctx&lt;span class=&quot;hljs-selector-class&quot;&gt;.Context, s sqlexec.Statement) (sqlexec&lt;span class=&quot;hljs-selector-class&quot;&gt;.RecordSet, error) {
+        rs, err = s.Exec(ctx)
+        err = finishStmt(ctx, sctx, se, sessVars, err)
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;98&quot;&gt;继续来分析executor/adapter中的(a *ExecStmt) Exec方法，一样采取划重点的方式：&lt;/p&gt;
+&lt;pre data-source-line=&quot;99&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(a *ExecStmt) &lt;span class=&quot;hljs-title&quot;&gt;Exec&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context) &lt;span class=&quot;hljs-params&quot;&gt;(sqlexec.RecordSet, error) {
+    e, err := a.buildExecutor(sctx)
+    e.Open(ctx)
+        &lt;span class=&quot;hljs-keyword&quot;&gt;var pi processinfoSetter
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if raw, ok := sctx.(processinfoSetter); ok {
+                pi = raw
+                sql := a.OriginText()
+                &lt;span class=&quot;hljs-keyword&quot;&gt;if simple, ok := a.Plan.(*plannercore.Simple); ok &amp;amp;&amp;amp; simple.Statement != &lt;span class=&quot;hljs-literal&quot;&gt;nil {
+                        &lt;span class=&quot;hljs-keyword&quot;&gt;if ss, ok := simple.Statement.(ast.SensitiveStmtNode); ok {
+                                &lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;127&quot;&gt;(a *ExecStmt) Exec方法中raw, ok := sctx.(processinfoSetter)这段逻辑就是把当前连接正在执行的语句存储到processinfo里面取，关于这部分细节比较简单，在这里不展开来分析。我们先来看看buildExecutor中做了什么事情？&lt;/p&gt;
+&lt;pre data-source-line=&quot;128&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt; &lt;span class=&quot;hljs-selector-tag&quot;&gt;b := newExecutorBuilder(ctx, &lt;span class=&quot;hljs-selector-tag&quot;&gt;a.InfoSchema)
+        e := &lt;span class=&quot;hljs-selector-tag&quot;&gt;b.build(&lt;span class=&quot;hljs-selector-tag&quot;&gt;a.Plan)
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;132&quot;&gt;重点要来了，在executor/builder.go中的build方法做了啥事？&lt;/p&gt;
+&lt;pre data-source-line=&quot;133&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt; case *plannercore&lt;span class=&quot;hljs-selector-class&quot;&gt;.Show:
+                return &lt;span class=&quot;hljs-selector-tag&quot;&gt;b.buildShow(v)
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;137&quot;&gt;build方法会根据不同的语句类型来构建不同的Executor并返回，show processlist命令会匹配到plannercore.Show类型，我们看看buildShow方法的实现：&lt;/p&gt;
+&lt;pre data-source-line=&quot;138&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt; e := &amp;amp;ShowExec{
+                baseExecutor: newBaseExecutor(&lt;span class=&quot;hljs-selector-tag&quot;&gt;b&lt;span class=&quot;hljs-selector-class&quot;&gt;.ctx, v.Schema(), v.ExplainID()),
+                Tp:           v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Tp,
+                DBName:       model.NewCIStr(v.DBName),
+                Table:        v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Table,
+                Column:       v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Column,
+                User:         v&lt;span class=&quot;hljs-selector-class&quot;&gt;.User,
+                Flag:         v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Flag,
+                Full:         v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Full,
+                GlobalScope:  v&lt;span class=&quot;hljs-selector-class&quot;&gt;.GlobalScope,
+                is:           &lt;span class=&quot;hljs-selector-tag&quot;&gt;b&lt;span class=&quot;hljs-selector-class&quot;&gt;.is,
+        }
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if len(v.Conditions) == &lt;span class=&quot;hljs-number&quot;&gt;0 {
+                return e
+        }
+        sel := &amp;amp;SelectionExec{
+                baseExecutor: newBaseExecutor(&lt;span class=&quot;hljs-selector-tag&quot;&gt;b&lt;span class=&quot;hljs-selector-class&quot;&gt;.ctx, v.Schema(), v.ExplainID(), e),
+                filters:      v&lt;span class=&quot;hljs-selector-class&quot;&gt;.Conditions,
+        }
+        return sel
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;160&quot;&gt;因为v.Conditions为0，所以返回类型为ShowExec的Executor，我们接下来再刚才的Exec方法中的e.Open方法，其实就是ShowExec的Open方法,ShowExec位于executor/show.go文件中，我们查找后发现ShowExec中没有Open方法，我当时是被搞蒙了，后来发现这是go的一个语言特性，它使用的是baseExecutor的Open方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;161&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(e *baseExecutor) &lt;span class=&quot;hljs-title&quot;&gt;Open&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context) &lt;span class=&quot;hljs-title&quot;&gt;error {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for _, child := &lt;span class=&quot;hljs-keyword&quot;&gt;range e.children {
+                err := child.Open(ctx)
+                &lt;span class=&quot;hljs-keyword&quot;&gt;if err != &lt;span class=&quot;hljs-literal&quot;&gt;nil {
+                        &lt;span class=&quot;hljs-keyword&quot;&gt;return errors.Trace(err)
+                }
+        }
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return &lt;span class=&quot;hljs-literal&quot;&gt;nil
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;172&quot;&gt;上面的方法会遍历baseExecutor中的children的Executor，然后调用它们的Open方法，但是因为ShowExec在创建它的baseExecutor的时候，没有任何的children，所以在show processlist这个操作过程中，Open方法相当于啥也没干，但是大家在分析其它语句时，这个Open方法是一个很重要的方法。我们再来看刚才Exec中的最后的return块里面，返回了包装executor、processinfo等信息的recordSet类型。至此关于show processlist命令如何包装成Executor并和processinfo等信息作为recordSet类型的返回值返回给上层函数分析完毕。&lt;/p&gt;
+&lt;h2 id=&quot;show-processlist的获取各个连接的processinfo信息&quot; data-source-line=&quot;173&quot;&gt;show processlist的获取各个连接的processinfo信息&lt;/h2&gt;
+&lt;p data-source-line=&quot;174&quot;&gt;接下来我们再来看handleQuery中的writeResultset方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;175&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-attr&quot;&gt;err = cc.writeResultset(ctx, rs[&lt;span class=&quot;hljs-number&quot;&gt;0], &lt;span class=&quot;hljs-literal&quot;&gt;false, &lt;span class=&quot;hljs-number&quot;&gt;0, &lt;span class=&quot;hljs-number&quot;&gt;0)
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;178&quot;&gt;在server/conn.go中的writeResultset主要的逻辑就是下面的逻辑：&lt;/p&gt;
+&lt;pre data-source-line=&quot;179&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-attr&quot;&gt;err = cc.writeChunks(ctx, rs, binary, serverStatus)
+&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;182&quot;&gt;我们继续来分析writeChunks中的重要部分:&lt;/p&gt;
+&lt;pre data-source-line=&quot;183&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(cc *clientConn) &lt;span class=&quot;hljs-title&quot;&gt;writeChunks&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context, rs ResultSet, binary &lt;span class=&quot;hljs-keyword&quot;&gt;bool, serverStatus &lt;span class=&quot;hljs-keyword&quot;&gt;uint16) &lt;span class=&quot;hljs-title&quot;&gt;error {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for {
+                err := rs.Next(ctx, chk)
+        }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;190&quot;&gt;writeChunks里面主要就是循环调用rs.Next的方法，直到满足条件为止，rs的类型实际上是server/driver_tidb.go下的tidbResultSet类型，我们来看一下它的Next方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;191&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(trs *tidbResultSet) &lt;span class=&quot;hljs-title&quot;&gt;Next&lt;span class=&quot;hljs-params&quot;&gt;(ctx context.Context, chk *chunk.Chunk) &lt;span class=&quot;hljs-title&quot;&gt;error {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return trs.recordSet.&lt;span class=&quot;hljs-keyword&quot;&gt;Next(ctx, chk)
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;196&quot;&gt;tidbResultSet的Next方法主要是调用了executor/adapter.go中的recordSet类型的Next方法，我们来看看这个Next方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;197&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-selector-tag&quot;&gt;func (&lt;span class=&quot;hljs-selector-tag&quot;&gt;a *&lt;span class=&quot;hljs-selector-tag&quot;&gt;recordSet) &lt;span class=&quot;hljs-selector-tag&quot;&gt;Next(&lt;span class=&quot;hljs-selector-tag&quot;&gt;ctx &lt;span class=&quot;hljs-selector-tag&quot;&gt;context&lt;span class=&quot;hljs-selector-class&quot;&gt;.Context, &lt;span class=&quot;hljs-selector-tag&quot;&gt;chk *&lt;span class=&quot;hljs-selector-tag&quot;&gt;chunk&lt;span class=&quot;hljs-selector-class&quot;&gt;.Chunk) &lt;span class=&quot;hljs-selector-tag&quot;&gt;error {
+        &lt;span class=&quot;hljs-attribute&quot;&gt;err := a.executor.&lt;span class=&quot;hljs-built_in&quot;&gt;Next(ctx, chk)
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;202&quot;&gt;recordSet方法的重点就是调用它的executor的Next方法，我们在上一个小节 结尾处分析出recordSet的executor就是之前生成的ShowExec(可算是找到它了，我已经累晕)。那么，我们接着分析它的Next方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;203&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-selector-tag&quot;&gt;e&lt;span class=&quot;hljs-selector-class&quot;&gt;.fetchAll()
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;206&quot;&gt;ShowExec中的Next方法的主要逻辑就是调用它的fetchAll方法，接着往下看：&lt;/p&gt;
+&lt;pre data-source-line=&quot;207&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;case ast.&lt;span class=&quot;hljs-string&quot;&gt;ShowProcessList:
+                &lt;span class=&quot;hljs-keyword&quot;&gt;return e.fetchShowProcessList()
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;211&quot;&gt;因为匹配到了这个case，所以会调用它的fetchShowProcessList方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;212&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-selector-tag&quot;&gt;func (&lt;span class=&quot;hljs-selector-tag&quot;&gt;e *&lt;span class=&quot;hljs-selector-tag&quot;&gt;ShowExec) &lt;span class=&quot;hljs-selector-tag&quot;&gt;fetchShowProcessList() &lt;span class=&quot;hljs-selector-tag&quot;&gt;error {
+        &lt;span class=&quot;hljs-attribute&quot;&gt;sm := e.ctx.&lt;span class=&quot;hljs-built_in&quot;&gt;GetSessionManager()
+        pl := sm.&lt;span class=&quot;hljs-built_in&quot;&gt;ShowProcessList()
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;218&quot;&gt;上面的sm类型的server/server.go中的Server类型，我们来看看它的ShowProcessList方法：&lt;/p&gt;
+&lt;pre data-source-line=&quot;219&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;func (s *Server) ShowProcessList() map[uint64]util&lt;span class=&quot;hljs-selector-class&quot;&gt;.ProcessInfo {
+        s&lt;span class=&quot;hljs-selector-class&quot;&gt;.rwlock&lt;span class=&quot;hljs-selector-class&quot;&gt;.RLock()
+        rs := make(map[uint64]util&lt;span class=&quot;hljs-selector-class&quot;&gt;.ProcessInfo, len(s.clients))
+        &lt;span class=&quot;hljs-keyword&quot;&gt;for _, client := range s&lt;span class=&quot;hljs-selector-class&quot;&gt;.clients {
+                &lt;span class=&quot;hljs-keyword&quot;&gt;if atomic.LoadInt32(&amp;amp;client.status) == connStatusWaitShutdown {
+                        continue
+                }
+                pi := client&lt;span class=&quot;hljs-selector-class&quot;&gt;.ctx&lt;span class=&quot;hljs-selector-class&quot;&gt;.ShowProcess()
+                rs[pi.ID] = pi
+        }
+        s&lt;span class=&quot;hljs-selector-class&quot;&gt;.rwlock&lt;span class=&quot;hljs-selector-class&quot;&gt;.RUnlock()
+        return rs
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;234&quot;&gt;它主要是遍历当前所有的客户端，并获取到所有客户端的ShowProcess，其中的client.ctx类型为server.TiDBContext，我们来看看它的ShowProcess:&lt;/p&gt;
+&lt;pre data-source-line=&quot;235&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;func &lt;span class=&quot;hljs-params&quot;&gt;(tc *TiDBContext) &lt;span class=&quot;hljs-title&quot;&gt;ShowProcess&lt;span class=&quot;hljs-params&quot;&gt;() &lt;span class=&quot;hljs-title&quot;&gt;util.&lt;span class=&quot;hljs-title&quot;&gt;ProcessInfo {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return tc.session.ShowProcess()
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;240&quot;&gt;逻辑比较简单，就是调用类型为session.session的ShowProcess方法，接着往下看：&lt;/p&gt;
+&lt;pre data-source-line=&quot;241&quot;&gt;
+&lt;code class=&quot;hljs&quot;&gt;func (s *session) ShowProcess() util&lt;span class=&quot;hljs-selector-class&quot;&gt;.ProcessInfo {
+        &lt;span class=&quot;hljs-selector-tag&quot;&gt;var pi util&lt;span class=&quot;hljs-selector-class&quot;&gt;.ProcessInfo
+        tmp := s&lt;span class=&quot;hljs-selector-class&quot;&gt;.processInfo&lt;span class=&quot;hljs-selector-class&quot;&gt;.Load()
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if tmp != nil {
+                pi = tmp.(util.ProcessInfo)
+                pi&lt;span class=&quot;hljs-selector-class&quot;&gt;.Mem = s.GetSessionVars()&lt;span class=&quot;hljs-selector-class&quot;&gt;.StmtCtx&lt;span class=&quot;hljs-selector-class&quot;&gt;.MemTracker&lt;span class=&quot;hljs-selector-class&quot;&gt;.BytesConsumed()
+        }
+        return pi
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p data-source-line=&quot;252&quot;&gt;session的ShowProcess方法会从内存中加载当前session的processInfo信息。至此我们分析show processlist命令的源码分析完毕，关于每个连接如何设置自身的processinfo信息，逻辑也比较简单，大家有兴趣可以自己去研究一下。&lt;/p&gt;
+
+&lt;p data-source-line=&quot;254&quot;&gt;我们可以回答一下开头提出的两个问题：&lt;/p&gt;
+&lt;ul data-source-line=&quot;255&quot;&gt;&lt;li&gt;show processlist到底是不是单机的命令，和TiKV、PD有没有啥关系？答案是show processlist确实是一个单机命令，和TiKV、PD没有任何关系。&lt;/li&gt;
+&lt;li&gt;kill tidb需要使用的id字段到底代表的是什么？id字段就是在创建连接时，分配的connectionId，它在单个TiDB服务内唯一。&lt;/li&gt;
+&lt;/ul&gt;&lt;p data-source-line=&quot;258&quot;&gt;通过上面的分析，我们还可以总结以下的特点：&lt;/p&gt;
+&lt;ul data-source-line=&quot;259&quot;&gt;&lt;li&gt;TiDB的连接在客户端不能够复用，因为它处理请求时，主流程是在单协程中处理的，处理完一个再处理下一个；&lt;/li&gt;
+&lt;li&gt;show processlist命令的处理中关于ShowExec的Open方法调用，其实是它内部的baseExecutor的Open方法；&lt;/li&gt;
+&lt;li&gt;每个连接的session负责独立管理此连接的processinfo信息；&lt;/li&gt;
+&lt;li&gt;TiDB的Executor机制靠next的方式不断在它的链式处理结构上传递；&lt;/li&gt;
+&lt;li&gt;show processlist因为没有其它条件，所以它在处理时的Executor类型为ShowExec，没有再包装SelectionExec类型；&lt;/li&gt;
+&lt;li&gt;真正的语句执行(获取show processlist的信息)其实是在write的时候，我在分析这点的时候，花了不少时间；&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;源码阅读方法&quot; data-source-line=&quot;265&quot;&gt;源码阅读方法&lt;/h2&gt;
+&lt;p data-source-line=&quot;266&quot;&gt;最后，我想和大家分享一下，我自己在源码阅读里面用到的一些方法和技巧，大的方面会有两种方法：&lt;/p&gt;
+&lt;ul data-source-line=&quot;267&quot;&gt;&lt;li&gt;由因导果：就是由某一行代码，开始自顶向下的正向阅读；&lt;/li&gt;
+&lt;li&gt;执果索因：就是从结果处出发，开始自底向上的反向阅读和推导；&lt;/li&gt;
+&lt;/ul&gt;&lt;p data-source-line=&quot;270&quot;&gt;上面的两种方法，会伴随大家在源码阅读的各个阶段，但是有了这两种方法还是远远不够的，我再分享一下我的相关技巧：&lt;/p&gt;
+&lt;ul data-source-line=&quot;271&quot;&gt;&lt;li&gt;编译运行：当我们在下定决心要阅读某个框架的源码时，第一步要做的就是，将这个框架的源码从源码库拉下来后，用我们的IDE工具编译运行起来，对于有些框架运行的难度会比较高，就比如说我这次选择的TiDB，在编译过程中花费了好多的时间。建议大家在这个过程中，不要放弃，第一步是一定要把它编译运行起来；&lt;/li&gt;
+&lt;li&gt;资料参考：一般来讲只要不是太冷门的组件，一般网上都会有比较多的源码分享，我们需要甄别出写的好的源码分析资料，然后参考验证我们的源码阅读；&lt;/li&gt;
+&lt;li&gt;重要类的结构关系图整理：我们都知道，java体系的组件（golang的也一样），在设计时都会有各种复杂接口和抽象类继承关系，在阅读源码时，我们很容易便陷入到这种复杂的继承关系中去，所以利用IDE工具绘出类的结构关系图，会在我们阅读源码时，有很大的帮助；&lt;/li&gt;
+&lt;li&gt;掌握调试技巧：有较好的调试技巧可以便于我们分析代码流程和上下游关系；&lt;/li&gt;
+&lt;li&gt;修改源码：在我们不能完全确定流程分支等情况下，可以靠修改源码去理解；&lt;/li&gt;
+&lt;li&gt;提问题：在本文分析show processlist源码的过程中，提问题一直都伴随着我们的源码阅读过程，提问题能让我们更好的理解背后的含义，便于深入到源码的架构设计中去；&lt;/li&gt;
+&lt;li&gt;聚焦：对于类似于TiDB如此复杂的组件，我们在一开始分析的过程中，一定要先选定分析的主线路，比如：本章的“show processlist”，在这个过程中，有意的忽略我们本次分析主线路之外的逻辑分支，目标明确，才能不会陷入到框架各种复杂的设计中去；&lt;/li&gt;
+&lt;li&gt;总结分享：这一点是最重要的，源码阅读完后，如果不进行总结，过一段时间，我们便很容易遗忘了，同时分享也很重要，开源软件本身就是一种众包思想，我们既然是受益方，同时也要通过知识分享回馈他人；&lt;/li&gt;
+&lt;/ul&gt;</description>
+<pubDate>Tue, 16 Apr 2019 16:40:00 +0000</pubDate>
+<dc:creator>mantu</dc:creator>
+<og:description>- 丰巢把最重要的两个基础业务都放到了TiDB上，后续应该会有更多的核心系统跑在TiDB上，我们丰巢中间件团队作为引入TiDB到丰巢的推动人和执行者，对于TiDB的稳定性和突发事件的处理，一定要做足功</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/mantu/p/10721122.html</dc:identifier>
+</item>
+<item>
+<title>在商城系统中使用设计模式----策略模式之在spring中使用策略模式 - 那个男孩很坏</title>
+<link>http://www.cnblogs.com/boychen/p/10721078.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/boychen/p/10721078.html</guid>
+<description>&lt;div class=&quot;Box-body&quot;&gt;
+&lt;p&gt;  场景：商城活动中有几种，满减，打折，送积分.我们要获取商品对最终价格。&lt;/p&gt;
+
+&lt;p&gt;4.实现&lt;/p&gt;
+&lt;p&gt;步骤一.创建接口类 &lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;interface&lt;/span&gt;&lt;span&gt; GoodsActivity {
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 获取应该支付的金额
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; amount 商品的单价
+     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
+     &lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+    BigDecimal getPayPrice(BigDecimal amount);
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt; 步骤二.实现接口，并添加@Component注解&lt;/p&gt;
+
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Component
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; DiscountActivity &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; GoodsActivity {
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;折扣&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;double&lt;/span&gt;&lt;span&gt; discount ;
+
+    @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; BigDecimal getPayPrice(BigDecimal amount) {
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;假装从数据库的配置表取折扣&lt;/span&gt;
+        discount = 8.0&lt;span&gt;;
+
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; BigDecimal(discount).multiply(amount).divide(&lt;span&gt;new&lt;/span&gt; BigDecimal(10&lt;span&gt;));
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Component
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; FullReduceActivity &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; GoodsActivity {
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;满多少&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt;&lt;span&gt; BigDecimal fullAmount;
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;减多少&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt;&lt;span&gt; BigDecimal reductionAmount ;
+
+    @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; BigDecimal getPayPrice(BigDecimal amount) {
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;假装从数据库的配置表取配置数据&lt;/span&gt;
+        fullAmount = &lt;span&gt;new&lt;/span&gt; BigDecimal(300&lt;span&gt;);
+
+        reductionAmount  &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; BigDecimal(100&lt;span&gt;);
+
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; amount.compareTo(fullAmount)&amp;gt;=0?&lt;span&gt;amount.subtract(reductionAmount):amount;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Component
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; IntegralActivity &lt;span&gt;implements&lt;/span&gt;&lt;span&gt; GoodsActivity {
+
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;抵扣的积分  10积分=1元&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;int&lt;/span&gt; integral = 100&lt;span&gt;;
+
+    @Override
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; BigDecimal getPayPrice(BigDecimal amount) {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; amount.subtract(&lt;span&gt;new&lt;/span&gt; BigDecimal(integral/10&lt;span&gt;));
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;步骤三.创建context&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; GoodsActivityContext {
+
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; GoodsActivity goodsActivity;
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; GoodsActivityContext(GoodsActivity goodsActivity){
+        &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.goodsActivity=&lt;span&gt;goodsActivity;
+    }
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 获取商品价格
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; amount
+     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
+     &lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt;&lt;span&gt; BigDecimal getPrice(BigDecimal amount){
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; goodsActivity.getPayPrice(amount);
+    }
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;步骤四.在控制层中调用策略模式&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@RestController
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ActivityController{
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; DiscountActivity discountActivity;
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; FullReduceActivity fullReduceActivity;
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; IntegralActivity integralActivity;
+
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 获取最终售价
+     *  （这样的控制层写法很不友好，需要写大量的代码去实现）
+     *      为了解决这个问题，将引用工厂模式...
+     *
+     *      工厂是创建型模式,它的作用就是创建对象；
+     *      策略是行为型模式,它的作用是让一个对象在许多行为中选择一种行为;
+     *
+     *  解决不同的问题
+     * 工厂模式是创建型的设计模式，它接受指令，创建出符合要求的实例；它主要解决的是资源的统一分发，将对象的创建完全独立出来，让对象的创建和具体的使用客户无关。主要应用在多数据库选择，类库文件加载等。
+     * 策略模式是为了解决的是策略的切换与扩展，更简洁的说是定义策略族，分别封装起来，让他们之间可以相互替换，策略模式让策略的变化独立于使用策略的客户。
+     *
+     * 工厂相当于黑盒子，策略相当于白盒子；
+     *
+     *
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; activityType
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; amount
+     * &lt;/span&gt;&lt;span&gt;@return&lt;/span&gt;
+     &lt;span&gt;*/&lt;/span&gt;&lt;span&gt;
+    @RequestMapping(&lt;/span&gt;&quot;getLastPrice&quot;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; ResponseResult getLastPrice(String activityType,BigDecimal amount){
+
+        ResponseResult responseResult &lt;/span&gt;=&lt;span&gt; ResponseResult.getInstance();
+
+        GoodsActivityContext goodsActivityContext;
+
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;根据活动类型获取最终售价&lt;/span&gt;
+        &lt;span&gt;switch&lt;/span&gt;&lt;span&gt; (activityType){
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;discount&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; GoodsActivityContext(discountActivity);
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;fullReduce&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; GoodsActivityContext(fullReduceActivity);
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;integral&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; GoodsActivityContext(integralActivity);
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;default&lt;/span&gt;&lt;span&gt;:
+                responseResult.setCode(&lt;/span&gt;1&lt;span&gt;);
+                responseResult.setMsg(&lt;/span&gt;&quot;数据类型错误&quot;&lt;span&gt;);
+                responseResult.setData(&lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; responseResult;
+        }
+
+        responseResult.setCode(&lt;/span&gt;0&lt;span&gt;);
+        responseResult.setMsg(&lt;/span&gt;&quot;操作成功&quot;&lt;span&gt;);
+        responseResult.setData(goodsActivityContext.getPrice(amount));
+
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; responseResult;
+    }
+
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;总结：按照注释说明，很明显我们需要优化这个策略模式。&lt;/p&gt;
+&lt;p&gt; 步骤三：（2） 引入工厂模式，对策略对象进行管理&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@Component
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; GoodsActivityStrategyFactory {
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; Map&amp;lt;String,GoodsActivity&amp;gt;&lt;span&gt; goodsActivityMap;
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 根据活动类型 获取所对应的策略
+     * &lt;/span&gt;&lt;span&gt;@param&lt;/span&gt;&lt;span&gt; activityType
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;public&lt;/span&gt;&lt;span&gt; GoodsActivityContext getGoodsActivityStrategy(String activityType){
+
+        GoodsActivityContext goodsActivityContext;
+
+        &lt;/span&gt;&lt;span&gt;switch&lt;/span&gt;&lt;span&gt; (activityType){
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;discount&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; GoodsActivityContext(goodsActivityMap.get(&quot;discountActivity&quot;&lt;span&gt;));
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;fullReduce&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; GoodsActivityContext(goodsActivityMap.get(&quot;fullReduceActivity&quot;&lt;span&gt;));
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;case&lt;/span&gt; &quot;integral&quot;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; GoodsActivityContext(goodsActivityMap.get(&quot;integralActivity&quot;&lt;span&gt;));
+                &lt;/span&gt;&lt;span&gt;break&lt;/span&gt;&lt;span&gt;;
+            &lt;/span&gt;&lt;span&gt;default&lt;/span&gt;&lt;span&gt;:
+                goodsActivityContext &lt;/span&gt;= &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+        }
+
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; goodsActivityContext;
+    }
+
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;步骤四.在控制层中调用策略模式&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;@RestController
+&lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; ActivityController{
+
+    @Autowired
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; GoodsActivityStrategyFactory goodsActivityStrategyFactory;
+
+
+    @RequestMapping(&lt;/span&gt;&quot;getLastPrice_V2&quot;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; ResponseResult getLastPrice_V2(String activityType,BigDecimal amount){
+
+
+        ResponseResult responseResult &lt;/span&gt;=&lt;span&gt; ResponseResult.getInstance();
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;从工厂中获取  活动策略&lt;/span&gt;
+        GoodsActivityContext goodsActivityContext =&lt;span&gt; goodsActivityStrategyFactory.getGoodsActivityStrategy(activityType);
+
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (goodsActivityContext==&lt;span&gt;null&lt;/span&gt;&lt;span&gt;){
+            responseResult.setCode(&lt;/span&gt;1&lt;span&gt;);
+            responseResult.setData(&lt;/span&gt;&lt;span&gt;null&lt;/span&gt;&lt;span&gt;);
+            responseResult.setMsg(&lt;/span&gt;&quot;数据类型错误&quot;&lt;span&gt;);
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; responseResult;
+        }
+
+        responseResult.setCode(&lt;/span&gt;0&lt;span&gt;);
+        responseResult.setMsg(&lt;/span&gt;&quot;操作成功&quot;&lt;span&gt;);
+        responseResult.setData(goodsActivityContext.getPrice(amount));
+
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; responseResult;
+
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;源码：&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/littleStone-chan/design-patternsIn-mall/tree/master/spring-boot-strategy&quot; target=&quot;_blank&quot;&gt;&lt;span&gt;在springboot中使用策略模式&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://github.com/littleStone-chan/design-patternsIn-mall/tree/master/spring-boot-strategy&quot; target=&quot;_blank&quot;&gt; &lt;/a&gt;&lt;/p&gt;
+&lt;p&gt; 在工作中，不能灵活的时候设计模式。希望通过这次的学习，可以加深对设计模式对理解。&lt;/p&gt;
+&lt;p&gt;接下来会继续整理出自己在工作对时候可以使用对设计模式，不对望指点。如果文章对您有帮助，github给个start吧。&lt;/p&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Tue, 16 Apr 2019 16:12:00 +0000</pubDate>
+<dc:creator>那个男孩很坏</dc:creator>
+<og:description>1.前言： 这是策略模式在spring中的使用，对策略模式不了解对同学可以移步在商城中简单对使用策略模式。 2.问题： 在策略模式中，我们创建表示各种策略的对象和一个行为，随着策略对象改变而改变的 c</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/boychen/p/10721078.html</dc:identifier>
+</item>
+<item>
+<title>Java面试题解析（一） - JRookie丶</title>
+<link>http://www.cnblogs.com/JRookie/p/10721056.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/JRookie/p/10721056.html</guid>
+<description>&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;本文是面试题目系列的第一篇，题目主要来自 GitChat 上一个课程，在此特别记录自身想的答案和在网上查询的结果，分享出来，大家共同学习。如果有不对的地方，欢迎大家指出。&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;hr/&gt;&lt;h2 id=&quot;jdk-和-jre有什么区别&quot;&gt;JDK 和 JRE有什么区别&lt;/h2&gt;
+&lt;p&gt;JDK:Java Development Kit,java开发包,其包括JRE和一些Java工具,如javac,javap等&lt;/p&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;开发环境(编译,调试,分析工具)和运行环境&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;JRE:Java Runtime environment,Java运行时环境,其包括JVM和Java运行过程中所需要的一些核心类库.如lang,util等常用的...&lt;/p&gt;
+&lt;p&gt;--&lt;/p&gt;
+&lt;h2 id=&quot;和equals的区别是什么&quot;&gt;== 和equals的区别是什么&lt;/h2&gt;
+&lt;p&gt;对于基本类型来说,== 是用来比较两者的字面值是否相同的,基本类型没有equals方法&lt;/p&gt;
+&lt;p&gt;对于引用来说,== 是用来比较两者的引用是否相同,equals是用来比较引用指向的对象是否相同的&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;自定义对象如果需要比较两者是否相同,需要开发者自己手动重写equals()方法,一般重写这个方法也会带着重写hashcode()方法&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;两个对象的-hashcode-相同则-equals-也一定为-true对吗&quot;&gt;两个对象的 hashCode() 相同，则 equals() 也一定为 true，对吗&lt;/h2&gt;
+&lt;p&gt;不对,hashcode()只是将对象按照一定的Hash算法生成对应的16进制字符串,因为有长度的限制,因此必定会出现重复的情况,但他们的equals()此时并不一定相同.&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;final-在-java-中有什么作用&quot;&gt;final 在 java 中有什么作用&lt;/h2&gt;
+&lt;p&gt;final是Java中的一个关键字.&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;定义基本变量:变量是常量,在第一次声明值后就无法修改.&lt;/li&gt;
+&lt;li&gt;定义对象:对象的引用无法修改,即无法指向其他的对象,但对象内部的值可以修改&lt;/li&gt;
+&lt;li&gt;定义方法:方法无法被重写,一般用来表示方法已经完善了,不希望别人重写该方法&lt;/li&gt;
+&lt;li&gt;定义类:类无法被继承,Java中的String等类就无法被继承.&lt;/li&gt;
+&lt;/ul&gt;&lt;hr/&gt;&lt;h2 id=&quot;java-中的-math.round-1.5-等于多少&quot;&gt;java 中的 Math.round(-1.5) 等于多少&lt;/h2&gt;
+&lt;pre&gt;
+&lt;code&gt;
+    public void testMath(){
+        log.info(&quot;-1.8:,{}&quot;,Math.round(-1.8));
+        log.info(&quot;-1.5:,{}&quot;,Math.round(-1.5));
+        log.info(&quot;-1.2:,{}&quot;,Math.round(-1.2));
+        log.info(&quot;1.2:,{}&quot;,Math.round(1.2));
+        log.info(&quot;1.5:,{}&quot;,Math.round(1.5));
+        log.info(&quot;1.8:,{}&quot;,Math.round(1.8));
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;// 运行结果
+2019-04-04 10:59:32.599  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : -1.8:,-2
+2019-04-04 10:59:32.600  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : -1.5:,-1
+2019-04-04 10:59:32.600  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : -1.2:,-1
+2019-04-04 10:59:32.600  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : 1.2:,1
+2019-04-04 10:59:32.600  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : 1.5:,2
+2019-04-04 10:59:32.601  INFO 8076 --- [           main] com.jrookie.service.DemoServiceTest      : 1.8:,2&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通过结果可以看出除了-1.5都像是四舍五入的结果,但通过分析源码可以得出&lt;br/&gt;其结果是&lt;strong&gt;数据+0.5再向下取整&lt;/strong&gt;即可&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;string-属于基础的数据类型吗&quot;&gt;String 属于基础的数据类型吗&lt;/h2&gt;
+&lt;p&gt;String属于Java核心类库的对象&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;/**
+* 内部由不可变的char数组来实现,这也解释了为什么String是不可变的类型
+*/
+public final class String
+    implements java.io.Serializable, Comparable&amp;lt;String&amp;gt;, CharSequence {
+ private final char value[];&lt;/code&gt;
+&lt;/pre&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;java-中操作字符串都有哪些类它们之间有什么区别&quot;&gt;java 中操作字符串都有哪些类？它们之间有什么区别&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;String:最基本的字符串类型,创建后不可变&lt;/li&gt;
+&lt;li&gt;StringBuilder:其内部的char[]数组都是可变,因此是可变类型&lt;/li&gt;
+&lt;li&gt;StringBuffer:也是可变类型,但其内部大量使用了&lt;strong&gt;synchronized&lt;/strong&gt;关键字,表明内部的方法都是线程安全的.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;因此在性能比较上:String &amp;gt; StringBuilder &amp;gt; StringBuffer&lt;br/&gt;但如果想要用可变类型,可以直接使用StringBuffer,这个是线程安全的,且性能和StringBuilder相比,并没有差很多.&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;string-stri与-string-strnew-stringi一样吗&quot;&gt;String str=&quot;i&quot;与 String str=new String(“i”)一样吗&lt;/h2&gt;
+&lt;p&gt;不一样,String str=&quot;i&quot;,是声明一个引用直接指向字符串常量池,而String str=new String(“i”),会生成一个堆对象,引用指向该对象,该对象再指向字符串常量池.&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;如何将字符串反转&quot;&gt;如何将字符串反转&lt;/h2&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/JohnTsai/p/5606719.html&quot;&gt;多种解法及其编码实现&lt;/a&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;数组的方式引入第三方数据,作为存储&lt;/li&gt;
+&lt;li&gt;直接在原数据上进行操作.可以考虑使用异或的方式来交换数据,效率更高&lt;/li&gt;
+&lt;/ul&gt;&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;StringBuilder 和 StringBuffer 中封装好了对应的反转操作,可以直接使用&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;string-类的常用方法都有那些&quot;&gt;String 类的常用方法都有那些&lt;/h2&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;抽象类必须要有抽象方法吗&quot;&gt;抽象类必须要有抽象方法吗&lt;/h2&gt;
+&lt;p&gt;根据下面的代码实例,表明应该是可以的&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;public abstract class AbstractDemoClass {
+    public void test(){
+        System.out.println(&quot;hello,world&quot;);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;普通类和抽象类有哪些区别&quot;&gt;普通类和抽象类有哪些区别&lt;/h2&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;抽象类能使用-final-修饰吗&quot;&gt;抽象类能使用 final 修饰吗&lt;/h2&gt;
+&lt;p&gt;不可以,抽象类必须要有子类来继承它,实现其中的抽象方法,才可以实例化,如果用final来修饰的话,该类就无法被继承,那么这个抽象类就没有用处了.&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;接口和抽象类有什么区别&quot;&gt;接口和抽象类有什么区别&lt;/h2&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;java-中-io-流分为几种&quot;&gt;java 中 IO 流分为几种&lt;/h2&gt;
+&lt;p&gt;分为字节流和字符流,其中每个又细分为输入和输出,因此一共有四种流,分为为InputStream,OutputStream,Reader,Writer.&lt;/p&gt;
+&lt;p&gt;在处理字节流和字符流之间的转换问题时,注意编码的问题.&lt;/p&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;bionioaio-有什么区别&quot;&gt;BIO、NIO、AIO 有什么区别&lt;/h2&gt;
+&lt;h3 id=&quot;bio&quot;&gt;BIO&lt;/h3&gt;
+&lt;p&gt;同步阻塞模型,A调用B,A需要收到B的返回结果才可以继续执行,B去立即执行&lt;/p&gt;
+&lt;h3 id=&quot;nio&quot;&gt;NIO&lt;/h3&gt;
+&lt;p&gt;非阻塞IO,A调用B,A不用收到结果就可以继续执行&lt;/p&gt;
+&lt;h3 id=&quot;aio&quot;&gt;AIO&lt;/h3&gt;
+&lt;p&gt;异步非阻塞IO,A调用B,B返回给A保证会执行,然后A继续干其他事,当B干完了后通知A,再让A来处理数据&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;操作基于事件和回调机制&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;hr/&gt;&lt;h2 id=&quot;files的常用方法都有哪些&quot;&gt;Files的常用方法都有哪些&lt;/h2&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;对应collection的Collections类,是对File的操作类,封装了一些常用方法:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Files. exists()：检测文件路径是否存在。&lt;/li&gt;
+&lt;li&gt;Files. createFile()：创建文件。 [ createFile()：创建文件。]&lt;/li&gt;
+&lt;li&gt;Files. createDirectory()：创建文件夹。&lt;/li&gt;
+&lt;li&gt;Files. delete()：删除一个文件或目录。&lt;/li&gt;
+&lt;li&gt;Files. copy()：复制文件。&lt;/li&gt;
+&lt;li&gt;Files. move()：移动文件。&lt;/li&gt;
+&lt;li&gt;Files. size()：查看文件个数。&lt;/li&gt;
+&lt;li&gt;Files. read()：读取文件。&lt;/li&gt;
+&lt;li&gt;Files. write()：写入文件。&lt;/li&gt;
+&lt;/ul&gt;&lt;/blockquote&gt;
+</description>
+<pubDate>Tue, 16 Apr 2019 16:01:00 +0000</pubDate>
+<dc:creator>JRookie丶</dc:creator>
+<og:description>在GitChat上看到的一个面试题合集，在其中添加了自己的回答，供大家和自身查漏补缺。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/JRookie/p/10721056.html</dc:identifier>
+</item>
+<item>
 <title>连载《一个程序猿的生命周期》-《发展篇》- 27.从来没有996过，仍然需要人生的选择权 - 一个程序猿的生命周期</title>
 <link>http://www.cnblogs.com/blog470130547/p/10720957.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/blog470130547/p/10720957.html</guid>
@@ -43,31 +917,6 @@
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/blog470130547/p/10720957.html</dc:identifier>
-</item>
-<item>
-<title>Where is the clone one and how to extract it? - Pieces0310</title>
-<link>http://www.cnblogs.com/pieces0310/p/10720901.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/pieces0310/p/10720901.html</guid>
-<description>&lt;p&gt;&lt;span&gt;One cannot be in two places at once. Do you know what's &quot;Dual Apps&quot;? Manufactures like Xiaomi,Oppo,Huawei offer &quot;Dual Apps&quot; feature which allows users to run two different accounts of the same app on his/her phone. Let's take &quot;Facebook&quot; for example. The scenario is that a suspect's phone running Android 7 and we have to extract his/her &quot;Facebook&quot;, including the original one and the clone one.&lt;/span&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/706830/201904/706830-20190416224118360-1841809670.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;Now there are two Facebook Apps on suspect's phone. What's the clone one looks like? You could take a look as below. On the left side is the  original one and the other side is the clone one.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/706830/201904/706830-20190416224456011-1215574555.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;Take a guess if you conduct &quot;Downgrade Extraction&quot; on suspect's phone to extract &quot;Facebook&quot;, could you got both of these two &quot;Facebook&quot; without fail? The answer is &quot;No&quot;. You only got the original one. So the question is: Where is the clone one and how to extract it? To achieve this, I borrow a rooted Xiaomi from a friend of mine and take a took. Very interesting there are two uid running the same app Facebook. u999? That's weird~&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/706830/201904/706830-20190416225604350-1280680686.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;span&gt;I've looked everywhere to search for the clone one facebook. I want to  know exactly where it is. That's it. The path what I\m looking for is /data/user/999/ .&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/706830/201904/706830-20190416230432535-719814423.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;Of course the path may differ from brand to brand.  Now &quot;Downgrade Extraction&quot; could extract the original one, but not working on the clone one. &lt;span&gt;The challenge for Mobile forensic tools is to extract both &quot;Dual Apps&quot; on phones running Android 7 or above.&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 16 Apr 2019 15:23:00 +0000</pubDate>
-<dc:creator>Pieces0310</dc:creator>
-<og:description>One cannot be in two places at once. Do you know what's &quot;Dual Apps&quot;? Manufactures like</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/pieces0310/p/10720901.html</dc:identifier>
 </item>
 <item>
 <title>利用MAT玩转JVM内存分析（一） - javaadu</title>
@@ -758,256 +1607,6 @@ REPEATABLE-READ
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/stoneFang/p/10720160.html</dc:identifier>
-</item>
-<item>
-<title>你知道希尔排序为什么可以打破二次时间界吗？ - 9龙</title>
-<link>http://www.cnblogs.com/9dragon/p/10720032.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/9dragon/p/10720032.html</guid>
-<description>&lt;div class=&quot;output_wrapper&quot; id=&quot;output_wrapper_id&quot; readability=&quot;68.22905027933&quot;&gt;
-&lt;h3 id=&quot;h&quot;&gt;&lt;span&gt;引言：&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;前面详解了&lt;a href=&quot;https://www.cnblogs.com/9dragon/p/10705097.html&quot;&gt;如何优化冒泡排序？&lt;/a&gt;，&lt;a href=&quot;https://www.cnblogs.com/9dragon/p/10710735.html&quot;&gt;图解选择排序与插入排序&lt;/a&gt;，这些简单排序算法平均时间复杂度都是O(n^2)。&lt;strong&gt;希尔排序是第一批打破二次时间屏障的算法之一&lt;/strong&gt;。下面我们来分析为什么希尔排序可以打破二次时间复杂度。&lt;/p&gt;
-&lt;h3 id=&quot;h-1&quot;&gt;&lt;span&gt;一、分析简单排序算法的下界&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;strong&gt;逆序&lt;/strong&gt;：具有性质&lt;strong&gt;i &amp;lt; j&lt;/strong&gt;但 &lt;strong&gt;a[i] &amp;gt; a[j]&lt;/strong&gt;的序偶&lt;strong&gt;（a[i]，a[j]）&lt;/strong&gt;。如序列34，8，64，51，32，21有9个逆序，即（34，8）、（34，32）、（34，31）、（64，51）、（64，32）、（64，21）、（51，32）、（51，21）以及（32，21）。注意，这正好是需要（隐含）执行的交换次数。事实总是这样，因为&lt;strong&gt;交换两个不按顺序排序的相邻元素恰好消除一个逆序&lt;/strong&gt;，而一个排过序的数组没有逆序。由于算法中还有O(N)量的工作，假设 &lt;strong&gt;I&lt;/strong&gt; 是原数组中的逆序数，所以插入排序的运行时间是O(I + N)。所以，&lt;strong&gt;如果逆序数是O(N)，则插入排序以线性时间运行；冒泡排序通过加标志位也可以在有序的条件下达到最优O(N)。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;所以我们可以&lt;strong&gt;通过计算原始序列中的平均逆序数得出简单排序的平均时间精确的界&lt;/strong&gt;。&lt;/p&gt;
-&lt;p&gt;这里&lt;strong&gt;假设元素互异&lt;/strong&gt;（如果允许重复，那我们连重复的平均次数都无法知道）。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;定理1：N个互异数的数组的平均逆序数是N(N-1)/4。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;证明：N个互异数的序列L与逆序列Lr中，所有序偶为N(N-1)/2（很容易理解：相当于从N个互异数中选两个元素，这两个元素有顺序，即：&lt;strong&gt;A&lt;sup&gt;2&lt;/sup&gt;&lt;sub&gt;N&lt;/sub&gt;&lt;/strong&gt;= N(N-1)/2）。那平均的逆序表列该有一半：即 N(N-1)/4个逆序。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;定理2：通过交换相邻元素进行排序的任何算法平均都需要&lt;br/&gt;&lt;span class=&quot;katex-display&quot;&gt;&lt;span class=&quot;katex&quot;&gt;&lt;img src=&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD8AAAAlCAYAAAD1EjEiAAAFLUlEQVRoQ+1XeSjefxx/Y45hIYyS0EjCJnIuxxIKyRybI+1i7Q9Li9xEKMlZrkRhja2VtrVFri0sltUicpUjWZPkKGeO9fr8ep6er+fwzPzM5vn89zzf9+f9fr/ex+v9/sgdHh4e0gU9cjLwssxfvAjIyv7i5fw/xLLMyzL/F0RgcXGRampqaGxsjOzt7enJkyd0+fLlE3v+15T9/v4+VVVVUXBwMGlqatKzZ8/I29ubgoKC/n3wKysr1NTUxLKtoKBAjY2NNDc3RxkZGf8++OXlZXr06BFlZWXRjRs3KDs7mzQ0NFgFnPT8L2WPjKiqqpKuru5J/RK6t7e3R62treTk5ES7u7uUnJxMOTk5ZGxszJc9ODigL1++kI2NjVRcIBL8xsYGK6vBwUEyNTUl/EbZRUVFkaOjI8nLy4sFBTL69OkTxcTE0KVLl4TkXr58yUhraGiI3N3dqa6ujrS0tJjc27dvKT8/n0ZHRxmAtLQ08vHx4ehAEIqLi8nX15esrKyE9P/48YNevHjB2kNNTU1i8IXAT01NUWxsLIWEhNCDBw/4ABYWFujp06fk7OzMSk0UsKWlJSotLaWEhAQ+IFHWh4eHqaCggDo6Olgfe3p68sUmJiZY8B4/fkxycnKc63iAvn//ngwMDMjW1lYssPb2dpqfn6eHDx8K6RC8xAG/s7PDoo3IP3/+nHR0dDgGWlpaWGCQPTc3NyHjvCwex8DQo66uTtXV1WRoaMgCoayszPR1dnaykr1586aQ/t7eXlpdXSUXFxdWjQMDA3Tnzh0hOVRpamoqJSUlcdriqCAHPHo1IiKCrK2tqaSkRKhvkDFeRaSkpHB0ra2tUWJiIutFExMTsVnhjaywsDBW5kVFRfT69WuytLRkd+rr6+nWrVtkZGTE0cFruw8fPvD/RxLu3r0r0hb8v3r1KkVGRor1hQP++/fvTNjc3FwkeEQasxVMe5RlEZiKigoqLCykK1euiDWIIKGqUNZopfDwcJY96Nva2mJcc+/ePakIS1JD9/T00Js3bxiHKCkpiRTlgAeLYm4CiKiyf/fuHSMSKHVwcOAolMYYLkA3eAXLCqoAgezv72egYf/jx490//59iUQlzcfx8XHWTqgAjERRR4jwvn79yow3NDSQnZ0d/w4cRWDgYF5eHr9HeQJg2Onp6WOXDpStvr4+XzeCgRbIzc1loxGTRFS/SwNYUAbEiZ2gvLyctLW1pQMPkBglYHPB0kZLgO3hpIWFhZAyacCDrUFy4A3eDgCSBVesr6+z8RYYGCjU778KHPK/DH5kZITQk9euXWMBAPPzSgZjaXZ2lhFiW1sbBQQEkKKiIt+vV69e0eTkpMTMC/a7YB92dXXR7du3GXmVlZWxBel3zy+DR3YBAgDBxFhCQH44yJirqysbNVhkoqOjOf6BDNEqCJq4l9a3b99YgI4yNJgcqyv0/866KuiQNP5wen5zc5Pi4uKotraW6enr62P9t729TfHx8VRZWcn+xxLh5eXFAY8xmZ6ezsAfXWuxcGA0gk9wQkNDWVWpqKjwdWBHMDMzE7k/nKQKkEQkU1IwT2235y1IGFtHJ8FJnP+dO7wp4u/vL9GXUwMPZz9//kzd3d1su8Kz80+dmZkZ9n7IzMyUuC+cKng8OtAaHh4edP369T+CHT6An/BeEDWVBJ06VfBQjC2tubmZ/Pz8SE9P70wDgFEKosYegafvcefUwR9n8Dx9l4E/T9k4S19kmT/LaJ8nW7LMn6dsnKUvssyfZbTPk62fXZ7csNWld5IAAAAASUVORK5CYII=&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;证明：因为初始的平均逆序数为N(N-1)/4，而每次交换只减少一个逆序数，因此需要&lt;br/&gt;&lt;span class=&quot;katex-display&quot;&gt;&lt;span class=&quot;katex&quot;&gt;&lt;img src=&quot;data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEUAAAAnCAYAAABZsYV4AAAFb0lEQVRoQ+1Yayiebxi/UE4tXxCW80Iyp/iwYUXziWhyDOOLciplNjbULDNixBcmWy1ETim+OoQYK7YPNKeSwxLKKZlDm3+/ux497/s87/s+eHzY/s/95a33vu/ruu7f/bt+13U/ehcXFxekDBUE9BRQhIxQQBHJEgUUBRRp4qkwRWGKwhRpCPxrTJmbm6OxsTFaW1sjDw8PiomJISMjo2uDwW38azVlc3OTvn79SpGRkXRyckKVlZXk5eVFUVFR/19Qvn//TnV1dfTu3TuysbGh/v5+wn8vXrwgY2PjGwFza0z59esX9fX1UXBwMFlZWd0oSLHNe3t79OXLFwoJCWEgNDU10fn5OWVkZJCBgcHlFrCot7eXAgMDyd7eXlIcGkH58+cPra+v08zMDCEAa2trlrd2dnakr6+v1fjv37+pra2NPD09ycfHR3TtxsYG1dbWEn6RCnFxcSoHwv/V1dU0OztLhoaGdO/ePcrNzSUnJyeBvZ8/f9L79+8pJydHdB7xf/78mVJSUsjc3FwnMKKgrKysUE1NDQskISGBLC0tWeDt7e1M1J49eybqnPOGG/zx4welpqaq3JpYNK2trTQ6Okr7+/tUVVVFDg4Ol8vwVm1ubqZHjx6Rs7Oz6GHAyI8fP1JYWBiLV9OYnp6mqakpSk9P1xmTABQAUlxcTA8ePKCsrCwVA2BAfX09TU5O0tu3b0WBQZC44fj4eHJxcdF6K8fHx9TR0UHu7u5UUlJCSUlJlJycTHp6emwfNw9bpqamAluIB6nh7+9Pjo6OtL29zZjATx9uE2xBjGNjYxnjtQ0VUODkw4cPTLRAx/v37wv2QszAlOjoaEH+YjHo3tXVRQUFBaIH4RtEeqKkPnnyhMrLy2lra4sJp4WFBVuG+fHxccZW9QEWDQ0NMRCQUjg0Uh2M4UBV39Pd3U24ND7wYuCogHJwcMAOs7u7K6Ayt3l1dZUpPFIKBzEzM1Ox29LSQqenp5SWlqYzd5FmGA8fPqTh4WEqLS2loqIievz4MfufP69ubH5+nvLy8ujo6Ohy6vnz5xQREaHRLy4U8b1584bu3LmjcZ0KKIeHh/Tq1Sva2dnRCQoEV9342dkZY5i3tzeFh4frBAVijKoAHYHv169fs2ALCwvJxMSEMS4oKIiVXDkGLhTxwb42m6Lp09PTwyoDmiH1AcFC+qhXC04DoDVILT8/P63nENML6ENjYyMLHMIKvdGkJ9cBCVWorKyMsrOztRYKgdAuLi7Sy5cvWWf49OlTgW/QD8GjUqirPZd+6BU0lWJ+GkIvEhMTL32gtObn51NAQABj2rdv32TpUDkHUuMTgAKxxcEBDqoQX/Vxu2CCq6srA0xd5aU61aQXnNBPTEwwbUD10sW4qzBGanyC9EFgyO+KigpW0/lldWlpidEbTILAAhQ+MBA96AJuX9thUDnQ86D/gDbxB6oXBNPW1pYJr1x6Ah/XSh8I7MjICHttDg4OsocWXzChNXfv3mU9DMobWnhUIW5IFVqAjqYNHaZ6FYBPpCaGHO8YPuDXElqkB/oUX19fZguNHNeV4l3x6dMncnNzY3O4UZRdVAn+0FaSQV90ygsLC6zRQtVBa8754+yg81xeXmbNnJwDJbmzs1MgC+o+VNIHtG5oaGCqjxEaGnp5W9wNDgwMsDlUhczMTEGjBMcopeg3xLpQOQ95VVtc8yZWQPi2ZH8lIzXQToNhutr8qx7qJuuRBXh+QO+0vZHgQ3ZQYBTdKT/1bnIYufbe6EEoRxBSPh3I4UeqDVk+HUh1pm3dbX9kkhqjrB+ZpDr9F9fdiqb87UApoIjcoAKKAoq0xFaYojBFYYo0BBSmSMNJ0RQRnP4DinVEuTwJvbcAAAAASUVORK5CYII=&quot;/&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;结论：&lt;/strong&gt;这个&lt;strong&gt;下界&lt;/strong&gt;告诉我们，&lt;strong&gt;为了使一个排序算法以亚二次或O(N^2)时间运行，必须执行一些比较，特别是要对相距较远的元素进行交换。&lt;/strong&gt;一个排序算法通过删除逆序得以向前进行，而为了有效地进行它必须使每次交换删除不止一个逆序。下面我们来看希尔排序怎么打破二次时间界。&lt;/p&gt;
-&lt;h3 id=&quot;hshellsort&quot;&gt;&lt;span&gt;二、希尔排序（ShellSort）&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;希尔排序按其设计者希尔（Donald Shell）的名字命名。&lt;strong&gt;希尔排序通过多次插入排序来实现。&lt;/strong&gt;它通过比较相距一定间隔的元素来工作；各趟比较所用的距离随着算法的进行而减小，直到只比较相邻元素的最后一趟排序为止。所以希尔排序也叫&lt;strong&gt;缩减增量排序。&lt;/strong&gt;&lt;/p&gt;
-&lt;ul readability=&quot;2&quot;&gt;&lt;li readability=&quot;7&quot;&gt;
-&lt;p&gt;&lt;strong&gt;算法思想&lt;/strong&gt;：使用一个序列h&lt;sub&gt;1&lt;/sub&gt;,h&lt;sub&gt;2&lt;/sub&gt;,….h&lt;sub&gt;t&lt;/sub&gt;,叫&lt;strong&gt;做增量序列&lt;/strong&gt;。只要h&lt;sub&gt;1&lt;/sub&gt;=1,任何增量序列都是可行的。在使用增量h&lt;sub&gt;k&lt;/sub&gt;排序后，对于每一个i 我们都有a[i]&amp;lt;=a[i+h&lt;sub&gt;k&lt;/sub&gt;]；所有相隔h&lt;sub&gt;k&lt;/sub&gt;的元素都被排序，这称为h&lt;sub&gt;k&lt;/sub&gt;排序。&lt;strong&gt;只要最后h&lt;sub&gt;1&lt;/sub&gt;=1（这时就是最普通的插入排序）&lt;/strong&gt;,希尔排序都可完成工作。&lt;strong&gt;一趟h&lt;sub&gt;k&lt;/sub&gt;排序就是对h&lt;sub&gt;k&lt;/sub&gt;个子数组进行插入排序。&lt;/strong&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;strong&gt;排序过程&lt;/strong&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;选择一个增量序列h&lt;sub&gt;1&lt;/sub&gt;,h&lt;sub&gt;2&lt;/sub&gt;,….h&lt;sub&gt;t&lt;/sub&gt;，h&lt;sub&gt;1&lt;/sub&gt;=1。&lt;/li&gt;
-&lt;li&gt;根据增量序列个数，即循环t次进行排序，每次排序结束后更换为h&lt;sub&gt;t-1&lt;/sub&gt;的增量。&lt;/li&gt;
-&lt;li&gt;把原数组分为h&lt;sub&gt;t&lt;/sub&gt;个子数组，对每个子数组进行插入排序。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;下面我们使用增量序列1、3、5对序列 {3, 7, 1, 13, 9, 11, 5, 8, 2, 4, 12, 6, 10}进行希尔排序的图解。&lt;/p&gt;
-&lt;img src=&quot;https://img2018.cnblogs.com/blog/1603499/201904/1603499-20190416210517054-1749710125.jpg&quot; alt=&quot;希尔排序图解&quot; title=&quot;希尔排序图解&quot;/&gt;希尔排序图解
-&lt;p&gt;每种颜色代表一个子数组，很直观看到每一趟排序过程及结果。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;java实现冒泡排序：&lt;/strong&gt;代码中我们使用希尔建议的增量序列（但效率不高）。h&lt;sub&gt;t&lt;/sub&gt;=N/2和h&lt;sub&gt;k&lt;/sub&gt;=h&lt;sub&gt;k+1&lt;/sub&gt;/2。理解了插入排序流程，代码实现很简单。&lt;/li&gt;
-&lt;/ul&gt;&lt;pre&gt;
-&lt;code class=&quot;java language-java hljs&quot;&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;private&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;static&lt;/span&gt; &amp;lt;T extends Comparable&amp;lt;? &lt;span class=&quot;hljs-keyword&quot;&gt;super&lt;/span&gt; T&amp;gt;&amp;gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;shellsort&lt;/span&gt;&lt;span class=&quot;hljs-params&quot;&gt;(T[] a)&lt;/span&gt; &lt;/span&gt;{&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;int&lt;/span&gt; j;&lt;br/&gt;T tmp = &lt;span class=&quot;hljs-keyword&quot;&gt;null&lt;/span&gt;;&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;hljs-keyword&quot;&gt;int&lt;/span&gt; gap = a.length / &lt;span class=&quot;hljs-number&quot;&gt;2&lt;/span&gt;; gap &amp;gt; &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;; gap /= &lt;span class=&quot;hljs-number&quot;&gt;2&lt;/span&gt;) {&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;for&lt;/span&gt; (&lt;span class=&quot;hljs-keyword&quot;&gt;int&lt;/span&gt; i = gap; i &amp;lt; a.length; i++) {&lt;br/&gt;tmp = a[i];&lt;br/&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;for&lt;/span&gt; (j = i; j &amp;gt;= gap &amp;amp;&amp;amp;&lt;br/&gt;tmp.compareTo(a[j - gap]) &amp;lt; &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;; j -= gap) {&lt;br/&gt;a[j] = a[j - gap];&lt;br/&gt;}&lt;br/&gt;a[j] = tmp;&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;}&lt;br/&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;时间、空间复杂度及稳定性分析：&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;strong&gt;希尔排序的运行时间依赖于增量序列的选择&lt;/strong&gt;，而证明很复杂【有兴趣可查看其他资料】。&lt;/li&gt;
-&lt;li&gt;使用&lt;strong&gt;希尔增量&lt;/strong&gt;时希尔排序&lt;strong&gt;最坏时间复杂度&lt;/strong&gt;是：&lt;strong&gt;O(n^2)。&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;使用&lt;strong&gt;Hibbard增量&lt;/strong&gt;的希尔排序&lt;strong&gt;最坏时间复杂度&lt;/strong&gt;是：&lt;strong&gt;O(n&lt;sup&gt;3/2&lt;/sup&gt;)&lt;/strong&gt;；&lt;strong&gt;最优时间复杂度是O(n&lt;sup&gt;5/4&lt;/sup&gt;)&lt;/strong&gt;。&lt;/li&gt;
-&lt;li&gt;使用&lt;strong&gt;Sedgewick 增量&lt;/strong&gt;序列,排序&lt;strong&gt;最坏时间复杂度&lt;/strong&gt;是：&lt;strong&gt;O(n&lt;sup&gt;4/3&lt;/sup&gt;)&lt;/strong&gt;；&lt;strong&gt;平均时间复杂度是O(n&lt;sup&gt;7/6&lt;/sup&gt;)&lt;/strong&gt;。最好的序列是{1,5,19,41,109……}。该序列中的项或者是9 * 4&lt;sup&gt;i&lt;/sup&gt; - 9 * 2&lt;sup&gt;i&lt;/sup&gt; +1的形式，或者是4&lt;sup&gt;i&lt;/sup&gt; - 3* 2&lt;sup&gt;i&lt;/sup&gt;+1)的形式。&lt;/li&gt;
-&lt;li&gt;空间复杂度：只用到一个临时变量，所以&lt;strong&gt;空间复杂度&lt;/strong&gt;为&lt;strong&gt;O(1)&lt;/strong&gt;；&lt;/li&gt;
-&lt;li&gt;稳定性：&lt;strong&gt;不稳定&lt;/strong&gt;排序。因为每一趟的步长不一样，所以步长长的插入排序可能会把后面的元素插入到前面。&lt;/li&gt;
-&lt;/ol&gt;&lt;h3 id=&quot;h-2&quot;&gt;&lt;span&gt;三、总结&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;​ &lt;strong&gt;本篇说明了想要打破二次时间界，必须比较相距较远的元素来进行交换，这样可以一次交换删除多个逆序，以达到突破二次时间界。希尔排序通过使用增量序列来将原始序列分为多个子序列，对每个子序列进行插入排序。只要最终增量序列h&lt;sub&gt;1&lt;/sub&gt;=1,希尔排序都可正常工作。希尔排序时间严重依赖于增量序列的选择，我们可以直接先将好的增量序列“打表”存在数组中，这样不用每次排序都去计算。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;声明&lt;/strong&gt;：&lt;strong&gt;画图码字都辛苦，如有转载，请注明出处。文中引用来自《数据结构与算法java语言描述（原书第三版）》&lt;/strong&gt;&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Tue, 16 Apr 2019 13:06:00 +0000</pubDate>
-<dc:creator>9龙</dc:creator>
-<og:description>引言： 前面详解了如何优化冒泡排序？，图解选择排序与插入排序，这些简单排序算法平均时间复杂度都是O(n^2)。希尔排序是第一批打破二次时间屏障的算法之一。下面我们来分析为什么希尔排序可以打破二次时间复</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/9dragon/p/10720032.html</dc:identifier>
-</item>
-<item>
-<title>【官网】性能篇（三）为电池寿命做优化——概述 - 宋者为王</title>
-<link>http://www.cnblogs.com/andy-songwei/p/10719778.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/andy-songwei/p/10719778.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;前言&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       本文是“为电池寿命做优化”系列文档所做的一篇概述。&lt;/p&gt;
-&lt;p&gt;       中国版官网原文地址为：&lt;a href=&quot;https://developer.android.google.cn/topic/performance/power&quot; target=&quot;_blank&quot;&gt;https://developer.android.google.cn/topic/performance/power&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;       路径为：Android Developers &amp;gt; Docs &amp;gt; 指南 &amp;gt; Best practies &amp;gt; Optimize for battery life &amp;gt;Overview&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;正文&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       电池寿命是移动用户体验最重要的一个方面。设备没有电量就根本无法提供任何功能。所以，应用尽可能地重视电池寿命是非常重要的。&lt;/p&gt;
-&lt;p&gt;       有3个要点需要考虑来保持您的应用是省电的：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;让您的应用“懒惰第一”&lt;/li&gt;
-&lt;li&gt;利用可以帮助管理您应用的电池消耗的平台特性。&lt;/li&gt;
-&lt;li&gt;使用可以帮您识别耗尽电量的罪魁祸首的工具。&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;懒惰第一&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       让您的应用“懒惰第一”意味着寻找方法来降低和优化操作，尤其是电池密集型的操作。支撑“懒惰第一”设计的核心问题为：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;节省：您的应用有冗余的操作可以砍掉吗？例如，可以用缓存下载的数据而不是重复地唤醒无线网络以重新下载数据吗？&lt;/li&gt;
-&lt;li&gt;延迟：应用需要立刻执行某个动作吗？例如，可以等到设备充电时再备份数据到云端吗？&lt;/li&gt;
-&lt;li&gt;合并：可以批量工作，而不是多次把设备推向活跃状态吗？例如，几十个应用中的每一个都在不同的时间开启无线网络来发送消息，这真的有必要吗？这些消息可以替换为在无线网一次唤醒时发送吗？&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;       当遇到使用CPU、无线网和屏幕时，您应该问问这些问题。“懒惰第一”的设计常常是一种抑制电池杀手的好办法。&lt;/p&gt;
-&lt;p&gt;       为了帮助您实现这些和其它功能，Android平台提供了很多特性来帮助最大化电池寿命。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;平台特征&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       一般来说，Android平台为您提供了两种帮助策略来优化您应用的电池使用。首先，它提供了几个可以在您应用中实现的API。您可以在【&lt;a href=&quot;https://developer.android.google.cn/guide/background&quot; target=&quot;_blank&quot;&gt;Intelligent Job Scheduling&lt;/a&gt;】中了解更多关于这些API的信息。&lt;/p&gt;
-&lt;p&gt;       在平台中也有内部机制来版主保护电池寿命。但是它们不是您能通过编程实现的API，您仍然应该了解它们，从而让您的应用可以成功地利用它们。更多信息，请查看：&lt;/p&gt;
-&lt;p&gt;       除此以外，Android 9（API 等级28）为省电模式做了很多改善工作。设备制造商决定了施加的精准限制。作为一个示例，在AOSP构建上，系统应用了如下限制：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;系统更积极地将应用置于应用待机模式，而不是等待应用空闲下来。&lt;/li&gt;
-&lt;li&gt;无论它们的目标API是什么级别，后台执行限制对所有应用都适用。&lt;/li&gt;
-&lt;li&gt;当屏幕熄灭后，本地服务可能会失效。&lt;/li&gt;
-&lt;li&gt;后台应用没有网络访问权限.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;       请在【&lt;a href=&quot;https://developer.android.google.cn/topic/performance/power/power-details.html&quot; target=&quot;_blank&quot;&gt;电量管理限制&lt;/a&gt;】中查阅特定设备电量优化的完整详情。&lt;/p&gt;
-&lt;p&gt;       和平常一样，在省电模式下测试您的应用是一个好主意。您可以通过设备的“设置&amp;gt;电池节省器”屏幕手动开启省电模式。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;工具&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       通过使用供平台使用的工具来发现您应用中消耗功率最大的部分，您可以从这些特性上获取更多的好处。找到目标是通往成功优化的一大步。&lt;/p&gt;
-&lt;p&gt;       有很多为Android提供的工具，帮助您确定那些可以优化的区域，以提高电池寿命，包括【&lt;a href=&quot;https://developer.android.google.cn/studio/profile/inspect-gpu-rendering#profile_rendering&quot; target=&quot;_blank&quot;&gt;Profile GPU Rendering&lt;/a&gt;】和【&lt;a href=&quot;https://github.com/google/battery-historian&quot; target=&quot;_blank&quot;&gt;Battery Historian&lt;/a&gt;】。利用这些工具来瞄准那些可以使用“懒惰第一”原则的目标区域。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;结语&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;       本文最大限度保持原文的意思，由于笔者水平有限，若有不准确或不妥当的地方，请指正，谢谢！&lt;/p&gt;
-</description>
-<pubDate>Tue, 16 Apr 2019 12:22:00 +0000</pubDate>
-<dc:creator>宋者为王</dc:creator>
-<og:description>电池寿命是移动用户体验最重要的一个方面。设备没有电量就根本无法提供任何功能。所以，应用尽可能地重视电池寿命是非常重要的。本文是“为电池寿命做优化”系列文档所做的一篇概述，从整体上来介绍电池优化需要注意</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/andy-songwei/p/10719778.html</dc:identifier>
-</item>
-<item>
-<title>分布式系列十二: Redis高级主题 - 罪恶斯巴克</title>
-<link>http://www.cnblogs.com/walkinhalo/p/10719688.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/walkinhalo/p/10719688.html</guid>
-<description>&lt;h2 id=&quot;持久化&quot;&gt;持久化&lt;/h2&gt;
-&lt;p&gt;Redis 支持持久化, 其持久化数据有两种方式. 两种可以同时使用. 如果同时使用, Reids 在重启时将使用 AOF 方式来还原数据.&lt;/p&gt;
-&lt;h3 id=&quot;rdb&quot;&gt;RDB&lt;/h3&gt;
-&lt;p&gt;按照一定策略定时同步内存的数据到磁盘.文件名 &lt;code&gt;dump.rdb&lt;/code&gt;&lt;/p&gt;
-&lt;ul readability=&quot;1&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;snapshot: 快照复制. Redis在指定情况下触发快照: (1) 按配置的规则;(2) save 或 bgsave 命令执行;(3) flushall 命令; (4)执行复制&lt;/p&gt;
-&lt;ol readability=&quot;3&quot;&gt;&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;配置的规则: &lt;code&gt;save seconds exchange&lt;/code&gt; 当在 seconds 指定的时间内, key 的数量更改大于 exchange 时发生快照.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;save 或 bgsave 命令: 执行快照同步操作, 注意&lt;code&gt;save&lt;/code&gt;这个操作会暂时阻塞客户端请求. &lt;code&gt;bgsave&lt;/code&gt;则不会阻塞&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;flushall: 清除内存所有数据, 只要规则不为空, redis就会执行快照&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;执行复制:&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;快照原理&lt;/p&gt;
-&lt;p&gt;fork 复制一份当前进程的副本, 这个进程是子进程, 负责同步持久化到磁盘. 而父进程负责处理客户端请求.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;快照的优缺点:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;缺点: 可能会丢失数据, 在下一次快照前宕机&lt;/li&gt;
-&lt;li&gt;优点: 最大化Redis的性能, 父子进程职责分离&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;aof&quot;&gt;AOF&lt;/h3&gt;
-&lt;p&gt;保存命令到磁盘, 也就是持久化日志.&lt;/p&gt;
-&lt;ul readability=&quot;9&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;配置: &lt;code&gt;appendonly yes&lt;/code&gt; 启动aof. 默认的文件名是 &lt;code&gt;appendonly.aof&lt;/code&gt;.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;配置 &lt;code&gt;auto-aof-rewrite-percentage 100&lt;/code&gt; 当 aof 文件与上一次文件的大小相比, 超过配置的百分比就进行重写&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;配置 &lt;code&gt;auto-aof-rewrite-min-size 64m&lt;/code&gt; 限制允许重写最小 aof 文件大小, 即小于64m时不重写&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;aof 重写原理: aof 重写是安全的. 相当于同时将命令追加到现有的aof文件, 同时写入新的 aof 临时文件, 临时文件最终将覆盖原 aof 文件.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;7&quot;&gt;
-&lt;p&gt;同步磁盘数据: aof机制会将命令记录到aof文件, 但实际是同步到操作系统的缓存区, 最终由操作系统同步到磁盘. 可以通过下面配置修改策略&lt;br/&gt;&lt;code&gt;appendsync always&lt;/code&gt; 每次执行写入就同步, 安全但影响性能&lt;br/&gt;&lt;code&gt;appendsync everysec&lt;/code&gt; 每一秒执行&lt;br/&gt;&lt;code&gt;appendsync no&lt;/code&gt; 不执行同步, 由操作系统去执行, 效率高但不安全&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;aof 文件损坏后的修复, 使用&lt;code&gt;redis-check-aof-fix&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;集群&quot;&gt;集群&lt;/h2&gt;
-&lt;h3 id=&quot;masterslave-复制&quot;&gt;master/slave 复制&lt;/h3&gt;
-&lt;p&gt;主从方式, 从是只读的, slave也可以有自己的slave.&lt;/p&gt;
-&lt;ul readability=&quot;2&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;slave节点上配置 &lt;code&gt;slaveof masterip masterport&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;配置 &lt;code&gt;slave-serve-stale-data no&lt;/code&gt; 可以用来保证数据同步后再做其他操作&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;命令&lt;code&gt;info replication&lt;/code&gt;可以查看信息.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;实现原理:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;slave 连接到 master 后, 会向 master 发送 &lt;code&gt;SYNC&lt;/code&gt; 命令.&lt;/li&gt;
-&lt;li&gt;master 收到命令后, 会做两件事(1) 执行bgsave;(2)master 将收到的修改命令存入缓冲区, 再将命令传输给slave&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;复制方式:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;基于rdb文件复制&lt;/li&gt;
-&lt;li&gt;无硬盘复制 配置&lt;code&gt;rpli-diskless-sync yes&lt;/code&gt;&lt;/li&gt;
-&lt;li&gt;增量复制 PSYNC master run id. offset&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;命令&lt;code&gt;replconf listening-port 6379&lt;/code&gt;可以用来查看复制过程&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;缺点: 无法做master选举&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;sentinale-哨兵模式&quot;&gt;sentinale 哨兵模式&lt;/h3&gt;
-&lt;ol&gt;&lt;li&gt;监控&lt;/li&gt;
-&lt;li&gt;master选举&lt;/li&gt;
-&lt;/ol&gt;&lt;ul readability=&quot;1&quot;&gt;&lt;li&gt;配置文件为&lt;code&gt;sentinel.conf&lt;/code&gt;&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;配置节点: &lt;code&gt;sentinel monitor mymaster 192,168,11,111 6379 2&lt;/code&gt; 最后的2为投票数&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;是高可用方案, 但不是高性能方案&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;集群-1&quot;&gt;集群&lt;/h3&gt;
-&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;6&quot;&gt;
-&lt;p&gt;原理&lt;/p&gt;
-&lt;p&gt;Reids有slot槽的概念: redis中有16384个. 根据key的 CRC16 算法, 取得的结果与槽数取模.落入的槽的索引是固定的. 然后根据节点数将槽的范围确定到每个节点上.&lt;/p&gt;
-&lt;p&gt;当节点新增和删除时, 节点的槽范围发生变化, 数据迁移需要人工干预.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;三方方案&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;redis shardding : jedis支持&lt;/li&gt;
-&lt;li&gt;codis : 代理, 分片和数据迁移自动化&lt;/li&gt;
-&lt;li&gt;twemproxy :&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2 id=&quot;缓存穿透问题&quot;&gt;缓存穿透问题&lt;/h2&gt;
-&lt;ul&gt;&lt;li&gt;数据库中不存在的对象查询后也缓存.&lt;/li&gt;
-&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;if(objJson!=null){
-    redisService.expire(&quot;key&quot;,timeout:3*60);
-} else {
-    redisService.expire(&quot;key&quot;,timeout:5); //5秒内不查询数据库
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;synchronized&lt;/code&gt; 方法, 不理想, 排队影响性能.&lt;/li&gt;
-&lt;li&gt;同步块, 需要双重判定, 否则阻塞的线程均会查询数据库, 代码如下&lt;/li&gt;
-&lt;/ul&gt;&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;String value = redisService.get(&quot;key&quot;);
-if(value==null){
-    synchronized(lock){
-        value = redisService.get(&quot;key&quot;); //多线程再次查询,防止数据库多次查询
-        if(value==null){
-            value = dao.get();
-            redisService.set(&quot;key&quot;,value);
-            if(objJson!=null){
-                redisService.expire(&quot;key&quot;,timeout:3*60);
-            } else {
-                redisService.expire(&quot;key&quot;,timeout:5); //5秒内不查询数据库
-            }
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;if(redisService.setNx(&quot;key&quot;)==true){
-    //查询数据库
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ul&gt;&lt;li&gt;不设超时时间或设置一个较长的超时时间, 然后判断当前时间是否超过缓存时间, 结合分布式锁, 超过则刷新缓存. 此解决方法可能会发生少量数据不一致的情况.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;采用何种策略需要结合实际需求, 是保证可用, 还是保证一致性? 对于一致性要求不高的场景, 可能最后一种方案可以彻底解决击穿问题. 对于一致性要求较高的场景, 使用同步/锁的方式会更好.&lt;/p&gt;
-</description>
-<pubDate>Tue, 16 Apr 2019 12:09:00 +0000</pubDate>
-<dc:creator>罪恶斯巴克</dc:creator>
-<og:description>持久化 Redis 支持持久化, 其持久化数据有两种方式. 两种可以同时使用. 如果同时使用, Reids 在重启时将使用 AOF 方式来还原数据. RDB 按照一定策略定时同步内存的数据到磁盘.文件</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/walkinhalo/p/10719688.html</dc:identifier>
 </item>
 </channel>
 </rss>
