@@ -9,6 +9,777 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>Rancker2.2.2-HA 高可用k8s容器集群搭建 - kelsen</title>
+<link>http://www.cnblogs.com/kelsen/p/10836332.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/kelsen/p/10836332.html</guid>
+<description>&lt;p&gt;对于生产环境，需以高可用的配置安装 Rancher，确保用户始终可以访问 Rancher Server。当安装在Kubernetes集群中时，Rancher将与集群的 etcd 集成，并利用Kubernetes 调度实现高可用。&lt;/p&gt;
+&lt;p&gt;为确保高可用，本文所部署的 Kubernetes 集群将专用于运行 Rancher ，Rancher 运行起来后，可再创建或导入集群以运行具体的工作负载。&lt;/p&gt;
+&lt;h2 id=&quot;一推荐架构&quot;&gt;一、推荐架构&lt;/h2&gt;
+&lt;ul&gt;&lt;li&gt;Rancher的DNS 应解析到 4层(TCP) 负载均衡上。&lt;/li&gt;
+&lt;li&gt;负载均衡应将端口 TCP/80 和 TCP/443 转发到 Kubernetes 集群中的所有3个节点。&lt;/li&gt;
+&lt;li&gt;Ingress-controller 将 HTTP 重定向到HTTPS并终止端口 TCP/443 上的 SSL/TLS（SSL数字证书在这里部署）。&lt;/li&gt;
+&lt;li&gt;Ingress-controller 将流量转发到 pod 的 TCP/80 端口。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;下面是一张从官网拉过来的图片,更直观一些。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://rancher.com/docs/img/rancher/ha/rancher2ha.svg&quot; alt=&quot;image&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;二准备工作&quot;&gt;二、准备工作&lt;/h2&gt;
+&lt;h3 id=&quot;服务器准备&quot;&gt;1. 服务器准备&lt;/h3&gt;
+&lt;ol&gt;&lt;li&gt;1台 Linux服务器，配置不用很高，用于四层负载均衡&lt;/li&gt;
+&lt;li&gt;3台 Linux服务器，Rancker-server-node 节点&lt;/li&gt;
+&lt;li&gt;n台 Linux服务器，Rancker-agent-node 节点(n&amp;lt;=50)&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;节点服务器的硬件配置，可根据实际情况依据该表自行选择。&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;小&lt;/td&gt;
+&lt;td&gt;最多5个&lt;/td&gt;
+&lt;td&gt;高达50&lt;/td&gt;
+&lt;td&gt;2&lt;/td&gt;
+&lt;td&gt;8 GB&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;中&lt;/td&gt;
+&lt;td&gt;最多15个&lt;/td&gt;
+&lt;td&gt;最多200&lt;/td&gt;
+&lt;td&gt;4&lt;/td&gt;
+&lt;td&gt;16 GB&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;大&lt;/td&gt;
+&lt;td&gt;高达50&lt;/td&gt;
+&lt;td&gt;最多500个&lt;/td&gt;
+&lt;td&gt;8&lt;/td&gt;
+&lt;td&gt;32 GB&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot;&gt;&lt;td&gt;超大&lt;/td&gt;
+&lt;td&gt;最多100个&lt;/td&gt;
+&lt;td&gt;高达1000&lt;/td&gt;
+&lt;td&gt;32&lt;/td&gt;
+&lt;td&gt;128 GB&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot;&gt;&lt;td&gt;更大规模&lt;/td&gt;
+&lt;td&gt;100+&lt;/td&gt;
+&lt;td&gt;1000+&lt;/td&gt;
+&lt;td&gt;联系 Rancher&lt;/td&gt;
+&lt;td&gt;联系 Rancher&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;h3 id=&quot;工具安装&quot;&gt;2.工具安装&lt;/h3&gt;
+&lt;p&gt;这些工具软件将在部署过程中用到，需提前安装好，并确保通过 $PATH 变量可以找到。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;安装 kubectl&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;这是一个 kubernetes 命令行工具，&lt;a href=&quot;https://kubernetes.io/docs/tasks/tools/install-kubectl/#install-kubectl&quot;&gt;安装参考&lt;/a&gt; K8S 官网&lt;/p&gt;
+&lt;p&gt;这里要注意的是，官网的安装过程是到谷歌云平台下载，这里我门修改下载链接为 RANCHER 提供的镜像地址。&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 下载目前最新版
+wget https://www.cnrancher.com/download/kubernetes/linux-amd64-v1.14.1-kubectl
+# 设置执行权限
+chmod +x ./linux-amd64-v1.14.1-kubectl 
+# 将其移动到 /usr/locak/bin/kubectl 
+sudo mv ./linux-amd64-v1.14.1-kubectl /usr/local/bin/kubectl&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;安装 RKE&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;RKE 全称 Rancher Kubernetes Engine，是一个用于构建 kubernets 集群的命令行工具。网络原因，我们切换到 Rancher 提供的镜像地址下载安装&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 下载目前最新版
+wget https://www.cnrancher.com/download/rke/v0.1.18-rke_linux-amd64
+# 设置执行权限
+chmod +x v0.1.18-rke_linux-amd64
+# 将其移动到 /usr/locak/bin/kubectl 
+sudo cp v0.1.18-rke_linux-amd64 /usr/local/bin/rke
+# 验证安装
+rke --version # rke version v0.1.18&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;安装 helm&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;helm 是Kubernetes的包管理器。Helm版本需高于 &lt;code&gt;v2.12.1&lt;/code&gt;。&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 网络原因，切换到 Rancher 提供的镜像连接
+wget https://www.cnrancher.com/download/helm/helm-v2.13.1-linux-amd64.tar.gz
+# 解压
+tar -zxvf helm-v2.0.0-linux-amd64.tgz
+# 移动到 /usr/local/bin/helm
+mv linux-amd64/helm /usr/local/bin/helm&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;三创建节点和负载均衡&quot;&gt;三、创建节点和负载均衡&lt;/h2&gt;
+&lt;p&gt;这些节点须在同一个网络区域或数据中心。&lt;/p&gt;
+&lt;h3 id=&quot;节点准备&quot;&gt;1. 节点准备&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;操作系统&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;所有节点安装 ubuntu 18.04(64-bit x86)&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;网络要求&lt;/strong&gt;&lt;br/&gt;注意参考 &lt;a href=&quot;https://rancher.com/docs/rancher/v2.x/en/installation/requirements/#&quot;&gt;官网&lt;/a&gt;放行相关端口。本文 ip 清单（仅用于演示）：&lt;/p&gt;
+&lt;table&gt;&lt;thead/&gt;&lt;tbody readability=&quot;7&quot;&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-LB&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.1 / 内网 10.0.0.1&lt;/td&gt;
+&lt;td&gt;四层负载均衡&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-SERVER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.6 / 内网 10.0.0.6&lt;/td&gt;
+&lt;td&gt;local 集群&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-SERVER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.7 / 内网 10.0.0.7&lt;/td&gt;
+&lt;td&gt;local 集群&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-SERVER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.8 / 内网 10.0.0.8&lt;/td&gt;
+&lt;td&gt;local 集群&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-WORKER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.16 / 内网 10.0.0.16&lt;/td&gt;
+&lt;td&gt;local 集群&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;even&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-WORKER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.17 / 内网 10.0.0.17&lt;/td&gt;
+&lt;td&gt;工作负载&lt;/td&gt;
+&lt;/tr&gt;&lt;tr class=&quot;odd&quot; readability=&quot;2&quot;&gt;&lt;td&gt;NODE-WORKER&lt;/td&gt;
+&lt;td&gt;公网 168.168.168.18 / 内网 10.0.0.18&lt;/td&gt;
+&lt;td&gt;工作负载&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;p&gt;&lt;strong&gt;docker-ce&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;并安装最新stable版 docker-ce:18.09.6&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 删除旧版本docker
+sudo apt-get remove docker docker-engine docker.io containerd runc
+
+# 更新 apt 
+$ sudo apt-get update
+
+# 安装工具包
+$ sudo apt-get install \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common
+
+# 添加Docker官方 GPG key
+$ curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+# 添加 stable apt 源
+$ sudo add-apt-repository \
+   &quot;deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+   $(lsb_release -cs) \
+   stable&quot;
+
+# 安装 Docker CE
+$ sudo apt-get update
+$ sudo apt-get install docker-ce docker-ce-cli containerd.io
+
+# 将当前用户加入&quot;docker&quot;用户组，加入到该用户组的账号在随后安装过程会用到。
+$ sudo usermod -aG docker $USER&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;配置四层负载均衡&quot;&gt;2. 配置四层负载均衡&lt;/h3&gt;
+&lt;p&gt;RKE 将会在每个节点上配置一个 Ingress-controller pod，这个 pod 将绑定到该节点的 TCP/80 和 TCP/443 端口，作为 Rancher-server 的HTTPS流量入口点。&lt;/p&gt;
+&lt;p&gt;将负载均衡器配置为基本的第4层TCP转发器，这里采用 NGINX 作四层负载均衡。&lt;/p&gt;
+&lt;p&gt;*&lt;strong&gt;安装 Nginx&lt;/strong&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo apt-get install nginx
+# /usr/sbin/nginx：主程序
+# /etc/nginx：存放配置文件
+# /usr/share/nginx：存放静态文件
+# /var/log/nginx：存放日志&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;更新配置文件 &lt;code&gt;/etc/nginx/nginx.conf&lt;/code&gt;&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;worker_processes 4;
+worker_rlimit_nofile 40000;
+
+events {
+    worker_connections 8192;
+}
+
+stream {
+    upstream rancher_servers_http {
+        least_conn;
+        server 10.0.0.6:80 max_fails=3 fail_timeout=5s;
+        server 10.0.0.7:80 max_fails=3 fail_timeout=5s;
+        server 10.0.0.8:80 max_fails=3 fail_timeout=5s;
+    }
+    server {
+        listen     80;
+        proxy_pass rancher_servers_http;
+    }
+
+    upstream rancher_servers_https {
+        least_conn;
+        server 10.0.0.6:443 max_fails=3 fail_timeout=5s;
+        server 10.0.0.7:443 max_fails=3 fail_timeout=5s;
+        server 10.0.0.8:443 max_fails=3 fail_timeout=5s;
+    }
+    
+    server {
+        listen     443;
+        proxy_pass rancher_servers_https;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;pre&gt;
+&lt;code&gt;注意：将local群集专用于Rancher。
+勿将此负载均衡（即local群集Ingress）对 Rancher 以外的应用程序进行负载转发。&lt;/code&gt;
+&lt;/pre&gt;&lt;/blockquote&gt;
+&lt;h2 id=&quot;四使用-rke-安装-kubernetes&quot;&gt;四、使用 RKE 安装 kubernetes&lt;/h2&gt;
+&lt;p&gt;下面使用 RKE(Kubernetes Engine) 安装高可用的 Kubernetes。&lt;/p&gt;
+&lt;h3 id=&quot;node-server-之间建立-ssh-信任&quot;&gt;1. NODE-SERVER 之间建立 ssh 信任&lt;/h3&gt;
+&lt;p&gt;我们目前有三台服务器用作 local 集群，首先要确保我们主机能够通过 ssh 访问到另外两台主机并执行相关操作。比如执行 docker 命令，还记得前面我们加入 docker 用户组的用户吧。&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 根据需求配置相关信息生成 rsa 公钥密钥
+ssh-keygen
+
+# 复制当前主机上的公钥到另外两台上面，实现免密码登录
+ssh-copy-id -i ~/.ssh/id_rsa.pub user@x.x.x.x
+
+# 要注意这里也要跟自己注册注册一下 ：ssh-copy-id -i ~/.ssh/id_rsa.pub user@本机ip&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;编写-rancher-cluster.yml-文件&quot;&gt;2. 编写 rancher-cluster.yml 文件&lt;/h3&gt;
+&lt;p&gt;这里需要注意，这个文件没有明确配置rsa文件名，默认会使用 &lt;code&gt;$HOME/.ssh/id_rsa&lt;/code&gt; 建立连接。内容如下&lt;/p&gt;
+&lt;pre class=&quot;yml&quot;&gt;
+&lt;code&gt;nodes:
+  - address: 168.168.168.6
+    internal_address: 10.0.0.6
+    user: ubuntu
+    role: [controlplane,worker,etcd]
+  - address: 168.168.168.7
+    internal_address: 10.0.0.7
+    user: ubuntu
+    role: [controlplane,worker,etcd]
+  - address: 168.168.168.8
+    internal_address: 10.0.0.8
+    user: ubuntu
+    role: [controlplane,worker,etcd]
+
+services:
+  etcd:
+    snapshot: true
+    creation: 6h
+    retention: 24h&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;运行-rke-构建-kubernetes-集群&quot;&gt;3. 运行 RKE 构建 kubernetes 集群&lt;/h3&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;rke up --config ./rancher-cluster.yml
+# 验证：返回类似下面的消息则说明执行成功，有问题欢迎留言交流。
+# Finished building Kubernetes cluster successfully.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;执行成功会在当前目录生成一个文件 &lt;code&gt;kube_config_rancher-cluster.yml&lt;/code&gt;，将该文件复制到 &lt;code&gt;.kube/kube_config_rancher-cluster.yml&lt;/code&gt;。&lt;/p&gt;
+&lt;p&gt;或者&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;export KUBECONFIG=$(pwd)/kube_config_rancher-cluster.yml&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;测试集群&quot;&gt;4. 测试集群&lt;/h3&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;kubectl get nodes
+# 返回下面信息说明集群创建成功
+NAME           STATUS   ROLES                      AGE   VERSION
+168.168.168.6   Ready    controlplane,etcd,worker   13m   v1.13.5
+168.168.168.7   Ready    controlplane,etcd,worker   13m   v1.13.5
+168.168.168.8   Ready    controlplane,etcd,worker   13m   v1.13.5&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;保存好相关配置文件&quot;&gt;5. 保存好相关配置文件&lt;/h3&gt;
+&lt;p&gt;当排除故障、升级群集时需要用到以下文件，请将其副本保存在一个安全的位置。&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;rancher-cluster.yml&lt;/code&gt;：RKE集群配置文件。&lt;br/&gt;&lt;code&gt;kube_config_rancher-cluster.yml&lt;/code&gt;：群集的Kubeconfig文件，此文件包含完全访问群集的凭据。&lt;br/&gt;&lt;code&gt;rancher-cluster.rkestate&lt;/code&gt;：Kubernetes群集状态文件，此文件包含完全访问群集的凭据。&lt;/p&gt;
+&lt;h3 id=&quot;初始化-helm&quot;&gt;6. 初始化 Helm&lt;/h3&gt;
+&lt;p&gt;一开始，我们安装了 Helm ，Helm 是 Kubernetes 首选的包管理工具。为了能够使用 Helm，需要在群集上安装服务器端组件 tiller。&lt;/p&gt;
+&lt;p&gt;Kubernetes APIServer 开启了 RBAC 访问控制，所以需要创建 tiller 使用的service account: tiller 并分配合适的角色给它。&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;# 在 kube-system 命名空间下创建一个 serviceaccount ,并将角色绑定给 tiller
+kubectl -n kube-system create serviceaccount tiller
+
+# 然后， heml 就可以在集群上安装 tiller 了
+# 同样，网络原因，我们需要配置一个镜像仓库地址
+helm init --upgrade -i registry.cn-hangzhou.aliyuncs.com/google_containers/tiller:v2.13.1 --stable-repo-url https://kubernetes.oss-cn-hangzhou.aliyuncs.com/charts
+
+# 输出：$HELM_HOME has been configured at /home/ubuntu/.helm.&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;测试-tiller-安装是否成功&quot;&gt;7. 测试 tiller 安装是否成功&lt;/h3&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;kubectl -n kube-system  rollout status deploy/tiller-deploy
+# 输出 deployment &quot;tiller-deploy&quot; successfully rolled out
+
+helm version
+# Client: &amp;amp;version.Version{SemVer:&quot;v2.13.1&quot;, GitCommit:&quot;618447cbf203d147601b4b9bd7f8c37a5d39fbb4&quot;, GitTreeState:&quot;clean&quot;}
+# Server: &amp;amp;version.Version{SemVer:&quot;v2.13.1&quot;, GitCommit:&quot;618447cbf203d147601b4b9bd7f8c37a5d39fbb4&quot;, GitTreeState:&quot;clean&quot;}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;五安装-rancher&quot;&gt;五、安装 Rancher&lt;/h2&gt;
+&lt;p&gt;这里注意选择 stable 版本，首先添加 heml 源仓库。&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;helm repo add rancher-stable https://releases.rancher.com/server-charts/stable&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;部署-rancher-并配置-ssl-数字证书&quot;&gt;1. 部署 Rancher 并配置 SSL 数字证书&lt;/h3&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;helm install rancher-stable/rancher \
+  --name rancher \
+  --namespace cattle-system \
+  --set hostname=cloud.jfjbapp.cn \
+  --set ingress.tls.source=secret
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;将通过-ca-机构签发的数字证书准备好&quot;&gt;2. 将通过 CA 机构签发的数字证书准备好，&lt;/h3&gt;
+&lt;h3 id=&quot;检查-rancher-是否成功可用&quot;&gt;3. 检查 rancher 是否成功可用&lt;/h3&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;kubectl -n cattle-system rollout status deploy/rancher
+Waiting for deployment &quot;rancher&quot; rollout to finish: 0 of 3 updated replicas are available...
+deployment &quot;rancher&quot; successfully rolled out&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;访问-rancher-ui&quot;&gt;4. 访问 Rancher UI&lt;/h3&gt;
+&lt;p&gt;浏览器打开 &lt;code&gt;https://your.doamin&lt;/code&gt;，为 &lt;code&gt;admin&lt;/code&gt;账户设置初始密码，并登入系统。提示设置&lt;code&gt;server-url&lt;/code&gt;，确保你的地址无误，确认即可。随后稍等皮片刻，待系统完成初始化。&lt;/p&gt;
+&lt;p&gt;如果出现local集群一直停留在等待状态，并提示 &lt;code&gt;Waiting for server-url setting to be set&lt;/code&gt;，可以尝试点击 全局-&amp;gt;local-&amp;gt;升级-&amp;gt;添加一个成员角色（admin/ClusterOwner）-&amp;gt;保存即可。&lt;/p&gt;
+&lt;h2 id=&quot;六结语&quot;&gt;六、结语&lt;/h2&gt;
+&lt;p&gt;至此，已完成 Rancher 2.2.3 的 HA 安装，后续再做一些安全加固，检查各项配置确保无安全风险，即可开始提供服务。随后会抽空再写一篇文章简单介绍微服务架构应用的部署。&lt;/p&gt;
+</description>
+<pubDate>Wed, 08 May 2019 23:33:00 +0000</pubDate>
+<dc:creator>kelsen</dc:creator>
+<og:description>对于生产环境，需以高可用的配置安装 Rancher，确保用户始终可以访问 Rancher Server。当安装在Kubernetes集群中时，Rancher将与集群的 etcd 集成，并利用Kuber</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/kelsen/p/10836332.html</dc:identifier>
+</item>
+<item>
+<title>强迫症福利--收起.NET程序的dll来 - 波多尔斯基</title>
+<link>http://www.cnblogs.com/podolski/p/10836241.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/podolski/p/10836241.html</guid>
+<description>&lt;p&gt;作为上床后需要下床检查好几次门关了没有的资深强迫症患者，有一个及其搞我的问题，就是dll问题。&lt;/p&gt;
+&lt;p&gt;曾几何时，在没有nuget的年代，当有依赖项需要引用的时候，只能通过文件引用来管理引用问题，版本问题，更新问题层出不穷，很是难受。&lt;/p&gt;
+&lt;p&gt;后来出来nuget，喜大普奔，总算解决了引用的问题。开心之余，依然还有一个很膈应人的问题：生成文件夹满地的dll，找个exe眼睛很难受。&lt;/p&gt;
+&lt;p&gt;讲道理这个也不是什么大问题，但是就是心痒痒，就特别想把这些dll收到一个单独文件夹里面，外面就留exe和配置等文件。然后就找这个东西：PrettyBin。&lt;/p&gt;
+&lt;h2 id=&quot;prettybin&quot;&gt;PrettyBin&lt;/h2&gt;
+&lt;p&gt;PrettyBin是一个开源的nuget包：&lt;a href=&quot;https://github.com/slmjy/PrettyBin&quot; class=&quot;uri&quot;&gt;https://github.com/slmjy/PrettyBin&lt;/a&gt;，使用它可以将.NET Framework程序引用的文件收到lib文件夹里面，使用起来也非常方便，老样子，直接nuget安装。&lt;/p&gt;
+&lt;pre class=&quot;powershell&quot;&gt;
+&lt;code&gt;Install-Package PrettyBin&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;提示重新加载项目，点击确定，就完事了。&lt;br/&gt;安装之前，输出是这样的：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/616093/201905/616093-20190509011826843-867839415.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;安装之后，输出是这样的：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/616093/201905/616093-20190509011838953-1738509163.png&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;dll之类的文件都进lib文件夹了，感觉世界都干净了很多。&lt;/p&gt;
+&lt;h2 id=&quot;补充&quot;&gt;补充&lt;/h2&gt;
+&lt;ol readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;细心的童鞋应该能够发现，我写的是&lt;strong&gt;.NET Framework&lt;/strong&gt;的程序引用，.NET Core，.NET Standard呢？&lt;br/&gt;答案是：.NET Core啥的东西生成的就是dll，都一样就没必要了。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;安装prettybin之后，再安装新的包会怎么样？受不受影响？&lt;br/&gt;依然有用，不受影响。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li readability=&quot;0&quot;&gt;
+&lt;p&gt;对于新的nuget管理形式PackageReference效果如何怎么样？&lt;br/&gt;这个有说法的，需要先了解这个包工作的原理。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;&lt;h2 id=&quot;原理解析&quot;&gt;原理解析&lt;/h2&gt;
+&lt;p&gt;首先看看安装的时候，nuget包管理器弹出的提示：&lt;/p&gt;
+&lt;pre class=&quot;powershell&quot;&gt;
+&lt;code&gt;正在执行脚本文件“ConsoleApp4\packages\PrettyBin.1.1.0\tools\init.ps1”
+Init BinPrettify
+正在执行脚本文件“ConsoleApp4\packages\PrettyBin.1.1.0\tools\install.ps1”
+Install PrettifyBin; 
+http://schemas.microsoft.com/developer/msbuild/2003
+No Target AfterBuild Node. Creating
+No ItemGroup whith MoveToLibFolder tag. Creating
+No Move tag in AfterBuild Target. Creating
+Edititing App.config
+runtimeNode items
+No probing Node. Creating
+已将“PrettyBin 1.1.0”成功安装到 ConsoleApp4&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;可以看到，这里首先执行的是给项目文件添加`&lt;code&gt;msbuild&lt;/code&gt;内容，增加了&lt;code&gt;AfterBuild&lt;/code&gt;节点，&lt;code&gt;MoveToLibFolder&lt;/code&gt;节点和&lt;code&gt;Move&lt;/code&gt;节点。&lt;/p&gt;
+&lt;pre class=&quot;xml&quot;&gt;
+&lt;code&gt;&amp;lt;Import Project=&quot;$(MSBuildToolsPath)\Microsoft.CSharp.targets&quot; /&amp;gt;
+&amp;lt;Target Name=&quot;AfterBuild&quot;&amp;gt;
+&amp;lt;ItemGroup&amp;gt;
+    &amp;lt;MoveToLibFolder Include=&quot;$(OutputPath)*.dll ; $(OutputPath)*.pdb ; $(OutputPath)*.xml&quot; /&amp;gt;
+&amp;lt;/ItemGroup&amp;gt;
+&amp;lt;Move SourceFiles=&quot;@(MoveToLibFolder)&quot; DestinationFolder=&quot;$(OutputPath)lib&quot; OverwriteReadOnlyFiles=&quot;true&quot; /&amp;gt;
+&amp;lt;/Target&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;msbuild可以设置生成后的操作，成功生成之后，将目录下面的dll文件，pdb文件和xml都转到了lib文件夹。&lt;br/&gt;然后修改了app.config文件，在runtime底下增加了一个&lt;code&gt;probing&lt;/code&gt;节点。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;pre class=&quot;xml&quot;&gt;
+&lt;code&gt;&amp;lt;runtime&amp;gt;
+&amp;lt;assemblyBinding xmlns=&quot;urn:schemas-microsoft-com:asm.v1&quot;&amp;gt;
+    &amp;lt;probing privatePath=&quot;lib;libs&quot; xmlns=&quot;&quot; /&amp;gt;
+&amp;lt;/assemblyBinding&amp;gt;
+&amp;lt;/runtime&amp;gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;blockquote readability=&quot;3.3694029850746&quot;&gt;
+&lt;p&gt;probing节点提供.NET程序集查找的选项，privatepath指定路径，详细资料可以查看MSDN：&lt;a href=&quot;https://support.microsoft.com/en-us/help/837908/how-to-load-an-assembly-at-runtime-that-is-located-in-a-folder-that-is&quot; class=&quot;uri&quot;&gt;https://support.microsoft.com/en-us/help/837908/how-to-load-an-assembly-at-runtime-that-is-located-in-a-folder-that-is&lt;/a&gt;&lt;br/&gt;补充资料：关于&lt;a href=&quot;https://docs.microsoft.com/zh-cn/dotnet/framework/configure-apps/specify-assembly-location&quot;&gt;指定程序集位置&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;所以，prettybin是通过运行&lt;code&gt;powershell&lt;/code&gt;脚本设置生成成功后转移文件，并将程序集查找路径调整为lib文件夹。&lt;/p&gt;
+&lt;p&gt;根据&lt;a href=&quot;https://docs.microsoft.com/zh-cn/nuget/reference/migrate-packages-config-to-package-reference&quot; class=&quot;uri&quot;&gt;https://docs.microsoft.com/zh-cn/nuget/reference/migrate-packages-config-to-package-reference&lt;/a&gt;，PackageReference方式nuget是不支持install.ps1脚本的。所以并不能支持prettybin。&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;新建.NET Framework程序是默认是通过传统的package.config文件进行包管理的，新建.NET Core和.NET Standard都是默认使用PackageReference包管理。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;结论&quot;&gt;结论&lt;/h2&gt;
+&lt;ol&gt;&lt;li&gt;&lt;em&gt;如果需要使用PrettyBin，那么直接默认配置.NET FRAMEWORK项目的nuget管理方式，完美支持。&lt;/em&gt;&lt;/li&gt;
+&lt;li&gt;&lt;em&gt;如果需要升级新的包管理方式，可以在安装了PrettyBin之后升级项目，依然支持。&lt;/em&gt;&lt;/li&gt;
+&lt;li&gt;&lt;em&gt;升级了PackageReference之后，安装PrettyBin无效。&lt;/em&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;h4 id=&quot;p.s.-补充不使用prettybin也不调用afterbuild的一种实现httpswww.broculos.net201403visual-studio-build-dlls-to-separate.html.wwitjjfjly8&quot;&gt;P.S. 补充不使用prettybin，也不调用AFTERBUILD的一种实现：&lt;a href=&quot;https://www.broculos.net/2014/03/visual-studio-build-dlls-to-separate.html#.WWiTjJFJLy8&quot; class=&quot;uri&quot;&gt;https://www.broculos.net/2014/03/visual-studio-build-dlls-to-separate.html#.WWiTjJFJLy8&lt;/a&gt;&lt;/h4&gt;
+</description>
+<pubDate>Wed, 08 May 2019 17:22:00 +0000</pubDate>
+<dc:creator>波多尔斯基</dc:creator>
+<og:description>作为上床后需要下床检查好几次门关了没有的资深强迫症患者，有一个及其搞我的问题，就是dll问题。 曾几何时，在没有nuget的年代，当有依赖项需要引用的时候，只能通过文件引用来管理引用问题，版本问题，更</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/podolski/p/10836241.html</dc:identifier>
+</item>
+<item>
+<title>Spring Boot 2 快速教程：WebFlux 快速入门（二） - www.bysocket.com</title>
+<link>http://www.cnblogs.com/Alandre/p/10836242.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/Alandre/p/10836242.html</guid>
+<description>&lt;p&gt;摘要: 原创出处 https://www.bysocket.com 「公众号：泥瓦匠BYSocket 」欢迎关注和转载，保留摘要，谢谢！&lt;/p&gt;
+
+&lt;p&gt;文章工程：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;JDK 1.8&lt;/li&gt;
+&lt;li&gt;Maven 3.5.2&lt;/li&gt;
+&lt;li&gt;Spring Boot 2.1.3.RELEASE&lt;/li&gt;
+&lt;li&gt;工程名：springboot-webflux-1-quickstart&lt;/li&gt;
+&lt;li&gt;工程地址：见文末&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;一、Spring Boot 2.0&lt;/h2&gt;
+&lt;p&gt;spring.io 官网有句醒目的话是：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;BUILD ANYTHING WITH SPRING BOOT
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Spring Boot （Boot 顾名思义，是引导的意思）框架是用于简化 Spring 应用从搭建到开发的过程。应用开箱即用，只要通过一个指令，包括命令行 &lt;code&gt;java -jar&lt;/code&gt; 、&lt;code&gt;SpringApplication&lt;/code&gt; 应用启动类 、 Spring Boot Maven 插件等，就可以启动应用了。另外，Spring Boot 强调只需要很少的配置文件，所以在开发生产级 Spring 应用中，让开发变得更加高效和简易。目前，Spring Boot 版本是 2.x 版本。Spring Boot 包括 WebFlux。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://images.gitbook.cn/87db53c0-b936-11e7-b969-cb3cfaf54002&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;二、Spring Boot 2.0 WebFlux&lt;/h2&gt;
+&lt;p&gt;了解 WebFlux ,首先了解下什么是 Reactive Streams。Reactive Streams 是 JVM 中面向流的库标准和规范：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;处理可能无限数量的元素&lt;/li&gt;
+&lt;li&gt;按顺序处理&lt;/li&gt;
+&lt;li&gt;组件之间异步传递&lt;/li&gt;
+&lt;li&gt;强制性非阻塞背压（Backpressure）&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;2.1 Backpressure(背压)&lt;/p&gt;
+&lt;p&gt;背压是一种常用策略，使得发布者拥有无限制的缓冲区存储元素，用于确保发布者发布元素太快时，不会去压制订阅者。&lt;/p&gt;
+&lt;p&gt;2.2 Reactive Streams（响应式流）&lt;/p&gt;
+&lt;p&gt;一般由以下组成：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;发布者：发布元素到订阅者&lt;/li&gt;
+&lt;li&gt;订阅者：消费元素&lt;/li&gt;
+&lt;li&gt;订阅：在发布者中，订阅被创建时，将与订阅者共享&lt;/li&gt;
+&lt;li&gt;处理器：发布者与订阅者之间处理数据&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;2.3 响应式编程&lt;br/&gt;有了 Reactive Streams 这种标准和规范，利用规范可以进行响应式编程。那再了解下什么是 Reactive programming 响应式编程。响应式编程是基于异步和事件驱动的非阻塞程序，只是垂直通过在 JVM 内启动少量线程扩展，而不是水平通过集群扩展。这就是一个编程范例，具体项目中如何体现呢？&lt;/p&gt;
+&lt;p&gt;响应式项目编程实战中，通过基于 Reactive Streams 规范实现的框架 Reactor 去实战。Reactor 一般提供两种响应式 API ：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Mono：实现发布者，并返回 0 或 1 个元素&lt;/li&gt;
+&lt;li&gt;Flux：实现发布者，并返回 N 个元素&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;2.4 Spring Webflux&lt;/p&gt;
+&lt;p&gt;Spring Boot Webflux 就是基于 Reactor 实现的。Spring Boot 2.0 包括一个新的 spring-webflux 模块。该模块包含对响应式 HTTP 和 WebSocket 客户端的支持，以及对 REST，HTML 和 WebSocket 交互等程序的支持。一般来说，Spring MVC 用于同步处理，Spring Webflux 用于异步处理。&lt;/p&gt;
+&lt;p&gt;Spring Boot Webflux 有两种编程模型实现，一种类似 Spring MVC 注解方式，另一种是使用其功能性端点方式。注解的会在第二篇文章讲到，下面快速入门用 Spring Webflux 功能性方式实现。&lt;/p&gt;
+&lt;h2&gt;三、Spring Boot 2.0 WebFlux 特性&lt;/h2&gt;
+&lt;p&gt;常用的 Spring Boot 2.0 WebFlux 生产的特性如下：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;响应式 API&lt;/li&gt;
+&lt;li&gt;编程模型&lt;/li&gt;
+&lt;li&gt;适用性&lt;/li&gt;
+&lt;li&gt;内嵌容器&lt;/li&gt;
+&lt;li&gt;Starter 组件&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;还有对日志、Web、消息、测试及扩展等支持。&lt;/p&gt;
+&lt;h4&gt;3.1 响应式 API&lt;/h4&gt;
+&lt;p&gt;Reactor 框架是 Spring Boot Webflux 响应库依赖，通过 Reactive Streams 并与其他响应库交互。提供了 两种响应式 API : Mono 和 Flux。一般是将 Publisher 作为输入，在框架内部转换成 Reactor 类型并处理逻辑，然后返回 Flux 或 Mono 作为输出。&lt;/p&gt;
+&lt;h4&gt;3.2 适用性&lt;/h4&gt;
+&lt;p&gt;&lt;img src=&quot;http://springforall.ufile.ucloud.com.cn/static/img/e39654d047bd43a8f708d67f947c00c01523267&quot; alt=&quot;file&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;一图就很明确了，WebFlux 和 MVC 有交集，方便大家迁移。但是注意：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;MVC 能满足场景的，就不需要更改为 WebFlux。&lt;/li&gt;
+&lt;li&gt;要注意容器的支持，可以看看下面内嵌容器的支持。&lt;/li&gt;
+&lt;li&gt;微服务体系结构，WebFlux 和 MVC 可以混合使用。尤其开发 IO 密集型服务的时候，选择 WebFlux 去实现。&lt;/li&gt;
+&lt;/ul&gt;&lt;h4&gt;3.3 编程模型&lt;/h4&gt;
+&lt;p&gt;Spring 5 web 模块包含了 Spring WebFlux 的 HTTP 抽象。类似 Servlet API , WebFlux 提供了 WebHandler API 去定义非阻塞 API 抽象接口。可以选择以下两种编程模型实现：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;注解控制层。和 MVC 保持一致，WebFlux 也支持响应性 @RequestBody 注解。&lt;/li&gt;
+&lt;li&gt;功能性端点。基于 lambda 轻量级编程模型，用来路由和处理请求的小工具。和上面最大的区别就是，这种模型，全程控制了请求 – 响应的生命流程&lt;/li&gt;
+&lt;/ul&gt;&lt;h4&gt;3.4 内嵌容器&lt;/h4&gt;
+&lt;p&gt;跟 Spring Boot 大框架一样启动应用，但 WebFlux 默认是通过 Netty 启动，并且自动设置了默认端口为 8080。另外还提供了对 Jetty、Undertow 等容器的支持。开发者自行在添加对应的容器 Starter 组件依赖，即可配置并使用对应内嵌容器实例。&lt;/p&gt;
+&lt;p&gt;但是要注意，必须是 Servlet 3.1+ 容器，如 Tomcat、Jetty；或者非 Servlet 容器，如 Netty 和 Undertow。&lt;/p&gt;
+&lt;h4&gt;3.5 Starter 组件&lt;/h4&gt;
+&lt;p&gt;跟 Spring Boot 大框架一样，Spring Boot Webflux 提供了很多 “开箱即用” 的 Starter 组件。Starter 组件是可被加载在应用中的 Maven 依赖项。只需要在 Maven 配置中添加对应的依赖配置，即可使用对应的 Starter 组件。例如，添加 &lt;code&gt;spring-boot-starter-webflux&lt;/code&gt; 依赖，就可用于构建响应式 API 服务，其包含了 Web Flux 和 Tomcat 内嵌容器等。&lt;/p&gt;
+&lt;p&gt;开发中，很多功能是通过添加 Starter 组件的方式来进行实现。那么，Spring Boot 2.x 常用的 Starter 组件有哪些呢？&lt;/p&gt;
+&lt;h2&gt;四、Spring Boot 2.0 WebFlux 组件&lt;/h2&gt;
+&lt;p&gt;Spring Boot WebFlux 官方提供了很多 Starter 组件，每个模块会有多种技术实现选型支持，来实现各种复杂的业务需求：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;Web：Spring WebFlux&lt;/li&gt;
+&lt;li&gt;模板引擎：Thymeleaf&lt;/li&gt;
+&lt;li&gt;存储：Redis、MongoDB、Cassandra。不支持 MySQL&lt;/li&gt;
+&lt;li&gt;内嵌容器：Tomcat、Jetty、Undertow&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;五、快速入门&lt;/h2&gt;
+&lt;h3&gt;5.1 Spring Initializr 快速构建项目骨架&lt;/h3&gt;
+&lt;p&gt;Spring Boot Maven 工程，就是普通的 Maven 工程，加入了对应的 Spring Boot 依赖即可。Spring Initializr 则是像代码生成器一样，自动就给你出来了一个 Spring Boot Maven 工程。Spring Initializr 有两种方式可以得到 Spring Boot Maven 骨架工程：&lt;/p&gt;
+&lt;h4&gt;5.1.1 start.spring.io 在线生成&lt;/h4&gt;
+&lt;p&gt;Spring 官方提供了名为 Spring Initializr 的网站，去引导你快速生成 Spring Boot 应用。网站地址为：https://start.spring.io，操作步骤如下：&lt;/p&gt;
+&lt;p&gt;第一步，选择 Maven 或者 Gradle 构建工具，开发语言 Java 、Kotlin 或者 Groovy，最后确定 Spring Boot 版本号。这里默认选择 Maven 构建工具、Java 开发语言和 Spring Boot 2.0.1。&lt;/p&gt;
+&lt;p&gt;第二步，输入 Maven 工程信息，即项目组 &lt;code&gt;groupId&lt;/code&gt; 和名字 &lt;code&gt;artifactId&lt;/code&gt;。这里对应 Maven 信息为：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;groupId：springboot&lt;/li&gt;
+&lt;li&gt;artifactId：sspringboot-webflux-1-quickstart&lt;br/&gt;这里默认版本号 version 为 0.0.1-SNAPSHOT 。三个属性在 Maven 依赖仓库是唯一标识的。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;第三步，选择工程需要的 Starter 组件和其他依赖。最后点击生成按钮，即可获得骨架工程压缩包。这里快速入门，只要选择 Reactive Web 即可。如图 1-8 所示。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://springforall.ufile.ucloud.com.cn/static/img/e8756dce7ada604d9f29f2fd61d0f1721523318&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h3&gt;5.2 配置 POM 依赖&lt;/h3&gt;
+&lt;p&gt;检查工程 POM 文件中，是否配置了 spring-boot-starter-webflux 依赖。如果是上面自动生成的，配置如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;  &amp;lt;dependencies&amp;gt;
+    &amp;lt;dependency&amp;gt;
+      &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+      &amp;lt;artifactId&amp;gt;spring-boot-starter-webflux&amp;lt;/artifactId&amp;gt;
+    &amp;lt;/dependency&amp;gt;
+
+    &amp;lt;dependency&amp;gt;
+      &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+      &amp;lt;artifactId&amp;gt;spring-boot-starter-test&amp;lt;/artifactId&amp;gt;
+      &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
+    &amp;lt;/dependency&amp;gt;
+    &amp;lt;dependency&amp;gt;
+      &amp;lt;groupId&amp;gt;io.projectreactor&amp;lt;/groupId&amp;gt;
+      &amp;lt;artifactId&amp;gt;reactor-test&amp;lt;/artifactId&amp;gt;
+      &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
+    &amp;lt;/dependency&amp;gt;
+  &amp;lt;/dependencies&amp;gt;
+
+  &amp;lt;build&amp;gt;
+    &amp;lt;plugins&amp;gt;
+      &amp;lt;plugin&amp;gt;
+        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
+        &amp;lt;artifactId&amp;gt;spring-boot-maven-plugin&amp;lt;/artifactId&amp;gt;
+      &amp;lt;/plugin&amp;gt;
+    &amp;lt;/plugins&amp;gt;
+  &amp;lt;/build&amp;gt;
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;spring-boot-starter-webflux 依赖，是我们核心需要学习 webflux 的包，里面默认包含了 spring-boot-starter-reactor-netty 、spring 5 webflux 包。也就是说默认是通过 netty 启动的。&lt;/p&gt;
+&lt;p&gt;reactor-test、spring-boot-starter-test 两个依赖搭配是用于单元测试。&lt;/p&gt;
+&lt;p&gt;spring-boot-maven-plugin 是 Spring Boot Maven 插件，可以运行、编译等调用。&lt;/p&gt;
+&lt;h3&gt;5.3 编写处理器类 Handler&lt;/h3&gt;
+&lt;p&gt;新建包 org.spring.springboot.handler ，作为编写功能处理类。新建城市（City）例子的处理类 CityHandler，代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.http.MediaType;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.stereotype.Component;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.BodyInserters;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.ServerRequest;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.ServerResponse;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import reactor.core.publisher.Mono;
+
+&lt;span class=&quot;hljs-meta&quot;&gt;@Component
+&lt;span class=&quot;hljs-keyword&quot;&gt;public &lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class &lt;span class=&quot;hljs-title&quot;&gt;CityHandler {
+
+    &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public Mono&amp;lt;ServerResponse&amp;gt; &lt;span class=&quot;hljs-title&quot;&gt;helloCity&lt;span class=&quot;hljs-params&quot;&gt;(ServerRequest request) {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return ServerResponse.ok().contentType(MediaType.TEXT_PLAIN)
+                .body(BodyInserters.fromObject(&lt;span class=&quot;hljs-string&quot;&gt;&quot;Hello, City!&quot;));
+    }
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;ServerResponse 是对响应的封装，可以设置响应状态，响应头，响应正文。比如 ok 代表的是 200 响应码、MediaType 枚举是代表这文本内容类型、返回的是 String 的对象。&lt;/p&gt;
+&lt;p&gt;这里用 Mono 作为返回对象，是因为返回包含了一个 ServerResponse 对象，而不是多个元素。&lt;/p&gt;
+&lt;h3&gt;5.4 编写路由器类 Router&lt;/h3&gt;
+&lt;p&gt;新建 org.spring.springboot.router 包，作为编写路由器类。新建城市（City）例子的路由类 CityRouter，代码如下：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;import org.spring.springboot.handler.CityHandler;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.context.annotation.Bean;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.context.annotation.Configuration;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.http.MediaType;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.RequestPredicates;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.RouterFunction;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.RouterFunctions;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import org.springframework.web.reactive.function.server.ServerResponse;
+
+&lt;span class=&quot;hljs-meta&quot;&gt;@Configuration
+&lt;span class=&quot;hljs-keyword&quot;&gt;public &lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class &lt;span class=&quot;hljs-title&quot;&gt;CityRouter {
+
+
+    &lt;span class=&quot;hljs-meta&quot;&gt;@Bean
+    &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;public RouterFunction&amp;lt;ServerResponse&amp;gt; &lt;span class=&quot;hljs-title&quot;&gt;routeCity&lt;span class=&quot;hljs-params&quot;&gt;(CityHandler cityHandler) {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return RouterFunctions
+                .route(RequestPredicates.GET(&lt;span class=&quot;hljs-string&quot;&gt;&quot;/hello&quot;)
+                                .and(RequestPredicates.accept(MediaType.TEXT_PLAIN)),
+                        cityHandler::helloCity);
+    }
+
+}
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;RouterFunctions 对请求路由处理类，即将请求路由到处理器。这里将一个 GET 请求 /hello 路由到处理器 cityHandler 的 helloCity 方法上。跟 Spring MVC 模式下的 HandleMapping 的作用类似。&lt;/p&gt;
+&lt;p&gt;RouterFunctions.route(RequestPredicate, HandlerFunction) 方法，对应的入参是请求参数和处理函数，如果请求匹配，就调用对应的处理器函数。&lt;/p&gt;
+&lt;p&gt;到这里一个简单的服务就写好了，下面怎么运行该服务。&lt;/p&gt;
+&lt;h3&gt;5.5 启动运行项目&lt;/h3&gt;
+&lt;p&gt;一个简单的 Spring Boot Webflux 工程就开发完毕了，下面运行工程验证下。使用 IDEA 右侧工具栏，点击 Maven Project Tab ，点击使用下 Maven 插件的 &lt;code&gt;install&lt;/code&gt; 命令。或者使用命令行的形式，在工程根目录下，执行 Maven 清理和安装工程的指令：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;cd springboot-webflux-&lt;span class=&quot;hljs-number&quot;&gt;1-quickstart
+mvn clean install
+&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在控制台中看到成功的输出：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;... 省略
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time: &lt;span class=&quot;hljs-number&quot;&gt;01:&lt;span class=&quot;hljs-number&quot;&gt;30 min
+[INFO] Finished at: &lt;span class=&quot;hljs-number&quot;&gt;2017-&lt;span class=&quot;hljs-number&quot;&gt;10-&lt;span class=&quot;hljs-number&quot;&gt;15T10:&lt;span class=&quot;hljs-number&quot;&gt;00:&lt;span class=&quot;hljs-number&quot;&gt;54+&lt;span class=&quot;hljs-number&quot;&gt;08:&lt;span class=&quot;hljs-number&quot;&gt;00
+[INFO] Final Memory: &lt;span class=&quot;hljs-number&quot;&gt;31M/&lt;span class=&quot;hljs-number&quot;&gt;174M
+[INFO] ------------------------------------------------------------------------
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h4&gt;5.5.1 运行工程&lt;/h4&gt;
+&lt;p&gt;在 IDEA 中执行 &lt;code&gt;Application&lt;/code&gt; 类启动，任意正常模式或者 Debug 模式。可以在控制台看到成功运行的输出：&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-java hljs&quot;&gt;... 省略
+&lt;span class=&quot;hljs-number&quot;&gt;2018-&lt;span class=&quot;hljs-number&quot;&gt;04-&lt;span class=&quot;hljs-number&quot;&gt;10 &lt;span class=&quot;hljs-number&quot;&gt;08:&lt;span class=&quot;hljs-number&quot;&gt;43:&lt;span class=&quot;hljs-number&quot;&gt;39.932  INFO &lt;span class=&quot;hljs-number&quot;&gt;2052 --- [ctor-http-nio-&lt;span class=&quot;hljs-number&quot;&gt;1] r.ipc.netty.tcp.BlockingNettyContext     : Started HttpServer on /&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;0:&lt;span class=&quot;hljs-number&quot;&gt;8080
+&lt;span class=&quot;hljs-number&quot;&gt;2018-&lt;span class=&quot;hljs-number&quot;&gt;04-&lt;span class=&quot;hljs-number&quot;&gt;10 &lt;span class=&quot;hljs-number&quot;&gt;08:&lt;span class=&quot;hljs-number&quot;&gt;43:&lt;span class=&quot;hljs-number&quot;&gt;39.935  INFO &lt;span class=&quot;hljs-number&quot;&gt;2052 --- [           main] o.s.b.web.embedded.netty.NettyWebServer  : &lt;span class=&quot;hljs-function&quot;&gt;Netty started on &lt;span class=&quot;hljs-title&quot;&gt;port&lt;span class=&quot;hljs-params&quot;&gt;(s): 8080
+2018-04-10 08:43:39.960  INFO 2052 --- [           main] org.spring.springboot.Application        : Started Application in 6.547 &lt;span class=&quot;hljs-title&quot;&gt;seconds &lt;span class=&quot;hljs-params&quot;&gt;(JVM running &lt;span class=&quot;hljs-keyword&quot;&gt;for &lt;span class=&quot;hljs-number&quot;&gt;9.851)
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;一看，确实是 Netty 启动的。&lt;/p&gt;
+&lt;p&gt;打开浏览器，访问 /hello 地址，会看到如图所示的返回结果：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://springforall.ufile.ucloud.com.cn/static/img/42a9f1eaa1ee54923556727eac2216481523320&quot; alt=&quot;file&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;六、总结&lt;/h2&gt;
+&lt;p&gt;本文主要讲了 Spring Boot 2.0 WebFlux 背景和快速入门使用。用的是基于功能性端点去创建一个服务，但这个有点代码偏多。下一章一个 CRUD 我们使用注解控制层，让开发更方便。&lt;/p&gt;
+&lt;h3&gt;系列教程目录&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;《01：WebFlux 系列教程大纲》&lt;/li&gt;
+&lt;li&gt;《02：WebFlux 快速入门实践》&lt;/li&gt;
+&lt;li&gt;《03：WebFlux Web CRUD 实践》&lt;/li&gt;
+&lt;li&gt;《04：WebFlux 整合 Mongodb》&lt;/li&gt;
+&lt;li&gt;《05：WebFlux 整合 Thymeleaf》&lt;/li&gt;
+&lt;li&gt;《06：WebFlux 中 Thymeleaf 和 Mongodb 实践》&lt;/li&gt;
+&lt;li&gt;《07：WebFlux 整合 Redis》&lt;/li&gt;
+&lt;li&gt;《08：WebFlux 中 Redis 实现缓存》&lt;/li&gt;
+&lt;li&gt;《09：WebFlux 中 WebSocket 实现通信》&lt;/li&gt;
+&lt;li&gt;《10：WebFlux 集成测试及部署》&lt;/li&gt;
+&lt;li&gt;《11：WebFlux 实战图书管理系统》&lt;/li&gt;
+&lt;/ul&gt;&lt;h3&gt;代码示例&lt;/h3&gt;
+&lt;p&gt;本文示例读者可以通过查看下面仓库的中的模块工程名: 2-x-spring-boot-webflux-handling-errors：&lt;/p&gt;
+&lt;p&gt;如果您对这些感兴趣，欢迎 star、follow、收藏、转发给予支持！&lt;/p&gt;
+&lt;h3&gt;参考资料&lt;/h3&gt;
+&lt;ul&gt;&lt;li&gt;Spring Boot 2.x WebFlux 系列：https://www.bysocket.com/archives/2290&lt;/li&gt;
+&lt;li&gt;spring.io 官方文档&lt;/li&gt;
+&lt;/ul&gt;&lt;h3&gt;以下专题教程也许您会有兴趣&lt;/h3&gt;
+&lt;div readability=&quot;9&quot;&gt;&lt;img src=&quot;http://www.bysocket.com/wp-content/uploads/2017/01/qrcode_for_gh_cd421e7eb7d6_430.jpg&quot; alt=&quot;&quot; width=&quot;224&quot; height=&quot;224&quot;/&gt; &lt;br/&gt;（关注微信公众号，领取 Java 精选干货学习资料） &lt;br/&gt;（添加我微信：bysocket01。加入纯技术交流群，成长技术）&lt;/div&gt;
+</description>
+<pubDate>Wed, 08 May 2019 17:22:00 +0000</pubDate>
+<dc:creator>www.bysocket.com</dc:creator>
+<og:description>摘要: 原创出处 https://www.bysocket.com 「公众号：泥瓦匠BYSocket 」欢迎关注和转载，保留摘要，谢谢！ 02：WebFlux 快速入门实践 文章工程： JDK 1.8</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/Alandre/p/10836242.html</dc:identifier>
+</item>
+<item>
+<title>分布式系统原理之cap理论 - killianxu</title>
+<link>http://www.cnblogs.com/killianxu/p/10714665.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/killianxu/p/10714665.html</guid>
+<description>&lt;p&gt;&lt;span&gt;  Cap理论表示在分布式系统中一致性(C)、可用性(A)和分区容错性(P)最多只能同时满足两个。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  一致性:客户端更新数据成功后,在任意时刻,在系统任意对外提供服务的节点,读取到的数据都是最新写入的数据。(强一致性)。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  可用性:当系统出现异常时，仍能对外提供服务。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  分区容错:当出现网络分区时，系统的容错能力(机器之间出现网络故障,不能正常通信)。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  证明cap理论:有两台机器M1和M2,为保持一致性,两台机器的数据相同,现在客户端对M1的数据进行更新,但M1和M2之间出现网络故障(分区),M的最新数据无法同步到M2,导致M1的数据变为v1,M2仍为v0。现有一客户端向M2发送数据读取请求,对此请求的处理有两种选择：&lt;/span&gt;&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;span&gt;返回旧数据v0,满足可用性,但是却违反了一致性。&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;阻塞此次读操作,直至网络故障恢复,M1的数据v1同步到M2中,满足一致性，但违反了可用性。&lt;/span&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;span&gt;  由于分布式系统天生具有分区的特性，所以一定要满足P，只能在CA中选其一。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;Cap理论说明了想设计完全满足强一致性、可用性和分区容错性的分布式系统是不切实际的,只能在三者之间权衡,为分布式系统的设计提供理论指导。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;1.2 一致性的分类&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  一致性可从客户端和服务端两个角度来看，客户端一致性定义客户端怎样和何时看到数据更新，服务端一致性定义更新时数据如何流经系统及系统对更新有何保证。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  客户端一致性分为以下几种：&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  1. 强一致性:数据更新之后，任何客户端在后续的访问中都能访问到最新版本的数据。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  2. 弱一致性：数据更新之后，不能保证客户端的访问能访问到最新更新之后的数据，数据更新到所有客户端可见这段时间称为不一致窗口。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  3. 最终一致性:最终一致性是种特殊的弱一致性，假如更新数据之后没有后续的对此数据对象的更新操作，系统保证一段时间之后任何客户端对此数据对象的访问都能返回最后一次更新的数据。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  最终一致性有如下变种:&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  1. 因果一致性: 如果进程A向进程B传达它已更新数据项，则进程B的后续访问将返回更新的值，并且保证写入将取代先前的写入。进程C的访问与进程A没有因果关系，遵循正常的最终一致性规则。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  2. 读已之所写一致性: 进程A在更新数据项之后始终访问更新的值，并且永远不会看到较旧的值。这是因果一致性模型的特例&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  3. 会话一致性:是读已之所写的实际应用版本,进程对系统的访问存在与一个会话上下文中,在此会话中的访问遵循读已之所写一致性。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  4. 单调读一致性:进程访问某一数据对象的值之后，此进程后续的访问都不会返回更旧版本的值。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  5. 单调写一致性:系统保证相同进程的一系列写操作是序列化有序的。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;同一个系统中，可以同时满足多种一致性,例如读已之所写和单调读一致性是常用的组合方案,这两种一致性使系统更易使用。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;  服务端一致性:&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  N=存储数据副本的结点数量&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  W=在更新完成之前，需要确认更新成功的副本数量。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  R=当读操作访问数据对象，需要访问的副本数量&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  如果W+R&amp;gt;N,写副本和读副本会出现重叠,能保证一定能读到更新后的数据对象,从而保证强一致性。例如:在实现了primary-backup关系数据库管理系统中,同步副本技术N=2,W=2,R=1,能保证强一致性;异步副本方式N=2,W=1,R=1, R+W=N,一致性不能得到保证。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  如果W+R&amp;lt;=N, 那么不能保证强一致性，只能是弱一致性或最终一致性。如在主备RDBMS中，使用异步同步副本，并开启从副本读功能的方式，那么N=2, W=1和R=1。在这种情况下，R+W=N, 一致性不能得到保证。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;1.3 CAP理论的变种(BASE理论)&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;  BASE理论由CAP理论演化而来，是工业界对分布式系统实践的总结，其核心思想是即使无法达到强一致性，也要保证满足最终一致性。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;BASE是Basically Available(基本可用）、Soft state(软状态）和Eventually consistent(最终一致性）三个短语的简写。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  基本可用:当系统发生不可预知故障时，允许损失部分可用性，例如:部分机房故障，允许查询时间变长(时间上的损失),系统高峰期为保证系统的稳定性,将部分用户请求引导到降级页面(功能上的损失)。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  软状态:允许系统中的数据存在中间状态，该中间状态不会影响系统的整体可用性,即允许多个副本间的同步存在延时。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;  最终一致性:系统中数据的副本经过一段时间的同步之后，最终能达到一致性状态，不要求强一致性。&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;参考文献&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;[1] 分布式系统的CAP理论.https://www.hollischuang.com/archives/666&lt;/span&gt;&lt;br/&gt;&lt;span&gt;[2] Vogels W. Eventually consistent[J]. Communications of the ACM, 2009, 52(1): 40-44.&lt;/span&gt;&lt;br/&gt;&lt;span&gt;[3] 分布式系统原理九：CAP理论和BASE理论.http://feixiao.github.io/2017/03/14/fbsxt9/&lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Wed, 08 May 2019 16:18:00 +0000</pubDate>
+<dc:creator>killianxu</dc:creator>
+<og:description>cap理论是分布式系统的基础理论,任何一个分布式系统不可能同时满足强一致性、可用性和分区容错性，而只能在三者之间权衡。为了提高系统的写入性能，一般系统只需满足最终一致性,最终一致性有几下几种常见变种:</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/killianxu/p/10714665.html</dc:identifier>
+</item>
+<item>
+<title>深入理解java虚拟机之垃圾收集器 - rainple</title>
+<link>http://www.cnblogs.com/rainple/p/10829144.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/rainple/p/10829144.html</guid>
+<description>&lt;p&gt;　　如果说收集算法是内存回收的方法论，那么垃圾收集器就是内存回收的具体实现。java虚拟机规范中对垃圾收集器应该如何实现并没有任何规定，因此不同的厂商、不同的版本的虚拟机所提供的垃圾收集器都有可能会有很大的区别，并且一般都会提供参数供用户根据自己的应用特点和要求组合出各个年代所使用的收集器。&lt;/p&gt;
+&lt;p&gt;　　相关系列博客：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508152011542-1236068799.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　上图中展示了不同年龄代的收集器，其中Serial、ParNew和Parallel Scavenge收集器作用于新生代，CMS、Parallel Old 和 Serial Old作用于老年代，G1在新生代和老年代都可以使用。不同的收集器之间如果有连线，则说明他们可以相互搭配使用。&lt;/p&gt;
+
+&lt;p&gt;　　&lt;strong&gt;并行&lt;/strong&gt;：指的是多条垃圾收集线程一起公共，但是此时用户工作线程仍处于等待状态。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;并发&lt;/strong&gt;：指的是用户线程和垃圾收集线程同时工作，也有可能是交替执行，用户程序在继续执行，而垃圾收集程序运行与另一个CPU上。&lt;/p&gt;
+&lt;p&gt;　　&lt;strong&gt;吞吐量&lt;/strong&gt;：吞吐量就是CPU用于运行用户代码的时间与CPU总消耗时间的比值，即吞吐量 = 运行用户代码时间 /（运行用户代码时间 + 垃圾收集时间）。虚拟机总共运行了100分钟，其中垃圾收集花掉1分钟，那吞吐量就是99%。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;em&gt;　　Serial收集器是一款串行执行的收集器，它是历史最悠久，也是最基本的收集器，采用复制算法实现的新生代收集器。在jdk1.3以前，Serial收集器是新生代唯一的选择。它是一个单线程执行的收集器，工作时只会知用一个cpu或线程区执行，更重要的是Serial在工作期间必须停掉所有的用户线程，直至垃圾收集完成，这一过程我们称之为“stop the world”。这项工作是由虚拟机自动执行和自动完成的，用户在不知情的情况下停掉了所有的线程，这对于一个最求响应速度来说简直是无法接受的。下图展示了Serial收集器在工作时的运行流程：&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508154614376-164710287.png&quot; alt=&quot;&quot;/&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;　　由于Serial收集器的工作模式是单线程的，自然就没有了多线程环境下线程切换带来的性能开销，所以该收集器在单线程环境下更加简单高效。&lt;/p&gt;
+
+
+&lt;p&gt;　　Parnew是Serial收集器的多线程版本，也是新生代收集器。ParNew收集器和Serial收集器除了多线程工作外几乎是相同的，包括所有控制参数、收集算法、stop the world，对象分配规则，回收策略等都是一样的。运行流程如下图：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508161127865-1394556920.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　虽然与Serial收集器相比仅仅多了多线程特性外，没有其它的创新之处，但是它却是许多Server模式下的虚拟机新生代收集器的首选，原因在于目前为止只有Serial和ParNew两个新生代收集器能够与性能优异的CMS配合使用。关于CMS介绍将在下文展开描述。&lt;/p&gt;
+
+
+&lt;p&gt;&lt;em&gt;　　Parallel Scavenge也是一款使用复制算法的新生代收集器。该收集器与其它收集器不同的是，它关注的目标是达到一个可控制的吞吐量，而CMS等收集器的关注点则是尽可能地减少用户线程地停顿时间，提高用户体验。Parallel Scavenge收集器提供了两个参数用于精确控制吞吐量，分别是控制最大垃圾收集停顿时间的-XX:MaxGCPauseMillis参数以及直接设置吞吐量大小的-XX:GCTimeRatio参数。也因此，Parallel Scavenge 被成为“吞吐量优先”收集器。&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;em&gt;　　停顿时间越短就越适合与用户交互较多地程序，这样用户体验才更好。而高吞吐量则可以让出更多的cpu资源给用户线程，让程序更快的完成运算任务，更适合后台运算较多而不需要与用户交互的程序。&lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;em&gt;　　自适应调节策略是&lt;em id=&quot;__mceDel&quot;&gt;Parallel Scavenge收集器的特点，也是与ParNew收集器的区别。&lt;em id=&quot;__mceDel&quot;&gt;Parallel Scavenge通过打开-XX:+UseAdaptiveSizePolicy的设置，就不需要手动地调节新生代（-Xmn）大小，Eden和Survivor区的比例（-XX:SurvivorRatio）、晋升老年代对象年龄（-XX:PretenureSizeThreshold）等细节参数，而是根据当前系统运行情况来确定这些参数，从而提高程序地吞吐量和缩短停顿时间，这一过程称之为GC自适应的调节策略（GC Ergonomics）。&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;em&gt;&lt;em&gt;&lt;em&gt;　　另外值得注意的一点是，&lt;em id=&quot;__mceDel&quot;&gt;Parallel Scavenge无法已CMS配合使用，如果新生代选择了&lt;em id=&quot;__mceDel&quot;&gt;Parallel Scavenge收集器，那么老年代的收集器只能选用Serial Old或者Parallel Old来配置使用。&lt;/em&gt;&lt;/em&gt;&lt;br/&gt;&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;em&gt;　　Serial Old是Serial收集器的老年代版本，也是单线程工作的，使用的是“标记-整理”算法。&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;　　该收集器主要用于Client模式下的虚拟机使用，如果在Server模式下可以与&lt;/em&gt;&lt;em&gt;&lt;em&gt;&lt;em&gt;&lt;em&gt;Parallel Scavenge收集器配合使用；&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;em id=&quot;__mceDel&quot;&gt;作为CMS收集器的后备预案，在并发收集发生Concurrent Mode Failure时使用。运行流程如下：&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508172212784-1193262127.png&quot; alt=&quot;&quot;/&gt;&lt;/em&gt;&lt;/p&gt;
+
+
+&lt;p&gt;&lt;em&gt;　　&lt;em id=&quot;__mceDel&quot;&gt;Parallel Old是Parallel Scavenge的老年代版本，也是一个并行收集器，使用“标记-整理”算法。该收集器在jdk1.6后对外提供使用，Parallel Scavenge 和  &lt;em id=&quot;__mceDel&quot;&gt;Parallel Old配合使用的话，更加适合应用于高吞吐量和cpu敏感资源的场合。下面是这两个收集器配合使用的运行流程：&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;&lt;em&gt;&lt;em&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508173257753-1511029872.png&quot; alt=&quot;&quot;/&gt;&lt;/em&gt;&lt;/em&gt;&lt;/em&gt;&lt;/p&gt;
+
+
+&lt;p&gt;　　CMS（Concurrent Mark Sweep）是一个并发收集器，使用了“标记-清除”算法来实现的。该收集器最求的更短的停顿时间，从而提升用户体验，因此也非常符合使用在网站、B/S系统的服务端的应用。&lt;/p&gt;
+&lt;p&gt;　　CMS收集器的工作流程大概可以分为以下4个步骤：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;初始标记：这个阶段仅仅标记能够和gc roots直接关联的对象，速度很快，但是需要“stop the world”。&lt;/li&gt;
+&lt;li&gt;并发标记：这个阶段开始进行gc roots tracing标记，与用户线程一起执行的，消耗时间很多。&lt;/li&gt;
+&lt;li&gt;重新标记：这个阶段是要是修正在并发标记期间由于用户线程也在运行而产生标记变动的那部分对象的标记，比较耗费的时间比初始标记阶段要长，但是远比并发标记阶段要短，这个过程也是需要“stop the world”的。&lt;/li&gt;
+&lt;li&gt;并发清除：对无用对象进行回收操作。这个过程与用户线程并行执行。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　由于标记和清除阶段可以和用户线程一起工作，因此几乎可以把CMS收集器的工作是并发的：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508180119437-2064927211.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;　　CMS是一款优秀的收集器，它的主要优点是低停顿，并发收集，因此也被成为并发低停顿收集器（Concurrent Low Pause Collector）。&lt;/p&gt;
+&lt;p&gt;　　当然，CMS收集器也有一定的缺点，主要包括一下几点：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;CMS收集器使用“标记-清除”算法实现，因此不可避免地有内存碎片地问题。当内存碎片过多时，在分配大对象地过程中即使有足够的空间，但是找不到足够地连续的空间来放该对象，那么就有可能触发一次full gc。&lt;/li&gt;
+&lt;li&gt;无法处理浮动垃圾（Floating Garbage） 可能出现“Concurrent Mode Failure”失败而导致另一次Full GC的产生。这是因为在标记的过程中用户线程也在运行着，那么在这一过程中出现的垃圾无法立即回收，而是等下一次gc才能清理，我这部分的垃圾就叫做“浮动垃圾”。也是由于在垃圾收集阶段用户线程还需要运行，那也就还需要预留有足够的内存空间给用户线程使用，因此CMS收集器不能像其他收集器那样等到老年代几乎完全被填满了再进行收集，需要预留一部分空间提供并发收集时的程序运作使用。&lt;/li&gt;
+&lt;li&gt;对cpu资源非常敏感。其实，只要是面对并发的情况下都会有这个问题，在并发阶段虽然不会中断用户线程，但是因为占用了部分用户的资源而导致程序变慢，总吞吐量降低。CMS搜集器默认的线程数 = （cpu核数 + 3） / 4，当cpu数量大于4时，垃圾回收线程数不少于25%，随着线程数的增加而下降，当cpu数量小于4时对线程的执行效率有显著的影响。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　运行示意图如下：&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508220304509-363296343.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;　　G1（Garbage-First）是一款&lt;strong&gt;面向服务端应用&lt;/strong&gt;的垃圾收集器，JDK 7 Update4 后开始进入商用。HotSpot开发团队赋予它的使命是未来可以替换掉JDK 1.5中发布的CMS收集器。之前提供的收集器都是仅作用于新生代或者是老年代，但是G1收集器可以作用于新生代和老年代，因为使用G1收集器是java heap的内存结构有很大的不同，它将整个Java堆划分为多个大小相等的独立区域（Region），虽然还保留有新生代和老年代的概念，但是他们已经没有了物理上的隔阂了，它们都是region的一部分的集合。&lt;/p&gt;
+&lt;p&gt;　　G1（Garbage-First）收集器是当今收集器技术发展的最前沿成果之一，与其他收集器相比，G1收集器具有以下特征：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;并行与并发&lt;/strong&gt;： G1能充分利用多CPU，多核环境下的硬件优势，使用多个CPU来缩短Stop-The-World停顿时间，部分其他收集器原本需要停顿java线程执行的GC动作，G1收集器仍然可以通过并发的方式让java程序继续执行。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;分代收集&lt;/strong&gt;： 与其他收集器一样，分代概念在G1中仍然得以保留。虽然G1可以不需要其他收集器配合能够独立管理整个堆，但它能够采用不用的方式去处理新创的对象和已经存活了一段世纪那、熬过多次GC的旧对象以获得更好的收集效果。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;空间整合&lt;/strong&gt;： 与CMS的“标记-清除”算法不同，G1整体来看采用了“标记-整理”算法实现的收集器，从局部（两个Region之间）上来看是基于“复制”算法实现的。无论使用哪一种方法，都意味着G1运作期间不会产生内存空间碎片的问题，收集后能提供规整的可用空间。这种特性有利于程序长时间运行，分配大对象是不会因为无法得到连续内存空间而提前处罚一次GC。&lt;/li&gt;
+&lt;li&gt;可预测的停顿： 这是G1相对于CMS的另一大优势，降低停顿时间是G1和CMS共同的关注点，但G1除了最求低停顿外，还能建立可预测的停顿时间模型，能让使用者明确指定在一个长度为M毫秒的时间片段内，消耗在垃圾收集上的时间不得超过N毫秒，这几乎是java（RTSJ）的垃圾收集器的特征了。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;　　G1收集器之所以能够建立可预测的停顿时间模型，因为他能够有计划地避免在整个Java堆中进行全区域的垃圾收集。G1跟踪各个Region里面的垃圾堆积的价值大小（回收所获得的空间大小以及回收所需要的经验值），在后台维护一个优先表，每次根据允许的收集时间，优先回收价值最大的Region。这种使用Region划分内存空间以及有优先级的区域回收方式，保证了G1收集器在有限的时间内可以获取尽可能高的收集效率。&lt;/p&gt;
+&lt;p&gt;　　在G1收集器中，Region之间的对象引用以及其他收集器中的新生代和老年代之间的对象引用，虚拟机都是使用Remembered Set来避免全堆扫描的。G1中每个Region都有一个与之对应的Remembered Set，虚拟机发现程序在对Reference类型的数据进行写操作时，会产生一个Write Barrier暂时中断写操作，检查Reference引用的对象是否处于不同的Region中，如果是，便通过CardTable把相关引用信息记录到被引用对象所属的Region中的Remembered Set之中。当进行内存回收时，在GC根节点的枚举范围中加入Remembered Set即可保证不对全堆扫描，也不会有遗漏。&lt;/p&gt;
+&lt;p&gt;　　如果不计算维护Remembered Set的操作，G1收集器的运作大致分为以下几个步骤：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;初始标记（Initial Marking）&lt;/strong&gt;： 这阶段仅仅只是标记GC Roots能直接关联到的对象并修改TAMS（Next Top at Mark Start）的值，让下一阶段用户程序并发运行时，能在正确的可用的Region中创建新对象，这阶段需要停顿线程，但是耗时很短。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;并发标记（Concurrent Marking）&lt;/strong&gt;： 从GC Roots 开始对堆的对象进行可达性分析，找出存活的对象，这阶段耗时长，但是可以与用户程序并发执行。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;最终标记（Final Marking）&lt;/strong&gt;： 为了修正在并发标记期间因为用户程序继续运行而导致标记产生变动的那一部分标记记录，虚拟机将这段时间对象变化记录记录在线程Remembered Set Logs里面。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;筛选回收（Live Data Counting and Evacuation）&lt;/strong&gt;： 首先对各个Region的回收价值和成本进行排序，根据用户所期望的GC停顿时间来制定回收计划，这一阶段是可以与用户程序一起并发执行的，但是因为只回收部分Region，时间是用户可控的，而且停顿用户线程将大幅度提高收集效率。&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;　　执行流程如下图：&lt;/p&gt;
+&lt;p&gt;　　&lt;img src=&quot;https://img2018.cnblogs.com/blog/1519364/201905/1519364-20190508230524633-68667895.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+&lt;table class=&quot;table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;收集器&lt;/th&gt;
+&lt;th&gt;串行、并行or并发&lt;/th&gt;
+&lt;th&gt;新生代/老年代&lt;/th&gt;
+&lt;th&gt;算法&lt;/th&gt;
+&lt;th&gt;目标&lt;/th&gt;
+&lt;th&gt;适用场景&lt;/th&gt;
+&lt;/tr&gt;&lt;/thead&gt;&lt;tbody readability=&quot;8&quot;&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;Serial&lt;/td&gt;
+&lt;td&gt;串行&lt;/td&gt;
+&lt;td&gt;新生代&lt;/td&gt;
+&lt;td&gt;复制算法&lt;/td&gt;
+&lt;td&gt;响应速度优先&lt;/td&gt;
+&lt;td&gt;单CPU环境下的Client模式&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;Serial Old&lt;/td&gt;
+&lt;td&gt;串行&lt;/td&gt;
+&lt;td&gt;老年代&lt;/td&gt;
+&lt;td&gt;标记-整理&lt;/td&gt;
+&lt;td&gt;响应速度优先&lt;/td&gt;
+&lt;td&gt;单CPU环境下的Client模式、CMS的后备预案&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;ParNew&lt;/td&gt;
+&lt;td&gt;并行&lt;/td&gt;
+&lt;td&gt;新生代&lt;/td&gt;
+&lt;td&gt;复制算法&lt;/td&gt;
+&lt;td&gt;响应速度优先&lt;/td&gt;
+&lt;td&gt;多CPU环境时在Server模式下与CMS配合&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;Parallel Scavenge&lt;/td&gt;
+&lt;td&gt;并行&lt;/td&gt;
+&lt;td&gt;新生代&lt;/td&gt;
+&lt;td&gt;复制算法&lt;/td&gt;
+&lt;td&gt;吞吐量优先&lt;/td&gt;
+&lt;td&gt;在后台运算而不需要太多交互的任务&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;Parallel Old&lt;/td&gt;
+&lt;td&gt;并行&lt;/td&gt;
+&lt;td&gt;老年代&lt;/td&gt;
+&lt;td&gt;标记-整理&lt;/td&gt;
+&lt;td&gt;吞吐量优先&lt;/td&gt;
+&lt;td&gt;在后台运算而不需要太多交互的任务&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;2&quot;&gt;&lt;td&gt;CMS&lt;/td&gt;
+&lt;td&gt;并发&lt;/td&gt;
+&lt;td&gt;老年代&lt;/td&gt;
+&lt;td&gt;标记-清除&lt;/td&gt;
+&lt;td&gt;响应速度优先&lt;/td&gt;
+&lt;td&gt;集中在互联网站或B/S系统服务端上的Java应用&lt;/td&gt;
+&lt;/tr&gt;&lt;tr readability=&quot;4&quot;&gt;&lt;td&gt;G1&lt;/td&gt;
+&lt;td&gt;并发&lt;/td&gt;
+&lt;td&gt;both&lt;/td&gt;
+&lt;td&gt;标记-整理+复制算法&lt;/td&gt;
+&lt;td&gt;响应速度优先&lt;/td&gt;
+&lt;td&gt;面向服务端应用，将来替换CMS&lt;/td&gt;
+&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+&lt;p&gt;　　参考资料： 《深入理解Java虚拟机-JVM高级特性与最佳实践》 -周志明&lt;/p&gt;
+</description>
+<pubDate>Wed, 08 May 2019 15:20:00 +0000</pubDate>
+<dc:creator>rainple</dc:creator>
+<og:description>前言 如果说收集算法是内存回收的方法论，那么垃圾收集器就是内存回收的具体实现。java虚拟机规范中对垃圾收集器应该如何实现并没有任何规定，因此不同的厂商、不同的版本的虚拟机所提供的垃圾收集器都有可能会</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/rainple/p/10829144.html</dc:identifier>
+</item>
+<item>
 <title>QT学习小demo之LightMD（MarkDown编辑器） - Asche</title>
 <link>http://www.cnblogs.com/asche/p/10834587.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/asche/p/10834587.html</guid>
@@ -1220,620 +1991,6 @@ Emitted 'error' event at:
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/snowdreams1006/p/10834754.html</dc:identifier>
-</item>
-<item>
-<title>大白话5分钟带你走进人工智能-第二十三节决策树系列之特点和数学表达形式(2) - LHBlog</title>
-<link>http://www.cnblogs.com/LHWorldBlog/p/10834580.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/LHWorldBlog/p/10834580.html</guid>
-<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;                                                                                                                                             第二十三节决策树系列之特点和数学表达形式(2)&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; 上节我们讲解了决策树的概念，本节的话我们讲解决策树的特点以及其数学表达形式。&lt;/span&gt;&lt;/p&gt;
-&lt;p id=&quot;main-toc&quot;&gt;&lt;span&gt;&lt;strong&gt;目录&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p id=&quot;1-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E7%89%B9%E7%82%B9-toc&quot;&gt;&lt;span&gt;&lt;a href=&quot;http://www.cnblogs.com/LHWorldBlog/p/10834580.html#1-决策树的特点&quot; data-cke-saved-href=&quot;#1-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E7%89%B9%E7%82%B9&quot;&gt;1-决策树的特点&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p id=&quot;%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%202-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E6%95%B0%E5%AD%A6%E8%A1%A8%E8%BE%BE%E5%BD%A2%E5%BC%8F-toc&quot;&gt;&lt;span&gt;&lt;a href=&quot;http://www.cnblogs.com/LHWorldBlog/p/10834580.html#       %202-决策树的数学表达形式&quot; data-cke-saved-href=&quot;#%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%202-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E6%95%B0%E5%AD%A6%E8%A1%A8%E8%BE%BE%E5%BD%A2%E5%BC%8F&quot;&gt;2-决策树的数学表达形式&lt;/a&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;hr id=&quot;hr-toc&quot;/&gt;&lt;h3 id=&quot;1-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E7%89%B9%E7%82%B9&quot;&gt;&lt;span&gt;1-决策树的特点&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;span&gt;决策树的特点大致有以下几种：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1、可以处理非线性问题&lt;/strong&gt;。逻辑回归处理非线性问题有一些捉襟见肘，没有特别完善的方法能解决，我们有若干种妥协的方法来让它凑合能用，而决策树天生就可以处理非线性问题。假设在一个二维的平面上，有若干数据如图：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;每一个数据有两个维度，x1和x2。总共9个数据点。如果我们想用逻辑回归来分类，无论怎么分，都找不到一条很好地直线将图中点分开。假设我们用决策树分裂的话，第一次分裂选择条件是x＜3，相当于画一条竖线，所有x＜3的都分到左边，x＞3分到右边。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;分到左边的都是O点，分到右边的有一半是O点一半是X点，给它落成一个叶子节点不太合适，就需要再次分裂，再选择分裂条件是x＜6，就将数据完美的分开了。我们的决策树的分裂图如图所示：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;原来逻辑回归处理不了的非线性问题，决策树轻而易举的就把它们分开了。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;再比如下图：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;数据点如图，想把蓝色，红色的数据点分开，同样的线性不可分，而决策树却可以会画出一个波浪线，把数据分开，相当于每一个折点部分就多出分裂一个条件。所以说通过决策树不断分裂的方式，可以处理各种各样的非线性问题。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2、可解释性强。&lt;/strong&gt;从数据集上抓到一个算法，生成出来一个模型，逻辑回归模型的本质，记在计算机里面的是一组w，训练出来这个模型是个一组数，它没有具体的物理含义。比如0.8和 0.7，怎么解释这两个w到底差别在哪？说不太清，可解释性差一些，机器到底学少什么你不知道。而&lt;strong&gt;决策树算法，记录下来的是一组分类条件&lt;/strong&gt;，相比一组w来说，它的可解释性是要强不少。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;          3、 决策树的模型非常简单&lt;/strong&gt;。它不需要借助函数最优化工具，在原生的决策树里面是没有损失函数这个概念的。决策树其实特别像森林球，某一条数据顺根节点、分支节点下来，最后落到某一个叶子节点上。它这个模型相对于梯度下降的训练过程中是比较简单的，预测就更简单了，直接跑一遍if…else，最后该是谁就是谁。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;      &lt;strong&gt;    4、缺点 不容易显示地使用函数表达，不可微&lt;/strong&gt;。可能带来一个问题是不好给它加正则项，正则项是用来评估模型简单程度的。原来的损失函数，给它加一个L1正则，组成了一个新的形式函数叫obj，原本是让L损失函数最小，现在要变成让它们俩合obj最小。为什么加上它效果就能好？在算法模型里边是通过这L1和L2两个指标来评估模型到底是简单还是复杂的。如果有更简单的方式能得到更好的模型，当然要优先简单的，因为复杂模型容易过拟合，这也就是正则存在的意义。但是决策树很难加这种正则表达式。&lt;/span&gt;&lt;/p&gt;
-&lt;h3&gt; &lt;/h3&gt;
-&lt;h3 id=&quot;%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%202-%E5%86%B3%E7%AD%96%E6%A0%91%E7%9A%84%E6%95%B0%E5%AD%A6%E8%A1%A8%E8%BE%BE%E5%BD%A2%E5%BC%8F&quot;&gt;&lt;span&gt;2-决策树的数学表达形式&lt;/span&gt;&lt;/h3&gt;
-&lt;p&gt;&lt;span&gt;决策树虽然不容易显示地使用函数表达，非得要表达的话，我们有两种方式表达。&lt;/span&gt;&lt;br/&gt;&lt;span&gt;&lt;strong&gt;           第一种是从路径的角度（Path View），将每个从根到叶子的路径作为一个假设 g，通过不同的条件组合得到最后的 G (X)。&lt;br/&gt;           第二种是从递归的角度（Recursive View），父树是由子树递归定义的 &lt;code&gt;tree=(root,sub-trees)&lt;/code&gt;。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1、我们先说第一种从路径的角度：&lt;/strong&gt;表达如下：&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;                                                                 &lt;img class=&quot;mathcode&quot; src=&quot;https://private.codecogs.com/gif.latex?%24G%28%5Cmathbf%7Bx%7D%29%3D%5Csum_%7Bt%3D1%7D%5E%7BT%7D%20q_%7Bt%7D%28%5Cmathbf%7Bx%7D%29%20%5Ccdot%20g_%7Bt%7D%28%5Cmathbf%7Bx%7D%29%24&quot; alt=&quot;$G(\mathbf{x})=\sum_{t=1}^{T} q_{t}(\mathbf{x}) \cdot g_{t}(\mathbf{x})$&quot; data-cke-saved-src=&quot;https://private.codecogs.com/gif.latex?%24G%28%5Cmathbf%7Bx%7D%29%3D%5Csum_%7Bt%3D1%7D%5E%7BT%7D%20q_%7Bt%7D%28%5Cmathbf%7Bx%7D%29%20%5Ccdot%20g_%7Bt%7D%28%5Cmathbf%7Bx%7D%29%24&quot; data-cke-widget-data=&quot;{}&quot; data-cke-widget-upcasted=&quot;1&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;上面G(x)是一个函数，对于&lt;strong&gt;函数我们永远就把它理解成一个机器，你给我一个原材料，我给你生产一个东西。&lt;/strong&gt;所以这里面的G(x)也不例外，对于决策树来说一般是做分类的，所以我们可以想到这个函数G(x)其实就代表着你给我一个X，我给你一个分类结果。所以G代表着这棵已经生成好的决策树，X代表着扔进去的一个原数据。而函数后面的表达式代表我这个机器如何工作的，如何从已知得到结果的，是表达式记录的信息。我们看到后面是个连加符号，给它拆解出来就是&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img class=&quot;mathcode&quot; src=&quot;https://private.codecogs.com/gif.latex?%24G%28x%29%3Dq_%7B1%7D%28x%29%5Ccdot%20g_%7B1%7D%28x%29&amp;amp;plus;q_%7B2%7D%28x%29%5Ccdot%20g_%7B2%7D%28x%29&amp;amp;plus;q_%7B3%7D%28x%29%5Ccdot%20g_%7B3%7D%28x%29%24&amp;amp;plus;...&amp;amp;plus;q_%7BT%7D%28x%29%5Ccdot%20g_%7BT%7D%28x%29%24%24&quot; alt=&quot;$G(x)=q_{1}(x)\cdot g_{1}(x)+q_{2}(x)\cdot g_{2}(x)+q_{3}(x)\cdot g_{3}(x)$+...+q_{T}(x)\cdot g_{T}(x)$$&quot; data-cke-saved-src=&quot;https://private.codecogs.com/gif.latex?%24G%28x%29%3Dq_%7B1%7D%28x%29%5Ccdot%20g_%7B1%7D%28x%29&amp;amp;plus;q_%7B2%7D%28x%29%5Ccdot%20g_%7B2%7D%28x%29&amp;amp;plus;q_%7B3%7D%28x%29%5Ccdot%20g_%7B3%7D%28x%29%24&amp;amp;plus;...&amp;amp;plus;q_%7BT%7D%28x%29%5Ccdot%20g_%7BT%7D%28x%29%24%24&quot; data-cke-widget-data=&quot;{}&quot; data-cke-widget-upcasted=&quot;1&quot;/&gt;               &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;这是什么意思呢？比如下图的决策树，我把叶子节点编号如图：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;这里面&lt;strong&gt;q代表所有决策树的路径&lt;/strong&gt;，比如我们的X是qutitingtime&amp;lt;17:00 并且没有约会，那么在上述决策树存在的情况下，这个数据会落到2号节点，&lt;strong&gt;能够通往几号节点的路径就叫几号路径&lt;/strong&gt;，所以X扔进来的情况下，会通往2号路径，所以我们定义此时的X只有q(2)x=1，其他路径都为0，即q(1)x=0,q(3)x=0...。所以&lt;strong&gt;我们qt是定义出来的，代表着x是不是在第t号路径上，is x on path t。gt(x)代表某一号叶子节点的表达，&lt;/strong&gt;比如这里的X，落在2号节点上，所以表达为Y，也就是说以后甭管X是什么样，只要落在2号节点上，就写成Y，&lt;strong&gt;因此qt(x).gt(x)就是代表来一条数据，先是通过qt(x)看看落在哪个叶子节点上，然后再通过gt(x)看看这个叶子结点的表达是什么，我们就返回什么（Y 或者N），简直就是一个很无聊的表达，并且表达的很简单。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;上面公式表达的前提就是树已经存在了，它的判别函数怎么表达。&lt;/strong&gt;所以还是针对上述落在2号节点的X，我们针对上面的决策树把连加符号拆解出来就是:&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;                 &lt;img class=&quot;mathcode&quot; src=&quot;https://private.codecogs.com/gif.latex?%24G%28x%29%3D0%5Ccdot%20g_%7B1%7D%28x%29&amp;amp;plus;1%20%5Ccdot%20g_%7B2%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B3%7D%28x%29%24&amp;amp;plus;0%5Ccdot%20g_%7B4%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B5%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B6%7D%28x%29%24%24&quot; alt=&quot;$G(x)=0\cdot g_{1}(x)+1 \cdot g_{2}(x)+0\cdot g_{3}(x)$+0\cdot g_{4}(x)+0\cdot g_{5}(x)+0\cdot g_{6}(x)$$&quot; data-cke-saved-src=&quot;https://private.codecogs.com/gif.latex?%24G%28x%29%3D0%5Ccdot%20g_%7B1%7D%28x%29&amp;amp;plus;1%20%5Ccdot%20g_%7B2%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B3%7D%28x%29%24&amp;amp;plus;0%5Ccdot%20g_%7B4%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B5%7D%28x%29&amp;amp;plus;0%5Ccdot%20g_%7B6%7D%28x%29%24%24&quot; data-cke-widget-data=&quot;{}&quot; data-cke-widget-upcasted=&quot;1&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;因为只有2号节点的q2(x)=1，其他都为0。这里面的点乘代表着对应关系，并不是真正的乘。T代表第几号叶子结点即叶子节点的序号。&lt;strong&gt;gt(x)是一个base hyponthesis 基础的假设&lt;/strong&gt;，这里就是假设我所有的叶子结点的表达的形式是Y还是N，是一个常数。因为这里面gt(x)的值只有Y或者N。不是取决于X的输入，而是取决于我当前落在第几号节点，g(1)(x)就是N，g(2)X就是Y。所以总结如下：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;                                                        &lt;img class=&quot;mathcode&quot; src=&quot;https://private.codecogs.com/gif.latex?%24G%28%5Cmathbf%7Bx%7D%29%3D%5Csum_%7Bc%3D1%7D%5E%7BC%7D%5Bb%28%5Cmathbf%7Bx%7D%29%3Dc%5D%20%5Ccdot%20G_%7Bc%7D%28%5Cmathbf%7Bx%7D%29%24&quot; alt=&quot;$G(\mathbf{x})=\sum_{c=1}^{C}[b(\mathbf{x})=c] \cdot G_{c}(\mathbf{x})$&quot; data-cke-saved-src=&quot;https://private.codecogs.com/gif.latex?%24G%28%5Cmathbf%7Bx%7D%29%3D%5Csum_%7Bc%3D1%7D%5E%7BC%7D%5Bb%28%5Cmathbf%7Bx%7D%29%3Dc%5D%20%5Ccdot%20G_%7Bc%7D%28%5Cmathbf%7Bx%7D%29%24&quot; data-cke-widget-data=&quot;{}&quot; data-cke-widget-upcasted=&quot;1&quot;/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;我们通过下面举例解释下上面公式：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;实际上上面是个递归的表达形式。比如对于根节点(qutting time )来说，有3个子节点，如图所示。对于1号子节点的根(has a date)来说有两个子节点 N或者Y。还是拿上面X是qutitingtime&amp;lt;17:00 并且没有约会的例子来说，从根节点下来会落到1号子节点，这里面的b(x)是分支的条件，这个例子中b(x)=1 ，C代表几个子节点，而对于qutting time的根节点来说，有3个子节点，所以C=3。落在几号节点上，只有当前子节点为1，其他都为0，所以对于这里只有G1(x)=1。当落到1号节点之后，继续往下走，同理接着遍历，会落到1号子节点中的Y子节点上，同理对于 has a date 作为根节点来说，C=2，因为落在Y子节点上，此时是叶子结点，不在遍历，所以向上依次返回最终结果Y。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;总结如下：&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;下一节我们讲解决策树的分裂流程以及分裂条件的评估。&lt;/span&gt;&lt;/p&gt;
-</description>
-<pubDate>Wed, 08 May 2019 12:52:00 +0000</pubDate>
-<dc:creator>LHBlog</dc:creator>
-<og:description>第二十三节决策树系列之特点和数学表达形式(2) 上节我们讲解了决策树的概念，本节的话我们讲解决策树的特点以及其数学表达形式。 目录 1-决策树的特点 2-决策树的数学表达形式 1-决策树的特点 决策树</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/LHWorldBlog/p/10834580.html</dc:identifier>
-</item>
-<item>
-<title>链接的思考 - kangheng</title>
-<link>http://www.cnblogs.com/kangheng/p/10821754.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/kangheng/p/10821754.html</guid>
-<description>&lt;h3 id=&quot;引言&quot;&gt;引言&lt;/h3&gt;
-&lt;p&gt;最近做一些工程，经常遇到链接错误，为此翻阅了相关的资料，梳理了一下编译链接的流程和原理。编程语言分为编译型和解释型，编译型语言是用编译器将高级语言翻译成计算机可执行的低级语言；而解释型语言是使用解释器是将低级语言“提升”成高级语言。解释型语言一次执行一句，缺少程序的全局信息，解释器中包含大量的“if”“else”判断，因此速度较慢，但是一次执行一句的方式却增加了语言灵活性，直观来说python使用起来比c++方便多了吧；而编译型语言，需要将程序整体进行编译，编译器知道程序的全局信息，可以省略一些“if”、“else”的判断。所以编译型语言比解释型语言使用麻烦些，但是执行速度却要快得多。C/C++ 就属于编译型语言，一个大的C/C++工程往往由大量的源代码文件组成，这些源代码通过编译后会得到一个个“.o”的“零部件”（可重定位文件），而工程中的“.h”文件就像是这些零部件的连接指南，链接器的工作就是将“零部件”通过“.h”.文件组装成可执行文件。有时候这些“零部件”太多了，将这些相关的“零部件”放在一起就组成了一个库（.lib or .a）,“零部件”组合起来生成一个库文件的过程我们就叫做“打包”。&lt;br/&gt;那么链接器如何将这些“零部件”组装起来呢？其实每个“零部件”（可重定位文件）都有许多对外显示的“名字”（例如函数名字，全局变量），这些名字就是这个“零部件”对外的“触角”，有的名字是这个零部件定义好了的，而另一些名字是这个“零部件”内没有定义的，链接器要做的就是要将不同零部件的未定义的名字与其他零部件已定义的名字关联上，就能得到一个可执行的文件。&lt;/p&gt;
-&lt;h3 id=&quot;一个实例&quot;&gt;一个实例&lt;/h3&gt;
-&lt;p&gt;现在举一个简单的c语言例子来说明，这个程序非常简单分别有main.c、function1.h、function1.c、function2.h、function2.c、function3.h、function3.c、function31.h、function31.c、function32.h、function32.c 几个文件，各个文件中代码如下：&lt;/p&gt;
-&lt;p&gt;main.c:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function1.h&quot;
-#include &quot;function2.h&quot;
-#include &quot;function3.h&quot;
-extern int i;
-int main()
-{
-    printf(&quot;%d\n&quot;,i);
-    function1();
-    function2();
-    function3();
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function1.h:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void function1();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function1.c:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function1.h&quot;
-void function1()
-{
-    printf(&quot;function1\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function2.h&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void function2();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function2.c&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function2.h&quot;
-void function2()
-{
-    printf(&quot;function2\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function3.h&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void function3();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function3.c&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function3.h&quot;
-#include &quot;function31.h&quot;
-#include &quot;function32.h&quot;
-
-int i = 123;
-void function3()
-{
-    function31();
-    function32();
-    printf(&quot;function3\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function31.h&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void function3();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function31.c&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function31.h&quot;
-void function31()
-{
-    printf(&quot;function31\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function32.h&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;void function32();&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;function32.c&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function32.h&quot;
-void function32()
-{
-    printf(&quot;function32\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可以看到main.c分别引用了function1.c 、function2.c、function3.c中的函数，而function3.c中又引用了function31.c和function32.c的函数，它们之间通过各自的.h文件和#include引用“粘合”在一起。&lt;br/&gt;现在我们通过&lt;code&gt;gcc -c main.c function1.c function2.c function3.c function31.c function32.c&lt;/code&gt;命令编译出各个.c文件对应的.o文件(可重定位文件)，这些.o文件是我们可执行文件的零部件。链接的工作是将这些零部件“拼装”起。上文说了链接器是将不同零部件的名字对应上实现链接。在linux中可以通过&lt;code&gt;nm&lt;/code&gt;命令查看零部件的名字。例如我们要看main.o的名字，使用&lt;code&gt;gcc -c main.o&lt;/code&gt;，结果如下:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;                 U function1
-                 U function2
-                 U function3
-                 U i
-0000000000000000 T main
-                 U printf
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;其中标志U代表未定义的符号，链接器要把这些未定义的名字在其他零部件.o文件中或者零部件的集合——库文件中对应上才能实现链接，生成可执行文件。我们再看看function3.o的名字&lt;code&gt;gcc -c function3.o&lt;/code&gt;:&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;0000000000000000 T function3
-                 U function31
-                 U function32
-0000000000000000 D i
-                 U puts
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;和预料中的一样吧，可以看出main.o 中未定义的function3 和 i 都能在function3.o中找到。接下我们利用这些“零部件”生成可执行文件&lt;code&gt;gcc -o main *.o&lt;/code&gt;，可以看出程序没有报错，并且正常执行。&lt;br/&gt;现在我们再试一下我们故意将function2.c中的function2 改成functionX：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;#include &amp;lt;stdio.h&amp;gt;
-#include &quot;function2.h&quot;
-void functionX()
-{
-    printf(&quot;function2\n&quot;);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;我们重新进行之前的实验，这次能够成功编译生成.o文件，但是连接时出现如下错误：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;main.o: In function `main':
-main.c:(.text+0x2b): undefined reference to `function2'
-collect2: error: ld returned 1 exit status&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可以看出这次连接器报错，在main.o中未定义的function2在其他零部件中找不到对应名字。&lt;/p&gt;
-&lt;h3 id=&quot;示意图&quot;&gt;示意图&lt;/h3&gt;
-&lt;p&gt;以下对上述简单例子的直观示意图&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;编译的过程：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1534176/201905/1534176-20190506201441069-85473518.png&quot;/&gt;&lt;/li&gt;
-&lt;li&gt;链接的过程：&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1534176/201905/1534176-20190506201453634-9034048.png&quot;/&gt;&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;思考&quot;&gt;思考&lt;/h3&gt;
-&lt;p&gt;这篇文章是对链接过程的直观思考，写得并不严谨，但希望能对读者有所启发，主要参考了《深入理解计算机系统》《c专家编程》两本书。仔细想来这种将一个大的工程分解成一个个的“零部件”的做法在现实中也是广泛存在的，比如飞机、汽车这些复杂的机器哪个不是由零部件组成的？试想使用板钢一块制造一辆汽车其难度得有多大。所以链接器的存在也是合情合理。&lt;/p&gt;
-</description>
-<pubDate>Wed, 08 May 2019 11:25:00 +0000</pubDate>
-<dc:creator>kangheng</dc:creator>
-<og:description>引言 最近做一些工程，经常遇到链接错误，为此翻阅了相关的资料，梳理了一下编译链接的流程和原理。编程语言分为编译型和解释型，编译型语言是用编译器将高级语言翻译成计算机可执行的低级语言；而解释型语言是使用</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/kangheng/p/10821754.html</dc:identifier>
-</item>
-<item>
-<title>企业级SpringBoot与Dubbo的并用 - SimpleWu</title>
-<link>http://www.cnblogs.com/SimpleWu/p/10833555.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/SimpleWu/p/10833555.html</guid>
-<description>&lt;p&gt;企业级SpringBoot与Dubbo的并用&lt;br/&gt;SpringBoot越来越热门以至于达到烂大街可见的程度，而Dubbo这个基于二进制的微服务框架又捐献给Apache孵化，如果不会如何使用那么是不是很不好意思呢？&lt;br/&gt;这次从公司的项目中抽一个小列子来熟悉下如果从零构建，至于深入了解-&amp;gt;传送门:&lt;a href=&quot;http://dubbo.apache.org/zh-cn/docs/user/quick-start.html&quot;&gt;Dubbo官方中文手册&lt;/a&gt;&lt;br/&gt;版本:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;Springboot2.x&lt;/li&gt;
-&lt;li&gt;Double2.6&lt;/li&gt;
-&lt;li&gt;Zk3.4.14&lt;/li&gt;
-&lt;li&gt;JDK8&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;这里就不介绍Dubbo了，传送去看看以前的：&lt;a href=&quot;https://www.cnblogs.com/SimpleWu/p/9769797.html&quot;&gt;互联网级微服务架构神器Duubo&lt;/a&gt;&lt;/p&gt;
-&lt;h4 id=&quot;zookeepr安装&quot;&gt;zookeepr安装&lt;/h4&gt;
-&lt;p&gt;下载去官网查找稳定的版本进行使用:http://www.apache.org/dyn/closer.cgi/zookeeper/&lt;br/&gt;先在服务器上安装zookeeper。&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;cd /usr/local/src/
-#下载
-sudo wget http://mirror.bit.edu.cn/apache/zookeeper/zookeeper-3.4.14/zookeeper-3.4.14.tar.gz
-#解压
-tar -zxvf zookeeper-3.4.14.tar.gz
-#修改配置文件名称
-mv conf/zoo_sample.cfg zoo.cfg
-#启动zk
-./bin/zkServer.sh start
-#出现以下字样代表启动成功，默认端口2181
-Starting zookeeper ... STARTED&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h4 id=&quot;springboot2.x整合dubbo&quot;&gt;SpringBoot2.x整合Dubbo&lt;/h4&gt;
-&lt;h5 id=&quot;父工程搭建pom工程&quot;&gt;父工程搭建(pom工程)&lt;/h5&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-    &amp;lt;artifactId&amp;gt;yun-double&amp;lt;/artifactId&amp;gt;
-    &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-&amp;lt;packaging&amp;gt;pom&amp;lt;/packaging&amp;gt;
-&amp;lt;name&amp;gt;yun-double&amp;lt;/name&amp;gt;
-&amp;lt;description&amp;gt;double&amp;lt;/description&amp;gt;
-
-&amp;lt;!--统一管理依赖版本--&amp;gt;
-&amp;lt;properties&amp;gt;
-    &amp;lt;java.version&amp;gt;1.8&amp;lt;/java.version&amp;gt;
-    &amp;lt;double.version&amp;gt;2.0.0&amp;lt;/double.version&amp;gt;
-    &amp;lt;zkclient.version&amp;gt;0.10&amp;lt;/zkclient.version&amp;gt;
-&amp;lt;/properties&amp;gt;
-
-&amp;lt;!-- 依赖于SpringBoot --&amp;gt;
-&amp;lt;parent&amp;gt;
-        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;spring-boot-starter-parent&amp;lt;/artifactId&amp;gt;
-        &amp;lt;version&amp;gt;2.1.4.RELEASE&amp;lt;/version&amp;gt;
-        &amp;lt;relativePath/&amp;gt;
-&amp;lt;/parent&amp;gt;
-
-&amp;lt;!--依赖定义--&amp;gt;
-&amp;lt;dependencyManagement&amp;gt;
-    &amp;lt;dependencies&amp;gt;
-        &amp;lt;dependency&amp;gt;
-            &amp;lt;groupId&amp;gt;com.alibaba.spring.boot&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;dubbo-spring-boot-starter&amp;lt;/artifactId&amp;gt;
-            &amp;lt;version&amp;gt;${double.version}&amp;lt;/version&amp;gt;
-        &amp;lt;/dependency&amp;gt;
-        &amp;lt;dependency&amp;gt;
-            &amp;lt;groupId&amp;gt;com.101tec&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;zkclient&amp;lt;/artifactId&amp;gt;
-            &amp;lt;version&amp;gt;${zkclient.version}&amp;lt;/version&amp;gt;
-        &amp;lt;/dependency&amp;gt;
-    &amp;lt;/dependencies&amp;gt;
-&amp;lt;/dependencyManagement&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;创建公共接口工程common&quot;&gt;创建公共接口工程common&lt;/h5&gt;
-&lt;p&gt;该工程用于存储服务层接口，以减少代码的冗余。&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;modelVersion&amp;gt;4.0.0&amp;lt;/modelVersion&amp;gt;
-
-&amp;lt;parent&amp;gt;
-    &amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-    &amp;lt;artifactId&amp;gt;yun-double&amp;lt;/artifactId&amp;gt;
-    &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-&amp;lt;/parent&amp;gt;
-
-&amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-&amp;lt;artifactId&amp;gt;common&amp;lt;/artifactId&amp;gt;
-&amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-
-&amp;lt;name&amp;gt;common&amp;lt;/name&amp;gt;
-&amp;lt;description&amp;gt;公共接口&amp;lt;/description&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;创建公共接口&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public interface UserService {
-
-    String getUserById(int id);
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h5 id=&quot;创建服务提供者provider&quot;&gt;创建服务提供者(provider)&lt;/h5&gt;
-&lt;p&gt;Pom文件&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;modelVersion&amp;gt;4.0.0&amp;lt;/modelVersion&amp;gt;
-
-&amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-&amp;lt;artifactId&amp;gt;provider&amp;lt;/artifactId&amp;gt;
-&amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-&amp;lt;packaging&amp;gt;jar&amp;lt;/packaging&amp;gt;
-
-&amp;lt;name&amp;gt;provider&amp;lt;/name&amp;gt;
-&amp;lt;description&amp;gt;生产者&amp;lt;/description&amp;gt;
-
-
-&amp;lt;parent&amp;gt;
-    &amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-    &amp;lt;artifactId&amp;gt;yun-double&amp;lt;/artifactId&amp;gt;
-    &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-&amp;lt;/parent&amp;gt;
-
-&amp;lt;dependencies&amp;gt;
-    &amp;lt;!-- SpringBoot快速启动Duubbo --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.alibaba.spring.boot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;dubbo-spring-boot-starter&amp;lt;/artifactId&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-    &amp;lt;!-- Zk客户端依赖 --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.101tec&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;zkclient&amp;lt;/artifactId&amp;gt;
-        &amp;lt;!-- 排除依赖里的日志 --&amp;gt;
-        &amp;lt;exclusions&amp;gt;
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;log4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;log4j&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;org.slf4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;slf4j-api&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;org.slf4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;slf4j-log4j12&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-        &amp;lt;/exclusions&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-    &amp;lt;!-- 导入公共接口依赖 --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;common&amp;lt;/artifactId&amp;gt;
-        &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-&amp;lt;/dependencies&amp;gt;
-
-&amp;lt;build&amp;gt;
-    &amp;lt;plugins&amp;gt;
-        &amp;lt;plugin&amp;gt;
-            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;spring-boot-maven-plugin&amp;lt;/artifactId&amp;gt;
-        &amp;lt;/plugin&amp;gt;
-    &amp;lt;/plugins&amp;gt;
-&amp;lt;/build&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在pom文件中我们需要引入Dubbo,Zk客户端并且引入公共接口工程&lt;br/&gt;application.properties配置文件&lt;/p&gt;
-&lt;pre class=&quot;propertiies&quot;&gt;
-&lt;code&gt;#dubbo.application.name 应用名称
-#dubbo.registry.address 注册中心地址
-#dubbo.protocol.name 协议名称
-#dubbo.protocol.port 协议端口
-#dubbo.scan dubbo 服务类包目录
-#server.port=8080
-spring.application.name=user-pro
-dubbo.application.name=user-provider1
-dubbo.registry.address=zookeeper://192.168.197.133:2181
-dubbo.protocol.name=dubbo
-dubbo.protocol.port=20880&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在这里dubbo.application.name应用名称一定不能重复&lt;br/&gt;实现UserService&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;@Component
-@Service(timeout = 10000,interfaceClass = UserService.class)
-public class UserServiceImpl implements UserService {
-
-    @Override
-    public String getUserById(int id) {
-        if(id == 1) {
-            return &quot;SimpleWu&quot;;
-        }else {
-            return &quot;Apache Dubbo&quot;;
-        }
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;@Service 这个注解使用的不是Spring里面的而是com.alibaba.dubbo.config.annotation.Service&lt;br/&gt;timeout 配置超时时间&lt;br/&gt;interfaceClass 接口类&lt;br/&gt;version 服务版本，如果配置了服务版本在消费端引用也必须一样，具体等会说&lt;br/&gt;创建启动类&lt;br/&gt;在该工程中我们不需要引入Web模块浪费端口号，只需要这样写启动类&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;@EnableDubbo
-@EnableDubboConfiguration
-@DubboComponentScan(&quot;com.simple.springboot.provider.common.impl&quot;)
-public class ProviderApplication {
-
-    public static void main(String[] args) {
-        SpringApplication app = new SpringApplication(ProviderApplication.class);
-        app.run(args);
-        //dubbo Main独立运行，脱离web容器
-        Main.main(args);
-    }
-
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;@EnableDubbo 启动Dubbo功能&lt;br/&gt;@EnableDubboConfiguration 启动Duubbo配置&lt;br/&gt;@DubboComponentScan &lt;strong&gt;扫描提供者实现类&lt;/strong&gt;&lt;/p&gt;
-&lt;h5 id=&quot;创建服务消费者consumer&quot;&gt;创建服务消费者(consumer)&lt;/h5&gt;
-&lt;p&gt;POM文件&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;modelVersion&amp;gt;4.0.0&amp;lt;/modelVersion&amp;gt;
-
-
-&amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-&amp;lt;artifactId&amp;gt;consumer&amp;lt;/artifactId&amp;gt;
-&amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-
-
-&amp;lt;name&amp;gt;consumer&amp;lt;/name&amp;gt;
-&amp;lt;description&amp;gt;消费者&amp;lt;/description&amp;gt;
-
-&amp;lt;parent&amp;gt;
-    &amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-    &amp;lt;artifactId&amp;gt;yun-double&amp;lt;/artifactId&amp;gt;
-    &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-&amp;lt;/parent&amp;gt;
-
-&amp;lt;dependencies&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;spring-boot-starter-web&amp;lt;/artifactId&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;spring-boot-starter-test&amp;lt;/artifactId&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-    &amp;lt;!-- SpringBoot快速启动Duubbo --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.alibaba.spring.boot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;dubbo-spring-boot-starter&amp;lt;/artifactId&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-    &amp;lt;!-- Zk客户端依赖 --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.101tec&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;zkclient&amp;lt;/artifactId&amp;gt;
-        &amp;lt;!-- 排除依赖里的日志 --&amp;gt;
-        &amp;lt;exclusions&amp;gt;
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;log4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;log4j&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;org.slf4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;slf4j-api&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-
-            &amp;lt;exclusion&amp;gt;
-                &amp;lt;groupId&amp;gt;org.slf4j&amp;lt;/groupId&amp;gt;
-                &amp;lt;artifactId&amp;gt;slf4j-log4j12&amp;lt;/artifactId&amp;gt;
-            &amp;lt;/exclusion&amp;gt;
-        &amp;lt;/exclusions&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-    &amp;lt;!-- 导入公共接口依赖 --&amp;gt;
-    &amp;lt;dependency&amp;gt;
-        &amp;lt;groupId&amp;gt;com.simple.springboot&amp;lt;/groupId&amp;gt;
-        &amp;lt;artifactId&amp;gt;common&amp;lt;/artifactId&amp;gt;
-        &amp;lt;version&amp;gt;0.0.1-SNAPSHOT&amp;lt;/version&amp;gt;
-    &amp;lt;/dependency&amp;gt;
-&amp;lt;/dependencies&amp;gt;
-
-&amp;lt;build&amp;gt;
-    &amp;lt;plugins&amp;gt;
-        &amp;lt;plugin&amp;gt;
-            &amp;lt;groupId&amp;gt;org.springframework.boot&amp;lt;/groupId&amp;gt;
-            &amp;lt;artifactId&amp;gt;spring-boot-maven-plugin&amp;lt;/artifactId&amp;gt;
-        &amp;lt;/plugin&amp;gt;
-    &amp;lt;/plugins&amp;gt;
-&amp;lt;/build&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在这个工程中我们是需要依赖Web的，不然咋访问呢&lt;br/&gt;编写Application.properties配置文件&lt;/p&gt;
-&lt;pre class=&quot;properties&quot;&gt;
-&lt;code&gt;spring.application.name=user-con
-server.port=8080
-dubbo.application.name=user-consumer
-dubbo.registry.address=zookeeper://192.168.197.133:2181
-dubbo.protocol.name=dubbo
-dubbo.protocol.port=20880
-#dubbo.scan=com.simple.springboot.provider.common.impl&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在这里dubbo.application.name应用名称一定不能重复&lt;br/&gt;dubbo.scan 该配置指向应该是要和服务提供方一致&lt;br/&gt;编写Controller&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;@RestController
-public class UserController {
-
-    //timeout 可以不指定，如果提供则有填写但是version一定要指定 不然会找不到服务 直连需要加url=&quot;dubbo://localhost:20880&quot;
-    @Reference
-    private UserService userService;
-
-    @GetMapping(&quot;/dubbo/user/{id}&quot;)
-    public String getUserById(@PathVariable int id){
-        return userService.getUserById(id);
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在这里是使用@Reference去发现服务而不是@Autowired去注入Bean&lt;br/&gt;@Reference 里面可以配置version,timeout超时时间&lt;br/&gt;如果需要Dubbo直连url=&quot;dubbo://localhost:20880&quot;&lt;/p&gt;
-&lt;p&gt;dubbo提供了四种负载均衡策略,分别是：&lt;br/&gt;1、Random LoadBalance 按权重的随机负载均衡,也是dubbo默认的负载均衡策略&lt;br/&gt;2、RoundRobin LoadBalance 按权重的轮询负载均衡,即在轮询的基础上添加了权重的策略&lt;br/&gt;3、LeastActive LoadBalance 最少活跃调用数,相同活跃数的随机访问,活跃数指调用前后的计数差即响应时间的长短;这种策略可以使响应慢的提供者收到的请求较少,大大提供系统性能&lt;br/&gt;4、ConsistentHash LoadBalance 一致性哈希；相同参数的请求总是发到同一提供者&lt;/p&gt;
-&lt;p&gt;负载均衡的配置：@Reference(loadbalance = &quot;roundrobin&quot;)，loadbalance 的值即为四种负载均衡的名称,全部小写&lt;/p&gt;
-&lt;p&gt;在集群调用失败时，Dubbo 提供了多种容错方案，缺省为 failover 重试。下面列举dubbo支持的容错策略：&lt;/p&gt;
-&lt;p&gt;1、Failover Cluster：失败自动切换，当出现失败，重试其它服务器。通常用于读操作，但重试会带来更长延迟。可通过 retries=&quot;XXX&quot; 来设置重试次数(不含第一次)。&lt;br/&gt;2、Failfast Cluster：快速失败，只发起一次调用，失败立即报错。通常用于非幂等性的写操作，比如新增记录。&lt;br/&gt;3、Failsafe Cluster：失败安全，出现异常时，直接忽略。通常用于写入审计日志等操作。&lt;br/&gt;4、Failback Cluster：失败自动恢复，后台记录失败请求，定时重发。通常用于消息通知操作。&lt;br/&gt;5、Forking Cluster：并行调用多个服务器，只要一个成功即返回。通常用于实时性要求较高的读操作，但需要浪费更多服务资源。可通过 forks=&quot;2&quot; 来设置最大并行数。&lt;br/&gt;6、Broadcast Cluster：广播调用所有提供者，逐个调用，任意一台报错则报错 [2]。通常用于通知所有提供者更新缓存或日志等本地资源信息。&lt;/p&gt;
-&lt;p&gt;配置如下：@Reference(cluster = &quot;failsafe&quot;)这里表示使用失败安全的容错策略&lt;/p&gt;
-&lt;p&gt;编写启动类&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;/**
- * @author:SimpleWu
- * @date: 2019-05-08
- */
-@EnableDubbo
-@SpringBootApplication
-@EnableDubboConfiguration
-@DubboComponentScan(&quot;com.simple.springboot.provider.common.impl&quot;)
-public class ConsumerApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(ConsumerApplication.class,args);
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后直接就可以访问成功了。&lt;br/&gt;如果不想使用注解扫描可以使用properties进行配置&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;#dubbo.scan=com.simple.springboot.provider.common.impl&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;参考代码：&lt;a href=&quot;https://gitlab.com/450255266/code/tree/master/SpringBoot/dubbo/yun-double&quot;&gt;传送门&lt;/a&gt;&lt;br/&gt;注意事项:&lt;br/&gt;Dubbo是一个二进制的Rpc框架在传输数据过程中，实体类必须经过序列化。&lt;br/&gt;在使用poi导出功能时一定不能把response传到Service层，否则传输到Service是导出不了文件而报错，至于文件下载也一样但是相信一般都会有单独的文件服务器。&lt;/p&gt;
-</description>
-<pubDate>Wed, 08 May 2019 10:10:00 +0000</pubDate>
-<dc:creator>SimpleWu</dc:creator>
-<og:description>企业级SpringBoot与Dubbo的并用 SpringBoot越来越热门以至于达到烂大街可见的程度，而Dubbo这个基于二进制的微服务框架又捐献给Apache孵化，如果不会如何使用那么是不是很不好</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/SimpleWu/p/10833555.html</dc:identifier>
-</item>
-<item>
-<title>JAVA兼职架构师 - 我是2货呀</title>
-<link>http://www.cnblogs.com/jay-wu/p/10833451.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/jay-wu/p/10833451.html</guid>
-<description>&lt;p&gt;在一些小企业或者公司人力不足的时候，经常会出现一个人干多个人的活。开发可能会干架构、测试、运维，一些小项目可能需要一个人完成。我把这些角色合并在一起称之为兼职架构师。&lt;/p&gt;
-&lt;p&gt;我用我的经历来说说兼职架构师的需要干的事吧。&lt;/p&gt;
-&lt;p&gt;1.首先，幸运的事情至少我还有一个产品经理，可以给出RoadMap，比如下：&lt;/p&gt;
-&lt;p&gt;单独项目的唯一好处是，产品经理会给你安排一个大致时间，可以把控一下时间和进度。你也不需要开会，因为就你一个人，不过看过《人月神话》的都知道，1+1有时并不能大于2。当然我们底层功能的版本有人C++的人来支持，这边不叙说了。&lt;/p&gt;
-&lt;p&gt;first，你拿到roadmap心中需要有个大致安排时间，技术选型，功能组织架构。尽量多思考，花多一点时间去想如何实现比较好，哪些重点功能，哪些列出来可以不需要首先完成的（可以自由安排优先级，一般周末很少需要加班，效率非常高）&lt;/p&gt;
-&lt;p&gt;second,因为我们测试人少，基本一个月一个小版本（小版本自己测试），一个季度保持一个大版本（大版本有测试帮测）。没有运维，就要考虑到部署人员通俗易懂，一个脚本需要执行所有环境的安排（内网实体机，需要安装包带所有功能，jdk,tomcat,mysql等脚本安装），所以非常考验脚本功底。尽量多想、多测，你也不想实施人员半夜打你电话吧？&lt;/p&gt;
-&lt;p&gt;at last，你需要geek最新技术，我重构的项目经历过struts2 到spring mvc ，然后到现在最新的spring boot。其间遇到的问题也很多。小企业不仅需要你会后端知识，前端也需要你独立完成。所以前端从jsp，到vm，再到现在的html5，也多多少少的要了解一些。前端框架我们主要能接受mvc模式，backbone.js是当初选型的，后来我们过渡过了react.js。所以你需要多看主流的技术和一些实际的知识，可以为以后技术选型提供帮助，这是架构师的成长之路。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531118/201905/1531118-20190508151049773-1622307789.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 2.我们拿到了RoadMap ，可以选自己画一些图，把主要功能给拎清楚，这样才能让我们更好的完成功能。&lt;/p&gt;
-&lt;p&gt;2.1 比如我们拿到日志模块，可以先画一个时序图。在时序图中画出大致的功能点（如图功能链路比较长，我建议可以画泳道图，这样比较清楚一些）&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1531118/201905/1531118-20190508174421821-479875945.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;2.时序图画完，我们就可以先做出具体的功能逻辑了，画出来就代码写起来比较简单了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531118/201905/1531118-20190508174551953-1724493130.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;3.有了流程设计图，表设计结构做出来。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531118/201905/1531118-20190508174933014-1645489032.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;4.最后写业务逻辑，定义好接口规范，这样就可以完成了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1531118/201905/1531118-20190508175047118-1256010918.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;总结一下：&lt;/p&gt;
-&lt;p&gt;在中国的创业型公司或者小企业中，大部分开发人员身兼多职。这样可以使人成长非常快，但提前是需要有良好的技术和全面的应对排查能力，对你进阶架构师有个良好的基础。一句话，不想做架构师的开发，不是一个好开发！一起加油。&lt;/p&gt;
-
-</description>
-<pubDate>Wed, 08 May 2019 09:56:00 +0000</pubDate>
-<dc:creator>我是2货呀</dc:creator>
-<og:description>在一些小企业或者公司人力不足的时候，经常会出现一个人干多个人的活。开发可能会干架构、测试、运维，一些小项目可能需要一个人完成。我把这些角色合并在一起称之为兼职架构师。 我用我的经历来说说兼职架构师的需</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/jay-wu/p/10833451.html</dc:identifier>
-</item>
-<item>
-<title>[项目实战］训练retinanet(pytorch版） - wuzeyuan</title>
-<link>http://www.cnblogs.com/wzyuan/p/10822162.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/wzyuan/p/10822162.html</guid>
-<description>&lt;p&gt;采用github上star比较高的一个开源实现&lt;a href=&quot;https://github.com/yhenon/pytorch-retinanet&quot;&gt;https://github.com/yhenon/pytorch-retinanet&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;在anaconda中新建了一个环境，因为一开始并没有新建环境，在原有的环境里，遇到了pytorch，numpy等版本问题，尤其是一开始用0.1.2版的pytorch，有一个ＴＨ路径不对，导致编译错误，这是我最讨厌的错误，遇到编译错误往往一脸懵逼，如果ＮＭＳ部分不用编译，直接用python实现就好了，当然那样速度可能会慢很多．&lt;/p&gt;
-&lt;p&gt;先记录下我的各个包的版本&lt;/p&gt;
-&lt;p&gt;cffi                      1.12.2&lt;/p&gt;
-&lt;p&gt;cudatoolkit               9.0&lt;/p&gt;
-&lt;p&gt;cudnn                     7.3.1&lt;/p&gt;
-&lt;p&gt;Cython                    0.29.7&lt;/p&gt;
-&lt;p&gt;matplotlib                3.0.3&lt;/p&gt;
-&lt;p&gt;numpy                     1.15.4&lt;/p&gt;
-&lt;p&gt;pytorch                   0.4.0&lt;/p&gt;
-&lt;p&gt;torchvision               0.2.1&lt;/p&gt;
-&lt;p&gt;当然了，其他版本也可以，但是这个版本一定是可行的．&lt;/p&gt;
-&lt;p&gt;然后准备训练coco，首先需要下载coco，这里采用wget下载，几个压缩包的地址链接&lt;a href=&quot;https://wx.qq.com/cgi-bin/mmwebwx-bin/webwxcheckurl?requrl=https%3A%2F%2Fblog.csdn.net%2Fdaniaokuye%2Farticle%2Fdetails%2F78699138%23commentsedit&amp;amp;skey=%40crypt_dc908151_7eb803d2f28fdd5c7662e20c3d802247&amp;amp;deviceid=e582240107253285&amp;amp;pass_ticket=8jK3TQRoOJhKOvr0P0tBqfTYOFl75D1A6Tylv%252FmGuypH4ET27SfB8BcFnd7e6OcY&amp;amp;opcode=2&amp;amp;scene=1&amp;amp;username=@4dad1bc3d7b9c80e7854b41103e8173d532b2c04bf7e27dbf3f325dda877fa6e&quot; target=&quot;_blank&quot;&gt;https://blog.csdn.net/daniaokuye/article/details/78699138#commentsedit&lt;/a&gt;．&lt;/p&gt;
-&lt;p&gt;采用wget下载意外地很慢，于是采用迅雷，意外地很快&lt;/p&gt;
-&lt;p&gt;网络开始训练，没有采用预训练权重，既没有用coco训练好的，也没有用resnet的预训练权重（下载起来太慢了）&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-python train.py --dataset coco --coco_path ../coco --depth &lt;span&gt;50&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;训练截图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1439008/201905/1439008-20190507152201870-1078403467.png&quot; alt=&quot;&quot; width=&quot;1494&quot; height=&quot;851&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;采用２个图片作为一个batch训练，ＧＰＵ占用&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1439008/201905/1439008-20190507152403982-1064789565.png&quot; alt=&quot;&quot; width=&quot;652&quot; height=&quot;390&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;batchsize为２，训练一个epoch大约６个小时，按照代码中默认的１００个epoch，恐怕得６００个小时，一个月了&lt;/p&gt;
-&lt;p&gt;幸好源代码中提供了训练好的coco权重,可以为我们所用,那就先看一下训练好的效果,调用可视化代码&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-python visualize.py --dataset coco --coco_path ../coco --model ./coco_resnet_50_map_0_335_state_dict.pt
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;效果&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1439008/201905/1439008-20190508174221218-1474323762.png&quot; alt=&quot;&quot; width=&quot;468&quot; height=&quot;435&quot;/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1439008/201905/1439008-20190508173930212-820634653.png&quot; alt=&quot;&quot; width=&quot;530&quot; height=&quot;434&quot;/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1439008/201905/1439008-20190508174028984-1431369285.png&quot; alt=&quot;&quot; width=&quot;507&quot; height=&quot;433&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;检测效果还是ok的~&lt;/p&gt;
-&lt;p&gt;这个版本的实现代码量在2000行左右,很适宜阅读,尤其是与Mask R-CNN(matterport版,大概6000行)相比&lt;/p&gt;
-&lt;p&gt;可视化代码稍加改造,就可以作为一个目标检测器使用了,棒!&lt;/p&gt;
-</description>
-<pubDate>Wed, 08 May 2019 09:48:00 +0000</pubDate>
-<dc:creator>wuzeyuan</dc:creator>
-<og:description>pytorch, retinanet,目标检测</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/wzyuan/p/10822162.html</dc:identifier>
 </item>
 </channel>
 </rss>
