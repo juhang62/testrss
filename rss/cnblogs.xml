@@ -9,6 +9,744 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
+<title>死磕 java同步系列之JMM（Java Memory Model） - 彤哥读源码</title>
+<link>http://www.cnblogs.com/tong-yuan/p/10884421.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/tong-yuan/p/10884421.html</guid>
+<description>&lt;h2 id=&quot;简介&quot;&gt;简介&lt;/h2&gt;
+&lt;p&gt;Java内存模型是在硬件内存模型上的更高层的抽象，它屏蔽了各种硬件和操作系统访问的差异性，保证了Java程序在各种平台下对内存的访问都能达到一致的效果。&lt;/p&gt;
+&lt;h2 id=&quot;硬件内存模型&quot;&gt;硬件内存模型&lt;/h2&gt;
+&lt;p&gt;在正式讲解Java的内存模型之前，我们有必要先了解一下硬件层面的一些东西。&lt;/p&gt;
+&lt;p&gt;在现代计算机的硬件体系中，CPU的运算速度是非常快的，远远高于它从存储介质读取数据的速度，这里的存储介质有很多，比如磁盘、光盘、网卡、内存等，这些存储介质有一个很明显的特点——距离CPU越近的存储介质往往越小越贵越快，距离CPU越远的存储介质往往越大越便宜越慢。&lt;/p&gt;
+&lt;p&gt;所以，在程序运行的过程中，CPU大部分时间都浪费在了磁盘IO、网络通讯、数据库访问上，如果不想让CPU在那里白白等待，我们就必须想办法去把CPU的运算能力压榨出来，否则就会造成很大的浪费，而让CPU同时去处理多项任务则是最容易想到的，也是被证明非常有效的压榨手段，这也就是我们常说的“并发执行”。&lt;/p&gt;
+&lt;p&gt;但是，让CPU并发地执行多项任务并不是那么容易实现的事，因为所有的运算都不可能只依靠CPU的计算就能完成，往往还需要跟内存进行交互，如读取运算数据、存储运算结果等。&lt;/p&gt;
+&lt;p&gt;前面我们也说过了，CPU与内存的交互往往是很慢的，所以这就要求我们要想办法在CPU和内存之间建立一种连接，使它们达到一种平衡，让运算能快速地进行，而这种连接就是我们常说的“高速缓存”。&lt;/p&gt;
+&lt;p&gt;高速缓存的速度是非常接近CPU的，但是它的引入又带来了新的问题，现代的CPU往往是有多个核心的，每个核心都有自己的缓存，而多个核心之间是不存在时间片的竞争的，它们可以并行地执行，那么，怎么保证这些缓存与主内存中的数据的一致性就成为了一个难题。&lt;/p&gt;
+&lt;p&gt;为了解决缓存一致性的问题，多个核心在访问缓存时要遵循一些协议，在读写操作时根据协议来操作，这些协议有MSI、MESI、MOSI等，它们定义了何时应该访问缓存中的数据、何时应该让缓存失效、何时应该访问主内存中的数据等基本原则。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://gitee.com/alan-tang-tt/yuan/raw/master/%E6%AD%BB%E7%A3%95%20java%E5%90%8C%E6%AD%A5%E7%B3%BB%E5%88%97/resource/JMM1.png&quot; alt=&quot;JMM&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;而随着CPU能力的不断提升，一层缓存就无法满足要求了，就逐渐衍生出了多级缓存。&lt;/p&gt;
+&lt;p&gt;按照数据读取顺序和CPU的紧密程度，CPU的缓存可以分为一级缓存（L1）、二级缓存（L2）、三级缓存（L3），每一级缓存存储的数据都是下一级的一部分。&lt;/p&gt;
+&lt;p&gt;这三种缓存的技术难度和制作成本是相对递减的，容量也是相对递增的。&lt;/p&gt;
+&lt;p&gt;所以，在有了多级缓存后，程序的运行就变成了：&lt;/p&gt;
+&lt;p&gt;当CPU要读取一个数据的时候，先从一级缓存中查找，如果没找到再从二级缓存中查找，如果没找到再从三级缓存中查找，如果没找到再从主内存中查找，然后再把找到的数据依次加载到多级缓存中，下次再使用相关的数据直接从缓存中查找即可。&lt;/p&gt;
+&lt;p&gt;而加载到缓存中的数据也不是说用到哪个就加载哪个，而是加载内存中连续的数据，一般来说是加载连续的64个字节，因此，如果访问一个 long 类型的数组时，当数组中的一个值被加载到缓存中时，另外 7 个元素也会被加载到缓存中，这就是“缓存行”的概念。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://gitee.com/alan-tang-tt/yuan/raw/master/%E6%AD%BB%E7%A3%95%20java%E5%90%8C%E6%AD%A5%E7%B3%BB%E5%88%97/resource/JMM2.png&quot; alt=&quot;JMM&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;缓存行虽然能极大地提高程序运行的效率，但是在多线程对共享变量的访问过程中又带来了新的问题，也就是非常著名的“伪共享”。&lt;/p&gt;
+&lt;p&gt;关于伪共享的问题，我们这里就不展开讲了，有兴趣的可以看彤哥之前发布的【&lt;a href=&quot;https://mp.weixin.qq.com/s/rd13SOSxhLA6TT13N9ni8Q&quot;&gt;杂谈 什么是伪共享（false sharing）？&lt;/a&gt;】章节的相关内容。&lt;/p&gt;
+&lt;p&gt;除此之外，为了使CPU中的运算单元能够充分地被利用，CPU可能会对输入的代码进行乱序执行优化，然后在计算之后再将乱序执行的结果进行重组，保证该结果与顺序执行的结果一致，但并不保证程序中各个语句计算的先后顺序与代码的输入顺序一致，因此，如果一个计算任务依赖于另一个计算任务的结果，那么其顺序性并不能靠代码的先后顺序来保证。&lt;/p&gt;
+&lt;p&gt;与CPU的乱序执行优化类似，java虚拟机的即时编译器也有类似的指令重排序优化。&lt;/p&gt;
+&lt;p&gt;为了解决上面提到的多个缓存读写一致性以及乱序排序优化的问题，这就有了内存模型，它定义了共享内存系统中多线程读写操作行为的规范。&lt;/p&gt;
+&lt;h2 id=&quot;java内存模型&quot;&gt;Java内存模型&lt;/h2&gt;
+&lt;p&gt;Java内存模型（Java Memory Model，JMM）是在硬件内存模型基础上更高层的抽象，它屏蔽了各种硬件和操作系统对内存访问的差异性，从而实现让Java程序在各种平台下都能达到一致的并发效果。&lt;/p&gt;
+&lt;p&gt;Java内存模型定义了程序中各个变量的访问规则，即在虚拟机中将变量存储到内存和从内存中取出这样的底层细节。这里所说的变量包括实例字段、静态字段，但不包括局部变量和方法参数，因为它们是线程私有的，它们不会被共享，自然不存在竞争问题。&lt;/p&gt;
+&lt;p&gt;为了获得更好的执行效能，Java内存模型并没有限制执行引擎使用处理器的特定寄存器或缓存来和主内存进行交互，也没有限制即时编译器调整代码的执行顺序等这类权利。&lt;/p&gt;
+&lt;p&gt;Java内存模型规定了所有的变量都存储在主内存中，这里的主内存跟介绍硬件时所用的名字一样，两者可以类比，但此处仅指虚拟机中内存的一部分。&lt;/p&gt;
+&lt;p&gt;除了主内存，每条线程还有自己的工作内存，此处可与CPU的高速缓存进行类比。工作内存中保存着该线程使用到的变量的主内存副本的拷贝，线程对变量的操作都必须在工作内存中进行，包括读取和赋值等，而不能直接读写主内存中的变量，不同的线程之间也无法直接访问对方工作内存中的变量，线程间变量值的传递必须通过主内存来完成。&lt;/p&gt;
+&lt;p&gt;线程、工作内存、主内存三者的关系如下图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://gitee.com/alan-tang-tt/yuan/raw/master/%E6%AD%BB%E7%A3%95%20java%E5%90%8C%E6%AD%A5%E7%B3%BB%E5%88%97/resource/JMM3.png&quot; alt=&quot;JMM&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;注意，这里所说的主内存、工作内存跟Java虚拟机内存区域划分中的堆、栈是不同层次的内存划分，如果两者一定要勉强对应起来，主内存主要对应于堆中对象的实例部分，而工作内存主要对应与虚拟机栈中的部分区域。&lt;/p&gt;
+&lt;p&gt;从更低层次来说，主内存主要对应于硬件内存部分，工作内存主要对应于CPU的高速缓存和寄存器部分，但也不是绝对的，主内存也可能存在于高速缓存和寄存器中，工作内存也可能存在于硬件内存中。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://gitee.com/alan-tang-tt/yuan/raw/master/%E6%AD%BB%E7%A3%95%20java%E5%90%8C%E6%AD%A5%E7%B3%BB%E5%88%97/resource/JMM4.png&quot; alt=&quot;JMM&quot;/&gt;&lt;/p&gt;
+&lt;h2 id=&quot;内存间的交互操作&quot;&gt;内存间的交互操作&lt;/h2&gt;
+&lt;p&gt;关于主内存与工作内存之间具体的交互协议，Java内存模型定义了以下8种具体的操作来完成：&lt;/p&gt;
+&lt;p&gt;（1）lock，锁定，作用于主内存的变量，它把主内存中的变量标识为一条线程独占状态；&lt;/p&gt;
+&lt;p&gt;（2）unlock，解锁，作用于主内存的变量，它把锁定的变量释放出来，释放出来的变量才可以被其它线程锁定；&lt;/p&gt;
+&lt;p&gt;（3）read，读取，作用于主内存的变量，它把一个变量从主内存传输到工作内存中，以便后续的load操作使用；&lt;/p&gt;
+&lt;p&gt;（4）load，载入，作用于工作内存的变量，它把read操作从主内存得到的变量放入工作内存的变量副本中；&lt;/p&gt;
+&lt;p&gt;（5）use，使用，作用于工作内存的变量，它把工作内存中的一个变量传递给执行引擎，每当虚拟机遇到一个需要使用到变量的值的字节码指令时将会执行这个操作；&lt;/p&gt;
+&lt;p&gt;（6）assign，赋值，作用于工作内存的变量，它把一个从执行引擎接收到的变量赋值给工作内存的变量，每当虚拟机遇到一个给变量赋值的字节码指令时使用这个操作；&lt;/p&gt;
+&lt;p&gt;（7）store，存储，作用于工作内存的变量，它把工作内存中一个变量的值传递到主内存中，以便后续的write操作使用；&lt;/p&gt;
+&lt;p&gt;（8）write，写入，作用于主内存的变量，它把store操作从工作内存得到的变量的值放入到主内存的变量中；&lt;/p&gt;
+&lt;p&gt;如果要把一个变量从主内存复制到工作内存，那就要按顺序地执行read和load操作，同样地，如果要把一个变量从工作内存同步回主内存，就要按顺序地执行store和write操作。注意，这里只说明了要按顺序，并没有说一定要连续，也就是说可以在read与load之间、store与write之间插入其它操作。比如，对主内存中的变量a和b的访问，可以按照以下顺序执行：&lt;/p&gt;
+&lt;p&gt;read a -&amp;gt; read b -&amp;gt; load b -&amp;gt; load a。&lt;/p&gt;
+&lt;p&gt;另外，Java内存模型还定义了执行上述8种操作的基本规则：&lt;/p&gt;
+&lt;p&gt;（1）不允许read和load、store和write操作之一单独出现，即不允许出现从主内存读取了而工作内存不接受，或者从工作内存回写了但主内存不接受的情况出现；&lt;/p&gt;
+&lt;p&gt;（2）不允许一个线程丢弃它最近的assign操作，即变量在工作内存变化了必须把该变化同步回主内存；&lt;/p&gt;
+&lt;p&gt;（3）不允许一个线程无原因地（即未发生过assign操作）把一个变量从工作内存同步回主内存；&lt;/p&gt;
+&lt;p&gt;（4）一个新的变量必须在主内存中诞生，不允许工作内存中直接使用一个未被初始化（load或assign）过的变量，换句话说就是对一个变量的use和store操作之前必须执行过load和assign操作；&lt;/p&gt;
+&lt;p&gt;（5）一个变量同一时刻只允许一条线程对其进行lock操作，但lock操作可以被同一个线程执行多次，多次执行lock后，只有执行相同次数的unlock操作，变量才能被解锁。&lt;/p&gt;
+&lt;p&gt;（6）如果对一个变量执行lock操作，将会清空工作内存中此变量的值，在执行引擎使用这个变量前，需要重新执行load或assign操作初始化变量的值；&lt;/p&gt;
+&lt;p&gt;（7）如果一个变量没有被lock操作锁定，则不允许对其执行unlock操作，也不允许unlock一个其它线程锁定的变量；&lt;/p&gt;
+&lt;p&gt;（8）对一个变量执行unlock操作之前，必须先把此变量同步回主内存中，即执行store和write操作；&lt;/p&gt;
+&lt;p&gt;注意，这里的lock和unlock是实现synchronized的基础，Java并没有把lock和unlock操作直接开放给用户使用，但是却提供了两个更高层次的指令来隐式地使用这两个操作，即moniterenter和moniterexit。&lt;/p&gt;
+&lt;h2 id=&quot;原子性可见性有序性&quot;&gt;原子性、可见性、有序性&lt;/h2&gt;
+&lt;p&gt;Java内存模型就是为了解决多线程环境下共享变量的一致性问题，那么一致性包含哪些内容呢？&lt;/p&gt;
+&lt;p&gt;一致性主要包含三大特性：原子性、可见性、有序性，下面我们就来看看Java内存模型是怎么实现这三大特性的。&lt;/p&gt;
+&lt;p&gt;（1）原子性&lt;/p&gt;
+&lt;p&gt;原子性是指一段操作一旦开始就会一直运行到底，中间不会被其它线程打断，这段操作可以是一个操作，也可以是多个操作。&lt;/p&gt;
+&lt;p&gt;由Java内存模型来直接保证的原子性操作包括read、load、user、assign、store、write这两个操作，我们可以大致认为基本类型变量的读写是具备原子性的。&lt;/p&gt;
+&lt;p&gt;如果应用需要一个更大范围的原子性，Java内存模型还提供了lock和unlock这两个操作来满足这种需求，尽管不能直接使用这两个操作，但我们可以使用它们更具体的实现synchronized来实现。&lt;/p&gt;
+&lt;p&gt;因此，synchronized块之间的操作也是原子性的。&lt;/p&gt;
+&lt;p&gt;（2）可见性&lt;/p&gt;
+&lt;p&gt;可见性是指当一个线程修改了共享变量的值，其它线程能立即感知到这种变化。&lt;/p&gt;
+&lt;p&gt;Java内存模型是通过在变更修改后同步回主内存，在变量读取前从主内存刷新变量值来实现的，它是依赖主内存的，无论是普通变量还是volatile变量都是如此。&lt;/p&gt;
+&lt;p&gt;普通变量与volatile变量的主要区别是是否会在修改之后立即同步回主内存，以及是否在每次读取前立即从主内存刷新。因此我们可以说volatile变量保证了多线程环境下变量的可见性，但普通变量不能保证这一点。&lt;/p&gt;
+&lt;p&gt;除了volatile之外，还有两个关键字也可以保证可见性，它们是synchronized和final。&lt;/p&gt;
+&lt;p&gt;synchronized的可见性是由“对一个变量执行unlock操作之前，必须先把此变量同步回主内存中，即执行store和write操作”这条规则获取的。&lt;/p&gt;
+&lt;p&gt;final的可见性是指被final修饰的字段在构造器中一旦被初始化完成，那么其它线程中就能看见这个final字段了。&lt;/p&gt;
+&lt;p&gt;（3）有序性&lt;/p&gt;
+&lt;p&gt;Java程序中天然的有序性可以总结为一句话：如果在本线程中观察，所有的操作都是有序的；如果在另一个线程中观察，所有的操作都是无序的。&lt;/p&gt;
+&lt;p&gt;前半句是指线程内表现为串行的语义，后半句是指“指令重排序”现象和“工作内存和主内存同步延迟”现象。&lt;/p&gt;
+&lt;p&gt;Java中提供了volatile和synchronized两个关键字来保证有序性。&lt;/p&gt;
+&lt;p&gt;volatile天然就具有有序性，因为其禁止重排序。&lt;/p&gt;
+&lt;p&gt;synchronized的有序性是由“一个变量同一时刻只允许一条线程对其进行lock操作”这条规则获取的。&lt;/p&gt;
+&lt;h2 id=&quot;先行发生原则happens-before&quot;&gt;先行发生原则（Happens-Before）&lt;/h2&gt;
+&lt;p&gt;如果Java内存模型的有序性都只依靠volatile和synchronized来完成，那么有一些操作就会变得很啰嗦，但是我们在编写Java并发代码时并没有感受到，这是因为Java语言天然定义了一个“先行发生”原则，这个原则非常重要，依靠这个原则我们可以很容易地判断在并发环境下两个操作是否可能存在竞争冲突问题。&lt;/p&gt;
+&lt;p&gt;先行发生，是指操作A先行发生于操作B，那么操作A产生的影响能够被操作B感知到，这种影响包括修改了共享内存中变量的值、发送了消息、调用了方法等。&lt;/p&gt;
+&lt;p&gt;下面我们看看Java内存模型定义的先行发生原则有哪些：&lt;/p&gt;
+&lt;p&gt;（1）程序次序原则&lt;/p&gt;
+&lt;p&gt;在一个线程内，按照程序书写的顺序执行，书写在前面的操作先行发生于书写在后面的操作，准确地讲是控制流顺序而不是代码顺序，因为要考虑分支、循环等情况。&lt;/p&gt;
+&lt;p&gt;（2）监视器锁定原则&lt;/p&gt;
+&lt;p&gt;一个unlock操作先行发生于后面对同一个锁的lock操作。&lt;/p&gt;
+&lt;p&gt;（3）volatile原则&lt;/p&gt;
+&lt;p&gt;对一个volatile变量的写操作先行发生于后面对该变量的读操作。&lt;/p&gt;
+&lt;p&gt;（4）线程启动原则&lt;/p&gt;
+&lt;p&gt;对线程的start()操作先行发生于线程内的任何操作。&lt;/p&gt;
+&lt;p&gt;（5）线程终止原则&lt;/p&gt;
+&lt;p&gt;线程中的所有操作先行发生于检测到线程终止，可以通过Thread.join()、Thread.isAlive()的返回值检测线程是否已经终止。&lt;/p&gt;
+&lt;p&gt;（6）线程中断原则&lt;/p&gt;
+&lt;p&gt;对线程的interrupt()的调用先行发生于线程的代码中检测到中断事件的发生，可以通过Thread.interrupted()方法检测是否发生中断。&lt;/p&gt;
+&lt;p&gt;（7）对象终结原则&lt;/p&gt;
+&lt;p&gt;一个对象的初始化完成（构造方法执行结束）先行发生于它的finalize()方法的开始。&lt;/p&gt;
+&lt;p&gt;（8）传递性原则&lt;/p&gt;
+&lt;p&gt;如果操作A先行发生于操作B，操作B先行发生于操作C，那么操作A先行发生于操作C。&lt;/p&gt;
+&lt;p&gt;这里说的“先行发生”与“时间上的先发生”没有必然的关系。&lt;/p&gt;
+&lt;p&gt;比如，下面的代码：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;int a = 0;
+
+// 操作A：线程1对进行赋值操作
+a = 1;
+
+// 操作B：线程2获取a的值
+
+int b = a;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果线程1在时间顺序上先对a进行赋值，然后线程2再获取a的值，这能说明操作A先行发生于操作B吗？&lt;/p&gt;
+&lt;p&gt;显然不能，因为线程2可能读取的还是其工作内存中的值，或者说线程1并没有把a的值刷新回主内存呢，这时候线程2读取到的值可能还是0。&lt;/p&gt;
+&lt;p&gt;所以，“时间上的先发生”不一定“先行发生”。&lt;/p&gt;
+&lt;p&gt;再看一个例子：&lt;/p&gt;
+&lt;pre class=&quot;java&quot;&gt;
+&lt;code&gt;// 同一个线程中
+int i = 1;
+
+int j = 2;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;根据第一条程序次序原则，&lt;code&gt;int i = 1;&lt;/code&gt;先行发生于&lt;code&gt;int j = 2;&lt;/code&gt;，但是由于处理器优化，可能导致&lt;code&gt;int j = 2;&lt;/code&gt;先执行，但是这并不影响先行发生原则的正确性，因为我们在这个线程中并不会感知到这点。&lt;/p&gt;
+&lt;p&gt;所以，“先行发生”不一定“时间上先发生”。&lt;/p&gt;
+&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
+&lt;p&gt;（1）硬件内存架构使得我们必须建立内存模型来保证多线程环境下对共享内存访问的正确性；&lt;/p&gt;
+&lt;p&gt;（2）Java内存模型定义了保证多线程环境下共享变量一致性的规则；&lt;/p&gt;
+&lt;p&gt;（3）Java内存模型提供了工作内存与主内存交互的8大操作：lock、unlock、read、load、use、assign、store、write；&lt;/p&gt;
+&lt;p&gt;（4）Java内存模型对原子性、可见性、有序性提供了一些实现；&lt;/p&gt;
+&lt;p&gt;（5）先行发生的8大原则：程序次序原则、监视器锁定原则、volatile原则、线程启动原则、线程终止原则、线程中断原则、对象终结原则、传递性原则；&lt;/p&gt;
+&lt;p&gt;（6）先行发生不等于时间上的先发生；&lt;/p&gt;
+&lt;h2 id=&quot;彩蛋&quot;&gt;彩蛋&lt;/h2&gt;
+&lt;p&gt;Java内存模型是Java中很重要的概念，理解它非常有助于我们编写多线程代码，理解多线程的本质，笔者这里整理了一些不错的资料提供给大家。&lt;/p&gt;
+&lt;p&gt;《深入理解Java虚拟机》&lt;/p&gt;
+&lt;p&gt;《Java并发编程的艺术》&lt;/p&gt;
+&lt;p&gt;《深入理解java内存模型》&lt;/p&gt;
+&lt;p&gt;关注我的公众号“彤哥读源码”回复“JMM”领取上面三本书籍。&lt;/p&gt;
+&lt;hr/&gt;&lt;p&gt;欢迎关注我的公众号“彤哥读源码”，查看更多源码系列文章,与彤哥一起畅游源码的海洋。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://gitee.com/alan-tang-tt/yuan/raw/master/%E6%AD%BB%E7%A3%95%20java%E9%9B%86%E5%90%88%E7%B3%BB%E5%88%97/resource/qrcode_ss.jpg&quot; alt=&quot;qrcode&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 17 May 2019 17:44:00 +0000</pubDate>
+<dc:creator>彤哥读源码</dc:creator>
+<og:description>硬件内存架构？ Java内存模型？ 内存间交互的操作有哪些？ 原子性、可见性、有序性？ 先行发生原则有哪些？</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/tong-yuan/p/10884421.html</dc:identifier>
+</item>
+<item>
+<title>黑科技抢先尝(续) - Windows terminal中WSL Linux 终端的极简美化指南 - dotNET匠人</title>
+<link>http://www.cnblogs.com/enjoy233/p/simple_guide_to_WSL_terminals_in_Windows_Terminal.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/enjoy233/p/simple_guide_to_WSL_terminals_in_Windows_Terminal.html</guid>
+<description>&lt;p&gt;之前，本人写了一篇文章 &lt;a href=&quot;https://www.cnblogs.com/enjoy233/p/awesome_windows_terminal_build_and_trial.html&quot;&gt;黑科技抢先尝 - Windows全新终端初体验(附无需编译就能安装的Preview版本及代码Build全过程&lt;/a&gt;，介绍了玩转Windows terminal的两种方式。&lt;/p&gt;
+&lt;p&gt;今天这篇文章，主要介绍如何美化 Windows terminal 中 WSL 的 Linux 终端，依然是以本人最熟悉的&lt;code&gt;Ubuntu&lt;/code&gt;为例，其他版本的 Linux 请参考本文的流程换用对应的命令。假定你已按我的上一篇文章已安装好 Windows terminal预编译版本，同时安装好了 Ubuntu，并设置号了 &lt;code&gt;WSL&lt;/code&gt;的权限，然后就可以按本文继续操作了。&lt;/p&gt;
+&lt;h2 id=&quot;修改默认源为apt-get安装提速&quot;&gt;修改默认源，为apt-get安装提速&lt;/h2&gt;
+&lt;p&gt;由于 &lt;code&gt;Ubuntu&lt;/code&gt;官方的源实在是太慢了，建议大家缓存阿里云镜像的 Ubuntu 源，其具体操作步骤如下：&lt;/p&gt;
+&lt;p&gt;首先将原配置文件备份&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo cp /etc/apt/sources.list /etc/apt/sources.list.20190516&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后 vim 打开&lt;code&gt;sources.list&lt;/code&gt;,&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo vim /etc/apt/sources.list&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;code&gt;i&lt;/code&gt;(插入)模式下，在末尾输入依次输入每一行进行替换:&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;:%s/security.ubuntu/mirrors.aliyun/g
+:%s/archive.ubuntu/mirrors.aliyun/g&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;每输入一行，回车一次，然后就替换好了。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;更新源:&lt;/strong&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo apt update; sudo apt upgrade&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;安装python-和-python-pip&quot;&gt;安装python 和 python pip&lt;/h2&gt;
+&lt;p&gt;依次输入如下命令:&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo apt-get install python3
+sudo apt-get install build-essential
+sudo apt-get install python-pip
+pip install --upgrade pip&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;安装-zsh&quot;&gt;安装 zsh&lt;/h2&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo apt-get install zsh&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;安装powerline-font中的特定字体&quot;&gt;安装powerline-font中的特定字体&lt;/h2&gt;
+&lt;p&gt;从&lt;a href=&quot;https://github.com/yanglr/WindowsDevTools/tree/master/awosomeTerminal/fonts-Ubuntu&quot;&gt;github&lt;/a&gt;下载字体&quot;DejaVu Sans Mono for Powerline&quot;，并安装。安装字体时，选择对应的哪一个ttf后缀的安装即可。&lt;/p&gt;
+&lt;p&gt;手动安装字体&quot;Fira code&quot; 或 &quot;DejaVu Sans Mono for Powerline&quot;&lt;/p&gt;
+&lt;p&gt;然后在命令行应用之，具体操作是在profiles.json中把字体设置成它，即可生效。&lt;/p&gt;
+&lt;p&gt;powerline/fonts: Patched fonts for Powerline users.&lt;br/&gt;&lt;a href=&quot;https://github.com/powerline/fonts&quot; class=&quot;uri&quot;&gt;https://github.com/powerline/fonts&lt;/a&gt;&lt;/p&gt;
+&lt;h2 id=&quot;安装powerline-shell&quot;&gt;安装powerline-shell&lt;/h2&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;cd ~
+mkdir src
+cd src
+git clone https://github.com/b-ryan/powerline-shell
+cd powerline-shell
+sudo python setup.py install&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;修改目录下的配置文件-.bashrc-和-.zshrc&quot;&gt;修改~目录下的配置文件 .bashrc 和 .zshrc&lt;/h2&gt;
+&lt;p&gt;首先，插入一点背景知识:&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;ps1格式简介：&lt;/strong&gt;&lt;br/&gt;shell有四种不同的命令提示，称为PS1，PS2，PS3和PS4。 PS代表Prompt String。Windows/Linux/Ubuntu都用得比较多的是PS1脚本。&lt;/p&gt;
+&lt;p&gt;&quot;$PS1&quot;, &quot;Prompt String 1&quot; 指定命令行界面中的环境变量。&lt;/p&gt;
+&lt;p&gt;先编辑文件 &lt;code&gt;.zshrc&lt;/code&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;vim ~/.zshrc&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在末尾加入内容:&lt;/p&gt;
+&lt;pre class=&quot;shell&quot;&gt;
+&lt;code&gt;function powerline_precmd() {
+
+    PS1=&quot;(powerline-shell --shell zsh ?)&quot;
+
+}
+
+ 
+
+function install_powerline_precmd() {
+
+  for s in &quot;${precmd_functions[@]}&quot;; do
+
+    if [ &quot;$s&quot; = &quot;powerline_precmd&quot; ]; then
+
+      return
+
+    fi
+
+  done
+
+  precmd_functions+=(powerline_precmd)
+
+}
+ 
+
+if [ &quot;$TERM&quot; != &quot;linux&quot; ]; then
+
+    install_powerline_precmd
+
+fi&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;编辑完后更新文件 &lt;code&gt;.zshrc&lt;/code&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;source ~/.zshrc&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;再编辑文件&lt;code&gt;.bashrc&lt;/code&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;vim ~/.bashrc&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;在末尾加入内容:&lt;/p&gt;
+&lt;pre class=&quot;shell&quot;&gt;
+&lt;code&gt;function _update_ps1() {
+
+    PS1=&quot;(powerline-shell ?)&quot;
+
+}
+
+ 
+
+if [ &quot;$TERM&quot; != &quot;linux&quot; ]; then
+
+    PROMPT_COMMAND=&quot;_update_ps1; $PROMPT_COMMAND&quot;
+
+fi&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;编辑完后更新文件 &lt;code&gt;.bashrc&lt;/code&gt;&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;source ~/.bashrc&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;然后，我随便输入几个命令:&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sudo su
+ls&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;此时Windows terminal中的效果如下：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518025115846-1068002612.png&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;我直接就使用这个默认主题了。&lt;/p&gt;
+&lt;p&gt;那么，如果要在命令提示符中插入emoji表情，怎么弄呢？就在下图相应的地方(对应文件 &lt;code&gt;.bashrc&lt;/code&gt;)加~&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518013926229-1636878313.png&quot; alt=&quot;emoji-prompt&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;此时的 terminal 为:&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518014400599-1258964235.png&quot; alt=&quot;vim-addEmoji&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;更有意思的玩法可以参考:&lt;br/&gt;&lt;a href=&quot;https://loige.co/random-emoji-in-your-prompt-how-and-why/&quot; class=&quot;uri&quot;&gt;https://loige.co/random-emoji-in-your-prompt-how-and-why/&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2 id=&quot;zsh主题定制&quot;&gt;zsh主题定制&lt;/h2&gt;
+&lt;p&gt;此外，如果想更深入地定制&lt;code&gt;zsh&lt;/code&gt;主题，推荐安装&lt;code&gt;oh_my_zsh&lt;/code&gt;，下面详细介绍。&lt;/p&gt;
+&lt;h2 id=&quot;安装-oh_my_zsh&quot;&gt;安装 oh_my_zsh&lt;/h2&gt;
+&lt;p&gt;Linux下安装&lt;code&gt;oh-my-zsh&lt;/code&gt;，需要在终端输入命令:&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;sh -c &quot;$(wget https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh -O -)&quot;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;如果 遇到证书类似问题&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;apt-get install ca-certificates&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;strong&gt;解决权限问题&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;如果启动时会出现&lt;code&gt;zsh-syntax-highlighting&lt;/code&gt;权限问题，运行下面的命令即可：&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;compaudit | xargs chmod g-w,o-w&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;卸载&lt;code&gt;oh_my_zsh&lt;/code&gt;的方法&lt;/p&gt;
+&lt;pre class=&quot;bash&quot;&gt;
+&lt;code&gt;uninstall_oh_my_zsh&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;从-windows-10-的-bash-中运行-wsl&quot;&gt;从 Windows 10 的 Bash 中运行 WSL&lt;/h2&gt;
+&lt;p&gt;对于windows 10中 &lt;code&gt;WSL&lt;/code&gt; 独立的默认Bash窗口，只能选择字体&quot;DejaVu Sans Mono for Powerline&quot;，可以在界面上选择后使用。&lt;br/&gt;开始菜单中搜索 bash 并打开，&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518024307461-934415003.png&quot; alt=&quot;bash&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;右键 属性-&amp;gt; 字体，选字体&quot;DejaVu Sans Mono for Powerline&quot;。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518022156762-2034582728.png&quot; alt=&quot;font&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;最后的运行结果是：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/436938/201905/436938-20190518023622078-1538515723.png&quot; alt=&quot;bash&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Scott Hanselman:&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;请注意我在 prompt 中也使用了&lt;a href=&quot;https://github.com/b-ryan/powerline-shell&quot;&gt;Powerline&lt;/a&gt; 。 我正在使用&lt;a href=&quot;https://www.hanselman.com/blog/MonospacedProgrammingFontsWithLigatures.aspx&quot;&gt;Fira Code&lt;/a&gt; ，它含有我需要的glyphs，但你当然也可以使用&lt;a href=&quot;https://github.com/powerline/fonts&quot;&gt;改进过的Powerline字体&lt;/a&gt;或使用像&lt;a href=&quot;https://github.com/ryanoasis/nerd-fonts&quot;&gt;Nerd Fonts&lt;/a&gt;和&lt;a href=&quot;https://github.com/ryanoasis/nerd-fonts&quot;&gt;它的字体补丁程序&lt;/a&gt;那样的工具制作&lt;a href=&quot;https://github.com/ryanoasis/nerd-fonts&quot;&gt;自己的字体&lt;/a&gt; 。 此字体补丁程序通常用于获取你最喜欢的等宽字体，并为其添加Powerline glyphs。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;注意：&lt;/strong&gt;如果您看到字形有任何奇怪的间距问题，您可以尝试使用&lt;code&gt;--use-single-width-glyphs&lt;/code&gt;来解决它。 通过发布，我认为所有这些小问题都将得到解决。 在我的终端环境下使用&lt;code&gt;Fira Code&lt;/code&gt;没有任何问题，您的环境可能有所不同。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;参考：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;修改 WSL Ubuntu 18.04 默认源为阿里云镜像 - Windows - 大象笔记&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://www.sunzhongwei.com/modify-the-wsl-ubuntu-1804-default-source-for-ali-cloud-images&quot; class=&quot;uri&quot;&gt;https://www.sunzhongwei.com/modify-the-wsl-ubuntu-1804-default-source-for-ali-cloud-images&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;b-ryan/powerline-shell: A beautiful and useful prompt for your shell&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/b-ryan/powerline-shell&quot; class=&quot;uri&quot;&gt;https://github.com/b-ryan/powerline-shell&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;How to Install Powerline Fonts, Symbols for Bash on Windows 10 - The Customize Windows&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://thecustomizewindows.com/2018/01/install-powerline-fonts-symbols-bash-windows-10/&quot; class=&quot;uri&quot;&gt;https://thecustomizewindows.com/2018/01/install-powerline-fonts-symbols-bash-windows-10/&lt;/a&gt;&lt;/p&gt;
+
+&lt;hr/&gt;&lt;br/&gt;&lt;strong&gt;敲黑板&lt;/strong&gt;：更多干货可关注 公号「dotNET匠人」，持续输出优质的技术文章~</description>
+<pubDate>Fri, 17 May 2019 17:41:00 +0000</pubDate>
+<dc:creator>dotNET匠人</dc:creator>
+<og:description>今天这篇文章，主要介绍如何美化 Windows terminal 中 WSL 的 Linux 终端，依然是以本人最熟悉的`Ubuntu`为例，其他版本的 Linux 请参考本文的流程换用对应的命令。假</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/enjoy233/p/simple_guide_to_WSL_terminals_in_Windows_Terminal.html</dc:identifier>
+</item>
+<item>
+<title>hibernate详解一 - 子爵号</title>
+<link>http://www.cnblogs.com/dsj-66/p/10884359.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/dsj-66/p/10884359.html</guid>
+<description>&lt;p&gt;&lt;span&gt;&lt;strong&gt;hibernate介绍&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;hibernate是一个开源的轻量级的框架，&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;hibernate框架应用在javaee三层结构中的dao层框架，在dao层对数据库进行crud操作，使用hibernate框架实现crud操作；&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;hibernate底层就是jdbc,hibernate对jdbc进行了封装；使用hibernate的好处，不必再写复杂的jdbc代码了，不需要写sql语句实现了。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;hibernate使用orm思想对数据库进行crud操作，orm即对象关系映射&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;orm解释：让实体类和数据库表进行一 一对应关系，让实体类首先和数据库表进行对应，再让实体类属性和表字段进行对应。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;不需要直接操作数据库表，而是操作数据库表对应的实体类对象。&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190517233543776-233433669.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h2&gt;一导入hibernate相关jar包，这是我java项目里的jar包&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190517234114259-1031996853.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt; 二 创建实体类，使用hibernate的时候不用我们自己创建表，由hibernate自动创建&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190517234410775-1530079707.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt; 三 配置实体类和数据库表的一 一对应关系，使用xml配置文件映射关系，映射文件名称和位置没有特定要求，建议和实体类在同一包下，实体类名称.hbm.xml&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190517235643418-266035764.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;四 创建hibernate的核心配置文件，核心配置文件的名称和位置都是固定的，位置在src下，名称是 hibernate.cfg.xml&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518000224574-1855939863.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518000316270-1342554835.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;hibernate工具类&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518001203642-1082277424.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518001240197-294239510.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;hibernate测试，运行完成后会自动在数据库中创建对应的表，并保存一条数据&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518001735641-1357937021.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/1649429/201905/1649429-20190518002017637-1609669459.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;session介绍（重点）&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;session类似于jdbc中的connection连接&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;调用session里面的不同方法来实现crud操作&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;session对象是单线程对象，不能公用，只能自己使用，所以上面使用了与本地线程绑定的session&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+</description>
+<pubDate>Fri, 17 May 2019 16:31:00 +0000</pubDate>
+<dc:creator>子爵号</dc:creator>
+<og:description>hibernate介绍 hibernate是一个开源的轻量级的框架， hibernate框架应用在javaee三层结构中的dao层框架，在dao层对数据库进行crud操作，使用hibernate框架实</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/dsj-66/p/10884359.html</dc:identifier>
+</item>
+<item>
+<title>PJzhang：经典子域名爆破工具subdomainsbrute - PJzhang白话安全</title>
+<link>http://www.cnblogs.com/landesk/p/10884000.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/landesk/p/10884000.html</guid>
+<description>&lt;p&gt;&lt;span&gt;猫宁！！！&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;参考链接：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;https://www.waitalone.cn/subdomainsbrute.html&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;https://www.secpulse.com/archives/5900.html&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;很多人知道子域名挖掘机，不过我最早使用的子域名爆破工具是lijiejie的subdomainsbrute，简单容易上手，而且字典符合中国人习惯。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;上一次更新已经是2018.02.06的事情了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;github地址：https://github.com/lijiejie/subDomainsBrute&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;我用的操作系统是kali linux&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;先下载到本地再说&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;git clone https://github.com/lijiejie/subDomainsBrute.git&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;cd /root/subDomainsBrute&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;执行python脚本，作者采用的python2，作者说需要pip install gevent dnspython，2个python模块，不过我的电脑已经安装好了。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;显示基础命令项：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190517223949793-904429754.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;查看这个工具的版本，现在已经是1.1版本了&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py --version&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;显示帮助文件内容，和执行python subDomainsBrute.py没区别&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;span&gt;python subDomainsBrute.py&lt;/span&gt;  -h&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;爆破子域名，采用默认字典subnames.txt，这个字典有15374个关键词，爆破出870个子域名，花费时间5-6分钟左右。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;同时爆破出来的子域名中还有一些三级域名，例如app.news.baidu.com，这就是为什么爆破次数为129583次了，进行了循环爆破。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py baidu.com&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190517225329121-256261885.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;爆破结束以后，会生成一份txt文档，里面除了公网域名，还有很多的内网域名可以看到，私有dns和公有dns共用的结果。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这里用到2家公共dns服务器，阿里的223.6.6.6，223.5.5.5，腾讯的119.29.29.29 ，182.254.116.116。txt文档域名后面对应的是解析的IP，ip可以扫描端口，也可以使用nessus进行扫描，发现其他有价值的信息。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190517230324954-1033377466.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;上面自动生成的文档，名字是baidu.com.txt，名称是可以自定义的，如&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py baidu.com -o baidu.txt&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;这里默认的进程是6，默认的线程是200，都是可以调整的，线程是最小的执行单元，进程中至少包含1个线程，这里把进程设置为1会好些，线程开的过高也会有更高的误报。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py -p 1 -t 200 baidu.com  -o baidu.txt&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;生成的结果txt文档中，有很多的内网ip，如果想要忽视掉，可以这样，加一个-i就好，域名对应的ip是内网的会被清除掉，结果只发现692个子域名，花费时间7-8分钟。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py -p 1 -t 200 -i baidu.com  -o baidu.txt&lt;/span&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190517234633555-1895416072.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;字典是子域名爆破中非常关键的一个环节，字典也是可以自定义的，作者提供了一份清单，dns_servers.txt是dns服务器的ip，sample_qq.com.txt是针对腾讯的爆破结果样例展示，subnames_all_5_letters.txt表示的是最多到4级域名，如a.aa.aaa.baidu.com，如下&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;{alphnum}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;{alphnum}{alphnum}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;{alphnum}{alphnum}{alphnum}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;{alphnum}{alphnum}{alphnum}{alphnum}&lt;/span&gt;&lt;br/&gt;&lt;span&gt;{alphnum}{alphnum}{alphnum}{alphnum}{alphnum}&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190517233811071-280375006.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;如果采用大字典subnames_full.txt，爆破三级及以上域名采用next_sub_full.txt字典，无疑需要花费更多的时间，如下&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py -p 1 -t 200 -i --full baidu.com  -o baidu.txt&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt; &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;-f的功能是首先调用next_sub.txt进行子域名爆破，工具会自动调用next_sub.txt进行深入轮循爆破，-f引用的字典名字也可以自定义的。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;python subDomainsBrute.py -f next_sub.txt baidu.com -o baidu.txt&lt;/span&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1687889/201905/1687889-20190518000706512-720427612.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;如果发现比较好的关键词，也可以向里面的字典中进行添加。&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;lijiejie的子域名爆破工具实用性很强，对于里面的细节使用不能浅尝辄止，如果只是python subDomainsBrute.py baidu.com -o baidu.txt就算完了，对自己的子域名收集和深入了解信息收集会是阻碍。&lt;/span&gt;&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 17 May 2019 16:25:00 +0000</pubDate>
+<dc:creator>PJzhang白话安全</dc:creator>
+<og:description>猫宁！！！ 参考链接： https://www.waitalone.cn/subdomainsbrute.html https://www.secpulse.com/archives/5900.htm</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/landesk/p/10884000.html</dc:identifier>
+</item>
+<item>
+<title>记微软OpenHack机器学习挑战赛 - 可健康了</title>
+<link>http://www.cnblogs.com/easymind223/p/10884332.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/easymind223/p/10884332.html</guid>
+<description>&lt;p&gt;　　有幸参加了微软OpenHack挑战赛，虽然题目难度不大，但是很有意思，学到了很多东西，还有幸认识了微软梁健老师，谢谢您的帮助！同时还认识同行的很多朋友，非常高兴，把这段难忘的比赛记录一下~~也分享一下代码，给那些没有参加的朋友，&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;数据集(文末链接)&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;首先每支队伍会收到一个数据集，它是一个登山公司提供的装备图片，有登山镐，鞋子，登山扣，不知道叫什么的雪地爪？手套，冲锋衣，安全带。。。一共12个类别，每个类别几百个样本，&lt;/span&gt;&lt;span&gt;我们的任务就是对这些图片分类和识别&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;简单看一下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517224838794-1420071222.png&quot; alt=&quot;&quot; width=&quot;743&quot; height=&quot;378&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;赛题：&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;赛题共有6道，简单描述一下：&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;1、搭建环境(略过)&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;2、图像正规化(包括颜色和大小)&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;3、通过机器学习方法对图像分类，precision&amp;gt;0.8&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;4、通过深度学习方法对图像分类，precision&amp;gt;0.9&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;5、部署(略过)&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;6、目标检测(用全新的数据集，检测雪地中的登山者是否带头盔！！航拍图像，有点难度~)&lt;/span&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;_______________________________________&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;下面是每道题目的详细描述和代码&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;br/&gt;题目2&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;完成以下任务:&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;选择一种基本颜色，例如白色并填充所有图片尺寸不是1:1比例的图像&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;不通过直接拉伸的方式，重塑至128x128x3像素的阵列形状&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;确保每个图像的像素范围从0到255(包含或[0,255])，也称为“对比度拉伸”(contrast stretching).&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;标准化或均衡以确保像素在[0,255]范围内.&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;成功完成的标准&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;团队将在Jupyter Notebook中运行一个代码单元，绘制原始图像，然后绘制填充后的像素值归一化或均衡图像, 展示给教练看.&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;团队将在Jupyter notebook 为教练运行一个代码单元，显示的像素值的直方图应该在0到255的范围内（包括0和255）.&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('c90160f9-4374-42da-80d4-d402f8b4a274')&quot; readability=&quot;65.5&quot;&gt;&lt;img id=&quot;code_img_closed_c90160f9-4374-42da-80d4-d402f8b4a274&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_c90160f9-4374-42da-80d4-d402f8b4a274&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('c90160f9-4374-42da-80d4-d402f8b4a274',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_c90160f9-4374-42da-80d4-d402f8b4a274&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;126&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;def&lt;/span&gt;&lt;span&gt; normalize(src):
+    arr &lt;/span&gt;=&lt;span&gt; array(src)
+    arr &lt;/span&gt;= arr.astype(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;float&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Do not touch the alpha channel&lt;/span&gt;
+    &lt;span&gt;for&lt;/span&gt; i &lt;span&gt;in&lt;/span&gt; range(3&lt;span&gt;):
+        minval &lt;/span&gt;=&lt;span&gt; arr[...,i].min()
+        maxval &lt;/span&gt;=&lt;span&gt; arr[...,i].max()
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; minval !=&lt;span&gt; maxval:
+            arr[...,i] &lt;/span&gt;-=&lt;span&gt; minval
+            arr[...,i] &lt;/span&gt;*= (255.0/(maxval-&lt;span&gt;minval))
+    arr &lt;/span&gt;=&lt;span&gt; arr.astype(uint8)
+    &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; Image.fromarray(arr,&lt;span&gt;'&lt;/span&gt;&lt;span&gt;RGB&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; matplotlib.pyplot as plt
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; ImageColor 
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; matplotlib.pyplot &lt;span&gt;import&lt;/span&gt;&lt;span&gt; imshow
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Image
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; pylab &lt;span&gt;import&lt;/span&gt; *
+&lt;span&gt;import&lt;/span&gt;&lt;span&gt; copy
+
+plt.figure(figsize&lt;/span&gt;=(10,10)) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;设置窗口大小&lt;/span&gt;
+
+&lt;span&gt;#&lt;/span&gt;&lt;span&gt; src = Image.open(&quot;100974.jpeg&quot;)&lt;/span&gt;
+src = Image.open(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;rose.jpg&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+
+src_array &lt;/span&gt;=&lt;span&gt; array(src)
+plt.subplot(&lt;/span&gt;2,2,1), plt.title(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;src&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+plt.imshow(src), plt.axis(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;off&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+
+ar&lt;/span&gt;=&lt;span&gt;src_array[:,:,0].flatten()
+ag&lt;/span&gt;=src_array[:,:,1&lt;span&gt;].flatten()
+ab&lt;/span&gt;=src_array[:,:,2&lt;span&gt;].flatten()
+plt.subplot(&lt;/span&gt;2,2,2),  plt.title(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;src hist&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+plt.axis([0,&lt;/span&gt;255,0,0.03&lt;span&gt;])
+plt.hist(ar, bins&lt;/span&gt;=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,hold=1) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原始图像直方图&lt;/span&gt;
+plt.hist(ag, bins=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;g&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;g&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,hold=1) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原始图像直方图&lt;/span&gt;
+plt.hist(ab, bins=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;b&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;b&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原g始图像直方图&lt;/span&gt;
+&lt;span&gt;
+
+dst &lt;/span&gt;=&lt;span&gt; normalize(src)
+dst_array &lt;/span&gt;=&lt;span&gt; array(dst)
+
+plt.subplot(&lt;/span&gt;2,2,3), plt.title(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;dst&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+plt.imshow(dst), plt.axis(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;off&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+ar&lt;/span&gt;=&lt;span&gt;dst_array[:,:,0].flatten()
+ag&lt;/span&gt;=dst_array[:,:,1&lt;span&gt;].flatten()
+ab&lt;/span&gt;=dst_array[:,:,2&lt;span&gt;].flatten()
+plt.subplot(&lt;/span&gt;2,2,4),  plt.title(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;dst hist&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+plt.axis([0,&lt;/span&gt;255,0,0.03&lt;span&gt;])
+plt.hist(ar, bins&lt;/span&gt;=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;red&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;r&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,hold=1) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原始图像直方图&lt;/span&gt;
+plt.hist(ag, bins=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;g&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;g&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,hold=1) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原始图像直方图&lt;/span&gt;
+plt.hist(ab, bins=256, normed=1,facecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;b&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;,edgecolor=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;b&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) &lt;span&gt;#&lt;/span&gt;&lt;span&gt;原g始图像直方图&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517230550205-2036407420.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;题目3&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;使用一个非参数化分类方法(参考 参考文档)来创建一个模型，预测新的户外装备图像的分类情况，训练来自挑战2的预处理过的128x128x3的装备图像。所使用的算法可以从scikit-learn库中挑选现有的非参数化算法来做分类。向教练展示所提供的测试数据集的精确度，并且精确度分数需要超过80%。&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('0565b50a-350c-43dc-b0fa-c5668228b3f3')&quot; readability=&quot;38&quot;&gt;&lt;img id=&quot;code_img_closed_0565b50a-350c-43dc-b0fa-c5668228b3f3&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_0565b50a-350c-43dc-b0fa-c5668228b3f3&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('0565b50a-350c-43dc-b0fa-c5668228b3f3',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_0565b50a-350c-43dc-b0fa-c5668228b3f3&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;71&quot;&gt;
+&lt;pre&gt;
+dir_data =&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;data/preprocess_images/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+
+equipments &lt;/span&gt;= [&lt;span&gt;'&lt;/span&gt;&lt;span&gt;axes&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;boots&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;carabiners&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;crampons&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;gloves&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;hardshell_jackets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;harnesses&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;helmets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,
+              &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;insulated_jackets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;pulleys&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;rope&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;tents&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;]
+train_data &lt;/span&gt;=&lt;span&gt; [] 
+y &lt;/span&gt;=&lt;span&gt; [] 
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; os
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Image
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; equip_name &lt;span&gt;in&lt;/span&gt;&lt;span&gt; equipments:
+    dir_equip &lt;/span&gt;= dir_data +&lt;span&gt; equip_name
+    
+    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; filename &lt;span&gt;in&lt;/span&gt;&lt;span&gt; os.listdir(dir_equip):             
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(filename.find(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;jpeg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)!=-1&lt;span&gt;):
+            name &lt;/span&gt;= dir_equip + &lt;span&gt;'&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; +&lt;span&gt; filename
+            img &lt;/span&gt;= Image.open(name).convert(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;L&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+            train_data.append(list(img.getdata()))
+            y.append(equip_name)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('247aff28-f048-4c40-a008-bea348b7493f')&quot; readability=&quot;36.5&quot;&gt;&lt;img id=&quot;code_img_closed_247aff28-f048-4c40-a008-bea348b7493f&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_247aff28-f048-4c40-a008-bea348b7493f&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('247aff28-f048-4c40-a008-bea348b7493f',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_247aff28-f048-4c40-a008-bea348b7493f&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;68&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;from&lt;/span&gt; sklearn &lt;span&gt;import&lt;/span&gt;&lt;span&gt; svm
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.cross_validation &lt;span&gt;import&lt;/span&gt;&lt;span&gt; train_test_split  
+
+train_X,test_X, train_y, test_y &lt;/span&gt;= train_test_split(train_data, y, test_size = 0.3, random_state =&lt;span&gt; 0)
+
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn &lt;span&gt;import&lt;/span&gt;&lt;span&gt; neighbors 
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.metrics &lt;span&gt;import&lt;/span&gt;&lt;span&gt; precision_recall_fscore_support as score
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.metrics &lt;span&gt;import&lt;/span&gt;&lt;span&gt; precision_score,recall_score
+
+clf_knn &lt;/span&gt;= neighbors.KNeighborsClassifier(algorithm=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;kd_tree&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)  
+clf_knn.fit(train_X, train_y)
+y_pred &lt;/span&gt;= clf_knn.predict(test_X)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('c2ab156c-a49c-48ea-ae14-3fef2c026e67')&quot; readability=&quot;48.5&quot;&gt;&lt;img id=&quot;code_img_closed_c2ab156c-a49c-48ea-ae14-3fef2c026e67&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_c2ab156c-a49c-48ea-ae14-3fef2c026e67&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('c2ab156c-a49c-48ea-ae14-3fef2c026e67',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_c2ab156c-a49c-48ea-ae14-3fef2c026e67&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;92&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;__doc__&lt;/span&gt;&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; itertools
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; numpy as np
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; matplotlib.pyplot as plt
+
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn &lt;span&gt;import&lt;/span&gt;&lt;span&gt; svm, datasets
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.model_selection &lt;span&gt;import&lt;/span&gt;&lt;span&gt; train_test_split
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.metrics &lt;span&gt;import&lt;/span&gt;&lt;span&gt; confusion_matrix
+
+&lt;/span&gt;&lt;span&gt;def&lt;/span&gt;&lt;span&gt; plot_confusion_matrix(cm, classes,
+                          
+                          normalize&lt;/span&gt;=&lt;span&gt;False,
+                          title&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Confusion matrix&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,
+                          cmap&lt;/span&gt;=&lt;span&gt;plt.cm.Blues):
+    &lt;/span&gt;&lt;span&gt;&quot;&quot;&quot;&lt;/span&gt;&lt;span&gt;
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    &lt;/span&gt;&lt;span&gt;&quot;&quot;&quot;&lt;/span&gt;
+    &lt;span&gt;if&lt;/span&gt;&lt;span&gt; normalize:
+        cm &lt;/span&gt;= cm.astype(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;float&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;) / cm.sum(axis=1&lt;span&gt;)[:, np.newaxis]
+        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Normalized confusion matrix&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+    &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;:
+        &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Confusion matrix, without normalization&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+    &lt;/span&gt;&lt;span&gt;print&lt;/span&gt;&lt;span&gt;(cm)
+
+    plt.imshow(cm, interpolation&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;nearest&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, cmap=&lt;span&gt;cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks &lt;/span&gt;=&lt;span&gt; np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation&lt;/span&gt;=45&lt;span&gt;)
+    plt.yticks(tick_marks, classes)
+
+    fmt &lt;/span&gt;= &lt;span&gt;'&lt;/span&gt;&lt;span&gt;.2f&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; normalize &lt;span&gt;else&lt;/span&gt; &lt;span&gt;'&lt;/span&gt;&lt;span&gt;d&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;
+    thresh &lt;/span&gt;= cm.max() / 2&lt;span&gt;.
+    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; i, j &lt;span&gt;in&lt;/span&gt; itertools.product(range(cm.shape[0]), range(cm.shape[1&lt;span&gt;])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;center&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,
+                 color&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;white&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &lt;span&gt;if&lt;/span&gt; cm[i, j] &amp;gt; thresh &lt;span&gt;else&lt;/span&gt; &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;black&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+
+    plt.tight_layout()
+    plt.ylabel(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;True label&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+    plt.xlabel(&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Predicted label&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Compute confusion matrix&lt;/span&gt;&lt;span&gt;
+#&lt;/span&gt;&lt;span&gt; cnf_matrix = confusion_matrix(y_test, y_pred)&lt;/span&gt;
+np.set_printoptions(precision=2&lt;span&gt;)
+confusion_mat &lt;/span&gt;= confusion_matrix(test_y, y_pred, labels =&lt;span&gt; equipments)
+
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Plot non-normalized confusion matrix&lt;/span&gt;
+plt.figure(figsize=(10,10&lt;span&gt;))
+plot_confusion_matrix(confusion_mat, classes&lt;/span&gt;=&lt;span&gt;equipments,
+                      title&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Confusion matrix, without normalization&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; Plot normalized confusion matrix&lt;/span&gt;
+plt.figure(figsize=(10,10&lt;span&gt;))
+
+plot_confusion_matrix(confusion_mat, classes&lt;/span&gt;=equipments, normalize=&lt;span&gt;True,
+                      title&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Normalized confusion matrix&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+plt.show()&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;　　因为要求精确度&amp;gt;0.8，sklearn中的很多算法应该都能满足，我选择了准确度比较高的KNN来建模，应该足够用了&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517231154612-798626361.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 算一下presion和recall，轻松超越0.8&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517231205371-1317652782.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;题目4&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;挑战完成标准，使用深度学习模型，如CNN分析复杂数据&lt;/strong&gt;&lt;br/&gt;&lt;strong&gt;团队将在Jupyter Notebook上为教练运行一个代码单元，展示模型的准确度为90％或更高&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;准确度如果要&amp;gt;0.9，sklearn中的机器学习算法就很难达到了，关键时刻只能上CNN&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('0f602230-a694-4497-bb4f-1e2a3b96451f')&quot; readability=&quot;38&quot;&gt;&lt;img id=&quot;code_img_closed_0f602230-a694-4497-bb4f-1e2a3b96451f&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_0f602230-a694-4497-bb4f-1e2a3b96451f&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('0f602230-a694-4497-bb4f-1e2a3b96451f',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_0f602230-a694-4497-bb4f-1e2a3b96451f&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;71&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;import&lt;/span&gt;&lt;span&gt; matplotlib.pyplot as plt
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; ImageColor 
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; matplotlib.pyplot &lt;span&gt;import&lt;/span&gt;&lt;span&gt; imshow
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Image
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; pylab &lt;span&gt;import&lt;/span&gt; *&lt;span&gt;
+dir_data &lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;data/preprocess_images/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
+
+equipments &lt;/span&gt;= [&lt;span&gt;'&lt;/span&gt;&lt;span&gt;axes&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;boots&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;carabiners&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;crampons&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;gloves&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;hardshell_jackets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;harnesses&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;helmets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,
+              &lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;insulated_jackets&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;pulleys&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;rope&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, &lt;span&gt;'&lt;/span&gt;&lt;span&gt;tents&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;]
+train_data &lt;/span&gt;=&lt;span&gt; [] 
+y &lt;/span&gt;=&lt;span&gt; [] 
+
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; os
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; PIL &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Image
+i&lt;/span&gt;=&lt;span&gt;0
+&lt;/span&gt;&lt;span&gt;for&lt;/span&gt; equip_name &lt;span&gt;in&lt;/span&gt;&lt;span&gt; equipments:
+    dir_equip &lt;/span&gt;= dir_data +&lt;span&gt; equip_name
+    &lt;/span&gt;&lt;span&gt;for&lt;/span&gt; filename &lt;span&gt;in&lt;/span&gt;&lt;span&gt; os.listdir(dir_equip):             
+        &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;(filename.find(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;jpeg&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;)!=-1&lt;span&gt;):
+            name &lt;/span&gt;= dir_equip + &lt;span&gt;'&lt;/span&gt;&lt;span&gt;/&lt;/span&gt;&lt;span&gt;'&lt;/span&gt; +&lt;span&gt; filename
+            img &lt;/span&gt;= Image.open(name).convert(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;L&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+            train_data.append(array(img).tolist())
+            y.append(i)
+    i &lt;/span&gt;+= 1&lt;span&gt;
+train_data &lt;/span&gt;= np.asarray(train_data)  
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('a27af073-2b1e-4082-a647-ea632052efe3')&quot; readability=&quot;41&quot;&gt;&lt;img id=&quot;code_img_closed_a27af073-2b1e-4082-a647-ea632052efe3&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_a27af073-2b1e-4082-a647-ea632052efe3&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('a27af073-2b1e-4082-a647-ea632052efe3',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_a27af073-2b1e-4082-a647-ea632052efe3&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;77&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;from&lt;/span&gt; sklearn &lt;span&gt;import&lt;/span&gt;&lt;span&gt; svm
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; sklearn.cross_validation &lt;span&gt;import&lt;/span&gt;&lt;span&gt; train_test_split  
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; numpy as np
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; keras
+num_classes&lt;/span&gt;=12&lt;span&gt;
+img_rows&lt;/span&gt;=128&lt;span&gt;
+img_cols&lt;/span&gt;=128&lt;span&gt;
+train_X, test_X, train_y, test_y &lt;/span&gt;= train_test_split(train_data, y, test_size = 0.3, random_state =&lt;span&gt; 0)
+
+train_X &lt;/span&gt;= train_X.reshape(train_X.shape[0], img_rows, img_cols, 1&lt;span&gt;)
+test_X &lt;/span&gt;= test_X.reshape(test_X.shape[0], img_rows, img_cols, 1&lt;span&gt;)
+    
+train_X &lt;/span&gt;= train_X.astype(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;float32&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+test_X &lt;/span&gt;= test_X.astype(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;float32&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+train_X &lt;/span&gt;/= 255&lt;span&gt;
+test_X &lt;/span&gt;/= 255
+&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;x_train shape:&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, train_X.shape)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(train_X.shape[0], &lt;span&gt;'&lt;/span&gt;&lt;span&gt;train samples&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(test_X.shape[0], &lt;span&gt;'&lt;/span&gt;&lt;span&gt;test samples&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;)
+
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; convert class vectors to binary class matrices&lt;/span&gt;
+train_y =&lt;span&gt; keras.utils.to_categorical(train_y, num_classes)
+test_y &lt;/span&gt;= keras.utils.to_categorical(test_y, num_classes)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;cnblogs_code&quot; onclick=&quot;cnblogs_code_show('b9ebdd1c-b94b-40ec-b3e8-548ce820a3e7')&quot; readability=&quot;48&quot;&gt;&lt;img id=&quot;code_img_closed_b9ebdd1c-b94b-40ec-b3e8-548ce820a3e7&quot; class=&quot;code_img_closed&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif&quot; alt=&quot;&quot;/&gt;&lt;img id=&quot;code_img_opened_b9ebdd1c-b94b-40ec-b3e8-548ce820a3e7&quot; class=&quot;code_img_opened&quot; onclick=&quot;cnblogs_code_hide('b9ebdd1c-b94b-40ec-b3e8-548ce820a3e7',event)&quot; src=&quot;https://images.cnblogs.com/OutliningIndicators/ExpandedBlockStart.gif&quot; alt=&quot;&quot;/&gt;&lt;div id=&quot;cnblogs_code_open_b9ebdd1c-b94b-40ec-b3e8-548ce820a3e7&quot; class=&quot;cnblogs_code_hide&quot; readability=&quot;91&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;from&lt;/span&gt; keras.layers &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Dense, Activation, Convolution2D, MaxPooling2D, Flatten
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; keras.models &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Sequential
+&lt;/span&gt;&lt;span&gt;from&lt;/span&gt; keras.layers &lt;span&gt;import&lt;/span&gt;&lt;span&gt; Convolution2D,MaxPooling2D, Conv2D
+&lt;/span&gt;&lt;span&gt;import&lt;/span&gt;&lt;span&gt; keras
+
+model &lt;/span&gt;=&lt;span&gt; Sequential()
+model.add(Conv2D(&lt;/span&gt;32, kernel_size=(3, 3&lt;span&gt;),
+                 activation&lt;/span&gt;=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;relu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;,
+                 input_shape&lt;/span&gt;=(128, 128, 1&lt;span&gt;)))
+model.add(MaxPooling2D(pool_size&lt;/span&gt;=(2, 2&lt;span&gt;)))
+model.add(Conv2D(&lt;/span&gt;64, (3, 3), activation=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;relu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;))
+model.add(MaxPooling2D(pool_size&lt;/span&gt;=(2, 2&lt;span&gt;)))
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; model.add(Dropout(0.25))&lt;/span&gt;
+&lt;span&gt;model.add(Flatten())
+model.add(Dense(&lt;/span&gt;128, activation=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;relu&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;))
+&lt;/span&gt;&lt;span&gt;#&lt;/span&gt;&lt;span&gt; model.add(Dropout(0.5))&lt;/span&gt;
+model.add(Dense(12, activation=&lt;span&gt;'&lt;/span&gt;&lt;span&gt;softmax&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;))
+
+model.compile(loss&lt;/span&gt;=&lt;span&gt;keras.losses.categorical_crossentropy,
+              optimizer&lt;/span&gt;=&lt;span&gt;keras.optimizers.Adadelta(),
+              metrics&lt;/span&gt;=[&lt;span&gt;'&lt;/span&gt;&lt;span&gt;accuracy&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;])
+
+model.fit(train_X, train_y,
+          batch_size&lt;/span&gt;=128&lt;span&gt;,
+          epochs&lt;/span&gt;=50&lt;span&gt;,
+          verbose&lt;/span&gt;=1&lt;span&gt;,
+          validation_data&lt;/span&gt;=&lt;span&gt;(test_X, test_y))
+score &lt;/span&gt;= model.evaluate(test_X, test_y, verbose=&lt;span&gt;0)
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Test loss:&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;&lt;span&gt;, score[0])
+&lt;/span&gt;&lt;span&gt;print&lt;/span&gt;(&lt;span&gt;'&lt;/span&gt;&lt;span&gt;Test accuracy:&lt;/span&gt;&lt;span&gt;'&lt;/span&gt;, score[1])
+&lt;/pre&gt;&lt;/div&gt;
+&lt;span class=&quot;cnblogs_code_collapse&quot;&gt;View Code&lt;/span&gt;&lt;/div&gt;
+&lt;p&gt;CNN的混淆矩阵比KNN的好了不少&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517232142616-2054279769.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 训练了好多次，不断调整各个卷积层和参数，终于达到了一个比较好的效果~~&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517232301939-1775984758.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;题目6&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;使用深度学习框架，基于一个常用的模型，比如Faster R-CNN，训练一个目标检测的模型。这个模型需要能够检测并且使用方框框出图片中出现的每一个头盔。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;这道题目首先要自己标注样本，几百张图像标注完累的半死。。。这里我们使用VOTT来标注，它会自动生成一个样本描述文件，很方便。Faster R-CNN的程序我们参考了git上的一个红细胞检测的项目，&lt;a href=&quot;https://github.com/THULiusj/CosmicadDetection-Keras-Tensorflow-FasterRCNN&quot;&gt;https://github.com/THULiusj/CosmicadDetection-Keras-Tensorflow-FasterRCNN&lt;/a&gt;，代码非常多就不贴了&lt;/p&gt;
+&lt;p&gt;最后来一张效果图&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/423745/201905/423745-20190517233941860-313002606.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;本文数据集和VOTT工具 链接：&lt;/p&gt;
+&lt;p&gt;https://pan.baidu.com/s/1FFw0PLJrrOhwR6J1HexPJA   &lt;/p&gt;
+&lt;p&gt;提取码 s242&lt;/p&gt;
+</description>
+<pubDate>Fri, 17 May 2019 16:16:00 +0000</pubDate>
+<dc:creator>可健康了</dc:creator>
+<og:description>有幸参加了微软OpenHack挑战赛，虽然题目难度不大，但是很有意思，学到了很多东西，还有幸认识了微软梁健老师，谢谢您的帮助！同时还认识同行的很多朋友，非常高兴，把这段难忘的比赛记录一下~~也分享一下</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>http://www.cnblogs.com/easymind223/p/10884332.html</dc:identifier>
+</item>
+<item>
 <title>MySQL 常用操作 - 刘哇勇</title>
 <link>http://www.cnblogs.com/Wayou/p/mysql_most_used_actions.html</link>
 <guid isPermaLink="true" >http://www.cnblogs.com/Wayou/p/mysql_most_used_actions.html</guid>
@@ -44,6 +782,7 @@ mysql -u username -ppassword old_db -sNe &lt;span class=&quot;pl-s&quot;&gt;&lt;
 &lt;span class=&quot;pl-k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;pl-smi&quot;&gt;table&lt;/span&gt; &lt;span class=&quot;pl-k&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;pl-s&quot;&gt;&lt;span class=&quot;pl-pds&quot;&gt;`&lt;/span&gt;mysql -u root -ppassword -s -N -e &lt;span class=&quot;pl-s&quot;&gt;&lt;span class=&quot;pl-pds&quot;&gt;&quot;&lt;/span&gt;use old_db;show tables from old_db;&lt;span class=&quot;pl-pds&quot;&gt;&quot;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;pl-pds&quot;&gt;`&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;pl-k&quot;&gt;;&lt;/span&gt; &lt;span class=&quot;pl-k&quot;&gt;do&lt;/span&gt; mysql -u root -ppassword -s -N -e &lt;span class=&quot;pl-s&quot;&gt;&lt;span class=&quot;pl-pds&quot;&gt;&quot;&lt;/span&gt;use old_db;rename table old_db.&lt;span class=&quot;pl-smi&quot;&gt;$table&lt;/span&gt; to new_db.&lt;span class=&quot;pl-smi&quot;&gt;$table&lt;/span&gt;;&lt;span class=&quot;pl-pds&quot;&gt;&quot;&lt;/span&gt;&lt;/span&gt;&lt;span class=&quot;pl-k&quot;&gt;;&lt;/span&gt; &lt;span class=&quot;pl-k&quot;&gt;done&lt;/span&gt;&lt;span class=&quot;pl-k&quot;&gt;;&lt;/span&gt;
 &lt;/pre&gt;&lt;/div&gt;
 &lt;p&gt;其中 &lt;code&gt;-ppassword&lt;/code&gt; 中 &lt;code&gt;password&lt;/code&gt; 为你的密码，和 &lt;code&gt;-p&lt;/code&gt; 之间没有空格。&lt;/p&gt;
+&lt;p&gt;注：上面为 shell 脚本而非 sql 脚本，在 shell 中运行或保存成 shell 文件执行。&lt;/p&gt;
 &lt;h3&gt;清空数据库&lt;/h3&gt;
 &lt;p&gt;清空数据库，即清空数据库中所有表中的记录。&lt;/p&gt;
 &lt;div class=&quot;highlight highlight-source-sql&quot; readability=&quot;15&quot;&gt;
@@ -78,7 +817,7 @@ $ mysqldump &lt;span class=&quot;pl-k&quot;&gt;-&lt;/span&gt;u &lt;span class=&q
 &lt;h3&gt;导入数据库&lt;/h3&gt;
 &lt;div class=&quot;highlight highlight-source-sql&quot; readability=&quot;7&quot;&gt;
 &lt;pre&gt;
-mysql &lt;span class=&quot;pl-k&quot;&gt;-&lt;/span&gt;u username &lt;span class=&quot;pl-k&quot;&gt;-&lt;/span&gt;ppassword database_name &lt;span class=&quot;pl-k&quot;&gt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;pl-c1&quot;&gt;backup&lt;/span&gt;.&lt;span class=&quot;pl-c1&quot;&gt;sql&lt;/span&gt;
+$ mysql &lt;span class=&quot;pl-k&quot;&gt;-&lt;/span&gt;u username &lt;span class=&quot;pl-k&quot;&gt;-&lt;/span&gt;ppassword database_name &lt;span class=&quot;pl-k&quot;&gt;&amp;lt;&lt;/span&gt; &lt;span class=&quot;pl-c1&quot;&gt;backup&lt;/span&gt;.&lt;span class=&quot;pl-c1&quot;&gt;sql&lt;/span&gt;
 &lt;/pre&gt;&lt;/div&gt;
 &lt;h2&gt;表&lt;/h2&gt;
 &lt;h3&gt;创建表&lt;/h3&gt;
@@ -1926,498 +2665,6 @@ void errorhandling(char *message){
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>http://www.cnblogs.com/helloworldcode/p/10883130.html</dc:identifier>
-</item>
-<item>
-<title>ERP选型准备、方法及注意事项 - 怡海软件CRM</title>
-<link>http://www.cnblogs.com/frensworkz/p/10882690.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/frensworkz/p/10882690.html</guid>
-<description>&lt;p&gt;&lt;strong&gt;摘要：&lt;/strong&gt;伴随着市场的需求，ERP系统管理厂商如雨后春笋般推向市场，企业在选择时面临着多种选择。本文怡海软件将针对ERP系统如何选型从选型前的准备工作、了解ERP厂商、如何选择及注意事项等方面进行简要阐述。&lt;br/&gt;&lt;strong&gt;关键词：&lt;/strong&gt;ERP,SAP,Oracle,infor&lt;/p&gt;&lt;p&gt;接触过ERP（Enterprise Resource Planning 企业资源计划）的人，大多应该都听说过这样一句话：“上ERP找死，不上ERP等死”，横竖都是死，ERP系统有这么可怕吗？其实不然，ERP建设的重要性不言而喻，是企业信息管理投资的重点，正确实施将会给企业发挥巨大的作用。本文怡海软件将围绕ERP系统实施的第一步工作--软件选型进行简要阐述，希望能帮助那些计划实施ERP的企业在追寻ERP的道路上走得更加顺利。&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1581663/201905/1581663-20190517172337069-1815767336.jpg&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;&lt;strong&gt;选型前的准备工作&lt;/strong&gt;&lt;br/&gt;企业在上ERP项目之前，必须要考虑这些问题：&lt;br/&gt;√ 清楚企业的现状、制定发展计划；&lt;br/&gt;√ 分析自身的管理特征；&lt;br/&gt;√ 明确引入ERP系统的目的及需求分析；&lt;br/&gt;√ 结合企业财务状况，做好预算；&lt;br/&gt;√ 选型小组成员确定。&lt;/p&gt;&lt;p&gt;提前进行或提前做计划，这样在选择ERP系统时才能做到有的放矢。否则，在众多ERP厂商中无目的的挑选，既有可能迷失方向，浪费时间，还有可能造成直到项目实施后才发现软件功能与企业的生产类型不相适应。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;了解ERP厂商&lt;/strong&gt;&lt;br/&gt;伴随着市场的需求，ERP系统管理厂商如雨后春笋般推向市场，企业在选择时面临着多种选择。&lt;/p&gt;
-&lt;p&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1581663/201905/1581663-20190517173530957-720052091.jpg&quot; alt=&quot;&quot;/&gt;&lt;br/&gt;&lt;strong&gt;国外主要有：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;SAP：SAP公司是ERP思想的倡导者，成立于1972年，总部设在德国南部的沃尔道夫市。SAP所提供的是一个有效的标准而又全面的ERP软件，同时软件模块化结构保证了数据单独处理的特殊方案需求。&lt;/p&gt;
-&lt;p&gt;Oracle：Oracle公司是全球最大的应用软件供应商，成立于1977年，总部设在美国加州。Oracle主打管理软件产品是目前全面集成的电子商务套件之一，能够使企业经营的各个方面全面自动化。&lt;/p&gt;
-&lt;p&gt;Infor ：作为一家 ERP 软件公司成立于2002 年，是为特定行业提供商业云软件的全球领先提供商。Infor 构建基于云的全面行业套件，并帮您部署用户体验至上的软件，充分利用数据科学并与您现有系统轻松集成。&lt;/p&gt;
-&lt;p&gt;Microsoft：微软ERP全称是Microsoft Dynamics ERP，包括Microsoft Dynamics Ax（Axapta）和Microsoft Dynamics Nav（Navision）。微软 ERP是专为企业定制的企业资源规划解决方案，可以最大限度地提高企业生产效率，提高整个组织的透明度并简化合规性，使您轻松开展跨国地区业务或跨国企业管理。&lt;/p&gt;
-&lt;p&gt;NETSUITE:&lt;em&gt;NetSuite&lt;/em&gt; 公司成立于1998年，总部设在美国加利福尼亚洲的 San Mateo ，是专门为中小型企业提供定制企业管理软件的应用程序制造商。NETSUITE erp 是一套统一的商业管理套件,涵盖了ERP/财务,CRM和电子商务等功能。&lt;/p&gt;
-&lt;p&gt;IFS： IFS 应用系统是一款与众不同的企业资源规划 (ERP) 软件。它不像其它一些 ERP 套件那样复杂和死板，其设计原则就是能够根据技术和业务的变化快速调整，从而最大程度地提高企业的敏捷性。&lt;/p&gt;
-&lt;p&gt;Sage：赛捷集团是全球第三大管理软件及解决方案专业提供商，其提供的ERP是一套全面的、多层架构的管理系统，其为客户提供多样化的选择、卓越的性能、使用的可靠性，以及无缝连接等功能。&lt;/p&gt;
-&lt;p&gt;此外国外厂商还有Syspro 和 IQMS等。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;国内主要有：&lt;/strong&gt;用友、金碟、智邦国际、浪潮通软、东软、宝信、航天信息、速达、任我行、金算盘等。&lt;/p&gt;&lt;p&gt;他们有的已经在ERP行业做了很久，积累了丰富的经验；有些厂商则是从财务软件转型做ERP，这样的厂商，他的ERP软件可能在财务模块上的功能很用强，但在其他模块就有可能存在弱点；还有的只是刚刚起步，但他们在ERP行业中各有千秋。分析一下目前市场上的ERP软件厂商，根据市场份额排名大致可以分为三类：&lt;/p&gt;&lt;p&gt;1、高端产品市场：如SAP、Oracle、Microsoft。它们功能强大，性能稳定、系统安全性高、具有开放性和可扩展性等特点，但实施复杂、实施难度大、周期长、价格高昂。要成功实施这样的ERP软件，价位一般在几十万，上百万元以上。这样的系统适合有一定预算的企业。&lt;br/&gt;2、中端产品市场：全球排行在10名左右的ERP软件如IFS、IQMS、Syspro等。这些ERP软件在某些行业领域的跨国公司管理方面有成功经验，往往在某个或某几个行业具有专业版本和相当强的优势。&lt;br/&gt;3、低端产品市场：主要是全球排行在20以后ERP软件。这些ERP软件实施周期短、价格低，但其稳定性、安全性及功能丰富程度方面差强人意。&lt;/p&gt;&lt;p&gt;需注意，企业在ERP系统选型方面，不要盲目追求最好，也不要因为资金紧张就选择不成熟的ERP软件，企业应该充分考虑自身的运作特点和性能价格比进行选择。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;ERP系统选型&lt;/strong&gt;&lt;br/&gt;企业在有的放矢地了解了ERP厂商之后，面对琳琅满目的各色ERP，开始要选择恰当的ERP了，这里怡海软件建议企业可以从下这些方面来考察ERP厂商。&lt;br/&gt;1、专业背景&lt;br/&gt;√是否有企业所在行业的实施经验？ERP厂商应该在相关行业有成功应用和相关行业的管理经验。企业ERP系统建设的实践及专业性非常的强，ERP软件厂商的专业程度直接影响企业的实施效果。&lt;br/&gt;√是否熟悉企业的具体运作模式和把掘企业的真正需求？企业的ERP系统建设不是“纸上谈兵”的事情，而是要切实能解决企业的具体问题。&lt;br/&gt;√是否能提供企业信息化建设的解决方案？&lt;br/&gt;√是否真正踏实地在做该领域的工作？因为企业的ERP系统建设是一个长期的工作，所选择的ERP厂商应该是专注在此行业。&lt;/p&gt;&lt;p&gt;2、技术实力&lt;br/&gt;√企业研发、实施团队的能力如何？&lt;br/&gt;√企业是否会花费更多的时间和资金投入到ERP产品的研发和优化中？软件开发尤其是要关注企业的研发管理能力，一家合格的ERP厂商对研发的投入会占全年收入的一定比例。&lt;br/&gt;√能否提供及时、快捷、优质、健全的技术支持？技术支持的好坏直接影&lt;br/&gt;响企业的具体实施和运用。&lt;/p&gt;&lt;p&gt;3、产品实力&lt;br/&gt;√是否涵盖了企业的主要业务范围？&lt;br/&gt;√是否满足企业现阶段需求？&lt;br/&gt;√产品是否满足企业可持续发展需求？ERP厂商不但要提供合理的ERP产品来满足企业的需求，更要提供适应企业未来发展的解决方案。&lt;br/&gt;√是否具备分析、优化和适应企业管理流程变化的功能？&lt;/p&gt;&lt;p&gt;4、服务和咨询能力&lt;br/&gt;√是否提供咨询服务？企业的ERP系统建设，有时并不是一个企业能完全解决的，就需要ERP软件厂商能站在企业的高度为企业提供相关的咨询服务工作，以满足企业的不同要求。&lt;br/&gt;√是否能为企业提供其他的增值服务能力？&lt;/p&gt;&lt;p&gt;5、其他&lt;br/&gt;√系统是否足够安全和稳定？&lt;br/&gt;√是否能与企业现有系统集成？目前大多数的企业的信息化建设都不是“白纸一张”，而是在单元技术方面取得了一定的实质性的进展，因此，企业在选择集成商时一定还要考虑能否继承企业现有的系统，或实现对现有系统的良性改造，实现企业信息化建设的平稳过渡。&lt;br/&gt;企业在明确了自身的需求后，还应明确ERP厂商能提供什么？只有在全方位的考察之后，企业才可能成功地完成ERP系统项目的选型工作。因为企业的信息化建设是一个长期的系统工程，需站在企业整体信息化的全局上来确定ERP软件厂商。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;选型注意事项&lt;/strong&gt;&lt;br/&gt;1、企业是主角：企业在ERP系统建设过程中，摆正企业与ERP厂商之间的关系非常关键，企业一定要树立企业的ERP系统建设不应该由ERP厂商独立完成的观念。“主角”是企业本身，而ERP厂商仅仅是“配角”的身份。ERP厂商应该放在咨询、顾问和具体实施的地位。摆正了关系，才能更好的进行合作，将双方的优势集中，实现“专业人做专业事”。&lt;br/&gt;2、转变管理理念：用先进实用的管理理念理顺企业现有的管理；需要时制定企业结构调整计划，尤其是关键业务的流程重组。&lt;br/&gt;3、强调软件的实用性：技术的领先性和技术的实用性一直困扰企业ERP系统建设时的选型，单纯追求技术的先进性和实用性都是不足取的，企业应该结合企业自身的实际，在追求先进性的同时强调实用性，并且一定要站在整个企业信息集成的角度来选择软件，并且要切实注重于系统的集成和开放。&lt;br/&gt;4、整体规划、分步实施：整体规划是系统的“整体”,是系统的“整体规划”，是实现整个系统的“技术途径”，总体规划一般不承担具体的项目设计，是整个研制工作中不可缺少的技术总纲。在具体实施过程中，要从简单技术入手，迅速向广度和深度发展。在应用的基础上启发更广泛、更深入的需求，同时通过效益驱动可以以树立企业建设信息化的信心，减少企业一次投入过多，负担过重而带来不必要的风险，分步实施同时可以紧跟信息技术发展的前沿。&lt;br/&gt;5、明确目标：即是不要偏离系统建设的最终目标，实现企业的整体的信息集成。&lt;br/&gt;6、高层领导：参与确实领会“一把手工程”，也即是不仅仅是企业的最高领导亲自参与，还应该包括整个决策层的参与决策，是一个企业的高层领导组成的领导班子，是广义上的“一把手”。&lt;/p&gt;&lt;p&gt;ERP系统能够将企业外部客户需求、内部生产制造流程以及供应商资源整合在一起，从而体现以客户为导向、市场为中心、整合企业资源的经营宗旨，提升企业的核心竞争力。随着信息技术的不断发展，企业信息化成为企业不可或缺的一环，而ERP作为必要手段，如何选择ERP软件，减少企业风险，是信息化建设过程中至关重要的事情。&lt;/p&gt;
-&lt;p&gt;欢迎转载，转载请注明出处：怡海软件（&lt;a href=&quot;http://www.frensworkz.com/&quot; target=&quot;_blank&quot;&gt;http://www.frensworkz.com/&lt;/a&gt;）&lt;/p&gt;
-
-</description>
-<pubDate>Fri, 17 May 2019 09:37:00 +0000</pubDate>
-<dc:creator>怡海软件CRM</dc:creator>
-<og:description>摘要：伴随着市场的需求，ERP系统管理厂商如雨后春笋般推向市场，企业在选择时面临着多种选择。本文怡海软件将针对ERP系统如何选型从选型前的准备工作、了解ERP厂商、如何选择及注意事项等方面进行简要阐述</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/frensworkz/p/10882690.html</dc:identifier>
-</item>
-<item>
-<title>Google IO 2019 Android 太长不看版 - 圣骑士wind</title>
-<link>http://www.cnblogs.com/mengdd/p/Google-IO-2019-Android-TLDR.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/mengdd/p/Google-IO-2019-Android-TLDR.html</guid>
-<description>&lt;p&gt;Google I/O 2019, 这里有个playlist是所有Android开发相关的session视频合集:&lt;br/&gt;&lt;a href=&quot;https://www.youtube.com/playlist?list=PLWz5rJ2EKKc9FfSQIRXEWyWpHD6TtwxMM&quot;&gt;Android &amp;amp; Play at Google I/O 2019&lt;/a&gt;&lt;br/&gt;当然啦每个视频都看不太现实了, 就挑几个看看吧.&lt;br/&gt;这里是我个人的一点笔记, 可以作为一个太长不看版, 感兴趣的点再自己了解下.&lt;/p&gt;
-
-&lt;ul&gt;&lt;li&gt;更易用的API.&lt;/li&gt;
-&lt;li&gt;隐藏底层细节.&lt;/li&gt;
-&lt;li&gt;兼容各种设备.&lt;/li&gt;
-&lt;li&gt;自动化测试套件.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;Design Toolchain:&lt;/p&gt;
-&lt;h3 id=&quot;layout-editor&quot;&gt;Layout Editor&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Blueprint mode.&lt;/li&gt;
-&lt;li&gt;context menu来提供一些更方便的工作. constraint popup. constraint menu.&lt;/li&gt;
-&lt;li&gt;预览改进: RecyclerView的预览改进. 预览sample数据.&lt;/li&gt;
-&lt;li&gt;attribute界面可以指定dimen中定义的自定义尺寸.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;相关文章:&lt;br/&gt;https://medium.com/androiddevelopers/android-studio-project-marble-layout-editor-608b6704957a&lt;/p&gt;
-&lt;h3 id=&quot;navigation-editor&quot;&gt;Navigation Editor&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;navigation components的使用.&lt;/li&gt;
-&lt;li&gt;navigation editor中的预览.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;resource-manager&quot;&gt;Resource Manager:&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Batch Import, 可以直接把图片资源拖拽整理进去. * 可以把svg拽进去变成vector drawable.&lt;/li&gt;
-&lt;li&gt;提供了layout, color等的小图预览.&lt;/li&gt;
-&lt;li&gt;颜色的alpha终于可以用百分比设置了.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;layout-inspector&quot;&gt;Layout Inspector:&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;改进了属性显示.&lt;/li&gt;
-&lt;li&gt;可以直接预览修改.&lt;/li&gt;
-&lt;li&gt;3D显示, 可以查找某个背景颜色到底是哪一层设置的.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;(我的思考: 现在Android Studio越来越鼓励开发者直接利用图形界面来设置layout了, 总是喜欢直接编辑xml算不算是早期Android遗老遗少的一个陋习?)&lt;/p&gt;
-
-&lt;p&gt;Kotlin first.&lt;/p&gt;
-&lt;h3 id=&quot;data-binding&quot;&gt;Data binding:&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Faster complilation:&lt;br/&gt;&lt;code&gt;android.databinding.incremental = true&lt;/code&gt;.&lt;br/&gt;增量注解处理.&lt;/li&gt;
-&lt;li&gt;错误信息改善了. (耶!)&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;how-to-access-views&quot;&gt;How to access views?&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;几种find view的方法比较.&lt;/li&gt;
-&lt;li&gt;View Binding: coming soon in Android Studio 3.6.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;lifecycle&quot;&gt;Lifecycle&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;ViewModel和Saved State.&lt;br/&gt;&lt;code&gt;SavedStateHandle&lt;/code&gt;: 传入ViewModel, 用于保存一些在应用被杀死后重启仍然需要恢复的值.&lt;/li&gt;
-&lt;li&gt;一些代码的写法被优化了.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;workmanager&quot;&gt;WorkManager&lt;/h3&gt;
-&lt;p&gt;优点: deferrable, persistent, constraint-based, backwards compatible.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;性能: on-demand initialization.&lt;/li&gt;
-&lt;li&gt;Google Play Services integration.&lt;/li&gt;
-&lt;li&gt;兼容性.&lt;/li&gt;
-&lt;li&gt;测试.&lt;/li&gt;
-&lt;li&gt;Future: foreground service.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;room&quot;&gt;Room&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Coroutines, 协程支持: suspend方法.&lt;/li&gt;
-&lt;li&gt;Full text search: &lt;code&gt;@Fts4&lt;/code&gt;, &lt;code&gt;MATCH&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;Database Views. &lt;code&gt;@DatabaseView&lt;/code&gt;. 重新组织一个可查询的数据结构, 类似于重新组装一个表, 用来查询.&lt;/li&gt;
-&lt;li&gt;扩展了Rx支持: 数据库操作方法可以返回&lt;code&gt;Single&lt;/code&gt;, &lt;code&gt;Completable&lt;/code&gt;等Rx类型.&lt;/li&gt;
-&lt;li&gt;Future: 注解处理; 关系改善; migration改善; 协程Channel&amp;amp;Flow.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;paging&quot;&gt;Paging&lt;/h3&gt;
-&lt;p&gt;What's next in Paging?&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Built in network support with error handling.&lt;/li&gt;
-&lt;li&gt;Headers &amp;amp; footers&lt;/li&gt;
-&lt;li&gt;更好的Rx和协程集成.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;navigation&quot;&gt;Navigation&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;ViewModels scoped to Navigation Graphs.&lt;/li&gt;
-&lt;li&gt;Navigate by URI.&lt;/li&gt;
-&lt;li&gt;Dialog as destinations.&lt;/li&gt;
-&lt;li&gt;Safe Args.&lt;/li&gt;
-&lt;li&gt;Future: Better support for dynamic features.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最后广告了一下这个课程:&lt;br/&gt;https://www.udacity.com/course/developing-android-apps-with-kotlin--ud9012&lt;/p&gt;
-
-&lt;p&gt;What's new in Android Q:&lt;/p&gt;
-&lt;h3 id=&quot;system-ui&quot;&gt;System UI&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;SAW: System Alert Window. -&amp;gt; 安全问题. -&amp;gt; 引入Bubbles (API 29).&lt;/li&gt;
-&lt;li&gt;Dark theme.&lt;/li&gt;
-&lt;li&gt;Share sheet: 内容预览, 粘贴, 性能改善.&lt;/li&gt;
-&lt;li&gt;通知分区域: Priority, Gentle.&lt;/li&gt;
-&lt;li&gt;Notification actions: 自动生成回复.&lt;/li&gt;
-&lt;li&gt;手势导航.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;platform&quot;&gt;Platform&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;WebView: Trichrome: Separate WebView/Chrome, hung renderer检测.&lt;/li&gt;
-&lt;li&gt;Accessibility.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;text&quot;&gt;Text&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;API 23默认开启了连字符, 性能下降, 所以在Q默认关闭了.&lt;/li&gt;
-&lt;li&gt;API for fonts.&lt;br/&gt;还单独有个text的演讲专门讲这个.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;magnifier&quot;&gt;Magnifier&lt;/h3&gt;
-&lt;h3 id=&quot;private-apis&quot;&gt;private APIs&lt;/h3&gt;
-&lt;p&gt;要么用public的, 要么private改成public的, 要么加新的.&lt;br/&gt;gray list中加了更多的(以后的版本将不能用了).&lt;/p&gt;
-&lt;h3 id=&quot;android-runtime-art&quot;&gt;Android Runtime (ART)&lt;/h3&gt;
-&lt;p&gt;Profile, 启动改善, GC改善.&lt;/p&gt;
-&lt;h3 id=&quot;kotlin&quot;&gt;Kotlin&lt;/h3&gt;
-&lt;p&gt;Q的新API有nullability注解.&lt;/p&gt;
-&lt;h3 id=&quot;security&quot;&gt;Security&lt;/h3&gt;
-&lt;p&gt;TLS 1.3 默认开启.&lt;br/&gt;生物识别改进.&lt;/p&gt;
-&lt;h3 id=&quot;jetpack-compose&quot;&gt;Jetpack Compose&lt;/h3&gt;
-&lt;p&gt;全新的UI组件: Kotlin, Reactive.&lt;br/&gt;(很像Flutter.)&lt;/p&gt;
-&lt;h3 id=&quot;privacy&quot;&gt;Privacy&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;外部存储限制.&lt;/li&gt;
-&lt;li&gt;Location: 权限设置更新. 新增只有前台时允许的选项.&lt;/li&gt;
-&lt;li&gt;后台启动Activity限制.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;其他&quot;&gt;其他&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;CameraX&lt;/li&gt;
-&lt;li&gt;Architecture Components&lt;/li&gt;
-&lt;li&gt;ViewPager2&lt;/li&gt;
-&lt;li&gt;ViewBindings&lt;/li&gt;
-&lt;li&gt;Blend Modes&lt;/li&gt;
-&lt;li&gt;RenderNode&lt;/li&gt;
-&lt;li&gt;HardwareRenderer: 可以控制光源(阴影)&lt;/li&gt;
-&lt;li&gt;Hardware Bitmaps&lt;/li&gt;
-&lt;li&gt;Audio Playback Capture&lt;/li&gt;
-&lt;li&gt;应用不能控制wifi开关&lt;/li&gt;
-&lt;li&gt;Settings Panel&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h3 id=&quot;为什么我们要模块化呢&quot;&gt;为什么我们要模块化呢?&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;scale: 更易分组开发人员; 更易查找资源.&lt;/li&gt;
-&lt;li&gt;更快的编译速度.&lt;/li&gt;
-&lt;li&gt;更快的CI. 只执行有修改的module相关的测试.&lt;/li&gt;
-&lt;li&gt;Good for business. App Bundles: 更小的apk.&lt;/li&gt;
-&lt;li&gt;分离的feature测试. 快速AB Test一个新功能.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;两种modules&quot;&gt;两种Modules:&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;Library Module&lt;/li&gt;
-&lt;li&gt;Dynamic Feature Module&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;如何分离模块呢&quot;&gt;如何分离模块呢?&lt;/h3&gt;
-&lt;ul&gt;&lt;li&gt;by feature&lt;/li&gt;
-&lt;li&gt;by layer&lt;/li&gt;
-&lt;li&gt;feature &amp;amp; layer.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;模块间的依赖&quot;&gt;模块间的依赖&lt;/h3&gt;
-&lt;p&gt;Module A依赖Module B:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;&lt;code&gt;api&lt;/code&gt;: Module B is part of my &lt;strong&gt;Public API&lt;/strong&gt;. 依赖A的可以看到B.&lt;/li&gt;
-&lt;li&gt;&lt;code&gt;implementation&lt;/code&gt;: Module B is my &lt;strong&gt;Implementation Detail&lt;/strong&gt;. 依赖A的看不到B.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;这里讨论了一个分层模块化构架中的问题: repo模块对数据库模块的依赖, 用&lt;code&gt;api&lt;/code&gt;, 上层可以直接使用数据库模块中的实例类, 但是同时暴露了DAO, 破坏了模块化分离的意义.&lt;br/&gt;两个选择:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;规定在上层不要操作数据库.&lt;/li&gt;
-&lt;li&gt;新建一个通用的数据模块, 存放实体类, 数据库模块&lt;code&gt;implementation&lt;/code&gt;依赖它, repo模块&lt;code&gt;api&lt;/code&gt;依赖它.&lt;/li&gt;
-&lt;/ul&gt;&lt;h3 id=&quot;测试.&quot;&gt;测试.&lt;/h3&gt;
-&lt;h3 id=&quot;dynamic-feature-modules&quot;&gt;Dynamic feature modules&lt;/h3&gt;
-&lt;p&gt;几个挑战:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;导航. 需要hardcode类名.&lt;/li&gt;
-&lt;li&gt;找依赖. Dynamically loaded modules.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;代码例子: &lt;a href=&quot;https://github.com/googlesamples/android-dynamic-code-loading&quot;&gt;android-dynamic-code-loading&lt;/a&gt;&lt;br/&gt;结合dagger.&lt;/p&gt;
-&lt;h3 id=&quot;数据库&quot;&gt;数据库&lt;/h3&gt;
-&lt;p&gt;数据库的几种选择:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;一个数据库: 好维护, 好共享, 但是没有分离.&lt;/li&gt;
-&lt;li&gt;一个核心数据库 + 每个feature自己的数据库: 有了分离, 但是共享成了问题. 如果hybrid: 让有交互的模块共享, 也是挺复杂的.&lt;/li&gt;
-&lt;li&gt;一个Room的bright feature: Multi-module数据库. (Not Available now.)&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;最后闲聊了几句关于构架的讨论.&lt;br/&gt;Android team只是提供options, 最后的选择还是depends.&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;考虑: short time costs, long time benefits.&lt;/li&gt;
-&lt;li&gt;用户不会因为app的构架好而给你5星.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;三个方面:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Sharing: 性能改进; UI改进; 更多自定义选项.&lt;/li&gt;
-&lt;li&gt;Notifications: gentle; actions.&lt;/li&gt;
-&lt;li&gt;Multitasking: Bubbles.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;Jetpack Benchmark Library:&lt;br/&gt;https://developer.android.com/studio/profile/benchmark.md&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;可以测量工作方法的时间: 重复测量的Rule;&lt;br/&gt;合理排除初始化时间.&lt;/li&gt;
-&lt;li&gt;UI测试.&lt;/li&gt;
-&lt;li&gt;新增module: Benchmark Module.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;工具实现细节介绍.&lt;/p&gt;
-&lt;p&gt;Best Practices:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Start with tracing.&lt;/li&gt;
-&lt;li&gt;Synchronous blocks.&lt;/li&gt;
-&lt;li&gt;Small blocks&lt;/li&gt;
-&lt;li&gt;Hot code.&lt;/li&gt;
-&lt;li&gt;Caches.&lt;/li&gt;
-&lt;li&gt;@RunWith(Parameterized)&lt;/li&gt;
-&lt;li&gt;不要比较设备.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;例子: &lt;a href=&quot;https://github.com/googlesamples/android-performance&quot;&gt;googlesamples/android-performance&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;最后, 欢迎关注微信公众号: 圣骑士Wind&lt;br/&gt;&lt;img src=&quot;https://images2015.cnblogs.com/blog/325852/201610/325852-20161025151540109-490601558.png&quot; alt=&quot;微信公众号&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 17 May 2019 09:33:00 +0000</pubDate>
-<dc:creator>圣骑士wind</dc:creator>
-<og:description>Google I/O 2019, Android版本的学霸画重点的笔记.</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/mengdd/p/Google-IO-2019-Android-TLDR.html</dc:identifier>
-</item>
-<item>
-<title>网络应用（6）：http报文结构与curl的使用 - 广州小程</title>
-<link>http://www.cnblogs.com/freeself/p/10882404.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/freeself/p/10882404.html</guid>
-<description>&lt;p&gt;http是一个协议，协议就是约定、规定，先不管为什么这么约定有什么高深的东西，为了解决具体问题，我们先要能使用协议，理解协议中对我们有用的那部分数据，是的，我们不是研究生，更不是纯研究，所有的研究都要由具体的问题来驱动。&lt;/p&gt;
-&lt;p&gt;那这里的具体问题是什么？就是看懂http的请求跟回复啊，就像写某某申请一样，你不理申请最终怎么传递出去，你先要知道以什么格式来写，对方回复后你怎么看明白它，这才是基本的。所以，http的请求格式跟回复格式，其实也只是形式上的东西，形式是多变而不稳定的，更不是什么深奥的东西，它只是表达了一些内容。&lt;/p&gt;
-&lt;p&gt;那就来看看http请求与响应的形式上的东西吧。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;本文介绍http请求与响应的报文结构，以及curl的使用。&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;先抓个包来直观看一下，在百度的搜索框中，敲入“helloworld”并回车，这时会发起一个http请求，用charles来抓包（为什么用它？因为我介绍过！），可以看到这样的请求与响应的信息：&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/get%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%E7%9A%84%E6%95%B0%E6%8D%AE.jpg&quot; alt=&quot;http请求与响应信息&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;从数据包来看，有一个GET方法，返回了200的状态码，等等。但这里混合了请求与响应的信息，如果分开来看，请求与响应各自有什么数据组织结构呢？&lt;/p&gt;
-&lt;h4 id=&quot;请求报文&quot;&gt;（1）请求报文&lt;/h4&gt;
-&lt;p&gt;http请求数据，使用的结构是这样的：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;{请求行，请求头，请求体}&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;小程引用网上的一张图，这张图描绘了这个结构：&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E8%AF%B7%E6%B1%82%E6%8A%A5%E6%96%87%E7%9A%84%E7%BB%93%E6%9E%84.jpg&quot; alt=&quot;http请求报文结构&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;参照上图，&lt;strong&gt;请求行&lt;/strong&gt;是这个样子：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;GET /index.html HTTP/1.1&lt;br/&gt;或者：&lt;br/&gt;POST /xiaocheng/about.html HTTP/1.1&lt;br/&gt;...&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;注意，请求行一般不包括host的地址，而host地址存放在请求头中。&lt;/p&gt;
-&lt;p&gt;然后是&lt;strong&gt;请求头&lt;/strong&gt;，分为多行，每一行是一个键值对（key: value的格式），比如请求头是这个样子的：&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E8%AF%B7%E6%B1%82%E5%A4%B4.jpg&quot; alt=&quot;http请求头&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;最后是&lt;strong&gt;请求体&lt;/strong&gt;，一般来说GET方法是不带请求体的，因为所有内容都放到请求行（特别是url中）或请求头中了，一般来说POST方法需要带请求体，比如在iTunes下载一个APP时，POST请求数据是这样的：&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E8%AF%B7%E6%B1%82%E4%BD%931.jpg&quot; alt=&quot;http请求体1&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E8%AF%B7%E6%B1%82%E4%BD%932.jpg&quot; alt=&quot;http请求体2&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;不要觉得好新奇，又是请求行、请求头又是请求体的，这都只是规则，形式上的东西，以这种形式传递了内容。&lt;/p&gt;
-&lt;h4 id=&quot;响应报文&quot;&gt;（2）响应报文&lt;/h4&gt;
-&lt;p&gt;响应数据的结构，也可以分三部分：&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;{响应行，响应头，响应体}&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;这里给一个响应实例：&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E5%93%8D%E5%BA%94%E6%8A%A5%E6%96%871.jpg&quot; alt=&quot;http响应报文1&quot;/&gt;&lt;br/&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E7%BD%91%E7%BB%9C%E5%BA%94%E7%94%A8/http%E8%AF%B7%E6%B1%82%E4%B8%8E%E5%93%8D%E5%BA%94%26curl/http%E5%93%8D%E5%BA%94%E6%8A%A5%E6%96%872.jpg&quot; alt=&quot;http响应报文2&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;响应行&lt;/strong&gt;，也叫状态行，包括http的版本、状态码与状态描述。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;响应头&lt;/strong&gt;跟请求头一样，由一行一行的key-value构成。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;响应体&lt;/strong&gt;一般就是请求方想要的数据了，但响应体不一定会存在，比如HEAD请求方法时不返回响应体（这时响应行就是请求方想要的）。&lt;/p&gt;
-&lt;p&gt;规则上是这样的，响应/请求行就是一行，响应/请求头就是key-value的集合，响应/请求体就是各种格式的数据（xml、gif、png等格式）。&lt;/p&gt;
-&lt;p&gt;http请求与响应数据，还有其它的一些知识，比如GET与POST的区别、返回404/403/303表示什么意思，等等，这个谁用谁查，不细说。&lt;/p&gt;
-&lt;p&gt;但我想说一个工具，一个可以发起http请求的工具，好用，就是&lt;strong&gt;curl&lt;/strong&gt;。&lt;/p&gt;
-&lt;h4 id=&quot;curl的使用&quot;&gt;（3）curl的使用&lt;/h4&gt;
-&lt;p&gt;小程使用的是macos，mac自带了curl工具。&lt;/p&gt;
-&lt;p&gt;curl的功能也算强大的，提供了系列的选项，这里只介绍一些常规的使用方式。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;get请求，与保存&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;curl www.baidu.com
-curl &quot;http://172.17.21.197:54321?pa1=hello&quot;
-// 保存，下载
-curl -o file.html www.baidu.com   
-curl -o i.jpg http://img3.douban.com/lpic/s4549903.jpg
-// -A 仿造ie与运行平台
-curl -A &quot;Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.0)&quot; www.baidu.com   
-// -e 仿造入口链接（即referer，用于盗链）
-curl -A &quot;Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.0)&quot; -e &quot;www.google.com&quot; www.baidu.com   
-// -x 使用代理
-curl -x a.b.c.d:54321 http://google.com  
-// -D 保存cookie到文件
-curl www.baidu.com -o aa.txt -D cookie.txt  
-// -b 读取文件并当作cookie数据来请求
-curl www.baidu.com -b cookie.txt  
-// -H 设置请求头，这里设置了cookie跟ua
-curl -H &quot;Cookie: install_id=14621691626; sid_guard=\&quot;0eb878191489e4247f643672c932c814|1504782359|2592000|Sat\054 07-Oct-2017 11:05:59 GMT\&quot;; \n User-Agent: xxx/1.5.6 (iPhone; iOS 10.2; Scale/2.00)&quot; &quot;https://xxx.yy.com/...&quot;  &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;post&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;// -d 请求体
-curl -d &quot;user=nickwolfe&amp;amp;password=12345&quot; http://www.linuxidc.com/login.cgi  
-curl -d &quot;key=jet&quot; 192.168.2.32:54321&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;post，以表单的方式（multipart/form-data）&lt;/strong&gt;&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;// &quot;file&quot;为key名，随便起，后面为文件路径（包括文件包）
-curl -F &quot;file=@./myfile.ok&quot; &quot;http://172.17.xx.xx:54321&quot;   &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;总结一下，本文介绍了http请求与响应报文的数据结构，也介绍了用于发送http请求的工具curl的使用。文章的目的，一方面是让你巩固http报文的结构（其实这只是形式的东西，不要太在意），另一方面掌握一个便利的发送http请求的工具（这个就很实用了）。&lt;/strong&gt;&lt;/p&gt;
-&lt;hr/&gt;&lt;p&gt;&lt;img src=&quot;https://free-picture1.oss-cn-shenzhen.aliyuncs.com/%E9%80%BB%E8%BE%91%E9%A2%98/%E9%80%BB15.png&quot; alt=&quot;smile&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 17 May 2019 09:13:00 +0000</pubDate>
-<dc:creator>广州小程</dc:creator>
-<og:description>http是一个协议，协议就是约定、规定，先不管为什么这么约定有什么高深的东西，为了解决具体问题，我们先要能使用协议，理解协议中对我们有用的那部分数据，是的，我们不是研究生，更不是纯研究，所有的研究都要</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/freeself/p/10882404.html</dc:identifier>
-</item>
-<item>
-<title>讨论：研发团队到底应该是制定OKR还是制定KPI？ - 猎手家园</title>
-<link>http://www.cnblogs.com/hunttown/p/10882308.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hunttown/p/10882308.html</guid>
-<description>&lt;p&gt;在讨论之前我们先来了解两个概念：&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;一、KPI&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;KPI是一套绩效管理的方法。全称为：Key Performance Indicator。中文叫：&lt;strong&gt;关键绩效指标&lt;/strong&gt;。&lt;/p&gt;
-&lt;p&gt;KPI，和我们的“任务分解”不同。任务分解是把目标，分解成可执行的任务。是在“如何执行”层面的思考。KPI，是把目标分解成可考核的指标，是在“如何管理”层面的思考。KPI是非常重要的一种管理手段，只是它有它的适用性。KPI是你管理驾驶舱中的仪表盘，让你时刻知道组织的运行状态。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;二、OKR&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;OKR，是“Objective &amp;amp; Key Results”的缩写。简单来说，就是整个公司、团队、个人，都要设立目标（Objective），和衡量这些目标完成与否的关键结果（Key Results）。&lt;/p&gt;
-&lt;p&gt;OKR是目标管理工具。如果说KPI是秒表，那OKR就是指南针。它最重要的作用，是让一个无法用数字考核的团队，通过层层分解的目标、关键任务，向同一个方向前行。&lt;/p&gt;
-
-&lt;p&gt;&lt;img class=&quot; __bg_gif&quot; src=&quot;data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==&quot; alt=&quot;&quot; data-copyright=&quot;0&quot; data-ratio=&quot;1&quot; data-src=&quot;https://mmbiz.qpic.cn/mmbiz_gif/IEWeX9udEiaKiboYiaWuRG3iaMht8PmwGzN0FllAPj1rATaCYmT9RiaK6yWy0D5fV9iblFyIrH1DPeROzZcIJ6zk5bYg/640?wx_fmt=gif&quot; data-type=&quot;gif&quot; data-w=&quot;128&quot; data-order=&quot;0&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;三、绩效管理毁了索尼？&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;索尼公司前常务董事土井利忠于2006年的一篇文章《&lt;a href=&quot;https://www.cnblogs.com/hunttown/p/10880022.html&quot; target=&quot;_blank&quot;&gt;绩效管理毁了索尼&lt;/a&gt;》中写到：“（绩效管理）让研发人员为了外部动机工作，丧失了内在的创新热情；那些短期内难见效益的工作，比如产品质量检验以及“老化处理”工序被忽视，为了完成业绩考核，几乎所有的人都只提出容易实现的低目标……”&lt;/p&gt;
-
-&lt;p&gt;此文一出，一时间在互联网引起轩然大波。&lt;strong&gt;难道KPI就不能使用了吗？&lt;/strong&gt;当然不是了，只是索尼公司没有正确使用它。&lt;/p&gt;
-&lt;p&gt;同一时期，三星的李健熙认为“奖励工资”是人类最伟大的发明，于是，他决定在三星集团内，打破传统，推行年薪制。三星集团各子公司的CEO，基本工资只占25%，其余的75%由绩效来决定。三星的绩效管理，极大地激励了管理层和员工。同样在2006年，三星电子超额利润达到2.52亿美元，当年提取用于员工分配的奖金就高达5040万美元。&lt;/p&gt;
-&lt;p&gt;除了成就三星，绩效管理还成就了IBM。郭士纳接任IBM的CEO后，一个重要的举措，就是把沃森父子的“家庭文化”，改造为“绩效文化”。郭士纳帮助IBM这只大象重新起舞，成为了商界的传奇。&lt;/p&gt;
-
-&lt;p&gt;那为什么索尼失败了呢？其实，&lt;strong&gt;索尼的问题不在于“绩效管理”，而在于“绩效管理”之前的“目标管理”，是把员工锁死在错误目标上的管理层。&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;作为管理者，在用“绩效管理”锁死目标之前，&lt;strong&gt;第一重要的事情是，想想自己锁对了目标没有。&lt;/strong&gt;你可以把“目标管理”，看成是“绩效管理”的一部分，也可以认为目标管理，先于绩效管理。如果说，我们需要一把同心锁，把员工和企业牢牢锁在一起，&lt;strong&gt;目标管理，是确保我们锁对了目标，绩效管理，就是确保我们锁死了目标&lt;/strong&gt;。&lt;/p&gt;
-&lt;p&gt;绩效管理和OKR的目标管理，是前行的两条腿，缺谁都会寸步难行。正确的做法是把企业的使命和任务，转化为经营目标，然后再用KPI、OKR等绩效管理工具，分解、执行、考核。&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;四、&lt;/strong&gt;研发团队到底使用KPI还是OKR？&lt;/p&gt;
-&lt;p&gt;“怎么解决工程师的绩效考核问题”，整个科技界都没有好办法。大家能想到的唯一办法，就是通过多方均衡，让主观打分，尽量接近客观。通过多人打分，让直属经理一个人的主观，接近多人评价的客观；通过更高级别组织对得分的再平衡，让小团队的主观，接近多团队均衡的客观。&lt;/p&gt;
-
-&lt;p&gt;小米雷军：&lt;strong&gt;KPI早已跟不上时代，小米公司没有KPI，责任感驱动员工执行力&lt;/strong&gt;。那也仅仅是在创业期，而且你的故事还要讲得好；当你的企业进入了稳定期你还没有KPI的话，我觉得这是一件非常危险的事。&lt;/p&gt;
-&lt;p&gt;我记得新浪对谷歌内部考核系统进行过相关报道，大概意思是：&lt;strong&gt;谷歌放弃了KPI，选择了OKR，是OKR帮助谷歌成为了一家伟大的公司&lt;/strong&gt;。但是你要知道，谷歌他是一家创新公司，一家技术驱动的公司，他需要员工走出舒适区，站得更高，看得更远，不断的突破自己的极限。&lt;/p&gt;
-
-&lt;p&gt;所以，很难说KPI和OKR哪个好，他只是在不同的公司、不同的创业阶段有不同的使用方式，但他们一定是相互配合使用的。正如文章开始所说，OKR是指南针，要确实公司上下目标一致，而KPI是秒表，鞭策公司的前行。KPI绩效管理和OKR的目标管理，是前行的两条腿，缺谁都会寸步难行。正确的做法是&lt;strong&gt;把企业的使命和任务，转化为经营目标，然后再用KPI、OKR等绩效管理工具，分解、执行、考核。&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;推荐阅读：&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;1、&lt;a href=&quot;https://www.cnblogs.com/hunttown/p/10880022.html&quot; target=&quot;_blank&quot;&gt;绩效主义毁了索尼&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;2、&lt;a href=&quot;https://mp.weixin.qq.com/s/PXfOKmKvB4lNvXBZ8gL_VA&quot; target=&quot;_blank&quot;&gt;一切不行都是人的不行？&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;3、&lt;a href=&quot;https://mp.weixin.qq.com/s/PWtlKz2M3sanWW8XvEVONQ&quot; target=&quot;_blank&quot;&gt;不会把目标翻译成任务要你何用？&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;4、&lt;a href=&quot;https://mp.weixin.qq.com/s/-zHn3qiXE7wKr3uRck7qdA&quot; target=&quot;_blank&quot;&gt;为什么不能用工时来考核研发的工作&lt;/a&gt;&lt;/p&gt;
-
-</description>
-<pubDate>Fri, 17 May 2019 09:03:00 +0000</pubDate>
-<dc:creator>猎手家园</dc:creator>
-<og:description>在讨论之前我们先来了解两个概念： 一、KPI KPI是一套绩效管理的方法。全称为：Key Performance Indicator。中文叫：关键绩效指标。 KPI，和我们的“任务分解”不同。任务分解</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/hunttown/p/10882308.html</dc:identifier>
-</item>
-<item>
-<title>是时候拥有一个你自己的命令行工具了 - detectiveHLH</title>
-<link>http://www.cnblogs.com/detectiveHLH/p/10881963.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/detectiveHLH/p/10881963.html</guid>
-<description>&lt;p&gt;本篇博客主要介绍了如何使用commander, inquirer以及chalk从零开始，创建属于自己的命令行工具。&lt;/p&gt;
-&lt;h2 id=&quot;一分钟体验&quot;&gt;0. 一分钟体验&lt;/h2&gt;
-&lt;p&gt;首先我们先花一分钟的时间，体验一下创建自己的命令行cli工具是什么感觉。&lt;/p&gt;
-&lt;h3 id=&quot;新建项目目录&quot;&gt;0.1. 新建项目目录&lt;/h3&gt;
-&lt;p&gt;假如我们的项目名称叫&lt;code&gt;hello-cli&lt;/code&gt;，使用如下命令新建项目目录。&lt;/p&gt;
-&lt;pre class=&quot;bash&quot;&gt;
-&lt;code&gt;mkdir hello-cli &amp;amp;&amp;amp; cd hello-cli&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;初始化项目&quot;&gt;0.2. 初始化项目&lt;/h3&gt;
-&lt;p&gt;接下里使用npm-init命令来初始化一个简单的package.json文件。&lt;/p&gt;
-&lt;pre class=&quot;bash&quot;&gt;
-&lt;code&gt;npm init -y&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;&lt;code&gt;-y&lt;/code&gt;命令表示接受npm的一切默认参数设置。然后替换package.json为如下代码。&lt;/p&gt;
-&lt;pre class=&quot;json&quot;&gt;
-&lt;code&gt;{
-  &quot;name&quot;: &quot;hello-cli&quot;,
-  &quot;version&quot;: &quot;1.0.0&quot;,
-  &quot;description&quot;: &quot;&quot;,
-  &quot;main&quot;: &quot;index.js&quot;,
-  &quot;bin&quot;: {
-    &quot;hello&quot;: &quot;hello&quot;
-  },
-  &quot;scripts&quot;: {
-    &quot;test&quot;: &quot;echo \&quot;Error: no test specified\&quot; &amp;amp;&amp;amp; exit 1&quot;
-  },
-  &quot;keywords&quot;: [],
-  &quot;author&quot;: &quot;&quot;,
-  &quot;license&quot;: &quot;ISC&quot;,
-  &quot;dependencies&quot;: {
-    &quot;chalk&quot;: &quot;^2.4.2&quot;,
-    &quot;commander&quot;: &quot;^2.20.0&quot;,
-    &quot;inquirer&quot;: &quot;^6.3.1&quot;,
-    &quot;shelljs&quot;: &quot;^0.8.3&quot;
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后使用&lt;code&gt;npm install&lt;/code&gt;安装依赖。&lt;/p&gt;
-&lt;h3 id=&quot;新建入口文件&quot;&gt;0.3. 新建入口文件&lt;/h3&gt;
-&lt;p&gt;在项目根目录下新建名为&lt;code&gt;hello&lt;/code&gt;的文件，不需要任何后缀，值得注意的是此时的文件名就是你的cli工具第一个键入的命令，例如&lt;code&gt;npm install&lt;/code&gt;，那么&lt;code&gt;hello&lt;/code&gt;就等价于&lt;code&gt;npm&lt;/code&gt;。并将代码替换如下。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;#! /usr/bin/env node
-
-const program = require('commander');
-const inquirer = require('inquirer');
-const chalk = require('chalk');
-
-program
-  .command('init')
-  .alias('i')
-  .description('初始化项目')
-  .action(option =&amp;gt; {
-    // 该对象用于存储所有与用户交互的数据
-    let config = {
-      // 假设我们需要用户自定义项目名称
-      projectName: null
-    };
-    // 使用chalk打印美化的版本信息
-    console.log(chalk.default.bold('hello v1.0.0'));
-
-    // 用于存储所有的交互步骤，例如让用户输入项目名称就是其中一个步骤
-    let promps = [];
-    if (config.projectName === null) {
-      promps.push({
-        type: 'input',
-        name: 'projectName',
-        message: '请输入项目名称',
-        validate: input =&amp;gt; {
-          if (!input) {
-            return '项目名称不能为空';
-          }
-          // 更新对象中属性的数据
-          config.projectName = input;
-          return true;
-        }
-      });
-    }
-
-    // 至此，与用户的所有交互均已完成，answers是收集到的用户所填的所有数据
-    // 同时，这也是你开始操作的地方，这个cli工具的核心代码应该从这个地方开始
-    inquirer.prompt(promps).then(async (answers) =&amp;gt; {
-      // do something here
-      console.log(answers);
-    });
-  });
-
-program.parse(process.argv);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h3 id=&quot;npm-link&quot;&gt;0.4. npm link&lt;/h3&gt;
-&lt;p&gt;那么问题来了，&lt;br/&gt;在你的项目根目录下使用&lt;code&gt;npm link&lt;/code&gt;，然后在你本地上就相当于安装了名为&lt;code&gt;hello-cli&lt;/code&gt;这样的一个全局npm包了。其原理是将你本地的项目在全局的node_modules中做了一个软链接，拿此项目举例，全局的&lt;code&gt;hello&lt;/code&gt;命令已经指向了你的本地目录。如果你想取消测试项目在全局中的映射，同样的进入项根目录，输入命令&lt;code&gt;npm unlink&lt;/code&gt;即可。&lt;/p&gt;
-&lt;p&gt;然后搭配以下命令食用你的第一个cli工具吧。如果报错提示没有权限，在命令前加上sudo即可。&lt;/p&gt;
-&lt;pre class=&quot;bash&quot;&gt;
-&lt;code&gt;hello init
-# 或者
-# hello i&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;commander&quot;&gt;1. commander&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/tj/commander.js&quot;&gt;commander&lt;/a&gt;是一个Node.js环境下的命令行接口解决方案。在上面的一分钟体验例子中，我们用到了&lt;code&gt;command&lt;/code&gt;,&lt;code&gt;alias&lt;/code&gt;,&lt;code&gt;description&lt;/code&gt;,&lt;code&gt;action&lt;/code&gt;这四个API。&lt;/p&gt;
-&lt;ul readability=&quot;4&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;command &lt;code&gt;command&lt;/code&gt;代表了这个cli工具向用户暴露的命令行指令。我们还是拿&lt;code&gt;npm install&lt;/code&gt;来举例子，&lt;code&gt;command('init')&lt;/code&gt;声明了一个叫init的命令，在此处，init等价于install&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;alias &lt;code&gt;alias&lt;/code&gt;是对于当前命令行指令的更短的指令。例如大家都知道，&lt;code&gt;npm install&lt;/code&gt;可以简写为&lt;code&gt;npm i&lt;/code&gt;。&lt;code&gt;i&lt;/code&gt;就是定义的alias&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;description &lt;code&gt;description&lt;/code&gt;是对当前命令行指令的描述，commander会自动的生成当前cli工具的帮助文档，而该描述就会在&lt;code&gt;hello -h&lt;/code&gt;中展示，如果你的一分钟体验项目还在的话，在命令行中输入&lt;code&gt;hello -h&lt;/code&gt;就可以看到自动生成的帮助文档了&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;action &lt;code&gt;action&lt;/code&gt;是我们注册我们自己回调函数的地方&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;parse &lt;code&gt;parse&lt;/code&gt;命令则是解析命令行&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;下面是一分钟体验项目中没有使用的命令，option。还是举一个例子。如果有用过&lt;a href=&quot;https://hexo.io/zh-cn/index.html&quot;&gt;hexo&lt;/a&gt;的应该熟悉这个命令。&lt;/p&gt;
-&lt;pre class=&quot;bash&quot;&gt;
-&lt;code&gt;hexo new post $YOUR_POST_NAME&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;没用过也没关系，这个命令是用于创建一个可以自定义名字的Markdown的文档的。大家可能会发现，上面的命令包含了4个单词，而我们的例子中只有两个。那是因为一分钟项目中没有使用commander的&lt;code&gt;option&lt;/code&gt;API。&lt;/p&gt;
-&lt;p&gt;如果你想在hello项目中实现一样的命令，那么只需要在program中调用该API即可。&lt;code&gt;.option('-p, --post', 'add post')&lt;/code&gt;，然后就可以通过&lt;code&gt;option&lt;/code&gt;参数获取到-p后面，用户输入的参数的值。&lt;/p&gt;
-&lt;h2 id=&quot;inquirer&quot;&gt;2. inquirer&lt;/h2&gt;
-&lt;p&gt;大家也发现了，在命令行输入init命令后，我们需要不停地与命令行进行交互拿到数据，但是在代码里并没有怎么体现，这是因为我们用了&lt;a href=&quot;https://github.com/SBoudrias/Inquirer.js/&quot;&gt;inquirer&lt;/a&gt;来帮我们做这些事情。&lt;/p&gt;
-&lt;p&gt;通过inquirer，我们可以实现输入框，获取用户的输入数据，还可以实现选择框。举个例子，用过antd-design-pro应该熟悉创建项目的流程。在命令行中输入命令&lt;code&gt;yarn create umi&lt;/code&gt;，在之后的流程中就会出现一个可选择的list。只需要将步骤中的代码替换成如下即可。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;promps.push({
-    type: 'list',
-    name: 'projectName',
-    message: '请输入项目名称',
-    choices: [
-      {
-        name: 'ant-design-pro',
-        value: 'ant-design-pro'
-      },
-      {
-        name: 'dva',
-        value: 'dva'
-      }
-    ]
-});&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;在项目中，还使用了&lt;code&gt;validate&lt;/code&gt;来对用户的输入数据进行验证，如果不需要验证的话，直接把validate整个代码删除掉就好。&lt;/p&gt;
-&lt;h2 id=&quot;chalk&quot;&gt;3. chalk&lt;/h2&gt;
-&lt;p&gt;&lt;a href=&quot;https://github.com/chalk/chalk&quot;&gt;chalk&lt;/a&gt;没有什么好介绍的，官网上的文档已经写的很详细了。给大家列一下项目中使用的例子就好。&lt;/p&gt;
-&lt;pre class=&quot;javascript&quot;&gt;
-&lt;code&gt;// 使用默认的字体颜色，加粗字体
-console.log(chalk.default.bold('hello v1.0.0'));
-// 打印蓝色的提示信息
-console.log(chalk.blue('hello v1.0.0'));
-// 字符串模板用法，在同一行中打印不同样式的信息
-console.log(chalk`{white.bold [1/3]} 🔍` + chalk`{default.bold Clone project into local path...}`);&lt;/code&gt;
-&lt;/pre&gt;
-&lt;h2 id=&quot;最后&quot;&gt;4. 最后&lt;/h2&gt;
-&lt;p&gt;如果你厌倦了Node.js写后端，想用Java的Spring Boot来写，但是又担心环境的搭建浪费太多时间。那么你可以试试&lt;a href=&quot;https://github.com/detectiveHLH/venus-init&quot;&gt;venus-init&lt;/a&gt;，只需要一行命令便可以快速搭建Java的开发环境。&lt;/p&gt;
-&lt;p&gt;Happy hacking.&lt;/p&gt;
-</description>
-<pubDate>Fri, 17 May 2019 08:21:00 +0000</pubDate>
-<dc:creator>detectiveHLH</dc:creator>
-<og:description>本篇博客主要介绍了如何使用commander, inquirer以及chalk从零开始，创建属于自己的命令行工具。 0. 一分钟体验 首先我们先花一分钟的时间，体验一下创建自己的命令行cli工具是什么</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>http://www.cnblogs.com/detectiveHLH/p/10881963.html</dc:identifier>
 </item>
 </channel>
 </rss>
