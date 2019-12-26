@@ -9,2089 +9,970 @@
 <link></link>
 <description>代码改变世界</description>
 <item>
-<title>聊聊 API 签名方式 - Fururur</title>
-<link>http://www.cnblogs.com/Sinte-Beuve/p/12093307.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/Sinte-Beuve/p/12093307.html</guid>
-<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
-&lt;p&gt;现在越来越多的公司以 API 的形式对外提供服务，这些 API 接口大多暴露在公网上，所以安全性就变的很重要了。最直接的风险如下：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;非法使用 API 服务。（收费接口非法调用）&lt;/li&gt;
-&lt;li&gt;恶意攻击和破坏。（数据篡改、DOS）&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;因此需要设计一些接口安全保护的方式来增强接口安全，在运输层可添加 SSL 证书，上 HTTPS，在应用层主要是通过一些加密逻辑来实现。目前主流的两种是在 HTTP Header 里加认证信息和 API 签名。&lt;/p&gt;
-&lt;h2 id=&quot;http-简单身份认证&quot;&gt;HTTP 简单身份认证&lt;/h2&gt;
-&lt;p&gt;在 HTTP 请求的 Header 中添加认证字段例如：&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;Authorization: 3F2504E04F8911D39A0C0305E82C3301&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;服务器处理前取出该字段进行校验即可。&lt;/p&gt;
-&lt;p&gt;Spring Boot 项目直接实现一个拦截器就可进行判断：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;String token = request.getHeader(&quot;Authorization&quot;);
-if (!Strings.isNullOrEmpty(token)) {
-    hasAuth = redisTemplate.hasKey(&quot;userToken:&quot; + token);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这类方法实现比较简单，可以做基本的身份认证，防君子不防小人，可通过中间人攻击获得 Authorization。使用 HTTPS 安全性会得到提高，但是无法抵御重放攻击造成的影响，例如 DDOS。&lt;/p&gt;
-&lt;h2 id=&quot;api-签名认证&quot;&gt;API 签名认证&lt;/h2&gt;
-&lt;p&gt;API 签名的方式较前一种要复杂的多，但是可解决的安全问题也更多：&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;可校验请求者的合法性。&lt;/li&gt;
-&lt;li&gt;可以校验参数的完整性和是否被篡改。&lt;/li&gt;
-&lt;li&gt;可以防止重放攻击。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;part1：请求端加密&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;API 使用者会获取到服务器颁发的 ak 和 sk 两个秘钥，ak 为公钥，sk 为私钥。&lt;/p&gt;
-&lt;p&gt;签名有以下规则：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;约定请求时会携带 ak 作为参数并放入 HTTP Header。&lt;/li&gt;
-&lt;li&gt;请求参数处理：
-&lt;ul&gt;&lt;li&gt;GET：取出所有的参数，并根据 key 进行字典排序，拼装成如下格式。&lt;/li&gt;
-&lt;li&gt;POST：如果是 &lt;code&gt;application/x-www-form-urlencoded&lt;/code&gt;，直接取出和 GET 参数进行排序拼接，如果是 &lt;code&gt;application/json&lt;/code&gt;，则直接将整个 json 串 md5 加密后再 base64。&lt;/li&gt;
-&lt;/ul&gt;&lt;/li&gt;
-&lt;/ol&gt;&lt;pre&gt;
-&lt;code&gt;GET:
-strToSign = uri + &quot;\n&quot; + k1=v1Z&amp;amp;k2=v2&amp;amp;k3=v3
-POST:
-strToSign = uri + &quot;\n&quot; + k1=v1Z&amp;amp;k2=v2&amp;amp;k3=v3 + &quot;\n&quot; + base64(md5(json_body))&lt;/code&gt;
-&lt;/pre&gt;
-&lt;ol&gt;&lt;li&gt;使用 HmacSHA256 算法，传入 sk 进行签名计算，&lt;code&gt;sign = HmacSHA256(K,strToSign)&lt;/code&gt;。&lt;/li&gt;
-&lt;li&gt;组装 HTTP 请求，将 &lt;code&gt;X-Ca-Key=ak,X-Ca-Signature=sign&lt;/code&gt; 添加到 HTTP Header 中进行请求。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;一个简单实例如下图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/697102/201912/697102-20191224200438391-700977733.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;part2：服务端解密&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;同样的，服务端获取到请求的 ak 后，查询出对应的 sk，使用相同的规则进行签名计算，计算出的 sign 和传入的 sign 比对，就能够知道参数是否被篡改。&lt;/p&gt;
-&lt;p&gt;经过这样签名方式后，可以保证上文提到的，校验请求者的合法性和校验参数的完整性和是否被篡改。但是如果有人施加一个中间人攻击，就可以获取到请求报文，即便攻击者无法破译出签名规则，也可以将请求重放，也就是原封不动提交给服务器，那么如果发起恶意大规模攻击，就会使服务器产生拒绝服务。&lt;/p&gt;
-&lt;h3 id=&quot;更进一步&quot;&gt;更进一步&lt;/h3&gt;
-&lt;p&gt;如果需要的安全性更高，可以采用 timestamp 和 nonce 来解决这个问题。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;timestamp：很好理解，调用者传入，服务端判断，一段时间失效。&lt;/li&gt;
-&lt;li&gt;nonce：在信息安全中，nonce 是一个在加密通信只能使用一次的数字。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;单一使用 timestamp，可以一定程度上减少重放攻击的频率，但是无法完全遏制。&lt;/p&gt;
-&lt;p&gt;单一使用 nonce，咋一眼看可以保证请求的唯一性，但实际上服务端，随着时间推移服务端无法存储大量的 nonce，需要进入淘汰环节，一旦旧的 nonce 被淘汰，那么攻击者依旧可以卷土重来进行重放攻击。&lt;/p&gt;
-&lt;p&gt;因此，将两者结合一起来就是最终的方案，服务端首先验证 nonce 是否存在，再校验时间戳是否在规定的期限内。如果旧 nonce 被清理，也有时间戳进行把关，使得请求无法被重放。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;part1：请求端生成 timestamp 和 nonce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;生成时需要保证短时间内生成 nonce 的唯一性。&lt;/p&gt;
-&lt;p&gt;将 timestamp 和 nonce 写入 HTTP Header 中。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;part2：服务端校验&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;数据库查询请求带上的 nonce 是否存在（推荐使用Redis，自带TTL功能）。&lt;/li&gt;
-&lt;li&gt;如果不存在，且请求时间有效则为合法请求，同时将 nonce 写入，并记录时间；如果不存在，且请求时间超出规定时限，判断为恶意请求。&lt;/li&gt;
-&lt;li&gt;如果已经存在，判断为恶意请求。&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;做足以上这几部基本上已经可以保证一定的安全性。当然还有更复杂的，可以阅读阿里的 &lt;a href=&quot;https://help.aliyun.com/document_detail/29475.html?spm=a2c4g.11186623.2.13.2aa44ae01LxLfD&quot;&gt;Open API 签名文档&lt;/a&gt;，根据项目自身对于安全性的需求可以适当进行简化。本文讲到的基本逻辑就是根据阿里的来的。&lt;/p&gt;
-&lt;h2 id=&quot;api-签名与-https&quot;&gt;API 签名与 HTTPS&lt;/h2&gt;
-&lt;p&gt;这边还想提一下 HTTPS。之前看到一则知乎上的提问：&lt;a href=&quot;https://www.zhihu.com/question/52392988&quot;&gt;使用了 https 后，还有必要对数据进行签名来确保数据没有被篡改吗？&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;总结一下就是：&lt;/p&gt;
-&lt;ul readability=&quot;-0.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;API 签名保证的是应用的数据安全和防篡改，并且可以作为业务的参数校验和处理重放攻击。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;HTTPS 保证的是运输层的加密传输，但是无法防御重放攻击。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;换句话说，HTTPS 保证通过中间人攻击抓到的报文是密文，无法很难破解。但仍然可以将报文重发，形成 DDOS。同时，如果不签名，只用 HTTP 简单认证，通过抓包，直接可以获取到 Authorization，就可以随意发起请求了。因此最安全的方法就是结合 HTTPS 和 API 签名。&lt;/p&gt;
-&lt;h2 id=&quot;总结&quot;&gt;总结&lt;/h2&gt;
-&lt;p&gt;本文主要介绍了当前主流 API 签名方式，可以根据项目场景去挑选组合合适的方案。&lt;/p&gt;
-&lt;p&gt;博客还附带实现了一个根据上文规则描述的工具类，可以用于API签名，可见下面源码链接。如果需要使用 timestamp 和 nonce 的可在此基础上将这两个字段添加到 sortedMap 中一起拼接，并集成Redis。&lt;/p&gt;
-
-&lt;h2 id=&quot;参考文献&quot;&gt;参考文献&lt;/h2&gt;
-</description>
-<pubDate>Wed, 25 Dec 2019 00:38:00 +0000</pubDate>
-<dc:creator>Fururur</dc:creator>
-<og:description>前言 现在越来越多的公司以 API 的形式对外提供服务，这些 API 接口大多暴露在公网上，所以安全性就变的很重要了。最直接的风险如下： 非法使用 API 服务。（收费接口非法调用） 恶意攻击和破坏。</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/Sinte-Beuve/p/12093307.html</dc:identifier>
+<title>小白学 Python 爬虫（27）：自动化测试框架 Selenium 从入门到放弃（上） - 极客挖掘机</title>
+<link>http://www.cnblogs.com/babycomeon/p/12100183.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/babycomeon/p/12100183.html</guid>
+<description>[unable to retrieve full-text content]人生苦短，我用 Python 前文传送门： &quot;小白学 Python 爬虫（1）：开篇&quot; &quot;小白学 Python 爬虫（2）：前置准备（一）基本类库的安装&quot; &quot;小白学 Python 爬虫（3）：前置准备（二）Linux基础入门&quot; &quot;小白学 Python 爬虫（4）：前置准备（三）Docker基础入门&quot;</description>
+<pubDate>Thu, 26 Dec 2019 00:45:00 +0000</pubDate>
+<dc:creator>极客挖掘机</dc:creator>
+<dc:identifier>http://www.cnblogs.com/babycomeon/p/12100183.html</dc:identifier>
 </item>
 <item>
-<title>TypeScript躬行记（5）——类型兼容性 - 咖啡机（K.F.J）</title>
-<link>http://www.cnblogs.com/strick/p/11726848.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/strick/p/11726848.html</guid>
-<description>&lt;p&gt;　　TypeScript是一种基于结构类型的语言，可根据其成员来描述类型。以结构相同的Person接口和Programmer类为例，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;interface&lt;/span&gt;&lt;span&gt; Person {
-  name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-}
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Programmer {
-  name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-}
-let person: Person &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; Programmer();
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　由于结构类型的关系，因此当变量声明为Person类型时，可通过Programmer类实例化。由此可知，结构类型只关注类型的组成结构，而名称并不重要。&lt;/p&gt;
+<title>如何把单体式应用拆解成微服务？【下】 - IT老兵哥</title>
+<link>http://www.cnblogs.com/itlaobingge/p/12100154.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/itlaobingge/p/12100154.html</guid>
+<description>&lt;p class=&quot;p1&quot;&gt;&lt;span&gt;&lt;strong&gt;热评博文：&lt;/strong&gt;&lt;/span&gt;《&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12089657.html&quot;&gt;如何设计出优美的Web API？&lt;/a&gt;》，现阅读量超 2300，小伙伴们不要错过哦！&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt; &lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;紧接昨天的上篇《&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12095774.html&quot;&gt;如何把单体式应用拆解成微服务？【上】&lt;/a&gt;》，今天我们一起来看看具体的拆解场景：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;场景1：数据库表外键引用关系&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;如果单体式应用中两个功能模块存在数据引用关系，那我们在拆解微服务时如何消除这种外键引用关系呢？首先，停⽌外键引⽤；然后，改成通过RESTful HTTP API⽅式获取原先外键关联的信息。如下图，改造前Payment数据库表中的记录通过外键引用Order，代码层面通常会借助对象关系映射（ORM）框架建立数据对象的关联，改造后代码层面就不能通过ORM框架做关联了。在Payment数据库表的记录中会保存Order的主键值，除此之外还会保存Order的关键属性信息，这样可以避免频繁的跨进程调用，从而可以提高系统的整体效率表现。&lt;/p&gt;
+&lt;p&gt;下图是改造前的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-04.jpeg&quot; alt=&quot;改造前&quot; width=&quot;558&quot; height=&quot;341&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;下图是改造后的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-05.jpeg&quot; alt=&quot;改造后&quot; width=&quot;558&quot; height=&quot;347&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;场景2：共享静态数据关系&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;如果单体式应用中两个功能模块彼此共享静态数据，那我们在拆解微服务时如何消除这种共享关系呢？静态数据通常存储在数据库当中，例如：商品类目代号。如果这些静态数据需要更新，那我们就需要频繁地发布系统，这样会导致多个服务的中断。&lt;/p&gt;
+&lt;p&gt;为了避免这个问题，我们也可以将这些静态数据拷贝多份，分别⽤于每个服务，但维护多份数据拷⻉的一致性是个问题。另外，我们也可以将这些静态数据存⼊每个服务的配置文件，降低更新数据的难度。统一配置中心，微服务架构中的必选组件，我们可以通过它来管理这些静态数据，这样在维护更新上会带来极大的便利。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;场景3：共享基础数据关系&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;如果单体式应用中两个功能模块共享某类基础数据，那我们在拆解微服务时如何消除这种共享关系呢？多个服务共享某类基础数据，例如：用户数据、物流公司数据等等，那我们要为这类数据提炼出专门的领域模型，将它封装成微服务，然后通过该服务来访问这些共享的基础数据。服务化带来的好处就是彼此之间仅仅依赖服务契约，双方具体采用什么技术和方案都是自由的。只要服务契约没有改变，那彼此的升级改造就不会影响。&lt;/p&gt;
+&lt;p&gt;下图是改造前的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-06.jpeg&quot; alt=&quot;改造前&quot; width=&quot;551&quot; height=&quot;335&quot;/&gt;&lt;br/&gt;下图是改造后的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-07.jpeg&quot; alt=&quot;改造后&quot; width=&quot;561&quot; height=&quot;461&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;场景4：共享数据库表格&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;如果单体式应用中两个功能模块共享一张数据表格，那我们在拆解微服务时如何消除这种共享关系呢？多个服务各自引⽤的数据被合并存储在一张数据库表当中，代码层面借助ORM框架实现多态，这种情况我们需要将每个服务所关注的数据剥离出来，分别存到不同的表格当中。&lt;/p&gt;
+&lt;p&gt;下图是改造前的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-08.jpeg&quot; alt=&quot;改造前&quot; width=&quot;559&quot; height=&quot;348&quot;/&gt;&lt;br/&gt;下图是改造后的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-09.jpeg&quot; alt=&quot;改造后&quot; width=&quot;558&quot; height=&quot;355&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;场景4：共享数据库&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;在拆解微服务过程中，我们该如何拆分数据库呢？最稳妥的方案就是分阶段重构数据库，数据是最宝贵的资源，我们不要贪图一步到位。&lt;/p&gt;
+&lt;p&gt;下图是改造前的情况：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-10.jpeg&quot; alt=&quot;改造前&quot; width=&quot;561&quot; height=&quot;376&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;第一步，按照业务上下文先将一个数据库拆解成两个数据库，但应用仍然是单体式应用，通过多数据源相关技术应用可以同时访问两个数据库，如下图所示：&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-11.jpeg&quot; alt=&quot;第一步&quot; width=&quot;557&quot; height=&quot;382&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;第二步，将单体式应用拆解成微服务，每个微服务都有各自独立的数据库，如下图所示：&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;&lt;img src=&quot;http://q2zx8rp1q.bkt.clouddn.com/microservice-refactoring-12.jpeg&quot; alt=&quot;第二步&quot; width=&quot;551&quot; height=&quot;368&quot;/&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;旧模块微服务改造优先级原则&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;从单体式应用中划分出有界的上下文，作为剥离微服务的候选，然后开始依次重构每个功能模块。那如何判断哪些模块应该优先被剥离成微服务呢？从模块剥离难度看，我们可以遵循先易后难的原则，逐步积累重构经验，这适用于在微服务构建方面经验不太丰富的团队；从需求变化频率看，优先剥离那些变更频繁的模块，整体收益会更大一些，这对于人力资源较为紧张的团队不失为一个好的判断准则；从资源消耗类型看，那些计算或内存密集的模块适合优先剥离，这样有利于弹性伸缩时提升资源利用效率，这对系统规模较大的场景效果最明显；从服务边界粒度看，粒度越粗越好剥离。具体按哪个规则来安排微服务的改造顺序，这就要根据每个团队的具体情况来具体分析了。&lt;/p&gt;
+&lt;p&gt;我们在支持不同系统实施微服务改造的过程中，上述优先级原则都被采用过，优先级存在的原因就是资源不够。微服务改造不是一蹴而就的事情，这个过程会持续很长时间，可能跨度几年，在不同阶段需要考虑的问题也就不同，最核心的原则就是按照适合自己的节奏有条不紊地开展工作，在确保线上业务稳定的前提下适当地追求速度。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;&lt;span&gt;微服务改造是否结束判断标准&lt;/span&gt;&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;那什么时候才算完成微服务改造呢？判断标准就是旧系统中全部有界上下文都被剥离成微服务，此时反腐层就可以被废除了；或者遗留的单体式应用相对较稳定，不再发生变化，重构的投入产出比不再划算；或者遗留的单体式应用关联业务已经退出市场了，系统下线了。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;&lt;strong&gt;微服务架构新挑战与解决方案&lt;/strong&gt;&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;当单体式应用被拆解成多个微服务之后，原先在一个事务边界内的操作现在要跨多个事务边界了，我们如何保证事务的一致性呢？下面是一些分布式事务机制：&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;再次尝试，最终一致：将每个操作步骤放⼊队列排队，后续再次尝试，确保最后执行成功，状态达成⼀致。&lt;/li&gt;
+&lt;li&gt;撤销全部操作：补偿事务机制，原事务操作失败之后，启动一个新的事务去撤销之前的操作。如果补偿事务也失败了，那系统需要提供手动或自动再次运⾏补偿事务的功能。&lt;/li&gt;
+&lt;li&gt;分布式事务：通过一个全局事务管理器来协调各个事务得以成功执行。对于短期事务，通常采用两阶段提交（Two-Phase Commit），第一阶段是投票阶段，分布式事务的参与者告诉事务管理器，判断本地事务是否可以顺利执行。如果事务管理器收集到所有投票结果都是YES，那就开始提交事务执行。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;分布式事务机制本身不算太复杂，我们借鉴业界的一些开源产品自研了一套分布式事务框架，跟微服务框架结合起来，应用开发者只需要按照框架的约定实现特定的接口，通过一些注解就可以发起分布式事务，相关细节可以参考阿里的全局事务服务GTS。&lt;/p&gt;
+&lt;p&gt;当单体式应用被拆解成多个微服务之后，原先集中存储的数据也被分开存储了，报表生成将会遇到新的挑战。在单体式应⽤情况下，通常有一个用于生成报表的从库，从主库同步数据，仅⽤于查询等读操作，避免⽣成报表过程影响主库的读写效率。在微服务情况下，我们将要通过服务调用来获取数据，设计适合报表统计的批量接口，以及增加缓存用于提升数据获取效率。&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;数据抽取：通过服务调⽤来获取报表所需数据，这会造成非常⼤的负载，以及专⻔为报表设计的API。为了弥补上述不足，我们可以将数据抽取程序独立出来，专门从业务数据库中抽取数据到报表数据库。&lt;/li&gt;
+&lt;li&gt;事件驱动数据抽取：基于事件驱动的微服务架构，我们可以开发特定事件的订阅者，负责将数据同步到报表数据库，这样可以解耦底层数据库系统。&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;微服务改造是一个长期过程，这个过程会遇到各式各样的问题，方法论可以帮助我们更好地解决这些问题，并且降低风险。欢迎大家一起探讨微服务改造过程中遇到的任何问题！&lt;/p&gt;
+&lt;p class=&quot;p1&quot;&gt;今天先分享到这里，如果你觉得有价值，麻烦动动手指点下文 「&lt;span&gt; &lt;strong&gt;推荐&lt;/strong&gt; &lt;/span&gt;」按钮，让更多小伙伴可以看到，我也会更加有动力坚持分享。另外，老兵哥我后续还会分享职业规划、应聘面试、技能提升、影响力打造等经验，欢迎 &lt;strong&gt;&lt;span&gt;关注&lt;/span&gt; &lt;/strong&gt;本专栏或歪信公主号 「 &lt;strong&gt;&lt;span&gt;IT老兵哥&lt;/span&gt; 」&lt;/strong&gt;！&lt;/p&gt;
+&lt;p&gt;&lt;img title=&quot;关注「 IT老兵哥 」，赋能程序人生！&quot; src=&quot;http://q2zx8rp1q.bkt.clouddn.com/itlaobingge-weixin-mp.jpeg&quot; alt=&quot;微信公众号「 IT老兵哥 」&quot; width=&quot;674&quot; height=&quot;288&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;关注「 &lt;span&gt;&lt;strong&gt;IT老兵哥&lt;/strong&gt;&lt;/span&gt; 」，赋能程序人生！&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;软技能-热点文章：&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11985486.html&quot;&gt;“花式”裁员套路深，你知道吗？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12037268.html&quot;&gt;遭遇裁员，如何渡过心理危机？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12083665.html&quot;&gt;如何在寒冬中找到好工作？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928497.html&quot;&gt;2C 还是 2B，跟找工作有什么关系？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928530.html&quot;&gt;大公司 vs 小公司，你会选哪个？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928607.html&quot;&gt;记住这一点，不怕找不到好工作！&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928713.html&quot;&gt;跳槽，跳还是不跳，该怎么跳？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928758.html&quot;&gt;程序员“求包养”攻略揭秘&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928879.html&quot;&gt;很努力了，为什么我还在原地踏步？&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;ul&gt;&lt;li&gt;&lt;strong&gt;硬技能-热点文章：&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://www.cnblogs.com/itlaobingge/p/12089657.html&quot; target=&quot;_blank&quot;&gt;如何设计出优美的Web API？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11928564.html&quot;&gt;程序员必须懂的架构入门课&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11947473.html&quot;&gt;从程序员到架构师，有捷径吗？&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11962255.html&quot;&gt;图解 Spring：HTTP 请求的处理流程与机制【1】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11963286.html&quot;&gt;图解 Spring：HTTP 请求的处理流程与机制【2】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11963311.html&quot;&gt;图解 Spring：HTTP 请求的处理流程与机制【3】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11963351.html&quot;&gt;图解 Spring：HTTP 请求的处理流程与机制【4】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11963380.html&quot;&gt;图解 Spring：HTTP 请求的处理流程与机制【5】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11987672.html&quot;&gt;如何正确使用 Spring Cloud？【上】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11987713.html&quot;&gt;如何正确使用 Spring Cloud？【中】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/11987739.html&quot;&gt;如何正确使用 Spring Cloud？【下】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12005284.html&quot;&gt;Spring 核心技术与产品理念剖析【上】&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/itlaobingge/p/12005510.html&quot;&gt;Spring 核心技术与产品理念剖析【下】&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;</description>
+<pubDate>Thu, 26 Dec 2019 00:32:00 +0000</pubDate>
+<dc:creator>IT老兵哥</dc:creator>
+<og:description>微服务改造是一个长期过程，这个过程会遇到各式各样的问题，方法论可以帮助我们更好地解决这些问题，并且降低风险。紧接昨天的上篇《如何把单体式应用拆解成微服务？【上】》，今天我们一起来看看具体的拆解场景。</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.cnblogs.com/itlaobingge/p/12100154.html</dc:identifier>
+</item>
+<item>
+<title>关于C#异步编程你应该了解的几点建议 - 依乐祝</title>
+<link>http://www.cnblogs.com/yilezhu/p/12099219.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yilezhu/p/12099219.html</guid>
+<description>[unable to retrieve full-text content]前段时间写了一篇关于C 异步编程入门的文章，你可以点击《 &quot;C 异步编程入门看这篇就够了&quot; 》查看。这篇文章我们来讨论下关于C 异步编程几个不成文的建议，希望对你写出高性能的异步编程代码有所帮助。注：本文的很多内容都是学习《Effective C 》的总结。 作者：依乐祝 原文地址：https://</description>
+<pubDate>Thu, 26 Dec 2019 00:06:00 +0000</pubDate>
+<dc:creator>依乐祝</dc:creator>
+<dc:identifier>https://www.cnblogs.com/yilezhu/p/12099219.html</dc:identifier>
+</item>
+<item>
+<title>Spring中如何使用工厂模式实现程序解耦？ - 宜春</title>
+<link>http://www.cnblogs.com/yichunguo/p/12093138.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/yichunguo/p/12093138.html</guid>
+<description>&lt;p&gt;@&lt;/p&gt;
+&lt;h2 id=&quot;啥是耦合解耦&quot;&gt;1、 啥是耦合、解耦？&lt;/h2&gt;
+&lt;p&gt;既然是程序解耦，那我们必须要先知道啥是耦合，耦合简单来说就是程序的依赖关系，而依赖关系则主要包括&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;1、 类之间的依赖&lt;br/&gt;2、 方法间的依赖&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;比如下面这段代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;  public class A{
+        public int i;
+    }
 
-&lt;p&gt;　　在判断两个函数的兼容性时，需要考虑参数数量、返回值类型等多个方面。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;1）参数数量&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　假设有两个函数add()和sum()，它们的参数数量不同，后者比前者多一个参数，而函数的返回值类型相同，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-let add = (x: number) =&amp;gt; 0&lt;span&gt;;
-let sum &lt;/span&gt;= (y: number, z: number) =&amp;gt; 0;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　当把add赋给sum时，编译能成功执行；而反之，则会报错，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-sum = add;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;正确&lt;/span&gt;
-add = sum;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　由此可知，参数少的函数不能赋给参数多的；而反过来时，需要确保每个位置所对应的参数类型保持一致，不过参数名称可以不同。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;2）返回值类型&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　假设有两个函数add()和sum()，它们没有参数，后者的返回值比前者多一个属性，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-let add = () =&amp;gt; ({ x: 1&lt;span&gt; });
-let sum &lt;/span&gt;= () =&amp;gt; ({ x: 1, y: 2});
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　当把sum赋给add时，编译能成功执行；而反之，则会报错，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-add = sum;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;正确&lt;/span&gt;
-sum = add;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　由此可知，源函数的返回值类型得是目标函数返回值的子类型。&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;3）参数类型&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　TypeScript中的参数类型需要同时满足协变和逆变，即双向协变。协变比较好理解，是指子类型兼容父类型，而逆变正好与协变相反。在下面的示例中，定义了父类Person和子类Programmer，Programmer类覆盖了Person类中的work()方法，并且其参数类型声明的更加宽泛。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person {
-  work(msg: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; |&lt;span&gt; undefined) { }
-}
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Programmer extends Person {
-  work(msg: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;) { }
-}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　接下来声明两个函数，它们的参数类型分别是Person和Programmer两个类，如下所示，其中person()函数是programmer()函数的子类型。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-let person = (x: Person) =&amp;gt; 0&lt;span&gt;;
-let programmer &lt;/span&gt;= (x: Programmer) =&amp;gt; 0;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　由于参数类型是双向协变的，因此两个变量之间可相互赋值，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-person =&lt;span&gt; programmer;
-programmer &lt;/span&gt;= person;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;4）可选参数和剩余参数&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　在比较函数的兼容性时，不需要匹配可选参数。以下面的pls()和add()两个函数为例，pls()中的两个参数必传，而add()中的第二个参数是可选的。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-let pls = (x: number, y: number) =&amp;gt; 0&lt;span&gt;;
-let add &lt;/span&gt;= (x: number, y?: number) =&amp;gt; 0&lt;span&gt;;
-pls &lt;/span&gt;=&lt;span&gt; add;
-add &lt;/span&gt;= pls;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　虽然参数不同，但是两个函数仍然是兼容的，并且可以相互赋值。剩余参数相当于无限个可选参数，也不会被匹配。下面示例中的sum()函数只声明了剩余参数，它与pls()和add()两个函数都是兼容的。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-let sum = (...args: number[]) =&amp;gt; 0&lt;span&gt;;
-pls &lt;/span&gt;=&lt;span&gt; sum;
-sum &lt;/span&gt;=&lt;span&gt; pls;
+    public class B{
+        public void put(A a){
+            System.out.println(a.i);
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;上面这个例子中A类和B类之间存在一种强耦合关系，&lt;code&gt;B&lt;/code&gt;类直接依赖&lt;code&gt;A&lt;/code&gt;类，&lt;code&gt;B&lt;/code&gt;类的&lt;code&gt;put&lt;/code&gt;方法非&lt;code&gt;A&lt;/code&gt;类类型不可，我们把这种情况叫做强耦合关系。&lt;/p&gt;
+&lt;p&gt;实际开发中应该做到：&lt;span&gt;&lt;strong&gt;编译期不依赖，运行时才依赖。&lt;/strong&gt;&lt;/span&gt;怎么理解呢？我们很容易想到&lt;span&gt;&lt;strong&gt;多态向上转型&lt;/strong&gt;&lt;/span&gt;，是的，编译时不确定，运行时才确定,当然接触面更广一点的童鞋会想到&lt;span&gt;&lt;strong&gt;接口回调&lt;/strong&gt;&lt;/span&gt;，是的接口回调方式也能有效的解耦！如下代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;//一个接口叫做Inter，里面定义了一个happy（）方法，有两个类A、B实现了这个接口
 
-add &lt;/span&gt;=&lt;span&gt; sum;
-sum &lt;/span&gt;= add;
+interface Inter{
+    void happy();
+}
+
+class A implements Inter{
+
+    @Override
+    public void happy() {
+        System.out.println(&quot;happy...A&quot;);
+    }
+}
+
+class B implements Inter{
+
+    @Override
+    public void happy() {
+        System.out.println(&quot;happy...B&quot;);
+    }
+}
+
+public class Test{
+    public void happys(Inter inter){
+        inter.happy();
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;是的，如上代码正是典型的接口回调，&lt;code&gt;Test&lt;/code&gt;类中的&lt;code&gt;happys&lt;/code&gt;方法参数变的相对灵活起来，代码中&lt;code&gt;Test类&lt;/code&gt;与&lt;code&gt;A类&lt;/code&gt;、&lt;code&gt;B类&lt;/code&gt;之间就存在一种弱耦合关系，&lt;code&gt;Test类&lt;/code&gt;的&lt;code&gt;happys&lt;/code&gt;方法的参数可以使&lt;code&gt;A类&lt;/code&gt;类型也可以是&lt;code&gt;B类&lt;/code&gt;类型，不像强耦合关系中非&lt;code&gt;A类&lt;/code&gt;类型不可的情形。&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;&lt;strong&gt;从某一意义上来讲使用类的向上转型或接口回调的方式进行解耦都是利用多态的思想！&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;当然解耦的方式还有很多，从根本意义上讲实现低耦合就是对两类之间进行解耦，解除类之间的直接关系，将直接关系转换成间接关系，从而也有很多设计模式也对程序进行解耦，比如：适配器模式、观察者模式、工厂模式....总之，必须明确一点：耦合性强的程序独立性很差！&lt;/p&gt;
+&lt;h2 id=&quot;jdbc程序进行解耦&quot;&gt;2、 jdbc程序进行解耦&lt;/h2&gt;
+&lt;p&gt;先来看一段代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;//1、注册驱动
+DriverManager.registerDriver(new com.mysql.jdbc.Driver()); //如果把jdbc的MySQLjar包依赖去除直接编译失败提示没有mysql    
+//2、获取连接
+Connection conn=DriverManager.getConnection(&quot;jdbc:mysql://localhost:3306/ufida&quot;,&quot;root&quot;,&quot;root&quot;);
+//3、获取操作数据库的预处理对象
+PreparedStatement pstm=conn.prepareStatement(&quot;select * from client&quot;);
+//4、执行SQL，得到结果集
+ResultSet rs=pstm.executeQuery();
+//5\遍历结果集
+while(rs.next()){
+    System.out.println(rs.getString(&quot;name&quot;));
+}
+//6、释放资源
+rs.close();
+pstm.close();
+conn.close();&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;等等等等，好熟悉好怀念的代码.....&lt;/p&gt;
+&lt;p&gt;没错就是jdbc的代码，不是用来怀旧的，而是如果这样设计，你会觉得这样的程序耦合性如何？又如何进行解耦？先仔细思考一番。&lt;/p&gt;
+&lt;p&gt;一分钟过去了.....&lt;br/&gt;两分钟过去了.....&lt;/p&gt;
+&lt;p&gt;好了，我们都知道jdbc连接MySQL需要一个&lt;code&gt;mysql-connector&lt;/code&gt;的jar包，如果我们把这个jar包依赖或者这个jar包给去掉，显然上面的这个程序会编译报错，如下图&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20191224153407666.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzQ0NTQzNTA4,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;br/&gt;显然这样的程序耦合性过高！于是我们可以这样设计，将第一步的注册驱动代码new的方式改成反射的方式如下：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt; //1、new的方式注册驱动
+DriverManager.registerDriver(new com.mysql.jdbc.Driver()); //如果把jdbc的MySQLjar包依赖去除直接编译失败提示没有mysql相关的jar包
+
+改为如下方式
+
+ //2、反射的方式注册驱动
+Class.forName(&quot;com.mysql.jdbc.Driver&quot;); //改用这种方式注册驱动会发现不会编译失败，相比上面的方式相对解耦，但是依然存在缺陷：若连接改为Oracle数据库，这里的字符串又要进行改动！&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;正如注释的解释一样，又一个缺陷就浮现了：若连接改为Oracle数据库，这里的字符串又要进行改动！&lt;/p&gt;
+&lt;p&gt;于是对于这个jdbc程序来说就有这样的一个解耦思路：&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;第一步：通过反射来创建对象，尽量避免使用new关键字&lt;br/&gt;第二步：通过读取配置文件来获取创建的对象全限定类名&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h2 id=&quot;传统daoservicecontroller的程序耦合性&quot;&gt;3、传统dao、service、controller的程序耦合性&lt;/h2&gt;
+&lt;p&gt;顺着jdbc程序的解耦思路，我们再来看看传统dao、service、controller的程序耦合性分析&lt;/p&gt;
+&lt;p&gt;由于只是一个demo，省去dao层的操作.....&lt;/p&gt;
+&lt;p&gt;定义一个Service接口&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public interface IAccountOldService{
+    public void save();
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Service接口实现类&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceOldImpl implements IAccountOldService{
+
+    @Override
+    public void save() {
+        System.out.println(&quot;save成功一个账户....&quot;);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;controller代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountCencollertOld {
+    public static void main(String[] args) {
+        IAccountOldService iaccount=new AccountServiceOldImpl (); 
+        iaccount.save();  //运行结果：save成功一个账户....
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;到这里，有何想法？表面上来看是没有一点问题的，So Beautiful，但仔细的看。表现层与业务层、业务层与持久层紧紧的互相依赖关联，这与我们开发程序的高内聚低耦合原则相违背,哦My God,So Bad！我们顺着jdbc程序的解耦思路，我们应该尽量避免使用new关键字，我们发现这些层里面service层new 持久层dao，controller表现层new 业务层service....太糟糕了&lt;/p&gt;
+&lt;p&gt;那么对此，你有何解耦思路？&lt;/p&gt;
+&lt;h2 id=&quot;使用工厂模式实现解耦&quot;&gt;4、使用工厂模式实现解耦&lt;/h2&gt;
+&lt;p&gt;别想了，工厂模式实现程序解耦你值得拥有！顺着jdbc程序的解耦思路：&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;1、通过读取配置文件来获取创建的对象全限定类名&lt;br/&gt;2、通过反射来创建对象，尽量避免使用new关键字&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;首先在resources目录下中写一个bean.properties配置类，具体内容如下&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;accountServiceOld=com.factory.service.impl.AccountServiceOldImpl&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;接着使用工厂方法代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;/**
+ * 一个创建Bean对象的工厂
+ *
+ *    1、需要一个配置文件来配置我们的service和dao    配置文件的内容：唯一标识=全限定类名（key-value）
+ *    2、通过读取配置文件中配置的内容，反射创建对象
+ *
+ *    场景：主要是service调用dao，controller调用service的程序。这里面耦合性非常的高，互相new互相依赖
+ *
+ *    为了解耦，利用工厂模式进行
+ */
+ public class BeanFactoryOld {
+    private static Properties props;
+
+    static{
+        try {
+            //实例化对象
+            props = new Properties();
+
+            //获取properties文件的流对象
+            InputStream in = BeanFactory.class.getClassLoader().getResourceAsStream(&quot;bean.properties&quot;);
+            props.load(in);//加载其对应路径下的配置文件
+
+        }catch (Exception e){
+            throw new ExceptionInInitializerError(&quot;初始化properties失败！&quot;);
+        }
+    }
+
+    //根据bean的名称获取bean对象
+    public static Object getBean(String beanName){
+        Object bean=null;
+        try {
+        String beanPath= props.getProperty(beanName);
+        bean = Class.forName(beanPath).newInstance();   //这里的newInstance创建实例（默认无参构造器）每次执行都需要创建一次
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return bean;
+    }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;此时，controller的代码就可以编写为&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;/**
+ * 这里模拟一个controller调用service
+ *
+ */
+public class AccountCencollertOld {
+    public static void main(String[] args) {
+   //    IAccountOldService iaccount=new AccountServiceOldImpl ();  //使用工厂方法不再通过new方式
+
+        IAccountOldService iaccount= (IAccountOldService) BeanFactoryOld.getBean(&quot;accountServiceOld&quot;);
+        iaccount.save(); //运行结果：save成功一个账户....   说明成功调用了service
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;通过运行结果，属实没毛病，成功降低程序耦合！So Beautiful！先高兴一会吧，因为马上出现.....但是，随之而来的问题又出现了，我们对这个controller进行一下改写&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;for(int i=0;i&amp;lt;5;i++){
+        IAccountOldService iaccount= (IAccountOldService) BeanFactoryOld.getBean(&quot;accountServiceOld&quot;);
+        iaccount.save(); 
+     }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;打印结果：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+com.factory.service.impl.AccountServiceImpl@677327b6
+save成功一个账户....
+com.factory.service.impl.AccountServiceImpl@14ae5a5
+save成功一个账户....
+com.factory.service.impl.AccountServiceImpl@7f31245a
+save成功一个账户....
+com.factory.service.impl.AccountServiceImpl@6d6f6e28
+save成功一个账户....&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;打印的是五个不同的对象，说明是多例的，每次调用getBean的时候都会newInstance出一个新对象，如下&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/2019122417054712.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzQ0NTQzNTA4,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;br/&gt;多例每次都要创建对象，资源浪费、效率低下&lt;/p&gt;
+&lt;p&gt;针对单例多例情况，我们再对service业务层代码进行修改：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceImpl implements IAccountService {
+    //定义类成员
+    private int i=1; 
+
+    @Override
+    public void save() {
+        System.out.println(&quot;save成功一个账户....&quot;);
+        System.out.println(i);
+        i++;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;运行controller代码，运行结果&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;why？多例因为每次都是新的对象，上面也验证过了，因此每次创建新对象都会初始化一次，重新赋值，所以都是1，如果我们把类成员改为局部成员变量如下&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceOldImpl implements IAccountOldService {
+
+//    private int i=1; 
+    @Override
+    public void save() {
+        int i=1;   //改为局部变量
+        System.out.println(&quot;save成功一个账户....&quot;);
+        System.out.println(i);
+        i++;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;不用猜，运行结果同样是1。算了还是运行一下吧哈哈哈&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1
+save成功一个账户....
+1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;说了这么多，通过观察service和dao之间单不单例好像无所谓，因为他们之间并没有业务方法中改变的类成员，所以并不需要多例来保证线程安全。那说这些有何意义？不要忘了，由于使用了工厂改进如下中的.&lt;code&gt;newInstance&lt;/code&gt;创建实例（默认无参构造器）每次执行都需要创建一次，这样就不好了（浪费资源），因此我们要设计出只&lt;code&gt;newInstance&lt;/code&gt;创建一次实例就很完美了，这也是我为啥要在&lt;code&gt;service&lt;/code&gt;和&lt;code&gt;controller&lt;/code&gt;中都添加一个&lt;code&gt;Old&lt;/code&gt;关键字的原因了，接下来我们来看看工厂是如何改进的！&lt;/p&gt;
+&lt;h2 id=&quot;工厂模式改进&quot;&gt;5、工厂模式改进&lt;/h2&gt;
+&lt;p&gt;为了不被搞晕，我们重新写代码，也就是重头开始写代码~其实就是把Old去掉~&lt;/p&gt;
+&lt;p&gt;由于只是一个demo，省去dao层的操作.....&lt;/p&gt;
+&lt;p&gt;定义一个Service接口&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public interface IAccountService {
+    public void save();
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Service接口实现类&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceImpl implements IAccountService{
+
+    @Override
+    public void save() {
+        System.out.println(&quot;save成功一个账户....&quot;);
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;controller代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;/**
+ * 这里模拟一个controller调用service
+ *
+ */
+public class AccountCencollert {
+    public static void main(String[] args) {
+//        IAccountService iaccount=new AccountServiceImpl(); 
+
+        IAccountService iaccount= (IAccountService) BeanFactory.getBean(&quot;accountService&quot;);
+        iaccount.save(); //运行结果：save成功一个账户....   说明了成功调用了service
+      }
+ }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;改进的工厂方法代码：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class BeanFactory {
+    private static Properties props;
+
+    //定义一个map容器，用于存放创建的对象
+    private static Map&amp;lt;String,Object&amp;gt; beans; //改进的代码============
+
+    static{
+        try {
+            //实例化对象
+            props = new Properties();
+
+            //获取properties文件的流对象
+            InputStream in = BeanFactory.class.getClassLoader().getResourceAsStream(&quot;bean.properties&quot;);
+            props.load(in);//加载其对应路径下的配置文件
+
+            ////////////////////以下是改进的代码=======================
+            //实例化容器
+            beans=new HashMap&amp;lt;String,Object&amp;gt;();
+            //取出配置文件中所有的key值
+            Enumeration&amp;lt;Object&amp;gt; keys = props.keys();
+            //遍历枚举
+            while(keys.hasMoreElements()){
+                //取出每个key
+                String key = keys.nextElement().toString();
+                //根据key取出对应的value  (这里因为每个value值对应着类路径)
+                String beanPath = props.getProperty(key);
+                //反射创建对象
+                Object value = Class.forName(beanPath).newInstance();
+                //把key和value存入容器中
+                beans.put(key,value);
+            }
+        }catch (Exception e){
+            throw new ExceptionInInitializerError(&quot;初始化properties失败！&quot;);
+        }
+    }
+
+
+    //随着代码的改进，我们就可以简化下面的获取bean对象的方法，如下代码
+    /**
+     * 根据bean的名称获取对象（单例）
+     */
+    public static Object getBean(String beanName){
+        //通过Map容器对应key来获取对应对象
+        return beans.get(beanName);    //这里通过Map容器中获取，这样就不会每次都创建一次实例！
+    }
+
+//不再使用下面的方法
+  /*
+    //根据bean的名称获取bean对象
+    public static Object getBean(String beanName){
+        Object bean=null;
+        try {
+        String beanPath= props.getProperty(beanName);
+        bean = Class.forName(beanPath).newInstance();   //这里的newInstance创建实例（默认无参构造器）每次执行都需要创建一次，这样就不好了
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return bean;
+    }*/
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;从上面改进的工厂代码，我们可以发现一开始就定义一个Map容器，用于存放创建的对象，为啥要先定义一个Map容器呢？用一个容器将这个实例装起来，这是由于不把这个对象装存起来的话，这个对象不使用很容易被GC掉，何况我们现在只使用这一个对象！&lt;/p&gt;
+&lt;p&gt;定义一个Map容器存放配置好的文件中的每个对象，之后我们就直接提供一个根据Map的key来取value的getBean方法，这样不仅仅扩展了程序的配置文件的灵活性而且还保证了只产生一个对象，保证资源不浪费，So Beautiful !&lt;/p&gt;
+&lt;p&gt;那如何证明已经是单例的模式了呢？很简单，如下设计一下service业务层、controller表现层代码即可：&lt;/p&gt;
+&lt;p&gt;service业务层：添加一个类成员属性，并在方法内部 i++;&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceImpl implements IAccountService {
+
+    private int i=1; //类成员属性
+
+    @Override
+    public void save() {
+        System.out.println(&quot;save成功一个账户....&quot;);
+        System.out.println(i);
+        i++;//二次改革代码
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;controller表现层: 创建调用工厂5次创建对象的方法&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;/**
+ * 这里模拟一个controller调用service
+ *
+ */
+public class AccountCencollert {
+    public static void main(String[] args) {
+        for(int i=0;i&amp;lt;5;i++){
+            IAccountService iaccount= (IAccountService) BeanFactory.getBean(&quot;accountService&quot;);
+            System.out.println(iaccount);  //打印的是五个不同的对象，说明是多例的
+            iaccount.save();  //会发现打印的i值都是1，并没有自增成功
+        }
+    }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;运行代码结果：&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+2
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+3
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+4
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+5&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;发现，确实5个对象都是同一个，并且出现了改变类成员属性的现象。&lt;/p&gt;
+&lt;p&gt;如果我们把类成员属性改为局部成员属性呢？&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;public class AccountServiceImpl implements IAccountService {
+
+    @Override
+    public void save() {
+        int i=1; //局部成员属性
+        System.out.println(&quot;save成功一个账户....&quot;);
+        System.out.println(i);
+        i++;
+    }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;运行结果&lt;/p&gt;
+&lt;pre class=&quot;javascript&quot;&gt;
+&lt;code&gt;com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1
+com.factory.service.impl.AccountServiceImpl@1540e19d
+save成功一个账户....
+1&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;看到这个结果，我们就能联想到，之前为什么servlet中为啥要避免定义类成员，原因就在这里！多例情况下，就不会出现这种情况！！！！&lt;/p&gt;
+&lt;h2 id=&quot;结语&quot;&gt;6、结语&lt;/h2&gt;
+&lt;p&gt;到这里我们已经基本了解了程序间的耦合与解耦，并且对单例多例也一并进行了进一步的了解。而spring中正是使用工厂模式来实现程序解耦的，spring是一个大工厂, 或许你并没有察觉哈哈哈哈.....&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;如果本文对你有一点点帮助，那么请点个赞呗，你的赞同是我最大的动力，谢谢~&lt;/strong&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;6&quot;&gt;
+&lt;p&gt;&lt;strong&gt;最后，若有不足或者不正之处，欢迎指正批评，感激不尽！如果有疑问欢迎留言，绝对第一时间回复！&lt;/strong&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;欢迎各位关注我的公众号，里面有一些java学习资料和一大波java电子书籍，比如说周志明老师的深入java虚拟机、java编程思想、核心技术卷、大话设计模式、java并发编程实战.....都是java的圣经，不说了快上Tomcat车，咋们走！最主要的是一起探讨技术，向往技术，追求技术，说好了来了就是盆友喔...&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/2019112519430061.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzQ0NTQzNTA4,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
+</description>
+<pubDate>Thu, 26 Dec 2019 00:04:00 +0000</pubDate>
+<dc:creator>宜春</dc:creator>
+<og:description>@[toc] 1、 啥是耦合、解耦？ 既然是程序解耦，那我们必须要先知道啥是耦合，耦合简单来说就是程序的依赖关系，而依赖关系则主要包括 1、 类之间的依赖 2、 方法间的依赖 比如下面这段代码： 上面</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.cnblogs.com/yichunguo/p/12093138.html</dc:identifier>
+</item>
+<item>
+<title>.NET ORM 开源项目 FreeSql 1.0 正式版发布 - nicye</title>
+<link>http://www.cnblogs.com/kellynic/p/12098419.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/kellynic/p/12098419.html</guid>
+<description>[unable to retrieve full-text content]一、简介 FreeSql 是 .NET 平台下的对象关系映射技术(O/RM)，支持 .NetCore 2.1+ 或 .NetFramework 4.0+ 或 Xamarin。 从 0.0.1 发布，历时整整一年的迭代更新，原计划元旦发布1.0，可能作者比较急提前了几天发布。其实是元旦有其他事…… 本</description>
+<pubDate>Wed, 25 Dec 2019 21:53:00 +0000</pubDate>
+<dc:creator>nicye</dc:creator>
+<dc:identifier>http://www.cnblogs.com/kellynic/p/12098419.html</dc:identifier>
+</item>
+<item>
+<title>改善Azure App Service托管应用程序性能的几个技巧 - nodotnet</title>
+<link>http://www.cnblogs.com/JulianHuang/p/12098385.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/JulianHuang/p/12098385.html</guid>
+<description>
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;本文介绍了几个技巧，这些技巧可以改善Azure App Service托管应用程序的性能。其中一些技巧是你现在就可以进行的配置变更，&lt;/p&gt;
+&lt;p&gt;而其他技巧则可能需要对应用程序进行一些重新设计和重构。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;开发者都希望从部署在Azure的App Services中压榨出最佳性能。&lt;br/&gt;更好的性能不仅能够获得更佳的响应体验；而且如果我们在Azure中能“四两拨千斤”，那么性能的提升还可以为我们省钱。&lt;br/&gt;在本文中，我们将研究提高Azure App Services中运行的Web程序性能的设置和策略。&lt;/p&gt;
+&lt;p&gt;下面几个性能提升意见在 App Service 配置界面即可操作，这一组技巧的主题是压榨出App Service本身的性能。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/587720/201912/587720-20191225233849912-341064056.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;1.   启动HTTP/2&lt;/p&gt;
+&lt;p&gt;Microsoft于2018年初宣布在App Services中支持HTTP/2，但到目前为止在Azure中默认创建的App Service还是以HTTP1.1协议工作。HTTP/2对常见的的Web协议进行了重大更改，许多更改旨在提高性能并减少Web上的延迟。例如，HTTP/2中的标头压缩和二进制格式将减少有效负载大小。另外请求管道和多路复用等功能允许使用更少的网络套接字来执行更多并发请求，并有助于避免一个缓慢的请求阻止所有后续请求，这是HTTP 1.1中的常见问题。&lt;/p&gt;
+&lt;p&gt;为你的的App Service启动HTTP/2协议，如上图所示，下拉列表指定HTTP2.0版本后，所有支持HTTP/2的客户端都将自动升级其连接， 不支持HTTP/2的客户端仍然以原有Http1.1 方式交互。&lt;/p&gt;
+&lt;p&gt;HTTP/2不会使每个应用都受益，下面是一个简单的测试以验证HTTP/2的改进：&lt;/p&gt;
+&lt;p&gt;某App Service托管页面引用了脚本、CSS资源、16张图像，每个图像的大小超过200 KB。&lt;/p&gt;
+&lt;p&gt; 使用developer tool记录使用HTTP 1.1在App Service上发生的情况。&lt;/p&gt;
+&lt;p&gt;请注意观察条形红色部分显示了后置请求以阻塞状态开始。这是可怕的“行头阻塞”问题，其中对连接数和并发请求的限制限制了客户端和服务器之间的吞吐量。直到第一个请求开始后800毫秒，客户端才会收到该页面的最终字节。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/587720/201912/587720-20191225183455136-1906000439.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 接下来在App Service中启用了HTTP / 2支持：&lt;/p&gt;
+&lt;p&gt;不需要对客户端或服务器上进行任何其他配置更改，最后一个字节不到500ms到达。由于HTTP/2提高了网络利用率，我们避免了阻塞。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/587720/201912/587720-20191225183519460-886719354.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt;2.  关闭空闲休眠&lt;/p&gt;
+&lt;p&gt;如果你有将应用程序部署到IIS的经历，那么你应该知道IIS在一段时间不活动之后将休眠（这个配置在IIS理默认是20分钟）。&lt;/p&gt;
+&lt;p&gt;Azure App Service延续了这一传统。尽管休眠可为在同一App Service Plan上运行的其他App Service提供资源，但是此策略会损害当前应用程序的性能，因为下一个传入请求将经历Web服务器冷启动的过程：缓存为空、连接池为空，站点预热，所有请求的速度都比正常情况慢。为了防止空闲关闭，您可以在“ App Service配置”刀片中设置“始终开启”标志。&lt;/p&gt;
+
+&lt;p&gt;3. 关闭App Service实例亲和力&lt;/p&gt;
+&lt;p&gt;即使你仅运行App Service Plan的单实例，每个Azure App Service前面都是负载平衡器。负载均衡器会转发请求到App Service实例。&lt;/p&gt;
+&lt;p&gt;因此，当App Service因流量缩放出多实例，负载均衡器使用&lt;a href=&quot;http://www.iis.net/learn/extensions/planning-for-arr&quot;&gt;Application Request Routing&lt;/a&gt;将连接会话分发给实例。&lt;/p&gt;
+&lt;p&gt;因为Azure无法知晓应用程序是不是stateless服务， 故默认的App Service将确保客户端在会话期间访问同一App Service实例。&lt;/p&gt;
+&lt;p&gt;为了实现这种亲和力，负载均衡器会在对客户端的第一个响应中注入&lt;strong&gt;ARRAffinity&lt;/strong&gt;  Cookie。&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/587720/201912/587720-20191226000646433-483118391.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+
+&lt;p&gt; 如果你的应用程序是stateless，并允许负载平衡器在实例之间分配请求，请关闭请求路由cookie，以提高性能和弹性。&lt;/p&gt;
+&lt;p&gt;--------------------------------------------------------------------------------&lt;/p&gt;
+&lt;p&gt;下面的改进需要一些其他网络规划或重组（某些情况下，还需要更改应用程序本身）&lt;/p&gt;
+&lt;p&gt;下一组技巧中的主题是缩短数据在网络上传输的距离&lt;/p&gt;
+&lt;p&gt;如果大多数客户流量都来自世界的特定区域，则将资源放置在离客户最近的Azure区域中是很有意义的。当然，我们许多人的客户分布在世界各地。在这种情况下，您可以考虑跨多个Azure区域进行地理复制，以与每个人保持亲密关系，之后你使用类似Azure Traffic Manager（基于DNS技术的负载均衡器）将你的客户直接路由到 最近的服务实例。&lt;/p&gt;
+&lt;p&gt;脚本、图片、CSS，视频等静态资源是在CDN边缘服务器上缓存的较好选择，一旦缓存，Azure App Service 不需要花费带宽和时间在这些资源上，专注处理动态资源。&lt;/p&gt;
+&lt;blockquote readability=&quot;5&quot;&gt;
+&lt;p&gt;Azure支持CDN边缘服务器的搭建 &lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;回过头来，看以上性能优化建议，第一步还是要评估当前App Service现状和性能，不是每一个策略都对你的App Service 有效。&lt;/p&gt;
+
+</description>
+<pubDate>Wed, 25 Dec 2019 17:26:00 +0000</pubDate>
+<dc:creator>nodotnet</dc:creator>
+<og:description>本文介绍了几个技巧，这些技巧可以改善Azure App Service托管应用程序的性能。其中一些技巧是你现在就可以进行的配置变更， 而其他技巧则可能需要对应用程序进行一些重新设计和重构。 开发者都希</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.cnblogs.com/JulianHuang/p/12098385.html</dc:identifier>
+</item>
+<item>
+<title>我的小小实验室之实现最简单的跳转 - AlfredZhao</title>
+<link>http://www.cnblogs.com/jyzhao/p/12099875.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/jyzhao/p/12099875.html</guid>
+<description>[unable to retrieve full-text content]需求： 由于工作需要，我自己的工作站上搭建有很多套实验环境，而在某种特定场景下，我需要通过默认连接的终端能随时跳转切换到其他环境下临时测试使用，因为只有我自己用，无需引入复杂的跳转机系统，也不需要审计。 环境： 均为Linux服务器 实现： 我想通过最简单的一些运维知识，搭建一套最简易的跳转程序，提</description>
+<pubDate>Wed, 25 Dec 2019 16:58:00 +0000</pubDate>
+<dc:creator>AlfredZhao</dc:creator>
+<dc:identifier>https://www.cnblogs.com/jyzhao/p/12099875.html</dc:identifier>
+</item>
+<item>
+<title>当我有一台服务器时我做了什么 - 山月水风</title>
+<link>http://www.cnblogs.com/xianwang/p/12099871.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/xianwang/p/12099871.html</guid>
+<description>[unable to retrieve full-text content]当一八年末的时候，我写了一篇文章 &quot;当我有一台服务器时我做了什么&quot; 又是年末，我服务器的架构也发生了一些变化，因此总结一番 &lt;! more + 原文地址: &quot;当我有一台服务器时我做了什么&quot; + 系列文章: &quot;当我有一台服务器时我做了什么&quot; 概览 去年服务器有两台，一台 2C4G，一台 1C2G 今年</description>
+<pubDate>Wed, 25 Dec 2019 16:47:00 +0000</pubDate>
+<dc:creator>山月水风</dc:creator>
+<dc:identifier>https://www.cnblogs.com/xianwang/p/12099871.html</dc:identifier>
+</item>
+<item>
+<title>.Net Core 授权系统组件解析 - 郑小超</title>
+<link>http://www.cnblogs.com/GreenLeaves/p/12099760.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/GreenLeaves/p/12099760.html</guid>
+<description>&lt;p&gt;前面关于.Net Core如何进行用户认证的核心流程介绍完毕之后,&lt;a id=&quot;cb_post_title_url&quot; class=&quot;postTitle2&quot; href=&quot;https://www.cnblogs.com/GreenLeaves/p/12093972.html&quot;&gt;.Net Core 认证系统之Cookie认证源码解析&lt;/a&gt;远程认证暂时不介绍,后期有时间,我会加上.接下去介绍认证组件是如何和认证组件一起协同工作.源码的路径如下,自行去github下载.ok,开始!&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225214905432-99764288.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;1、认证组件的执行流程&lt;/p&gt;
+&lt;p&gt;Core启动认证组件的方式很简单.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225214834431-2081738987.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225214959184-999936548.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 和认证系统一样,都是以中间件的形式提供服务.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215547630-1540597035.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 验证有没有注入授权组件的核心服务. &lt;/p&gt;
+&lt;p&gt;接下去查看中间件的代码,如下:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215705781-2096060158.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215726623-761172519.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215745346-1554643069.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215756423-1743967754.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 校验过程就不说了,第一步:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225215847403-173524023.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 从终结点元数据中读取打了Authorize的特性的控制器和方法.那么意味这此时控制器已经被注入了,所以一般services.AddMvc()和add.UseMvc()是先于认证组件注入的.&lt;/p&gt;
+&lt;p&gt;且微软提示,如果你自定义了一个授权Filter,改变了认证逻辑,可能会造成错误,不建议这种方式.因为核心认证组件支持所有的业务扩展,没必要再去定义额外的Filter.&lt;/p&gt;
+&lt;p&gt;接着看如下代码:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225220631812-2119278900.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; AuthorizationPolicy类合并了需要认证的元数据和认证策略提供类.那去找找IAuthorizationPolicyProvider接口的实现,如下&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225220958410-1991092686.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 在注入服务的时候,微软注入了默认的实现，又是Provider模式,Core底层大量采用了这个模式,所以如果你不知道,先去补补设计模式的知识点,可以参考本人的设计模式分类.这个设计模式很简单.不看代码就能猜出大致的实现，内部肯定维护了一个键值对,Dic或者HashMap.那就去看看.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225221253684-1443800863.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225221316788-290499715.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 调用了AuthorizationOptions参数中的GetPolicy方法,对应&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225221346760-902467920.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 果然是个字典.这意味这我们可以通过认证参数来配置认证策略,添加策略的方法如下:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225221523178-332130355.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; ok,再去看看AuthorizationPolicy的构造,其维护了两个主要的属性,后面会介绍.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225221630865-1126196262.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 一个认证方案的名称和一个授权条件集合,到这里可以知道认证组件可以和授权组件集成到一起使用的结论.&lt;/p&gt;
+&lt;p&gt;讲到这,回到中间件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225222016733-661340032.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; _prolicyProvider提供的是认证方案的名称和授权条件集合,以及需要被认证的元数据集合.&lt;/p&gt;
+&lt;p&gt;接着,看看AuthorizationPolicy.CombineAsync的实现&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225224422818-2112250818.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225224433187-568790137.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225224451494-1374714984.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225224510297-1040060417.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 跳过参数校验,分析核心代码,第一步:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225224949699-1475975750.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 遍历需要授权的元数据集合&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225204833-1490606879.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; AuthorizationPolicyBuilder,授权策略Buidler生成器,负责生成授权策略。Buidler生成器模式,不懂其移步本人设计模式分类,很简单.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225331754-957020429.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 判断需要授权元数据的Policy属性,ok,到这里.很明显.我们得看看Authorize特性&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225430872-1293013716.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225518522-555201270.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225552962-1815097590.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这个时候&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225225655742-1313874560.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 红框里得值就为&quot;自定义授权策略&quot;,接着通过policyProvider拿到对应得AuthorizationPolicy实例,本质就是认证策略名称为&quot;自定义授权策略&quot;的认证方案和授权条件集合.&lt;/p&gt;
+&lt;p&gt;接着通过policyBuilder将认证策略名称为&quot;自定义授权策略&quot;的认证方案和授权条件集合.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230303526-598338542.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 添加到AuthorizationPolicyBuilder实例的下面两个属性中去&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230335231-1920204613.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 此时,当你这样设置控制器或者其下的方法&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230525252-701593482.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 说明你不在采用授权组件的默认策略,所以&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230602793-735301837.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 接着&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230637150-1741384803.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 又去判断当前需要授权元数据的Authorize特性中是否设置了Roles特性,且可以设置多个,以&quot;，&quot;分隔&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230752131-1974357967.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 到这里说明自定义策略授权和Role授权是可以共存的,可以向下面这样&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225230927139-1391418791.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;接着&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225231023497-451775828.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这个方法本质,就是向AuthorizationPolicyBuilder实例的&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225231120326-306951070.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 追加授权条件.&lt;/p&gt;
+&lt;p&gt;简单说下为什么微软要给授权组件预留Roles角色集合,因为当前市面上主流的权限设计系统都是RBAC模式,中文就是基于角色(Role)的权限管理系统.&lt;/p&gt;
+&lt;p&gt;接着&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225231522141-668183035.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这里和角色一样不介绍了&lt;/p&gt;
+&lt;p&gt;到这里你会发现 基于认证方案授权策略+基于角色的授权策略=自定义策略的授权策略.&lt;/p&gt;
+&lt;p&gt;接着,如果没有任何控制器或者方法使用授权策略,那么使用最基本的拒绝匿名访问api策略&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225232153476-527707116.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 核心代码如下:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225232322366-491925319.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 如果当前用户未认证,则不能访问.&lt;/p&gt;
+&lt;p&gt;当然这个策略也可以通过AuthorizationOptions参数进行重写.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225232408021-1834747517.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 最后&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225232511661-21021489.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 去重构建一个新的PolicyBuilder对象实例.&lt;/p&gt;
+&lt;p&gt; 接着&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225232801019-1635397843.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233040055-924158147.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 执行PolicyBuilder中的用户认证,其中做了一些重复登陆的处理.本质就是如此.&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233124023-308731863.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这段代码就可以看出.如果当前用户未登陆,则返回&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233157481-1005261697.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 接着回到中间件&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233228565-1531146071.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 认证完毕之后,如果当前元数据打了AllowAnonymous特性像下面这样&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233358449-1320507195.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这样意味这之前的工作都白做了.直接跳过授权.&lt;/p&gt;
+&lt;p&gt;最后&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233515909-2960064.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233602920-1865683581.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 调用授权服务,进行授权校验.默认的授权服务注入点如下:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225233756040-891957951.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225234305659-1472666008.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 构建授权上下文,接着拿到所有的授权处理器.遍历执行&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225234504133-858164023.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 这个参数,可配置,当一个授权策略校验失败,便不再执行接下去的授权策略.&lt;/p&gt;
+&lt;p&gt;最后返回授权结果&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225234604608-727136814.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;总结:本质就是将&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191225234912707-969111156.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; 特性中的这两个参数,交给IAuthorizationHandler授权处理器处理.当然如果你制定了认证方案,那么则会去判断当前用户是否登陆.&lt;/p&gt;
+&lt;p&gt;  整个流程结束.纯属个人理解,能力有限,有问题,请指正,谢谢.&lt;/p&gt;
+
+&lt;p&gt;接下去会写一篇动态授权的文章,这样就能将授权组件+认证组件+权限系统集合起来实现完成用户认证和api动态授权.为后期的前端后端分离架构-基于id4的password模式+JwtBear认证+identity的授权认证中心做准备.最后形成一个完整的授权认证中心.&lt;/p&gt;
+&lt;p&gt;g&lt;/p&gt;
+</description>
+<pubDate>Wed, 25 Dec 2019 15:56:00 +0000</pubDate>
+<dc:creator>郑小超</dc:creator>
+<og:description>前面关于.Net Core如何进行用户认证的核心流程介绍完毕之后,.Net Core 认证系统之Cookie认证源码解析远程认证暂时不介绍,后期有时间,我会加上.接下去介绍认证组件是如何和认证组件一起</og:description>
+<dc:language>zh-cn</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.cnblogs.com/GreenLeaves/p/12099760.html</dc:identifier>
+</item>
+<item>
+<title>三分钟学会在ASP.NET Core MVC 中使用Cookie - 张子浩</title>
+<link>http://www.cnblogs.com/ZaraNet/p/12099286.html</link>
+<guid isPermaLink="true" >http://www.cnblogs.com/ZaraNet/p/12099286.html</guid>
+<description>&lt;h2&gt;一.Cookie是什么？&lt;/h2&gt;
+&lt;p&gt;　　我的朋友问我cookie是什么，用来干什么的，可是我居然无法清楚明白简短地向其阐述cookie，这不禁让我陷入了沉思：为什么我无法解释清楚，我对学习的方法产生了怀疑！所以我们在学习一个东西的时候，一定要做到知其然知其所以然。&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;　　HTTP协议本身是无状态的。什么是无状态呢，即服务器无法判断用户身份。Cookie实际上是一小段的文本信息）。客户端向服务器发起请求，如果服务器需要记录该用户状态，就使用response向客户端浏览器颁发一个Cookie。客户端浏览器会把Cookie保存起来。当浏览器再请求该网站时，浏览器把请求的网址连同该Cookie一同提交给服务器。服务器检查该Cookie，以此来辨认用户状态。&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;　　打个比方，这就犹如你办理了银行卡，下次你去银行办业务，直接拿银行卡就行，不需要身份证。&lt;/p&gt;
+&lt;h2&gt;二.在.NET Core中尝试&lt;/h2&gt;
+&lt;p&gt;　　废话不多说，干就完了，现在我们创建ASP.NET Core MVC项目，撰写该文章时使用的.NET Core SDK 3.0 构建的项目，创建完毕之后我们无需安装任何包，&lt;/p&gt;
+&lt;p&gt;　　但是我们需要在Startup中添加一些配置，用于Cookie相关的。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;//&lt;/span&gt;&lt;span&gt;public const string CookieScheme = &quot;YourSchemeName&quot;;&lt;/span&gt;
+        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; Startup(IConfiguration configuration)
+        {
+            Configuration &lt;/span&gt;=&lt;span&gt; configuration;
+        }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; IConfiguration Configuration { &lt;span&gt;get&lt;/span&gt;&lt;span&gt;; }
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; This method gets called by the runtime. Use this method to add services to the container.&lt;/span&gt;
+        &lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; ConfigureServices(IServiceCollection services)
+        {
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;CookieAuthenticationDefaults.AuthenticationScheme Cookies Default Value
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;you can change scheme&lt;/span&gt;
+&lt;span&gt;            services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+                .AddCookie(options &lt;/span&gt;=&amp;gt;&lt;span&gt; {
+                    options.LoginPath &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/LoginOrSignOut/Index/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
+                });
+            services.AddControllersWithViews();
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; is able to also use other services.
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;services.AddSingleton&amp;lt;IConfigureOptions&amp;lt;CookieAuthenticationOptions&amp;gt;, ConfigureMyCookie&amp;gt;();&lt;/span&gt;
+        }
 &lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;5）函数重载&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;　　当比较存在多个重载的函数时，其每个重载都要在目标函数上找到对应的函数签名，以此确保目标函数能在源函数所有可调用的地方调用，如下所示。&lt;/p&gt;
+&lt;p&gt;在其中我们配置登录页面，其中 &lt;span class=&quot;cnblogs_code&quot;&gt;AddAuthentication&lt;/span&gt; 中是我们的方案名称，这个是做什么的呢？很多小伙伴都懵懵懂懂表示很懵逼啊，我看很多人也是都写得默认，那它到底有啥用，经过我看AspNetCore源码发现它这个是可以做一些配置的。看下面的代码：&lt;/p&gt;
 &lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
 &lt;pre&gt;
-&lt;span&gt;interface add {
-  (x: number, y: string): any;
-  (x: number, y: number): number;
-}
-&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; sum(x: number, y: string): any;
-&lt;/span&gt;&lt;span&gt;function&lt;/span&gt;&lt;span&gt; sum(x: number, y: number): number;
-let func: add &lt;/span&gt;= sum;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　来自于不同枚举类型的枚举值，被认为是不兼容的，如下所示，当把Direction.Up赋给color变量时，在编译阶段会报错。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;enum&lt;/span&gt;&lt;span&gt; Color { Red, Green, Blue }
-&lt;/span&gt;&lt;span&gt;enum&lt;/span&gt;&lt;span&gt; Direction { Up, Down, Left, Right }
-let color &lt;/span&gt;= Color.Red;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;正确&lt;/span&gt;
-color = Direction.Up;         &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　数字枚举和数字类型相互兼容，如下所示，color变量被赋予了枚举成员，digit变量是一个数字，它们之间可以相互赋值。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-let color =&lt;span&gt; Color.Red;
-let digit &lt;/span&gt;= 1&lt;span&gt;;
-color &lt;/span&gt;=&lt;span&gt; digit;
-digit &lt;/span&gt;= color;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　字符串枚举无法兼容字符串类型，如下所示，当把field变量赋给Color的枚举成员时，在编译阶段会报错，但反过来可以正确执行。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;enum&lt;/span&gt; Color { Red = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;RED&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, Green = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;GREEN&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, Blue = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;BLUE&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; }
-let color &lt;/span&gt;=&lt;span&gt; Color.Red;
-let field &lt;/span&gt;= &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;PURPLE&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-color &lt;/span&gt;= field;            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-field = color;            &lt;span&gt;//&lt;/span&gt;&lt;span&gt;正确&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　类与对象字面量和接口类似，但类包含静态和实例两部分。在比较两个类实例时，仅匹配它们的实例成员，而静态成员和构造函数不影响兼容性，因为它们在比较时会被忽略。&lt;/p&gt;
-&lt;p&gt;　　在下面的示例中，创建了Person和Programmer两个类，虽然Programmer类包含了一个静态属性，并且其构造函数与Person类不同，但是它们之间可以相互兼容。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person {
-  name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-  constructor(name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;) { }
-}
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Programmer {
-  name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-  &lt;/span&gt;&lt;span&gt;static&lt;/span&gt;&lt;span&gt; age: number;
-  constructor(name: &lt;/span&gt;&lt;span&gt;string&lt;/span&gt;&lt;span&gt;, age: number) { }
-}
-
-let person: Person;
-let programmer: Programmer;
-person &lt;/span&gt;=&lt;span&gt; programmer;
-programmer &lt;/span&gt;= person;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　类的私有成员和受保护成员会影响兼容性，TypeScript要求它们必须来源于同一个类，从而既能保证父类兼容子类，也能避免与其它相同结构的类兼容。&lt;/p&gt;
-&lt;p&gt;　　在下面的示例中，Person和Teacher两个类都包含一个同名的私有属性，Programmer是Person的子类，三个变量的类型对应这三个类。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Person {
-  &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; name: &lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-}
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Teacher {
-  &lt;/span&gt;&lt;span&gt;private&lt;/span&gt; name: &lt;span&gt;string&lt;/span&gt;&lt;span&gt;;
-}
-&lt;/span&gt;&lt;span&gt;class&lt;/span&gt;&lt;span&gt; Programmer extends Person { }
-
-let person: Person;
-let programmer: Programmer;
-let teacher: Teacher;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　person和programmer两个变量可相互赋值，因为它们的私有成员来源于同一个类，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-person =&lt;span&gt; programmer;
-programmer &lt;/span&gt;= person;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　虽然person和teacher两个变量的结构相同，但是它们的私有成员来源于两个不同的类，因此无法相互赋值，如下所示。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-person = teacher;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-teacher = person;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;　　当泛型接口中的类型参数未使用时，不会影响其兼容性，如下所示，x和y两个变量可相互赋值。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;interface&lt;/span&gt; Person&amp;lt;T&amp;gt;&lt;span&gt; { }
-let x: Person&lt;/span&gt;&amp;lt;number&amp;gt;&lt;span&gt;;
-let y: Person&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt;&lt;span&gt;;
-
-x &lt;/span&gt;=&lt;span&gt; y;
-y &lt;/span&gt;= x;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　当泛型接口中的类型参数被一个成员使用时，就会影响其兼容性，如下所示，x和y两个变量不可相互赋值。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;interface&lt;/span&gt; Person&amp;lt;T&amp;gt;&lt;span&gt; {
-  data: T;
-}
-let x: Person&lt;/span&gt;&amp;lt;number&amp;gt;&lt;span&gt;;
-let y: Person&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt;&lt;span&gt;;
-
-x &lt;/span&gt;= y;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-y = x;        &lt;span&gt;//&lt;/span&gt;&lt;span&gt;错误&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;　　当比较未指定参数类型的泛型函数时，在检查兼容性之前会将其替换成any类型，例如下面的两个函数，相当于对“(x: any)=&amp;gt;any”和“(y: any)=&amp;gt;any”进行匹配，因此可相互赋值。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;33&quot;&gt;
-&lt;pre&gt;
-let send = &lt;span&gt;function&lt;/span&gt;&amp;lt;T&amp;gt;&lt;span&gt;(x: T): T {
-  &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; x;
-}
-let func &lt;/span&gt;= &lt;span&gt;function&lt;/span&gt;&amp;lt;U&amp;gt;&lt;span&gt;(y: U): U {
-  &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; y;
-}
-
-send &lt;/span&gt;=&lt;span&gt; func;
-func &lt;/span&gt;= send;
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt; 　　泛型类的兼容性规则与之前所述一致。&lt;/p&gt;
-</description>
-<pubDate>Wed, 25 Dec 2019 00:01:00 +0000</pubDate>
-<dc:creator>咖啡机（K.F.J）</dc:creator>
-<og:description>TypeScript是一种基于结构类型的语言，可根据其成员来描述类型。以结构相同的Person接口和Programmer类为例，如下所示。 由于结构类型的关系，因此当变量声明为Person类型时，可通</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/strick/p/11726848.html</dc:identifier>
-</item>
-<item>
-<title>做个别出心裁的圣诞礼物 - jerry_fuyi</title>
-<link>http://www.cnblogs.com/jerry-fuyi/p/oled_gif.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/jerry-fuyi/p/oled_gif.html</guid>
-<description>&lt;p&gt;忙活了小半年，转眼间圣诞将至。这次我是没时间像以前那样，走一套方案、PCB、焊接、程序、调试的流程了，只好在现有的开发板上写代码了。&lt;/p&gt;
-&lt;p&gt;当我做出这个决定时，我的想法只是用EasyElectronics板在0.96寸OLED显示屏上画一颗爱心。但是写着写着我就觉得这个爱心难画——&lt;/p&gt;
-&lt;ul readability=&quot;-0.5&quot;&gt;&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;我找不到一个含蓄之中带有三分活泼三分俏皮四分可爱的爱心形状；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;相比以前做过的双色666光立方（也许以后会写吧），画个爱心实在入不了我的法眼。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;于是怒改方案，把抠到一半的爱心图扔进了回收站。&lt;/p&gt;
-&lt;p&gt;但是画什么呢？静态的爱心不行，要画个会动的。什么会动呢？GIF！世上GIF千千万，选哪个呢？&lt;/p&gt;
-&lt;p&gt;我选了微信表情包“长草颜团子过年啦”第一行第二个“喜欢你”。&lt;/p&gt;
-&lt;h3 id=&quot;一获取每一帧图像&quot;&gt;一、获取每一帧图像&lt;/h3&gt;
-&lt;p&gt;网上查阅了一下相关资料，发布的表情想要获得GIF是基本没戏的。只有暴力截屏了。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;工具：手机。&lt;br/&gt;操作：录屏。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;并传输到电脑，此步骤省略。然后把每一帧挖出来。&lt;/p&gt;
-&lt;blockquote readability=&quot;6.5531914893617&quot;&gt;
-&lt;p&gt;工具：&lt;a href=&quot;https://potplayer.daum.net/&quot; target=&quot;_blank&quot;&gt;PotPlayer&lt;/a&gt;（也可以用其他软件）。&lt;/p&gt;
-&lt;p&gt;操作：对于每一帧（用D与F来逐帧播放），保存当前帧（png格式）。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;一共获得19张不同的图片。我没找到可以批量裁剪图片的软件。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;工具：画图。&lt;/p&gt;
-&lt;p&gt;操作：对于每一帧，裁剪出表情部分。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;二极致色彩-简约线条&quot;&gt;二、极致色彩-&amp;gt;简约线条&lt;/h3&gt;
-&lt;p&gt;现在有了表情的每一帧（不过背景是灰色的），但在转换为OLED可以接受的格式之前，还需要先把彩色图片转换为黑白。&lt;/p&gt;
-&lt;p&gt;如果直接用画图保存为单色位图，中间的爱心会消失。&lt;/p&gt;
-&lt;blockquote readability=&quot;5&quot;&gt;
-&lt;p&gt;工具：Word 2019（不太老的版本应该都行吧）。&lt;/p&gt;
-&lt;p&gt;操作：&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;
-&lt;p&gt;对于每一帧：&lt;/p&gt;
-&lt;ol readability=&quot;-2&quot;&gt;&lt;li&gt;
-&lt;p&gt;插入图片；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;图片格式-&amp;gt;颜色-&amp;gt;重新着色-&amp;gt;黑白50%；&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;另存为PDF；&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/blockquote&gt;
-&lt;p&gt;在Word中保存图片，输出的是原始图片。换个工具。&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;工具：Adobe Acrobat Pro DC。&lt;/p&gt;
-&lt;p&gt;操作：对于每一帧，保存图片为bmp。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;现在有了黑白图片，但尺寸是手机上显示的大小。&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;工具：画图（没错又是画图，万能的画图）。&lt;/p&gt;
-&lt;p&gt;操作：对于每一帧：&lt;/p&gt;
-&lt;ol readability=&quot;0&quot;&gt;&lt;li&gt;
-&lt;p&gt;另存为单色位图；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;如果图中有爱心，先补全边框（如果边框不完整），再填充颜色；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;重新调整大小，高度64（长度自动70）；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;调整一些看得不顺眼的像素。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/blockquote&gt;
-&lt;h3 id=&quot;三翻译为代码&quot;&gt;三、翻译为代码&lt;/h3&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
-&lt;p&gt;工具：PCtoLCD2002（网上很容易找到）。&lt;/p&gt;
-&lt;p&gt;操作：对于每一帧：&lt;/p&gt;
-&lt;ol readability=&quot;-1&quot;&gt;&lt;li&gt;
-&lt;p&gt;打开图片；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;生成字模（右下角；格式自己捣鼓吧）；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;保存字模；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;把txt文件的内容复制到代码中。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;/blockquote&gt;
-&lt;p&gt;一共19张图，最后一张复制一遍，有定格的效果。&lt;/p&gt;
-
-&lt;p&gt;先放&lt;a href=&quot;https://files.cnblogs.com/files/jerry-fuyi/heart.7z&quot; target=&quot;_blank&quot;&gt;链接&lt;/a&gt;，把&lt;code&gt;Release\heart.hex&lt;/code&gt;烧写进单片机就可以运行啦！&lt;/p&gt;
-&lt;p&gt;程序用C语言写成，分成4个文件：&lt;/p&gt;
-&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;0&quot;&gt;
-&lt;p&gt;&lt;code&gt;data.h&lt;/code&gt;，保存图片数据（想想把声明和定义都放在&lt;code&gt;.h&lt;/code&gt;文件里会出什么问题？）；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;code&gt;driver.h&lt;/code&gt;，OLED与定时器相关函数声明；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;code&gt;driver.c&lt;/code&gt;，SPI发送、OLED指令、定时器中断等实现；&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;&lt;code&gt;main.c&lt;/code&gt;，定时器回调函数与程序入口。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;大致思路是在&lt;code&gt;main&lt;/code&gt;中初始化，在定时器中断中读取并显示图片。&lt;/p&gt;
-&lt;p&gt;图片为70*64像素，每一像素用一个bit存储，一张图片需要560字节，20张就是11KB，内存里放不下。&lt;code&gt;&amp;lt;avr/pgmspace.h&amp;gt;&lt;/code&gt;提供了把数据放在程序空间（program space，即flash）的宏&lt;code&gt;PROGMEM&lt;/code&gt;，以及函数&lt;code&gt;memcpy_P&lt;/code&gt;，与&lt;code&gt;memcpy&lt;/code&gt;类似，不过是从flash中拷贝到内存中。&lt;/p&gt;
-&lt;p&gt;由于进入与退出中断需要push与pop所有使用的寄存器，相比12.5MHz的SPI与3us的间隔（否则OLED不能正常工作，不知道为什么）所花的时间相当，在中断中发送数据没有意义，所以数据是阻塞发送的。&lt;/p&gt;
-&lt;p&gt;为了优雅，驱动库与客户之间用回调函数解耦：客户定义函数&lt;code&gt;display&lt;/code&gt;，在&lt;code&gt;main&lt;/code&gt;的初始化中把&lt;code&gt;display&lt;/code&gt;的指针作为参数，注册回调；驱动库在中断中通过函数指针调用&lt;code&gt;display&lt;/code&gt;函数（函数指针可以不写取地址和解引用）。&lt;/p&gt;
-&lt;p&gt;实现细节就写这么多吧，其余的看代码和datasheet即可。&lt;/p&gt;
-&lt;p&gt;最后放一张效果图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/1734552/201912/1734552-20191222221244801-2135847558.gif&quot;/&gt;&lt;/p&gt;
-</description>
-<pubDate>Tue, 24 Dec 2019 16:02:00 +0000</pubDate>
-<dc:creator>jerry_fuyi</dc:creator>
-<og:description>忙活了小半年，转眼间圣诞将至。这次我是没时间像以前那样，走一套方案、PCB、焊接、程序、调试的流程了，只好在现有的开发板上写代码了。 当我做出这个决定时，我的想法只是用EasyElectronics板</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/jerry-fuyi/p/oled_gif.html</dc:identifier>
-</item>
-<item>
-<title>UWP 获取博客园积分，并以图表形式呈现变化趋势 - 星期八再娶你</title>
-<link>http://www.cnblogs.com/hupo376787/p/12094009.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/hupo376787/p/12094009.html</guid>
-<description>&lt;p&gt;先看一下效果吧&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/298986/201912/298986-20191224201109134-805256605.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;1. 分析&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;说实话，之前还真没在乎过博客园的排名和积分，博客园默认也不给显示。需要自己到选项里面勾选才可以。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/298986/201912/298986-20191224210244623-656205642.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 之前也有几个大佬写过类似的文章，不过是很早了。博客园关于获取积分的api已经变了。&lt;/p&gt;
-&lt;p&gt;也不算是api吧，毕竟不是官方公开的。不过自己可以通过查看页面元素，找到博客园的积分url。&lt;/p&gt;
-
-&lt;p&gt;在你勾选✔了上面的选项之后，打开你的博客主页，比如我的就是&lt;a href=&quot;https://www.cnblogs.com/hupo376787/&quot;&gt;https://www.cnblogs.com/hupo376787/&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;按F12，调出开发者工具，进入Network选项卡。&lt;/p&gt;
-&lt;p&gt;如果在下面的列表里面没有数据，F5刷新一下页面即可。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/298986/201912/298986-20191224210617420-2015778716.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;然后，点击【sidecolumn.aspx】，右侧就会出现相信的信息。&lt;/p&gt;
-&lt;p&gt;右击【sidecolumn.aspx】，【copy link address】，这个url就是我们要找的。&lt;/p&gt;
-&lt;p&gt;然后根据这个url返回的信息，我们利用正则表达式或者其他手段找到积分和排名的数据即可。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;2. 写Xaml界面&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;既然根据上面的分析，可以拿到积分和排名的数据，那么写代码就简单多了。&lt;/p&gt;
-&lt;p&gt;我这里使用C#来写的，语言只是一种工具，你也可以用Java、Swift、JavaScript、Flutter等，还可以用Python写。&lt;/p&gt;
-&lt;p&gt;无论哪一种，只要能拿到数据，用图表展示出来即可。&lt;/p&gt;
-&lt;p&gt;在xaml中，定义一下用户名输入框，还有一个图表控件。&lt;/p&gt;
-&lt;p&gt;图表使用的Microcharts。这是一个开源的图表控件，Github上已经斩获1000多个✨✨✨✨✨✨✨✨✨✨&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
-&amp;lt;StackPanel&amp;gt;
-            &amp;lt;&lt;span&gt;TextBox 
-                x:Name&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;textBlockUser&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt; 
-                Background&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Transparent&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                Padding&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;0, 5&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                BorderThickness&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;0&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                Width&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;200&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                HorizontalAlignment&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Left&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                PlaceholderText&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;hupo376787&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                TextChanged&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;User_TextChanged&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;/&amp;gt;
-            &amp;lt;TextBlock x:Name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;textBlockDate&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;/&amp;gt;
-            &amp;lt;TextBlock x:Name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;textBlockScore&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;/&amp;gt;
-            &amp;lt;TextBlock x:Name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;textBlockRank&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;/&amp;gt;
-
-            &amp;lt;charts:ChartView x:Name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;microChart&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;
-                              Height&lt;/span&gt;=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;300&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;/&amp;gt;
-        &amp;lt;/StackPanel&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;3. 获取网页数据&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;利用HttpClient写代码，获取指定url的网页源代码。&lt;/p&gt;
-&lt;p&gt;user是文本框可以输入的用户id。&lt;/p&gt;
-&lt;p&gt;然后根据Http返回来的数据，做成一个List&amp;lt;string&amp;gt;。这样就不用写正则表达式查找🔍了。&lt;/p&gt;
-&lt;p&gt;其实主要是我不大会写正则表达式而已。&lt;img src=&quot;https://img2018.cnblogs.com/blog/298986/201912/298986-20191224222738193-648461686.png&quot; alt=&quot;&quot; width=&quot;202&quot; height=&quot;112&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 不好意思暴露了。&lt;/p&gt;
-
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;36&quot;&gt;
-&lt;pre&gt;
- string url = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://www.cnblogs.com/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + user + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/ajax/sidecolumn.aspx&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-                HttpClient client &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; HttpClient();
-                HttpResponseMessage message &lt;/span&gt;= &lt;span&gt;await&lt;/span&gt;&lt;span&gt; client.GetAsync(url);
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; content = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; message.Content.ReadAsStringAsync();
-                List&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt; lines = content.Replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;积分与排名&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&quot;&lt;/span&gt;).Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).ToList();
-
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; scoreHeaderIndex = lines.FindIndex(x =&amp;gt; x.Contains(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;积分&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; rankHeaderIndex = lines.FindIndex(x =&amp;gt; x.Contains(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;排名&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-
-                &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; score = Convert.ToInt32(lines[scoreHeaderIndex + &lt;span&gt;1&lt;/span&gt;&lt;span&gt;]);
-                &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rank = Convert.ToInt32(lines[rankHeaderIndex + &lt;span&gt;1&lt;/span&gt;]);
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;4. 生成图表&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;因为要做成趋势图，并且博客园返回的数据只是当天的信息，并不不包含历史记录。&lt;/p&gt;
-&lt;p&gt;所以需要手动记录数据，并存放在本地。&lt;/p&gt;
-&lt;p&gt;之前那几个大佬也是这样子，写成了python或者js，每天自动运行一次，保存数据。&lt;/p&gt;
-&lt;p&gt;UWP想要记录数据，需要一点额外的权限。&lt;/p&gt;
-&lt;p&gt;因为需要记录txt文件，而这样的文本文件最好放在user/document文件夹下。&lt;/p&gt;
-&lt;p&gt;首先，用记事本打开Package.appxmanifest，加上&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-&amp;lt;Capabilities&amp;gt;
-   &amp;lt;uap:Capability Name=&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;documentsLibrary&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; /&amp;gt;
-&amp;lt;/Capabilities&amp;gt;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;然后在vs中打开Package.appxmanifest，添加声明。按照图示设置。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/298986/201912/298986-20191224223611378-1138035189.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;这样就有权限写入txt到文档文件夹了。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
-&lt;pre&gt;
-                StorageFolder storageFolder =&lt;span&gt; KnownFolders.DocumentsLibrary;
-                StorageFile file &lt;/span&gt;= &lt;span&gt;await&lt;/span&gt; storageFolder.CreateFileAsync(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;cnBlogs.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, CreationCollisionOption.OpenIfExists);
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; existData = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; FileIO.ReadTextAsync(file);
-                List&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt; list = existData.Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;).ToList();
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;我这儿首先读取了txt里面的数据，如果这个txt不存在，就创建。已经存在的话，直接打开读取数据。&lt;/p&gt;
-&lt;p&gt;然后绘图&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-                Random rnd = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Random();
-                List&lt;/span&gt;&amp;lt;ChartEntry&amp;gt; entries = &lt;span&gt;new&lt;/span&gt; List&amp;lt;ChartEntry&amp;gt;&lt;span&gt;();
-                &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt;(&lt;span&gt;var&lt;/span&gt; item &lt;span&gt;in&lt;/span&gt;&lt;span&gt; list)
-                {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (item.Trim() == &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;)
-                        &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
-
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; singleLineArray = item.Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; entry = &lt;span&gt;new&lt;/span&gt; ChartEntry((&lt;span&gt;float&lt;/span&gt;)Convert.ToDouble(singleLineArray[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;]))
-                    {
-                        Label &lt;/span&gt;= singleLineArray[&lt;span&gt;0&lt;/span&gt;&lt;span&gt;],
-                        ValueLabel &lt;/span&gt;= singleLineArray[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;],
-                        Color &lt;/span&gt;= SKColor.Parse(String.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;#{0:X6}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, rnd.Next(&lt;span&gt;0x1000000&lt;/span&gt;&lt;span&gt;)))
-                    };
-                    entries.Add(entry);
-                }&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; chart = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; LineChart {
-                    Entries &lt;/span&gt;=&lt;span&gt; entries,
-                    MinValue &lt;/span&gt;= &lt;span&gt;100000&lt;/span&gt;&lt;span&gt;,
-                    BackgroundColor &lt;/span&gt;=&lt;span&gt; SKColors.Transparent
-                };
-                &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.microChart.Chart = chart;
-&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;如果在生成折线图的时候，不加上&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;32&quot;&gt;
-&lt;pre&gt;
-BackgroundColor = SKColors.Transparent
-&lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;生成的图表默认白色。但是背景透明好看。&lt;/p&gt;
-
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;5. 记录获取的积分和排名数据&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt; 为了防止一天内多次打开app，重复记录，所以我做了一个检查。&lt;/p&gt;
-&lt;p&gt;利用System.IO写入数据。&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;41&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;                string&lt;/span&gt; contentToWrite = &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;;
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Add Today&lt;/span&gt;
-                &lt;span&gt;if&lt;/span&gt; (!existData.Contains(DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)))
-                {
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; entryToday = &lt;span&gt;new&lt;/span&gt; ChartEntry((&lt;span&gt;float&lt;/span&gt;&lt;span&gt;)Convert.ToDouble(score))
-                    {
-                        Label &lt;/span&gt;=&lt;span&gt; score.ToString(),
-                        ValueLabel &lt;/span&gt;= DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;),
-                        Color &lt;/span&gt;= SKColor.Parse(&lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;#{0:X6}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, rnd.Next(&lt;span&gt;0x1000000&lt;/span&gt;&lt;span&gt;)))
-                    };
-                    entries.Append(entryToday);
-
-                    contentToWrite &lt;/span&gt;= existData + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + score + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; rank;
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                    contentToWrite &lt;/span&gt;=&lt;span&gt; existData;
-
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Write&lt;/span&gt;
-                &lt;span&gt;await&lt;/span&gt; FileIO.WriteTextAsync(file, contentToWrite);
-&lt;/pre&gt;&lt;/div&gt;
-
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;6. 完成的代码&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;div class=&quot;cnblogs_code&quot; readability=&quot;49&quot;&gt;
-&lt;pre&gt;
-&lt;span&gt;        private&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task GetData(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; user)
+&lt;span&gt;internal&lt;/span&gt; &lt;span&gt;class&lt;/span&gt; ConfigureMyCookie : IConfigureNamedOptions&amp;lt;CookieAuthenticationOptions&amp;gt;&lt;span&gt;
+    {
+        &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; You can inject services here&lt;/span&gt;
+        &lt;span&gt;public&lt;/span&gt;&lt;span&gt; ConfigureMyCookie()
+        {}
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt; Configure(&lt;span&gt;string&lt;/span&gt;&lt;span&gt; name, CookieAuthenticationOptions options)
         {
-            &lt;/span&gt;&lt;span&gt;try&lt;/span&gt;&lt;span&gt;
-            {
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; url = &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;https://www.cnblogs.com/&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + user + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/ajax/sidecolumn.aspx&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;;
-                HttpClient client &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; HttpClient();
-                HttpResponseMessage message &lt;/span&gt;= &lt;span&gt;await&lt;/span&gt;&lt;span&gt; client.GetAsync(url);
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; content = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; message.Content.ReadAsStringAsync();
-                List&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt; lines = content.Replace(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;积分与排名&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, &lt;span&gt;&quot;&quot;&lt;/span&gt;).Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).ToList();
-
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; scoreHeaderIndex = lines.FindIndex(x =&amp;gt; x.Contains(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;积分&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; rankHeaderIndex = lines.FindIndex(x =&amp;gt; x.Contains(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;排名&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
-
-                &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; score = Convert.ToInt32(lines[scoreHeaderIndex + &lt;span&gt;1&lt;/span&gt;&lt;span&gt;]);
-                &lt;/span&gt;&lt;span&gt;int&lt;/span&gt; rank = Convert.ToInt32(lines[rankHeaderIndex + &lt;span&gt;1&lt;/span&gt;&lt;span&gt;]);
-
-                textBlockDate.Text &lt;/span&gt;= DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                textBlockScore.Text &lt;/span&gt;=&lt;span&gt; score.ToString();
-                textBlockRank.Text &lt;/span&gt;=&lt;span&gt; rank.ToString();
-
-                StorageFolder storageFolder &lt;/span&gt;=&lt;span&gt; KnownFolders.DocumentsLibrary;
-                StorageFile file &lt;/span&gt;= &lt;span&gt;await&lt;/span&gt; storageFolder.CreateFileAsync(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;cnBlogs.txt&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;, CreationCollisionOption.OpenIfExists);
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; existData = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; FileIO.ReadTextAsync(file);
-                List&lt;/span&gt;&amp;lt;&lt;span&gt;string&lt;/span&gt;&amp;gt; list = existData.Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;).ToList();
-
-                Random rnd &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; Random();
-                List&lt;/span&gt;&amp;lt;ChartEntry&amp;gt; entries = &lt;span&gt;new&lt;/span&gt; List&amp;lt;ChartEntry&amp;gt;&lt;span&gt;();
-                &lt;/span&gt;&lt;span&gt;foreach&lt;/span&gt;(&lt;span&gt;var&lt;/span&gt; item &lt;span&gt;in&lt;/span&gt;&lt;span&gt; list)
-                {
-                    &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (item.Trim() == &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;)
-                        &lt;/span&gt;&lt;span&gt;continue&lt;/span&gt;&lt;span&gt;;
-
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; singleLineArray = item.Split(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; entry = &lt;span&gt;new&lt;/span&gt; ChartEntry((&lt;span&gt;float&lt;/span&gt;)Convert.ToDouble(singleLineArray[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;]))
-                    {
-                        Label &lt;/span&gt;= singleLineArray[&lt;span&gt;0&lt;/span&gt;&lt;span&gt;],
-                        ValueLabel &lt;/span&gt;= singleLineArray[&lt;span&gt;1&lt;/span&gt;&lt;span&gt;],
-                        Color &lt;/span&gt;= SKColor.Parse(String.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;#{0:X6}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, rnd.Next(&lt;span&gt;0x1000000&lt;/span&gt;&lt;span&gt;)))
-                    };
-                    entries.Add(entry);
-                }
-
-                &lt;/span&gt;&lt;span&gt;string&lt;/span&gt; contentToWrite = &lt;span&gt;&quot;&quot;&lt;/span&gt;&lt;span&gt;;
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Add Today&lt;/span&gt;
-                &lt;span&gt;if&lt;/span&gt; (!existData.Contains(DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)))
-                {
-                    &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; entryToday = &lt;span&gt;new&lt;/span&gt; ChartEntry((&lt;span&gt;float&lt;/span&gt;&lt;span&gt;)Convert.ToDouble(score))
-                    {
-                        Label &lt;/span&gt;=&lt;span&gt; score.ToString(),
-                        ValueLabel &lt;/span&gt;= DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;),
-                        Color &lt;/span&gt;= SKColor.Parse(&lt;span&gt;string&lt;/span&gt;.Format(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;#{0:X6}&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;, rnd.Next(&lt;span&gt;0x1000000&lt;/span&gt;&lt;span&gt;)))
-                    };
-                    entries.Append(entryToday);
-
-                    contentToWrite &lt;/span&gt;= existData + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;\r\n&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + DateTime.Now.ToString(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;yyyy-MM-dd&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;) + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; + score + &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;,&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; +&lt;span&gt; rank;
-                }
-                &lt;/span&gt;&lt;span&gt;else&lt;/span&gt;&lt;span&gt;
-                    contentToWrite &lt;/span&gt;=&lt;span&gt; existData;
-
-                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; chart = &lt;span&gt;new&lt;/span&gt;&lt;span&gt; LineChart {
-                    Entries &lt;/span&gt;=&lt;span&gt; entries,
-                    MinValue &lt;/span&gt;= &lt;span&gt;100000&lt;/span&gt;&lt;span&gt;,
-                    BackgroundColor &lt;/span&gt;=&lt;span&gt; SKColors.Transparent
-                };
-                &lt;/span&gt;&lt;span&gt;this&lt;/span&gt;.microChart.Chart =&lt;span&gt; chart;
-
-                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Write&lt;/span&gt;
-                &lt;span&gt;await&lt;/span&gt;&lt;span&gt; FileIO.WriteTextAsync(file, contentToWrite);
-            }
-            &lt;/span&gt;&lt;span&gt;catch&lt;/span&gt;&lt;span&gt;
-            {
-
-            }
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; Only configure the schemes you want
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;if (name == Startup.CookieScheme)
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;{
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt; options.LoginPath = &quot;/someotherpath&quot;;
+            &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;}&lt;/span&gt;
+&lt;span&gt;        }
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;void&lt;/span&gt;&lt;span&gt; Configure(CookieAuthenticationOptions options)
+            &lt;/span&gt;=&amp;gt;&lt;span&gt; Configure(Options.DefaultName, options);
+    }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;在其中你可以定义某些策略，随后你直接改变 &lt;span class=&quot;cnblogs_code&quot;&gt;CookieScheme&lt;/span&gt; 的变量就可以替换某些配置，在配置中一共有这几项，这无疑是帮助我们快速使用Cookie的好帮手~点个赞。&lt;/p&gt;
+&lt;p&gt;&lt;br/&gt;&lt;img src=&quot;https://img2018.cnblogs.com/i-beta/1366751/201912/1366751-20191225222511332-957231715.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;在源码中可以看到Cookie默认保存的时间是14天，这个时间我们可以去选择，支持TimeSpan的那些类型。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;34&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt;&lt;span&gt; CookieAuthenticationOptions()
+        {
+            ExpireTimeSpan &lt;/span&gt;= TimeSpan.FromDays(&lt;span&gt;14&lt;/span&gt;&lt;span&gt;);
+            ReturnUrlParameter &lt;/span&gt;=&lt;span&gt; CookieAuthenticationDefaults.ReturnUrlParameter;
+            SlidingExpiration &lt;/span&gt;= &lt;span&gt;true&lt;/span&gt;&lt;span&gt;;
+            Events &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt;&lt;span&gt; CookieAuthenticationEvents();
         }&lt;/span&gt;
 &lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;之所以加了try{ ... } catch{ ... }，是因为在输入用户名的时候，可以根据文本变化，实时检测是不是有效的用户，并生成图表。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;span&gt;7. 总结&lt;/span&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;获取并显示数据，本身不是一件很难的事情，关键是怎么利用得到的数据，并把它很有的呈现出来。&lt;/p&gt;
-&lt;p&gt;当然，我这里也少做了一步，就是让应用自启动，开机的时候获取一次数据，这样就可以防止某天忘记打开，导致数据断层的问题了。&lt;/p&gt;
-&lt;p&gt;关于uwp如何随开机启动，我还没研究过，以后有时间的写一些分享心得。&lt;/p&gt;
-
-&lt;p&gt;OK，Merry Christmas！Lonely Christians！&lt;/p&gt;
-&lt;p&gt;❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️❄️&lt;/p&gt;
-&lt;p&gt;⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄⛄&lt;/p&gt;
-&lt;p&gt;🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄🎄&lt;/p&gt;
-&lt;p&gt;🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅🎅&lt;/p&gt;
-&lt;p&gt;🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎🍎&lt;/p&gt;
-&lt;p&gt; 🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦🧦&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 24 Dec 2019 14:58:00 +0000</pubDate>
-<dc:creator>星期八再娶你</dc:creator>
-<og:description>先看一下效果吧 1. 分析 说实话，之前还真没在乎过博客园的排名和积分，博客园默认也不给显示。需要自己到选项里面勾选才可以。 之前也有几个大佬写过类似的文章，不过是很早了。博客园关于获取积分的api已</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/hupo376787/p/12094009.html</dc:identifier>
-</item>
-<item>
-<title>曹工说Spring Boot源码（5）-- 怎么从properties文件读取bean - 三国梦回</title>
-<link>http://www.cnblogs.com/grey-wolf/p/12093929.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/grey-wolf/p/12093929.html</guid>
-<description>&lt;p&gt;相关背景及资源：&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/grey-wolf/p/12044199.html&quot;&gt;曹工说Spring Boot源码（1）-- Bean Definition到底是什么，附spring思维导图分享&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/grey-wolf/p/12051957.html&quot;&gt;曹工说Spring Boot源码（2）-- Bean Definition到底是什么，咱们对着接口，逐个方法讲解&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/grey-wolf/p/12070377.html&quot;&gt;曹工说Spring Boot源码（3）-- 手动注册Bean Definition不比游戏好玩吗，我们来试一下&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/grey-wolf/p/12078673.html&quot;&gt;曹工说Spring Boot源码（4）-- 我是怎么自定义ApplicationContext，从json文件读取bean definition的？&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://gitee.com/ckl111/spring-boot-first-version-learn&quot;&gt;工程代码地址&lt;/a&gt; &lt;a href=&quot;https://www.processon.com/view/link/5deeefdee4b0e2c298aa5596&quot;&gt;思维导图地址&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;工程结构图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/519126/201912/519126-20191215144930717-1919774390.png&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;bean definition实在太过重要，可以说是基础中的基础，所以我们花了很多讲在这上面，本讲的主题，还是这个。这次，我们是从properties文件里读取&lt;code&gt;bean definition&lt;/code&gt;。&lt;/p&gt;
-&lt;p&gt;但是，上次，从json读取，我们自己实现了&lt;code&gt;org.springframework.beans.factory.support.AbstractBeanDefinitionReader&lt;/code&gt;，使用fastjson从json文件内读取。&lt;/p&gt;
-&lt;p&gt;这次，我们不需要自己实现，是因为spring-beans包内，居然自带了从properties文件读取bean的实现类。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/519126/201912/519126-20191224210313144-673386379.png&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;所以，这样就变得很简单了，我们只需要定义一个&lt;code&gt;applicationContext&lt;/code&gt;，让它使用这个开箱即用的reader即可。&lt;/p&gt;
-&lt;p&gt;闲言少叙，let's code！&lt;/p&gt;
-
-&lt;p&gt;本类的&lt;code&gt;javadoc&lt;/code&gt;如是说：&lt;/p&gt;
-&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;接下来LoginOrOut Controller，我们模拟了登录和退出，通过 &lt;span class=&quot;cnblogs_code&quot;&gt;SignInAsync&lt;/span&gt; 和 &lt;span class=&quot;cnblogs_code&quot;&gt;SignOutAsync&lt;/span&gt; 方法。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;37&quot;&gt;
 &lt;pre&gt;
-&lt;code&gt;* Bean definition reader for a simple properties format.
-*
-* &amp;lt;p&amp;gt;Provides bean definition registration methods for Map/Properties and
-* ResourceBundle. Typically applied to a DefaultListableBeanFactory.&lt;/code&gt;
-&lt;/pre&gt;&lt;/blockquote&gt;
-&lt;p&gt;这里说，就是一个从properties格式的文件读取&lt;code&gt;bean definition&lt;/code&gt;的，那么，是不是&lt;code&gt;properties&lt;/code&gt;可以随便怎么写呢？嗯，按理说，是可以随便写，你别管我怎么写，形式重要吗，重要的是，有这个数据。&lt;/p&gt;
-&lt;p&gt;bean definition的核心数据有哪些？再回忆一下，beanClassName、scope、lazy-init、parent、abstract等。&lt;/p&gt;
-&lt;p&gt;parent和abstract，是个新概念，前面我也没有提，大家看下面的例子可能就懂了（来自于&lt;code&gt;PropertiesBeanDefinitionReader&lt;/code&gt;的注释，我自己梳理了一下）。&lt;/p&gt;
-&lt;p&gt;这个reader，对properties的格式是有要求的，参考下面这份：&lt;/p&gt;
-&lt;pre class=&quot;properties&quot;&gt;
-&lt;code&gt;//定义一个抽象bean，名称为employee（句号前面为bean的名称），表示为员工，类型为Employee，两个属性：组名：Insurance；useDialUp（我理解为工位是否配电话）：true
-employee.(class)=org.springframework.simple.Employee
-employee.(abstract)=true
-employee.group=Insurance
-employee.usesDialUp=false
-
-//定义一个非抽象bean，parent为抽象的employee，department属性为CEOdepartment，usesDialUp为true，覆盖了parent的false
-ceo.(parent)=employee
-ceo.department=ceo department
-ceo.usesDialUp=true
-
-//定义另一个非抽象bean，表示销售人员，lazy-init，经理字段：引用了另一个bean，name为ceo；部门为Sales
-salesrep.(parent)=employee
-salesrep.(lazy-init)=true
-salesrep.manager(ref)=ceo
-salesrep.department=Sales
-
-//这个类似
-techie.(parent)=employee
-techie.(scope)=prototype
-techie.department=Engineering
-techie.usesDialUp=true
-techie.manager(ref)=ceo&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;贴心的我给大家花了个图：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/519126/201912/519126-20191224213331358-1264747351.png&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;接下来，我们还是先看看这个类：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/519126/201912/519126-20191224210313144-673386379.png&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;实现接口&quot;&gt;实现接口&lt;/h2&gt;
-&lt;p&gt;看一个类，其实主要看接口，才能快速了解一个类的用途，这里，它实现了&lt;code&gt;org.springframework.beans.factory.support.BeanDefinitionReader&lt;/code&gt;接口。&lt;/p&gt;
-&lt;p&gt;这个接口的方法如下：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public interface BeanDefinitionReader {
-
-    //获取bean definition 注册中心，老朋友DefaultListableBeanFactory实现了该接口
-    BeanDefinitionRegistry getRegistry();
-
-    // 获取资源加载器
-    ResourceLoader getResourceLoader();
-    
-    //获取classloader
-    ClassLoader getBeanClassLoader();
-
-    //获取bean名称生成器
-    BeanNameGenerator getBeanNameGenerator();
-
-    //从指定资源充，加载bean definition
-    int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException;
-    
-    //重载
-    int loadBeanDefinitions(Resource... resources) throws BeanDefinitionStoreException;
-    
-    //重载
-    int loadBeanDefinitions(String location) throws BeanDefinitionStoreException;
-    
-    //重载
-    int loadBeanDefinitions(String... locations) throws BeanDefinitionStoreException;
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;大体，可以看出来，这个&lt;code&gt;bean definition reader&lt;/code&gt;接口，就是使用指定的classloader，从指定的resource，去加载bean definition。&lt;/p&gt;
-&lt;h2 id=&quot;加载bean-definition&quot;&gt;加载bean definition&lt;/h2&gt;
-&lt;p&gt;我们先看看&lt;code&gt;PropertiesBeanDefinitionReader&lt;/code&gt;怎么构造：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;    //调用父类，参数传入了bean definition 注册表
-    public PropertiesBeanDefinitionReader(BeanDefinitionRegistry registry) {
-        super(registry);
-    }
-
-    //构造默认的资源加载器、environment
-    protected AbstractBeanDefinitionReader(BeanDefinitionRegistry registry) {
-        this.registry = registry;
-
-        // Determine ResourceLoader to use.
-        if (this.registry instanceof ResourceLoader) {
-            this.resourceLoader = (ResourceLoader) this.registry;
+&lt;span&gt;[HttpPost]
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task&amp;lt;IActionResult&amp;gt;&lt;span&gt; Login(LoginModel loginModel)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (loginModel.Username == &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;haozi zhang&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt; &amp;amp;&amp;amp;&lt;span&gt;
+                loginModel.Password &lt;/span&gt;== &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;123456&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; claims = &lt;span&gt;new&lt;/span&gt; List&amp;lt;Claim&amp;gt;&lt;span&gt;
+                 {
+                 &lt;/span&gt;&lt;span&gt;new&lt;/span&gt;&lt;span&gt; Claim(ClaimTypes.Name, loginModel.Username)
+                 };
+                ClaimsPrincipal principal &lt;/span&gt;= &lt;span&gt;new&lt;/span&gt; ClaimsPrincipal(&lt;span&gt;new&lt;/span&gt; ClaimsIdentity(claims, &lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;login&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;));
+                &lt;/span&gt;&lt;span&gt;await&lt;/span&gt;&lt;span&gt; HttpContext.SignInAsync(principal);
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;Just redirect to our index after logging in. &lt;/span&gt;
+                &lt;span&gt;return&lt;/span&gt; Redirect(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;/Home/Index&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
+            }
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; View(&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;Index&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
         }
-        else {
-            this.resourceLoader = new PathMatchingResourcePatternResolver();
-        }
-
-        // Inherit Environment if possible
-        if (this.registry instanceof EnvironmentCapable) {
-            this.environment = ((EnvironmentCapable)this.registry).getEnvironment();
-        }
-        else {
-            this.environment = new StandardEnvironment();
-        }
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;再看主要的&lt;code&gt;loadBeanDefinition&lt;/code&gt;方法，是怎么实现的：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;    public int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException {
-        return loadBeanDefinitions(new EncodedResource(resource), null);
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;调用了内部的：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;//加载bean definition
-public int loadBeanDefinitions(EncodedResource encodedResource, String prefix)
-            throws BeanDefinitionStoreException {
-    //读取properties文件内容到props变量
-    Properties props = new Properties();
-    InputStream is = encodedResource.getResource().getInputStream();
-    if (encodedResource.getEncoding() != null) {
-        InputStreamReader reader = new InputStreamReader(is, encodedResource.getEncoding());
-        props.load(reader);
-    }
-    else {
-        props.load(is);
-    }
-    //注册bean definition
-    return registerBeanDefinitions(props, prefix, null);
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;继续深入上面的倒数第二行的函数：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public int registerBeanDefinitions(Map map, String prefix, String resourceDescription)
-            throws BeansException {
-
-        if (prefix == null) {
-            prefix = &quot;&quot;;
-        }
-        int beanCount = 0;
-
-        for (Object key : map.keySet()) {
-            String keyString = (String) key;
-            if (keyString.startsWith(prefix)) {
-                // Key is of form: prefix&amp;lt;name&amp;gt;.property
-                String nameAndProperty = keyString.substring(prefix.length());
-                // Find dot before property name, ignoring dots in property keys.
-                int sepIdx = nameAndProperty.lastIndexOf(SEPARATOR);
-                
-                if (sepIdx != -1) {
-                    String beanName = nameAndProperty.substring(0, sepIdx);
-                    if (!getRegistry().containsBeanDefinition(beanName)) {
-                        // 如果之前没注册这个bean，则注册之，这里的prefix：prefix+beanName，其实就是从properties文件中筛选出beanName一致的key-value
-                        registerBeanDefinition(beanName, map, prefix + beanName, resourceDescription);
-                        ++beanCount;
-                    }
+        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
+        &lt;span&gt;///&lt;/span&gt;&lt;span&gt; this action for web lagout 
+        &lt;/span&gt;&lt;span&gt;///&lt;/span&gt; &lt;span&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
+&lt;span&gt;        [HttpGet]
+        &lt;/span&gt;&lt;span&gt;public&lt;/span&gt;&lt;span&gt; IActionResult Logout()
+        {
+            Task.Run(&lt;/span&gt;&lt;span&gt;async&lt;/span&gt; () =&amp;gt;&lt;span&gt;
+            {
+                &lt;/span&gt;&lt;span&gt;//&lt;/span&gt;&lt;span&gt;注销登录的用户，相当于ASP.NET中的FormsAuthentication.SignOut  &lt;/span&gt;
+                &lt;span&gt;await&lt;/span&gt;&lt;span&gt; HttpContext.SignOutAsync();
+            }).Wait();
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; View();
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;就拿出推出的源码来看，其中获取了Handler的某些信息，随后将它转换为 &lt;span class=&quot;cnblogs_code&quot;&gt;IAuthenticationSignOutHandler&lt;/span&gt; 接口类型，这个接口 as 接口，像是在地方实现了这个接口，然后将某些运行时的值引用传递到该接口上。&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;40&quot;&gt;
+&lt;pre&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;virtual&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task SignOutAsync(HttpContext context, &lt;span&gt;string&lt;/span&gt;&lt;span&gt; scheme, AuthenticationProperties properties)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (scheme == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; defaultScheme = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; Schemes.GetDefaultSignOutSchemeAsync();
+                scheme &lt;/span&gt;= defaultScheme?&lt;span&gt;.Name;
+                &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (scheme == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+                {
+                    &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;new&lt;/span&gt; InvalidOperationException($&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;No authenticationScheme was specified, and there was no DefaultSignOutScheme found. The default schemes can be set using either AddAuthentication(string defaultScheme) or AddAuthentication(Action&amp;lt;AuthenticationOptions&amp;gt; configureOptions).&lt;/span&gt;&lt;span&gt;&quot;&lt;/span&gt;&lt;span&gt;);
                 }
             }
-        }
-
-        return beanCount;
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;主要就是遍历map，将property的key用.分割，前面的就是beanName，用beanName作为前缀，然后调用下一层函数：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;public static final String CLASS_KEY = &quot;(class)&quot;;
-public static final String PARENT_KEY = &quot;(parent)&quot;;
-public static final String SCOPE_KEY = &quot;(scope)&quot;;
-public static final String SINGLETON_KEY = &quot;(singleton)&quot;;
-public static final String ABSTRACT_KEY = &quot;(abstract)&quot;;
-public static final String LAZY_INIT_KEY = &quot;(lazy-init)&quot;;
-public static final String REF_SUFFIX = &quot;(ref)&quot;;
-
-protected void registerBeanDefinition(String beanName, Map&amp;lt;?, ?&amp;gt; map, String prefix, String resourceDescription)
-            throws BeansException {
-
-        String className = null;
-        String parent = null;
-        String scope = GenericBeanDefinition.SCOPE_SINGLETON;
-        boolean isAbstract = false;
-        boolean lazyInit = false;
-
-        ConstructorArgumentValues cas = new ConstructorArgumentValues();
-        MutablePropertyValues pvs = new MutablePropertyValues();
-
-        for (Map.Entry entry : map.entrySet()) {
-            String key = StringUtils.trimWhitespace((String) entry.getKey());
-            if (key.startsWith(prefix + SEPARATOR)) {
-                String property = key.substring(prefix.length() + SEPARATOR.length());
-                  //核心属性，bean的ClassName
-                if (CLASS_KEY.equals(property)) {
-                    className = StringUtils.trimWhitespace((String) entry.getValue());
-                }//parent属性
-                else if (PARENT_KEY.equals(property)) {
-                    parent = StringUtils.trimWhitespace((String) entry.getValue());
-                }//是否抽象bean definition
-                else if (ABSTRACT_KEY.equals(property)) {
-                    String val = StringUtils.trimWhitespace((String) entry.getValue());
-                    isAbstract = TRUE_VALUE.equals(val);
-                }//scope
-                  ...此处不重要的属性代码进行省略
-                //通过构造器注入其他bean，我们例子里没涉及
-                else if (property.startsWith(CONSTRUCTOR_ARG_PREFIX)) {
-                    if (property.endsWith(REF_SUFFIX)) {
-                        int index = Integer.parseInt(property.substring(1, property.length() - REF_SUFFIX.length()));
-                        cas.addIndexedArgumentValue(index, new RuntimeBeanReference(entry.getValue().toString()));
-                    }
-                    else {
-                        int index = Integer.parseInt(property.substring(1));
-                        cas.addIndexedArgumentValue(index, readValue(entry));
-                    }
-                }
-                // 这里引用其他bean，语法是我们例子用到的，(ref)
-                else if (property.endsWith(REF_SUFFIX)) {
-                    property = property.substring(0, property.length() - REF_SUFFIX.length());
-                    String ref = StringUtils.trimWhitespace((String) entry.getValue());
-                    Object val = new RuntimeBeanReference(ref);
-                    pvs.add(property, val);
-                }
-                else {
-                    // It's a normal bean property.
-                    pvs.add(property, readValue(entry));
-                }
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; handler = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; Handlers.GetHandlerAsync(context, scheme);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (handler == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;await&lt;/span&gt;&lt;span&gt; CreateMissingSignOutHandlerException(scheme);
             }
-        }
-        //构造一个bean definition
-        AbstractBeanDefinition bd = BeanDefinitionReaderUtils.createBeanDefinition(
-            parent, className, getBeanClassLoader());
-        bd.setScope(scope);
-        bd.setAbstract(isAbstract);
-        bd.setLazyInit(lazyInit);
-        //下面这两行，进行构造器注入和属性注入
-        bd.setConstructorArgumentValues(cas);
-        bd.setPropertyValues(pvs);
-        //注册
-        getRegistry().registerBeanDefinition(beanName, bd);
-    }&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;本类的主要代码就这些，删减了部分，主要是避免太冗余，代码有删减就会使用...表示。&lt;/p&gt;
-
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;package org.springframework.beans.extend.properties.applicationcontext;
-
-import org.springframework.beans.BeansException;
-import org.springframework.beans.factory.support.DefaultListableBeanFactory;
-import org.springframework.beans.factory.support.PropertiesBeanDefinitionReader;
-import org.springframework.beans.factory.xml.XmlBeanDefinitionReader;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.support.AbstractRefreshableConfigApplicationContext;
-import java.io.IOException;
-
-
-public class ClassPathPropertyFileApplicationContext extends AbstractRefreshableConfigApplicationContext {
-
-
-
-    /**
-     * Loads the bean definitions via an XmlBeanDefinitionReader.
-     * @see XmlBeanDefinitionReader
-     * @see #loadBeanDefinitions
-     */
-    @Override
-    protected void loadBeanDefinitions(DefaultListableBeanFactory beanFactory) throws BeansException, IOException {
-        // 构造一个propertiesBeanDefinitionReader，就是前面我们的主角
-        PropertiesBeanDefinitionReader beanDefinitionReader = new PropertiesBeanDefinitionReader(beanFactory);
-
-        beanDefinitionReader.setEnvironment(this.getEnvironment());
-        beanDefinitionReader.setResourceLoader(this);
-
-        // Allow a subclass to provide custom initialization of the reader,
-        // then proceed with actually loading the bean definitions.
-        loadBeanDefinitions(beanDefinitionReader);
-    }
-
-    //使用reader，加载bean definition
-    protected void loadBeanDefinitions(PropertiesBeanDefinitionReader reader) throws BeansException, IOException {
-        String[] configResources = getConfigLocations();
-        if (configResources != null) {
-            //看这，兄弟
-            reader.loadBeanDefinitions(configResources);
-        }
-    }
-
-    public ClassPathPropertyFileApplicationContext(String[] configLocations, boolean refresh, ApplicationContext parent)
-            throws BeansException {
-
-        super(parent);
-        setConfigLocations(configLocations);
-        if (refresh) {
-            refresh();
-        }
-    }
-
-
-}
-&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;@Slf4j
-public class BootStrap {
-    public static void main(String[] args) {
-        ClassPathPropertyFileApplicationContext context = new ClassPathPropertyFileApplicationContext(&quot;beanDefinition.properties&quot;);
-        Map&amp;lt;String, Employee&amp;gt; beansOfType = context.getBeansOfType(Employee.class);
-        for (Map.Entry&amp;lt;String, Employee&amp;gt; entry : beansOfType.entrySet()) {
-            log.info(&quot;bean name:{},bean:{}&quot;,entry.getKey(),entry.getValue());
-        }
-
-    }
-}&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;output：&lt;/p&gt;
-&lt;pre class=&quot;java&quot;&gt;
-&lt;code&gt;22:17:26.083 [main] INFO  o.s.b.extend.properties.BootStrap - bean name:techie,bean:Employee(group=Insurance, usesDialUp=true, department=Engineering, manager=Employee(group=Insurance, usesDialUp=true, department=ceo department, manager=null))
-    
-22:17:26.083 [main] INFO  o.s.b.extend.properties.BootStrap - bean name:salesrep,bean:Employee(group=Insurance, usesDialUp=false, department=Sales, manager=Employee(group=Insurance, usesDialUp=true, department=ceo department, manager=null))
-    
-22:17:26.083 [main] INFO  o.s.b.extend.properties.BootStrap - bean name:ceo,bean:Employee(group=Insurance, usesDialUp=true, department=ceo department, manager=null)&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这里可以看出来，子bean是继承了父bean的bean definition，并override了父bean中已经存在的属性。&lt;/p&gt;
-
-&lt;p&gt;工程源码：&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://gitee.com/ckl111/spring-boot-first-version-learn/tree/master/all-demo-in-spring-learning/spring-beans-load-bean-definition-from-properties&quot; class=&quot;uri&quot;&gt;https://gitee.com/ckl111/spring-boot-first-version-learn/tree/master/all-demo-in-spring-learning/spring-beans-load-bean-definition-from-properties&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;这一讲，主要是讲解了另一种读取&lt;code&gt;bean definition&lt;/code&gt;的方式，其实就是告诉我们要打破思想束缚，bean的来源可以用很多，不一定只有xml和注解。另外，也是培养我们的抽象思维，至少bean definition reader这个接口，给我们的感觉就是如此，我不管你&lt;code&gt;resource&lt;/code&gt;来自哪里，只要能读取&lt;code&gt;bean definition&lt;/code&gt;即可，正所谓：英雄不问出处！&lt;/p&gt;
-&lt;p&gt;我们作为技术从业人员也是如此，只要技术够ok，到哪都能混得走。&lt;/p&gt;
-&lt;p&gt;下一讲，我们将继续讲解&lt;code&gt;bean definition&lt;/code&gt;，主要是&lt;code&gt;bean definition&lt;/code&gt;的继承和&lt;code&gt;override&lt;/code&gt;相关内容。&lt;/p&gt;
-&lt;p&gt;觉得有帮助的话，大家点个赞哈&lt;/p&gt;
-</description>
-<pubDate>Tue, 24 Dec 2019 14:28:00 +0000</pubDate>
-<dc:creator>三国梦回</dc:creator>
-<og:description>写在前面的话 相关背景及资源： &amp;quot;曹工说Spring Boot源码（1） Bean Definition到底是什么，附spring思维导图分享&amp;quot; &amp;quot;曹工说Spring B</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/grey-wolf/p/12093929.html</dc:identifier>
-</item>
-<item>
-<title>ElasticSearch实战系列四: ElasticSearch理论知识介绍 - 虚无境</title>
-<link>http://www.cnblogs.com/xuwujing/p/12093933.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/xuwujing/p/12093933.html</guid>
-<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
-&lt;p&gt;在前几篇关于&lt;a href=&quot;https://www.cnblogs.com/xuwujing/category/1530849.html&quot;&gt;ElasticSearch&lt;/a&gt;的文章中，简单的讲了下有关ElasticSearch的一些使用，这篇文章讲一下有关 ElasticSearch的一些理论知识以及自己的一些见解。&lt;br/&gt;虽然本人是一个实战派，不太喜欢讲这些理论知识，因为这块可以查看官方文档，那里会写得非常详细，但是在使用了ElasticSearch之后，发现有的知识点需要掌握一定的理论知识才能理解，对于初学者来说有的不好理解，因此写下该篇文章，希望读者在看完之后能够有所帮助。&lt;/p&gt;
-&lt;h2 id=&quot;elasticsearch-理论知识介绍&quot;&gt;ElasticSearch 理论知识介绍&lt;/h2&gt;
-&lt;h3 id=&quot;elasticsearch是什么&quot;&gt;&lt;strong&gt;ElasticSearch是什么&lt;/strong&gt;&lt;/h3&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;Elasticsearch 是一个基于JSON的分布式搜索和分析引擎。它可以从RESTful Web服务接口访问，并使用模式少JSON(JavaScript对象符号)文档来存储数据。它是基于Java编程语言，这使Elasticsearch能够在不同的平台上运行。使用户能够以非常快的速度来搜索非常大的数据量。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;elasticsearch可以做什么&quot;&gt;&lt;strong&gt;ElasticSearch可以做什么&lt;/strong&gt;&lt;/h3&gt;
-&lt;blockquote&gt;
-&lt;ul&gt;&lt;li&gt;分布式的实时文件存储，每个字段都被索引并可被搜索&lt;/li&gt;
-&lt;li&gt;分布式的实时分析搜索引擎&lt;/li&gt;
-&lt;li&gt;可以扩展到上百台服务器，处理PB级结构化或非结构化数据&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;h3 id=&quot;lucene是什么&quot;&gt;&lt;strong&gt;Lucene是什么&lt;/strong&gt;&lt;/h3&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;ApacheLucene将写入索引的所有信息组织成一种倒排索引（Inverted Index）的结构之中，该结构是种将词项映射到文档的数据结构。其工作方式与传统的关系数据库不同，大致来说倒排索引是面向词项而不是面向文档的。且Lucene索引之中还存储了很多其他的信息，如词向量等等，每个Lucene都是由多个段构成的，每个段只会被创建一次但会被查询多次，段一旦创建就不会再被修改。多个段会在段合并的阶段合并在一起，何时合并由Lucene的内在机制决定，段合并后数量会变少，但是相应的段本身会变大。段合并的过程是非常消耗I/O的，且与之同时会有些不再使用的信息被清理掉。在Lucene中，将数据转化为倒排索引，将完整串转化为可用于搜索的词项的过程叫做分析。文本分析由分析器（Analyzer）来执行，分析其由分词器（Tokenizer），过滤器（Filter）和字符映射器（Character Mapper）组成，其各个功能显而易见。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;elk架构&quot;&gt;&lt;strong&gt;Elk架构&lt;/strong&gt;&lt;/h3&gt;
-&lt;blockquote readability=&quot;8&quot;&gt;
-&lt;p&gt;“ELK”是三个开源项目的首字母缩写，这三个项目分别是：Elasticsearch、Logstash 和 Kibana。Elasticsearch 是一个搜索和分析引擎。Logstash 是服务器端数据处理管道，能够同时从多个来源采集数据，转换数据，然后将数据发送到诸如 Elasticsearch 等“存储库”中。Kibana 则可以让用户在 Elasticsearch 中使用图形和图表对数据进行可视化。&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3 id=&quot;elasticsearch名词&quot;&gt;&lt;strong&gt;ElasticSearch名词&lt;/strong&gt;&lt;/h3&gt;
-&lt;h4 id=&quot;集群cluster&quot;&gt;集群(cluster)&lt;/h4&gt;
-&lt;p&gt;一个集群由一个或多个共享相同的群集名称的节点组成。每个群集有一个单独的主节点，这是由程序自动选择，如果当前主节点失败，程序会自动选择其他节点作为主节点。&lt;/p&gt;
-&lt;h4 id=&quot;节点node&quot;&gt;节点(node)&lt;/h4&gt;
-&lt;p&gt;一个节点属于一个集群。通常情况下一个服务器有一个节点，但有时候为了测试方便，一台服务器也可以有多个节点。在启动时，一个节点将使用广播来发现具有相同群集名称的现有群集，并将尝试加入该群集。&lt;strong&gt;节点属性根据elasticsearch.yml的一些配置来决定！其中master和datanode是必不可少的，其他的可以按照情况来进行添加！为了防止脑裂以及后续维护，建议将节点属性分离！&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;elasticsearch.yml配置:&lt;/strong&gt;&lt;/p&gt;
-&lt;ol readability=&quot;8&quot;&gt;&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;node.master: true 并且 node.data: true&lt;br/&gt;这种组合表示这个节点即有成为主节点的资格，又存储数据。&lt;br/&gt;如果某个节点被选举成为了真正的主节点，那么他还要存储数据，这样对于这个节点的压力就比较大了。ElasticSearch默认每个节点都是这样的配置，在测试环境下这样做没问题。实际工作中建议不要这样设置，因为这样相当于主节点和数据节点的角色混合到一块了。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;node.master: false 并且 node.data: true&lt;br/&gt;这种组合表示这个节点没有成为主节点的资格，也就不参与选举，只会存储数据。 这个节点我们称为data(数据)节点。在集群中需要单独设置几个这样的节点负责存储数据，后期提供存储和查询服务。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;node.master: true 并且 node.data: false&lt;br/&gt;这种组合表示这个节点不会存储数据，有成为主节点的资格，可以参与选举，有可能成为真正的主节点，这个节点我们称为master节点。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;node.master: false node.data: false&lt;br/&gt;这种组合表示这个节点即不会成为主节点，也不会存储数据，这个节点的意义是作为一个client(客户端)节点，主要是针对海量请求的时候可以进行负载均衡。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;node.ingest: true&lt;br/&gt;执行预处理管道，不负责数据和集群相关的事物。&lt;br/&gt;它在索引之前预处理文档，拦截文档的bulk和index请求，然后加以转换。&lt;br/&gt;将文档传回给bulk和index API，用户可以定义一个管道，指定一系列的预处理器。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;示例图:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20191224190134936.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly94dXd1amluZy5ibG9nLmNzZG4ubmV0,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;上述的节点属性可以根据实际的情况来进行配置。如果只有三台配置一般的服务器，在测试环境可以将master节点和datanode节点共用，也就是 &lt;code&gt;node.master: true&lt;/code&gt; 并且 &lt;code&gt;node.data: true&lt;/code&gt; ；在生产环境中，最好将节点分离，特别是masternode和datanode，哪怕是用配置非常差的服务器安装masternode。至于clientnode则需要看情况，如果有大量的查询，并且有很多的聚合分析查询的话，可以部署；ingestnode这个也是看具体的情况，如果有使用ingest等api的情况，也可以进行部署。至于&lt;strong&gt;集群规划&lt;/strong&gt;这个我们在后续的文章中再来讲解。&lt;/p&gt;
-&lt;h4 id=&quot;索引index&quot;&gt;索引（index）&lt;/h4&gt;
-&lt;p&gt;索引是Elasticsearch对逻辑数据的逻辑存储，所以它可以分为更小的部分。你可以把索引看成关系型数据库的表。然而，索引的结构是为快速有效的全文索引准备的，特别是它不存储原始值。如果你知道MongoDB，可以Elasticsearch的索引看成MongoDB里的一个集合。如果你熟悉CouchDB，可以把索引看成CouchDB数据库索引。Elasticsearch可以把索引存放在一台机器或者分散在多台服务器上，每个索引有一或多个分片（shard），每个分片可以有多个副本（replica）。&lt;/p&gt;
-&lt;p&gt;根据将ElasticSearch和传统关系型数据库作比较的话如下类比表:&lt;/p&gt;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; signOutHandler = handler &lt;span&gt;as&lt;/span&gt;&lt;span&gt; IAuthenticationSignOutHandler;
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (signOutHandler == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;throw&lt;/span&gt; &lt;span&gt;await&lt;/span&gt;&lt;span&gt; CreateMismatchedSignOutHandlerException(scheme, handler);
+            }
+            &lt;/span&gt;&lt;span&gt;await&lt;/span&gt;&lt;span&gt; signOutHandler.SignOutAsync(properties);
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;其中 &lt;span class=&quot;cnblogs_code&quot;&gt;GetHandlerAsync&lt;/span&gt; 中根据认证策略创建了某些实例，这里不再多说，因为源码深不见底，我也说不太清楚...只是想表达一下看源码的好处和坏处....&lt;/p&gt;
+&lt;div class=&quot;cnblogs_code&quot; readability=&quot;38&quot;&gt;
 &lt;pre&gt;
-&lt;code&gt;Relational DB -&amp;gt; Databases -&amp;gt; Tables -&amp;gt; Rows -&amp;gt; Columns
-Elasticsearch -&amp;gt; Indices -&amp;gt; Types -&amp;gt; Documents -&amp;gt; Fields&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;但是根据最新的ElasticSearch7.x中已经将Types移除了，并且在日常的使用中，我建议最好把一个索引(index)当做数据库的一张表来使用，类型(type)除了必要的情况，最好无视它，将它和索引库名设置一样即可。&lt;/p&gt;
-&lt;p&gt;这里顺便再来说下创建索引库的结构。我们知道在关系型数据库中需要创建表才能添加数据，但是在ElasticSearch中可以直接插入数据，它会根据你的第一条数据来自动创建索引库的结构， 但是这种在很多情况下是不符合我们要求的。如果我们想自己进行创建的话，那么就有必要了解一下index的setting和mapping了。&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;setting&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;setting可以理解为管理这个index的一些重要属性的，比如分片(shard)和副本(replica)，它决定这个索引库最终的配置形态。初学者的话，可以只用管这三个配置参数即可:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;number_of_shards: 是设置的分片数，设置之后无法更改！&lt;/li&gt;
-&lt;li&gt;refresh_interval: 是设置es缓存的刷新时间，如果写入较为频繁，但是查询对实时性要求不那么高的话，可以设置高一些来提升性能。可以更改&lt;/li&gt;
-&lt;li&gt;number_of_replicas : 是设置该索引库的副本数，建议设置为1以上。&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;mapping&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;mapping可以理解为关系型数据库的表结构，指定字段的类型。初学者可以先只用关心&lt;code&gt;text、keyword、byte、short、integer、long、float、double、boolean、date&lt;/code&gt;这几个字段，其中text和keyword都是string类型，选择区分很简单，需要进行分词用text，不需要并且进行排序或聚合的可以用keyword。&lt;/p&gt;
-&lt;h4 id=&quot;分片shard&quot;&gt;分片(shard)&lt;/h4&gt;
-&lt;p&gt;分片是一个单一的Lucene实例。这个是由Elasticsearch管理的比较底层的功能。索引是指向主分片和副本分片的逻辑空间。对于使用，只需要指定分片的数量，其他不需要做过多的事情。在开发使用的过程中，我们对应的对象都是索引，Elasticsearch会自动管理集群中所有的分片，当发生故障的时候，一个Elasticsearch会把分片移动到不同的节点或者添加新的节点。&lt;/p&gt;
-&lt;ul readability=&quot;3.5&quot;&gt;&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;主分片(primary shard):每个文档都存储在一个分片中，当你存储一个文档的时候，系统会首先存储在主分片中，然后会复制到不同的副本中。默认情况下，一个索引有5个主分片。你可以在事先制定分片的数量，当分片一旦建立，分片的数量则不能修改。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;5&quot;&gt;
-&lt;p&gt;副本分片(replica shard):每一个分片有零个或多个副本。副本主要是主分片的复制，其中有两个目的：&lt;/p&gt;
-&lt;p&gt;1、增加高可用性：当主分片失败的时候，可以从副本分片中选择一个作为主分片。&lt;br/&gt;2、提高性能：当查询的时候可以到主分片或者副本分片中进行查询。默认情况下，一个主分配有一个副本，但副本的数量可以在后面动态的配置增加。副本必须部署在不同的节点上，不能部署在和主分片相同的节点上。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;分片设置很重要！一个index指定了分片之后是无法修改的，因此在设置分片的时候一定要事前做好规划！&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;示例图:&lt;img src=&quot;https://img-blog.csdnimg.cn/20191224190111552.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly94dXd1amluZy5ibG9nLmNzZG4ubmV0,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h4 id=&quot;文档&quot;&gt;文档&lt;/h4&gt;
-&lt;p&gt;存储在Elasticsearch中的主要实体叫文档（document）。用关系型数据库来类比的话，一个文档相当于数据库表中的一行记录。当比较Elasticsearch中的文档和MongoDB中的文档，你会发现两者都可以有不同的结构，但Elasticsearch的文档中，相同字段必须有相同类型。这意味着，所有包含 title 字段的文档， title 字段类型都必须一样，比如 string 。&lt;br/&gt;文档由多个字段组成，每个字段可能多次出现在一个文档里，这样的字段叫多值字段（multivalued）。每个字段有类型，如文本、数值、日期等。字段类型也可以是复杂类型，一个字段包含其他子文档或者数组。字段类型在Elasticsearch中很重要，因为它给出了各种操作（如分析或排序）如何被执行的信息。幸好，这可以自动确定，然而，我们仍然建议使用映射。与关系型数据库不同，文档不需要有固定的结构，每个文档可以有不同的字段，此外，在程序开发期间，不必确定有哪些字段。当然，可以用模式强行规定文档结构。从客户端的角度看，文档是一个JSON对象。每个文档存储在一个索引中并有一个Elasticsearch自动生成的唯一标识符和文档类型。文档需要有对应文档类型的唯一标识符，这意味着在一个索引中，两个不同类型的文档可以有相同的唯一标识符。&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;文档类型:&lt;br/&gt;在Elasticsearch中，一个索引对象可以存储很多不同用途的对象。例如，一个博客应用程序可以保存文章和评论。文档类型让我们轻易地区分单个索引中的不同对象。每个文档可以有不同的结构，但在实际部署中，将文件按类型区分对数据操作有很大帮助。当然，需要记住一个限制，不同的文档类型不能为相同的属性设置不同的类型。例如，在同一索引中的所有文档类型中，一个叫 title 的字段必须具有相同的类型。&lt;/li&gt;
-&lt;/ul&gt;&lt;blockquote&gt;
-&lt;ul readability=&quot;3.5&quot;&gt;&lt;li&gt;核心数据类型&lt;br/&gt;text 和 keyword&lt;/li&gt;
-&lt;li&gt;数值数据类型&lt;br/&gt;long，integer，short，byte，double，float，half_float，scaled_float&lt;/li&gt;
-&lt;li&gt;日期数据类型&lt;br/&gt;date&lt;/li&gt;
-&lt;li&gt;布尔数据类型&lt;br/&gt;boolean&lt;/li&gt;
-&lt;li&gt;二进制数据类型&lt;br/&gt;binary&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;范围数据类型&lt;br/&gt;integer_range，float_range，long_range，double_range，date_range&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;复杂数据类型&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;对象数据类型&lt;br/&gt;object 用于单个JSON对象&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;嵌套数据类型&lt;br/&gt;nested 用于JSON对象数组&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;地理数据类型&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;地理位置数据类型&lt;br/&gt;geo_point 纬度/经度积分&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;地理形状数据类型&lt;br/&gt;geo_shape 用于多边形等复杂形状&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;专业数据类型&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;IP数据类型&lt;br/&gt;ip 用于IPv4和IPv6地址&lt;/li&gt;
-&lt;li&gt;完成数据类型&lt;br/&gt;completion 提供自动完成建议&lt;/li&gt;
-&lt;li&gt;令牌计数数据类型&lt;br/&gt;token_count 计算字符串中令牌的数量&lt;br/&gt;mapper-murmur3&lt;br/&gt;murmur3 在索引时计算值的哈希并将其存储在索引中&lt;br/&gt;mapper-annotated-text&lt;br/&gt;annotated-text 索引包含特殊标记的文本（通常用于标识命名实体）&lt;/li&gt;
-&lt;li&gt;渗滤器类型&lt;br/&gt;接受来自query-dsl的查询&lt;/li&gt;
-&lt;li&gt;join 数据类型&lt;br/&gt;为同一索引内的文档定义父/子关系&lt;/li&gt;
-&lt;li readability=&quot;-1&quot;&gt;
-&lt;p&gt;别名数据类型&lt;br/&gt;为现有字段定义别名。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;多字段:&lt;br/&gt;为不同的目的以不同的方式对同一字段建立索引通常很有用。例如，一个string字段可以映射为text用于全文搜索的字段，也可以映射为keyword用于排序或聚合的字段。或者，您可以使用standard分析仪， english分析仪和 french分析仪索引文本字段。&lt;br/&gt;这是多领域的目的。大多数数据类型通过fields参数支持多字段。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;/blockquote&gt;
-&lt;ul readability=&quot;1.5&quot;&gt;&lt;li readability=&quot;2&quot;&gt;
-&lt;p&gt;映射：&lt;br/&gt;在有关全文搜索基础知识部分，我们提到了分析的过程：为建索引和搜索准备输入文本。文档中的每个字段都必须根据不同类型做相应的分析。举例来说，对数值字段和从网页抓取的文本字段有不同的分析，比如前者的数字不应该按字母顺序排序，后者的第一步是忽略HTML标签，因为它们是无用的信息噪音。Elasticsearch在映射中存储有关字段的信息。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;路由(routing):&lt;br/&gt;当存储一个文档的时候，他会存储在一个唯一的主分片中，具体哪个分片是通过散列值的进行选择。默认情况下，这个值是由文档的id生成。如果文档有一个指定的父文档，从父文档ID中生成，该值可以在存储文档的时候进行修改。&lt;br/&gt;这个属性在学习初期可以不必理会，使用默认即可。在有一定了解ElasticSearch之后可以在进行了解学习。&lt;/li&gt;
-&lt;li readability=&quot;1&quot;&gt;
-&lt;p&gt;别名(alias):&lt;br/&gt;它是一个或多个索引的一个附加名称，允许使用这个名称来查询索引。一个别名可以对应多个索引，反之亦然，一个索引可以是多个别名的一部分。别名只能用作查询，不能进行数据操作！&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;示例图:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20191224190118715.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly94dXd1amluZy5ibG9nLmNzZG4ubmV0,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/20191224190119688.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly94dXd1amluZy5ibG9nLmNzZG4ubmV0,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
-&lt;h2 id=&quot;其它&quot;&gt;其它&lt;/h2&gt;
-&lt;p&gt;本文主要介绍了ElasticSearch的一些基础知识，其中ElasticSearch的理论知识远远不止这些，但是介绍的太多的话吸收不过来，其实很多的知识最好是边学边用中在掌握。学习ElasticSearch知识理论可以去官网学习，那里有非常详细的知识。&lt;br/&gt;&lt;img src=&quot;https://img-blog.csdnimg.cn/2019122422240928.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly94dXd1amluZy5ibG9nLmNzZG4ubmV0,size_16,color_FFFFFF,t_70&quot; alt=&quot;在这里插入图片描述&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;之后或许会写一篇关于ElasticSearch的集群规划，会从案例中进行讲解，包括机器、节点、索引库、分片副本一些选择和配置的一些具体知识。&lt;/p&gt;
-&lt;p&gt;参考：&lt;br/&gt;&lt;a href=&quot;https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html&quot; class=&quot;uri&quot;&gt;https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;参考书籍:&lt;br/&gt;《ElasticSearch权威指南》&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://www.cnblogs.com/xuwujing/tag/elasticsearch/&quot;&gt;ElasticSearch实战系列&lt;/a&gt;:&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/xuwujing/p/11385255.html&quot;&gt;ElasticSearch实战系列一: ElasticSearch集群+Kinaba安装教程&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/xuwujing/p/11567053.html&quot;&gt;ElasticSearch实战系列二: ElasticSearch的DSL语句使用教程---图文详解&lt;/a&gt;&lt;br/&gt;&lt;a href=&quot;https://www.cnblogs.com/xuwujing/p/11645630.html&quot;&gt;ElasticSearch实战系列三: ElasticSearch的JAVA API使用教程&lt;/a&gt;&lt;/p&gt;
-&lt;h3 id=&quot;音乐推荐&quot;&gt;音乐推荐&lt;/h3&gt;
+&lt;span&gt;public&lt;/span&gt; &lt;span&gt;async&lt;/span&gt; Task&amp;lt;IAuthenticationHandler&amp;gt; GetHandlerAsync(HttpContext context, &lt;span&gt;string&lt;/span&gt;&lt;span&gt; authenticationScheme)
+        {
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt;&lt;span&gt; (_handlerMap.ContainsKey(authenticationScheme))
+            {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; _handlerMap[authenticationScheme];
+            }
 
-&lt;p&gt;原创不易，如果感觉不错，希望给个推荐！您的支持是我写作的最大动力！&lt;br/&gt;版权声明:&lt;br/&gt;作者：虚无境&lt;br/&gt;博客园出处：&lt;a href=&quot;http://www.cnblogs.com/xuwujing&quot; class=&quot;uri&quot;&gt;http://www.cnblogs.com/xuwujing&lt;/a&gt;&lt;br/&gt;CSDN出处：&lt;a href=&quot;http://blog.csdn.net/qazwsxpcm&quot; class=&quot;uri&quot;&gt;http://blog.csdn.net/qazwsxpcm&lt;/a&gt;　　　　&lt;br/&gt;掘金出处：&lt;a href=&quot;https://juejin.im/user/5ae45d5bf265da0b8a6761e4&quot; class=&quot;uri&quot;&gt;https://juejin.im/user/5ae45d5bf265da0b8a6761e4&lt;/a&gt;&lt;br/&gt;个人博客出处：&lt;a href=&quot;http://www.panchengming.com&quot; class=&quot;uri&quot;&gt;http://www.panchengming.com&lt;/a&gt;&lt;/p&gt;
-</description>
-<pubDate>Tue, 24 Dec 2019 14:27:00 +0000</pubDate>
-<dc:creator>虚无境</dc:creator>
-<og:description>前言 在前几篇关于 &amp;quot;ElasticSearch&amp;quot; 的文章中，简单的讲了下有关ElasticSearch的一些使用，这篇文章讲一下有关 ElasticSearch的一些理论知识以及</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/xuwujing/p/12093933.html</dc:identifier>
-</item>
-<item>
-<title>基于Graylog的容器日志监控 - CodingDiary</title>
-<link>http://www.cnblogs.com/coding-diary/p/12093294.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/coding-diary/p/12093294.html</guid>
-<description>&lt;div class=&quot;markdown-here-wrapper&quot; data-md-url=&quot;https://i-beta.cnblogs.com/posts/edit&quot; readability=&quot;86.763813448211&quot;&gt;
-&lt;h3 id=&quot;docker-&quot;&gt;Docker日志&lt;/h3&gt;
-&lt;p&gt;当一个容器启动的时候，它其实是docker deamon的一个子进程，docker daemon可以拿到容器里面进程的标准输出，然后通过自身的LogDriver模块来处理，LogDriver支持的方式很多，默认写到本地文件，也可以发送到syslog等。 &lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20docker%20log%20driver.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Docker会默认收集应用程序的标准输出到一个json.log文件中，以一行一条JSON存储数据，文件的格式如下：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;{&quot;log&quot;:&quot;root@74205cdc7b53dd:/#ls\r\n&quot;,&quot;stream&quot;:&quot;stdout&quot;,&quot;time&quot;:&quot;xxx.155834526Z&quot;}
-{&quot;log&quot;:&quot;root@74205cdc7b53dd:/#ls\r\n&quot;,&quot;stream&quot;:&quot;stdout&quot;,&quot;time&quot;:&quot;xxx.255834528Z&quot;}
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;Docker的这种日志存储方式可以在容器启动时通过指定log-driver进行配置，支持的log driver如下：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20log%20drivers.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;graylog-&quot;&gt;Graylog日志管理&lt;/h3&gt;
-&lt;p&gt;Graylog是一个开源的完整的日志管理工具，功能和ELK类似。Docker原生支持graylog协议，Graylog官方也提供了对Docker的支持，二者可以无缝衔接。Graylog官方提供了Dockerfile可以在Docker上部署日志系统，同时也提供了docker-compose.yml文件来快速部署整个graylog栈。&lt;br/&gt;详细内容可以通过&lt;a href=&quot;http://docs.graylog.org/en/3.1/pages/installation/docker.html&quot;&gt;http://docs.graylog.org/en/3.1/pages/installation/docker.html&lt;/a&gt; 来查看。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20graylog.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;graylog-&quot;&gt;Graylog部署&lt;/h3&gt;
-&lt;p&gt;1.在当前用户目录下创建graylog目录作为部署的工作目录：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;$ mkdir graylog
-$ cd graylog
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;2.初始化目录和配置文件&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;$ mkdir -p ./graylog/config
-$ cd ./graylog/config
-$ wget https://raw.githubusercontent.com/Graylog2/graylog-docker/3.1/config/graylog.conf
-$ wget https://raw.githubusercontent.com/Graylog2/graylog-docker/3.1/config/log4j2.xml
-
-#另外由于Graylog以ID 1100 定义了用户和用户组，
-#导致Graylog在启动的时候可能会报config目录权限不足的错误，可以通过以下命令来解决
-chown -R 1100:1100 ./graylog/config
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;3.修改配置文件， 上一步获得的graylog.conf文件是官方提供的默认配置，用户可以根据需要进行配置，比如配置中时区默认为UTC时区，可以将其改为中国时区&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;root_timezone = Asia/Shanghai
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;4.准备docker-compose.yml文件&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;version: '3'
-services:
-  # MongoDB: https://hub.docker.com/_/mongo/
-  mongo:
-    image: mongo:3
-    networks:
-      - graylog
-    volumes:
-      - mongo_data:/data/db
-  # Elasticsearch: https://www.elastic.co/guide/en/elasticsearch/reference/6.x/docker.html
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.5.0
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-    environment:
-      - http.host=0.0.0.0
-      - transport.host=localhost
-      - network.host=0.0.0.0
-      - &quot;ES_JAVA_OPTS=-Xms512m -Xmx512m&quot;
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    deploy:
-      resources:
-        limits:
-          memory: 1g
-    networks:
-      - graylog
-  # Graylog: https://hub.docker.com/r/graylog/graylog/
-  graylog:
-    image: graylog/graylog:3.1
-    volumes:
-      - graylog_journal:/usr/share/graylog/data/journal
-      - ./graylog/config:/usr/share/graylog/data/config
-    environment:
-      # CHANGE ME (must be at least 16 characters)!
-      - GRAYLOG_PASSWORD_SECRET=somepasswordpepper
-      # Password: admin
-      - GRAYLOG_ROOT_PASSWORD_SHA2=8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
-      - GRAYLOG_HTTP_EXTERNAL_URI=http://192.168.0.103:9000/
-    networks:
-      - graylog
-    depends_on:
-      - mongo
-      - elasticsearch
-    ports:
-      # Graylog web interface and REST API
-      - 9000:9000
-      # Syslog TCP
-      - 1514:1514
-      # Syslog UDP
-      - 1514:1514/udp
-      # GELF TCP
-      - 12201:12201
-      # GELF UDP
-      - 12201:12201/udp
-networks:
-  graylog:
-    driver: bridge
-# Volumes for persisting data, see https://docs.docker.com/engine/admin/volumes/volumes/
-volumes:
-  mongo_data:
-    driver: local
-  es_data:
-    driver: local
-  graylog_journal:
-    driver: local
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;5.运行 “docker-compose up”启动服务， 服务正常启动后就可以通过&lt;a href=&quot;http://ip:9000&quot;&gt;http://ip:9000&lt;/a&gt; 进行访问graylog的Web界面，默认用户admin/admin。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20graylog%E9%A1%B5%E9%9D%A2.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;graylog-&quot;&gt;Graylog配置日志收集&lt;/h3&gt;
-&lt;p&gt;Graylog的日志收集通过定义input来完成，在Graylog的Web管理页面的System tab下可以选择定义input来对日志进行收集&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20%E9%80%89%E6%8B%A9input.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;进入input页面后选择input的类型，比如定义GELF UDP的input:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20%E9%80%89%E6%8B%A9GELF.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;选择完成后点击 “Lanch new input”，就会进入详细的input配置，配置完成后保存就可以了&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20%E9%85%8D%E7%BD%AEinput.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;保存后一切正常的话，input就会进入RUNNING状态，这时就可以往这个input里面发送数据了，点击“Stop input”，input就会停止，数据的接收也会停止，“Stop input”会变成“Start input”，需要接受数据的时点击启动就可以了。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20input%E8%BF%90%E8%A1%8C.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;h3 id=&quot;-docker-graylog&quot;&gt;配置Docker容器发送数据到Graylog&lt;/h3&gt;
-&lt;p&gt;配置Docker容器发送数据到Graylog时可以在运行docker run命令启动容器的时候加上如下参数：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;docker run --log-driver=gelf \
---log-opt gelf-address=udp://graylog服务器地址:12201 \
---log-opt tag=&amp;lt;当前容器服务标签，用来供graylog查询的时候进行分类&amp;gt; \
-&amp;lt;IMAGE&amp;gt; &amp;lt;COMMAND&amp;gt;
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;具体示例：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;docker run -d \
---log-driver=gelf \
---log-opt gelf-address=udp://localhost:12201 \
---log-opt tag=&quot;{{.ImageName}}/{{.Name}}/{{.ID}}&quot; \
-busybox sh -c 'while true; do echo &quot;Graylog test message&quot;; sleep 10; done;'
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如果容器通过docker-compose命令启动可以在docker-compose.yml文件中加入以下配置：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;logging:
-  driver:&quot;gelf&quot;
-  options:
-    gelf-address:&quot;udp://graylog服务器地址:12201&quot;
-    tag:&quot;容器服务标签&quot;
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;具体示例：&lt;/p&gt;
-&lt;pre&gt;
-&lt;code&gt;version: '2'
-services:
-  nginx:
-    image: nginx:latest
-    ports:
-      - &quot;80:80&quot;
-    logging:
-      driver: &quot;gelf&quot;
-      options:
-        gelf-address: &quot;udp://localhost:12201&quot;
-        tag: nginx-service
-&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;日志发送配置好之后就可以在的Search tab下搜索产看日志信息&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://gitee.com/mo-se-de-feng/notes/raw/master/%E5%AE%B9%E5%99%A8%E5%8C%96%E4%B8%93%E9%A2%98/images/1.3.2%20graylog%E6%97%A5%E5%BF%97%E6%98%BE%E7%A4%BA.PNG&quot; alt=&quot;img&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/common/1735841/201912/1735841-20191224200139471-2119361415.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;​&lt;/p&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Tue, 24 Dec 2019 12:02:00 +0000</pubDate>
-<dc:creator>CodingDiary</dc:creator>
-<og:description>Docker日志 当一个容器启动的时候，它其实是docker deamon的一个子进程，docker daemon可以拿到容器里面进程的标准输出，然后通过自身的LogDriver模块来处理，LogDr</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/coding-diary/p/12093294.html</dc:identifier>
-</item>
-<item>
-<title>Linux文档整理之【Jenkins+Docker自动化部署.Net Core】 - Cfan1236</title>
-<link>http://www.cnblogs.com/rui1236/p/12092775.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/rui1236/p/12092775.html</guid>
-<description>&lt;p&gt;这次整理的文档是Jenkins+Docker实现自动化部署，很早之前就写的，今天有时间就搬到博客园做个记录。&lt;/p&gt;
-&lt;p&gt;Jenkins是基于Java开发的一种持续集成工具，主要用于持续、自动的构建/测试软件等相关项目。在Java开发中我们经常能看到使用jenkins来部署，.Net core目前还是比较少见的，但是好的东西我们就应该要拿来使用、借鉴。&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;em&gt;这里使用Docker来安装&lt;/em&gt;&lt;/span&gt;JenKins，&lt;span&gt;&lt;em&gt;当然也可以直接安装到Linux中。&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;创建jenkins工作目录&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;mkdir /usr/local/jenkins&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;拉取jenkins镜像&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;docker pull jenkins&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;这里有个小插曲，我用的是jenkins镜像，默认也是latest一般意味着最后最新版本。很多官方最新镜像也都是如此命名；直到后来安装配置完成后，登录进去提示我不是最新版本，让我更新，并且很多插件已经不支持此版本了。发现当前版本和最新版本还相差好几个。心想这不是官方镜像吗 怎么还是这么旧的版本，最后通过搜索发现，Jenkins官方最新镜像现在已改为jenkins/jenkins的了。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;所以最新版是:&lt;strong&gt;jenkins/jenkins&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224190808051-1722628861.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;我们拉取最新lts版本。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;docker pull jenkins/jenkins:lts&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224190835971-1044844142.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;看如下图&lt;strong&gt;jenkins&lt;/strong&gt;和&lt;strong&gt;jenkins/jenkins&lt;/strong&gt;两个镜像的差别，发现常规下的latest版本并不最新的了，它们的创建时间已经是1年以前了。而jenkins/jenkins 则创建时间在2天不到。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;所以常规的latest并不意味着最新版本。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224174115642-2146719765.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;修改jenkins目录和docker目录权限,这里1000是容器中Jenkins 的用户 uid&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;chown -R 1000:1000 /usr/local/Jenkins&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;sudo chown -R 1000:1000 /var/run/docker.sock&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;尤其docker.sock 这个权限很重要，到时候容器里的Jenkins需要执行docker命令需要的&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;运行Jenkins 注意后面的镜像名称和版本lts&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;docker run -itd -p 8080:8080 -p 50000:50000 --name jenkins --privileged=true  -v /usr/local/jenkins:/var/jenkins_home -v /usr/bin/docker:/bin/docker  -v /var/run/docker.sock:/var/run/docker.sock jenkins/jenkins:lts &lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;em&gt;参数解释：&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;-p 8080:8080 -p 50000:50000 --&lt;/strong&gt;映射jenkins端口&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;--name jenkins --&lt;/strong&gt;容器名称自己命名&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;privileged=true --&lt;/strong&gt;授予容器管理员权限&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;-v /usr/local/jenkins:/var/jenkins_home --&lt;/strong&gt;映射jenkins目录&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;-v /usr/bin/docker:/bin/docker --&lt;/strong&gt;映射docke目录 到时候需要在容器里执行docker命令&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;-v /var/run/docker.sock:/var/run/docker.sock --&lt;/strong&gt;映射docker执行命令 到时候需要容器里执行docker命令。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224174403931-604302911.png&quot; alt=&quot;&quot; width=&quot;1564&quot; height=&quot;62&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;容器是否启动成功最好还是通过docker ps 或者netstat –ntlp |grep 8080 (查看我们容器映射的端口是否监听成功) 查看当前容器是否运行成功。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;某些情况下，如权限没有配对，启动会不成功的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看正在运行的容器。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;docker ps&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224174511669-1373086749.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;span&gt;查看容器启动成功后，我们可以通过地址+端口访问刚刚运行的Jenkins&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;例如http://192.168.1.101:8080   &lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;安装成功访问后会如下图所示。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224190855343-1092075801.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;提示首次访问需要密码，我们通过刚刚映射的Jenkins目录里查看这个默认密码。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;默认密码路径：&lt;strong&gt;/usr/local/jenkins/secrets/&lt;/strong&gt;  &lt;em&gt;(&lt;/em&gt;&lt;em&gt;注意前面usr/local/jenkins路径就是刚刚自己映射的目录)&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;em&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224174807164-93094199.png&quot; alt=&quot;&quot;/&gt;&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看密码文件&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;cat initialAdminPassword&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224174836497-1910904952.png&quot; alt=&quot;&quot;/&gt;&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;输入密码然后继续下一步。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224184616857-1732290197.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;下一步如果有出现404的，如下图&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;网上搜索了解听说是Jenkins的一个bug；部分版本存在。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224190907282-1056005613.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;解决办法(&lt;em&gt;以下步骤是解决登录404的；如果没有404则可以跳过&lt;/em&gt;)&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;首先回到Jenkins主目录找到config.xml文件并打开。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224175152954-1668664736.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;将&amp;lt;useSecurity&amp;gt; 修改为false&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224175211920-651412827.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;停止并重新运行jenkins&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224175231998-515860862.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;em&gt;重启后一定要重新查看默认密码，否则旧密码是登录不成功的。&lt;/em&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;登录进去以后这里默认选择推荐的插件。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224191109214-116616822.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;接下来就是等待安装，这里需要注意，如果jenkins版本比较老，则可能很多插件安装失败，直接红色的。此时可以跳过该界面进入首页。会有提示让你升级最新Jenkins版本。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224191208813-565584678.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;安装完成后创建一个用户名和密码，即可完成安装进入首页。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224191244546-892993301.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;1、源代码编译发布工程&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;源代码发布工程即将源代码提交到git服务器，jenkins通过git拉取最新的源代码，并通过Dockerfile里的配置进行编译发布过程。然后通过Docker构建此镜像并运行到容器。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;创建一个.Net Core Web项目。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;创建项目的时候可以选择启用Docker支持。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224181346110-1056232026.png&quot; alt=&quot;&quot; width=&quot;759&quot; height=&quot;506&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;对于之前的项目可以右键添加Docker支持。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;项目目录&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224181439744-755223529.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;默认的Dockerfile是有帮我们进行代码编译并发布动作的。所以默认的Dockerfile文件是适合和代码一起提交到服务器然后使用Docker进行构建镜像。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224181525910-626093647.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;项目创建完成后随代码一起提交到git服务器。(svn等也都可以)&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;git项目目录，注意将Dockerfile复制到根目录。由于到时候构建镜像的时候就是从根目录执行的。git目录如下所示。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224182724857-1255729928.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;span&gt;2、已编译的&lt;span lang=&quot;EN-US&quot;&gt;Release工程&lt;/span&gt;&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;已编译的Release工程，此种方式适合git或svn在局域网的；又不希望源代码不暴露到外网的需要。此种方式是将项目工程进行进行发布打包操作。例如java常见的打包成一个war包文件。.Net 就是生成对应的DLL 文件。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;项目在发布之前我们对项目的Dockerfile文件属性做个更改，以便在发布时将此文件复制到发布时的目录。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224182634862-326086930.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;选择上面建立的WebTest项目右键发布，选择发布到指定文件夹。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;将发布文件发布到自己的git(或svn)目录，如下图所示的，一定要包含Dockerfile文件。发布后的文件，可以根据自己需要将没有更新DLL或者appsetting.json等文件剔除掉。只保留本次要更新的文件即可。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224182538878-810525913.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;修改Dockerfile文件，因为默认的Dockerfile文件是包含编译发布的命令，所以这里要将这些相关命令操作删除掉；保留如下命令配置即可。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224183009915-1313902784.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;保存然后提交到所有文件到git服务器。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;提交后的git目录。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224183156750-1456602101.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;建议：无论是代码编译发布工程还是已编译的Release工程，第一次使用Docker部署时最好先自己手动将这些文件拷贝到服务器，并手动构建对象并运行容器看是否成功；能否访问网站。也就是先不用Jenkins将这些流程自己手动走一遍，确保一些目录包括Dockerfile等都是配置正确的。&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;项目工程创建完成并提交到git服务器后，开始在Jenkins里面创建任务。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224193149311-865244008.png&quot; alt=&quot;&quot; width=&quot;704&quot; height=&quot;482&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;输入项目描述，源代码管理选择自己对应的即可。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224193225394-1814339235.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;我这里选择的git。第一次添加项目时需要添加一种授权方式点击右边添加按钮即可。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224183752139-1109237736.png&quot; alt=&quot;&quot; width=&quot;687&quot; height=&quot;234&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;选择添加授权方式 常用的就是用户名加密码或者SSH方式。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224183858474-1672407212.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;下一步设置构建环境&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224183957636-966022869.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;设置触发器，这里主要是设置自动触发条件，有定时构建、远程触发构建、轮询SCM。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;这里只设置轮询SCM形式的，很简单的方式。意思是在指定间隔时间内会去轮询git或svn中版本是否有变化。如果有就立即构建该项目。其实就是做到只要代码提交了 则立刻就能自动构建项目进行发布；不在需要其他任何操作了。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224184205222-847025462.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;选择构建—&amp;gt;执行shell;当然我们这里是linux服务器所有多数选择执行shell。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224184756535-1693912725.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;添加shell 命令。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224184840972-1685252577.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;注意下面的webtest 改为自己的容器名称和对应镜像名称即可。&lt;/span&gt;&lt;/p&gt;
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; scheme = &lt;span&gt;await&lt;/span&gt;&lt;span&gt; Schemes.GetSchemeAsync(authenticationScheme);
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (scheme == &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;return&lt;/span&gt; &lt;span&gt;null&lt;/span&gt;&lt;span&gt;;
+            }
+            &lt;/span&gt;&lt;span&gt;var&lt;/span&gt; handler = (context.RequestServices.GetService(scheme.HandlerType) ??&lt;span&gt;
+                ActivatorUtilities.CreateInstance(context.RequestServices, scheme.HandlerType))
+                &lt;/span&gt;&lt;span&gt;as&lt;/span&gt;&lt;span&gt; IAuthenticationHandler;
+            &lt;/span&gt;&lt;span&gt;if&lt;/span&gt; (handler != &lt;span&gt;null&lt;/span&gt;&lt;span&gt;)
+            {
+                &lt;/span&gt;&lt;span&gt;await&lt;/span&gt;&lt;span&gt; handler.InitializeAsync(scheme, context);
+                _handlerMap[authenticationScheme] &lt;/span&gt;=&lt;span&gt; handler;
+            }
+            &lt;/span&gt;&lt;span&gt;return&lt;/span&gt;&lt;span&gt; handler;
+        }&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;最后我们在页面上想要获取登录的信息，可以通过 &lt;span class=&quot;cnblogs_code&quot;&gt;HttpContext.User.Claims&lt;/span&gt; 中的签名信息获取。&lt;/p&gt;
 &lt;div class=&quot;cnblogs_code&quot; readability=&quot;35&quot;&gt;
 &lt;pre&gt;
-#!/bin/&lt;span&gt;bash
-# 获取短版本号
-GITHASH&lt;/span&gt;=`git rev-parse --&lt;span&gt;short&lt;/span&gt;&lt;span&gt; HEAD`
-docker stop webtest
-docker &lt;/span&gt;&lt;span&gt;rm&lt;/span&gt;&lt;span&gt; webtest
-&lt;/span&gt;&lt;span&gt;echo&lt;/span&gt; ---------------Building Docker Image...------------------&lt;span&gt;
-docker build &lt;/span&gt;-&lt;span&gt;t webtest:$GITHASH .
-docker tag webtest:$GITHASH webtest:latest
-&lt;/span&gt;&lt;span&gt;echo&lt;/span&gt; ---------------Launching Container...------------------&lt;span&gt;
-docker run &lt;/span&gt;--name webtest -d -p &lt;span&gt;8005&lt;/span&gt;:&lt;span&gt;80&lt;/span&gt; webtest:latest 
+&lt;span&gt;@using Microsoft.AspNetCore.Authentication
+&lt;/span&gt;&amp;lt;h2&amp;gt;HttpContext.User.Claims&amp;lt;/h2&amp;gt;
+&amp;lt;dl&amp;gt;&lt;span&gt;
+    @foreach (&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; claim &lt;span&gt;in&lt;/span&gt;&lt;span&gt; User.Claims)
+    {
+        &lt;/span&gt;&amp;lt;dt&amp;gt;@claim.Type&amp;lt;/dt&amp;gt;
+        &amp;lt;dd&amp;gt;@claim.Value&amp;lt;/dd&amp;gt;&lt;span&gt;
+    }
+&lt;/span&gt;&amp;lt;/dl&amp;gt;
+&amp;lt;h2&amp;gt;AuthenticationProperties&amp;lt;/h2&amp;gt;
+&amp;lt;dl&amp;gt;&lt;span&gt;
+    @foreach (&lt;/span&gt;&lt;span&gt;var&lt;/span&gt; prop &lt;span&gt;in&lt;/span&gt; (&lt;span&gt;await&lt;/span&gt;&lt;span&gt; Context.AuthenticateAsync()).Properties.Items)
+    {
+        &lt;/span&gt;&amp;lt;dt&amp;gt;@prop.Key&amp;lt;/dt&amp;gt;
+        &amp;lt;dd&amp;gt;@prop.Value&amp;lt;/dd&amp;gt;&lt;span&gt;
+    }
+&lt;/span&gt;&amp;lt;/dl&amp;gt;
 &lt;/pre&gt;&lt;/div&gt;
-&lt;p&gt;&lt;span&gt;使用git提交代码进行测试。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185241042-500183426.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;自动开始构建了 注意jenkins这里时间是默认是utc时间。utc时间转换我们北京时间是要+8小时的。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185456799-637738902.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;span&gt;蓝色图标代表构建成功，如果失败会是红色&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185614436-1159409259.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看控制台输出信息，尤其构建失败时能够从里面获取到失败原因等。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185720268-1225603920.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;控制输出如下图所示&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185811245-1479416886.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;构建成功后我们到服务器检查下是否有刚刚构建的镜像和运行的容器。(当然一般情况下只要构建成功这两步可以不用检查)&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看镜像&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185839300-1405877496.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;查看运行的容器&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224185854685-1606274176.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;访问站点看能否访问成功。&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/554879/201912/554879-20191224190057323-1761894863.png&quot; alt=&quot;&quot;/&gt;&lt;/span&gt;&lt;/p&gt;
-
+&lt;h2&gt;三.最后效果以及源码地址&lt;/h2&gt;
+&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/i-beta/1366751/201912/1366751-20191225230634000-2135186270.gif&quot; alt=&quot;&quot; width=&quot;1023&quot; height=&quot;477&quot;/&gt;&lt;/p&gt;
+&lt;p&gt; GitHub地址：&lt;a href=&quot;https://github.com/zaranetCore/aspNetCore_JsonwebToken/tree/master/src/Identity.Cookie/DotNetCore_Cookie_Sample&quot;&gt;https://github.com/zaranetCore/aspNetCore_JsonwebToken/tree/master/src/Identity.Cookie/DotNetCore_Cookie_Sample&lt;/a&gt;&lt;/p&gt;
 </description>
-<pubDate>Tue, 24 Dec 2019 11:39:00 +0000</pubDate>
-<dc:creator>Cfan1236</dc:creator>
-<og:description>这次整理的文档是Jenkins+Docker实现自动化部署，很早之前就写的，今天有时间就搬到博客园做个记录。 Jenkins是基于Java开发的一种持续集成工具，主要用于持续、自动的构建/测试软件等相</og:description>
+<pubDate>Wed, 25 Dec 2019 15:13:00 +0000</pubDate>
+<dc:creator>张子浩</dc:creator>
+<og:description>一.Cookie是什么？ 我的朋友问我cookie是什么，用来干什么的，可是我居然无法清楚明白简短地向其阐述cookie，这不禁让我陷入了沉思：为什么我无法解释清楚，我对学习的方法产生了怀疑！所以我们</og:description>
 <dc:language>zh-cn</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/rui1236/p/12092775.html</dc:identifier>
-</item>
-<item>
-<title>AWS EC2 搭建 Hadoop 和 Spark 集群 - massquantity</title>
-<link>http://www.cnblogs.com/massquantity/p/12088449.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/massquantity/p/12088449.html</guid>
-<description>&lt;h2 id=&quot;前言&quot;&gt;前言&lt;/h2&gt;
-&lt;p&gt;本篇演示如何使用 AWS EC2 云服务搭建集群。当然在只有一台计算机的情况下搭建完全分布式集群，还有另外几种方法：一种是本地搭建多台虚拟机，好处是免费易操控，坏处是虚拟机对宿主机配置要求较高，我就一台普通的笔记本，开两三个虚拟机实在承受不起； 另一种方案是使用 &lt;a href=&quot;https://docs.aws.amazon.com/zh_cn/emr/latest/ManagementGuide/emr-overview.html&quot;&gt;&lt;span&gt;AWS EMR&lt;/span&gt;&lt;/a&gt; ，是亚马逊专门设计的集群平台，能快速启动集群，且具有较高的灵活性和扩展性，能方便地增加机器。然而其缺点是只能使用预设的软件，如下图：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;p&gt;如果要另外装软件，则需要使用 Bootstrap 脚本，详见 &lt;a href=&quot;https://docs.aws.amazon.com/zh_cn/emr/latest/ManagementGuide/emr-plan-software.html?shortFooter=true&quot;&gt;&lt;span&gt;https://docs.aws.amazon.com/zh_cn/emr/latest/ManagementGuide/emr-plan-software.html?shortFooter=true&lt;/span&gt;&lt;/a&gt; ，可这并不是一件容易的事情，记得之前想在上面装腾讯的 &lt;a href=&quot;https://github.com/Angel-ML/angel&quot;&gt;&lt;span&gt;Angel&lt;/span&gt;&lt;/a&gt; 就是死活都装不上去。 另外，如果在 EMR 上关闭了集群，则里面的文件和配置都不会保存，下次使用时全部要重新设置，可见其比较适用于一次性使用的场景。&lt;/p&gt;
-&lt;p&gt;综上所述，如果使用纯 EC2 进行手工搭建，则既不会受本地资源限制，也具有较高的灵活性，可以随意配置安装软件。而其缺点就是要手工搭建要耗费较多时间，而且在云上操作和在本地操作有些地方是不一样的，只要有一步出错可能就要卡壳很久，鉴于网上用 EC2 搭建这方面资料很少，因此这里写一篇文章把主要流程记录下来。&lt;/p&gt;
-&lt;p&gt;如果之前没有使用过 EC2，可能需要花一段时间熟悉，比如注册以及创建密钥对等步骤，官方提供了相关&lt;a href=&quot;https://aws.amazon.com/cn/getting-started/tutorials/launch-a-virtual-machine/?trk=gs_card&amp;amp;e=gs&amp;amp;p=gsrc&quot;&gt;&lt;span&gt;教程&lt;/span&gt;&lt;/a&gt; 。另外我的本地机和云端机使用的都是 Ubuntu 16.04 LTS 64位，如果你的本地机是 Windows，则需要用 Git 或 PuTTY 连接云端机，详情参阅 &lt;a href=&quot;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/putty.html&quot;&gt;&lt;span&gt;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/putty.html&lt;/span&gt;&lt;/a&gt; 。&lt;/p&gt;
-
-&lt;h2 id=&quot;创建-ec2-实例&quot;&gt;创建 EC2 实例&lt;/h2&gt;
-&lt;p&gt;下面正式开始，这里设立三台机器 (实例)，一台作主节点 (master node)，两台作从节点 (slaves node)。首先创建实例，选择 &lt;code&gt;Ubuntu Server 16.04 LTS (HVM)&lt;/code&gt; ，实例类型选择价格低廉的 &lt;code&gt;t2.medium&lt;/code&gt; 。如果是第一次用，就不要选价格太高的类型了，不然万一操作失误了每月账单可承受不起。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;在第 3 步中，因为要同时开三台机器，&lt;code&gt;Number of Instances&lt;/code&gt; 可以直接选择3。但如果是每台分别开的话，下面的 Subnet 都要选择同一个区域，不然机器间无法通信，详情参阅 &lt;a href=&quot;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/using-regions-availability-zones.html&quot;&gt;&lt;span&gt;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/using-regions-availability-zones.html&lt;/span&gt;&lt;/a&gt; 。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;第 4 步设置硬盘大小，如果就搭个集群可能不用动，如果还要装其他软件，可能就需要在这里增加容量了，我是增加到了 15 GB：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;第 5 和第 6 步直接Next 即可，到第 7 步 Launch 后选择或新建密钥对，就能得到创建好的 3 个实例，这里可以设置名称备注，如 master、slave01、slave02 等：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;开启 3 个终端窗口，ssh 连接3个实例，如 &lt;code&gt;ssh -i xxxx.pem ubuntu@ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com&lt;/code&gt; ，其中 &lt;code&gt;xxxx.pem&lt;/code&gt; 是你的本地密钥对名称，&lt;code&gt;ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com&lt;/code&gt; 是该实例的外部 DNS 主机名，每台实例都不一样。这里需要说明一下，因为这是和本地开虚拟机的不同之处： EC2 的实例都有&lt;strong&gt;公有 IP&lt;/strong&gt; 和&lt;strong&gt;私有 IP&lt;/strong&gt; 之分，私有 IP 用于云上实例之间的通信，而公有 IP 则用于你的本地机与实例之间的通信，因此这里 ssh 连接使用的是公有 IP (DNS) 。在下面搭建集群的步骤中也有需要填写公有和私有 IP ，注意不要填反了。关于二者的区别参阅 &lt;a href=&quot;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/using-instance-addressing.html?shortFooter=true#using-instance-addressing-common&quot;&gt;&lt;span&gt;https://docs.aws.amazon.com/zh_cn/AWSEC2/latest/UserGuide/using-instance-addressing.html?shortFooter=true#using-instance-addressing-common&lt;/span&gt;&lt;/a&gt; 。&lt;/p&gt;
-
-&lt;h2 id=&quot;新增-hadoop-用户安装-java-环境&quot;&gt;新增 hadoop 用户、安装 Java 环境&lt;/h2&gt;
-&lt;p&gt;以下以 master 节点为例。登陆实例后，默认用户为 ubuntu，首先需要创建一个 hadoop 用户：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo useradd -m hadoop -s /bin/bash   # 增加 hadoop用户
-$ sudo passwd hadoop                    # 设置密码，需要输入两次
-$ sudo adduser hadoop sudo              # 为 hadoop 用户增加管理员权限
-$ su hadoop                             # 切换到 hadoop 用户，需要输入密码
-$ sudo apt-get update                   # 更新 apt 源&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这一步完成之后，终端用户名会变为 hadoop，且 &lt;code&gt;/home&lt;/code&gt; 目录下会另外生成一个 hadoop 文件夹。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;Hadoop 依赖于 Java 环境，所以接下来需要先安装 JDK，直接从&lt;a href=&quot;https://www.oracle.com/technetwork/java/javase/downloads/jdk8-downloads-2133151.html&quot;&gt;官网&lt;/a&gt;下载，这里下的是 &lt;code&gt;Linux x64&lt;/code&gt; 版本 &lt;code&gt;jdk-8u231-linux-x64.tar.gz&lt;/code&gt; ，用 scp 远程传输到 master 机。注意这里只能传输到 ubuntu 用户下，传到 hadoop 用户下可能会提示权限不足。&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ scp -i xxx.pem jdk-8u231-linux-x64.tar.gz ubuntu@ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com:/home/ubuntu/  # 本地执行该命令&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;本篇假设所有软件都安装在 &lt;code&gt;/usr/lib&lt;/code&gt; 目录下：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo mv /home/ubuntu/jdk-8u231-linux-x64.tar.gz /home/hadoop         # 将文件移动到 hadoop 用户下
-$ sudo tar -zxf /home/hadoop/jdk-8u231-linux-x64.tar.gz -C /usr/lib/   # 把JDK文件解压到/usr/lib目录下
-$ sudo mv /usr/lib/jdk1.8.0_231  /usr/lib/java                         # 重命名java文件夹
-$ vim ~/.bashrc                                                        # 配置环境变量，貌似EC2只能使用 vim&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;添加如下内容：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;export JAVA_HOME=/usr/lib/java
-export JRE_HOME=${JAVA_HOME}/jre
-export CLASSPATH=.:${JAVA_HOME}/lib:${JRE_HOME}/lib
-export PATH=${JAVA_HOME}/bin:$PATH&lt;/code&gt;
-&lt;/pre&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ source ~/.bashrc   # 让配置文件生效
-$ java -version    # 查看 Java 是否安装成功&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如果出现以下提示则表示安装成功：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;&lt;strong&gt;在 master 节点完成上述步骤后，在两个 slave 节点完成同样的步骤 (新增 hadoop 用户、安装 Java 环境)&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h2 id=&quot;网络配置&quot;&gt;网络配置&lt;/h2&gt;
-&lt;p&gt;这一步是为了便于 Master 和 Slave 节点进行网络通信，在配置前请先确定是以 hadoop 用户登录的。首先修改各个节点的主机名，执行 &lt;code&gt;sudo vim /etc/hostname&lt;/code&gt; ，在 master 节点上将 &lt;code&gt;ip-xxx-xx-xx-xx&lt;/code&gt; 变更为 &lt;code&gt;Master&lt;/code&gt; 。其他节点类似，在 slave01 节点上变更为 Slave01，slave02 节点上为 Slave02。&lt;/p&gt;
-&lt;p&gt;然后执行 &lt;code&gt;sudo vim /etc/hosts&lt;/code&gt; 修改自己所用节点的IP映射，以 master 节点为例，添加红色区域内信息，注意这里的 IP 地址是上文所述的私有 IP：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;接着在两个 slave 节点的hosts中添加同样的信息。完成后重启一下，在进入 hadoop 用户，能看到机器名的变化 (变成 Master 了)：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;对于 ec2 实例来说，还需要配置安全组 (Security groups)，使实例能够互相访问 ：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;选择划线区域，我因为是同时建立了三台实例，所以安全组都一样，如果不是同时建立的，这可能三台都要配置。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;p&gt;进入后点击 &lt;code&gt;Inbound&lt;/code&gt; 再点 &lt;code&gt;Edit&lt;/code&gt; ，再点击 &lt;code&gt;Add Rule&lt;/code&gt;，选择里面的 &lt;code&gt;All Traffic&lt;/code&gt; ，接着保存退出：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;三台实例都设置完成后，需要互相 ping 一下测试。如果 ping 不通，后面是不会成功的：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ ping Master -c 3   # 分别在3台机器上执行这三个命令
-$ ping Slave01 -c 3
-$ ping Slave02 -c 3&lt;/code&gt;
-&lt;/pre&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;接下来安装 SSH server， SSH 是一种网络协议，用于计算机之间的加密登录。安装完 SSH 后，要让 Master 节点可以无密码 SSH 登陆到各个 Slave 节点上，在Master节点执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo apt-get install openssh-server
-$ ssh localhost                                         # 使用 ssh 登陆本机，需要输入 yes 和 密码
-$ exit                                                  # 退出刚才的 ssh localhost, 注意不要退出hadoop用户
-$ cd ~/.ssh/                                            # 若没有该目录，请先执行一次ssh localhost
-$ ssh-keygen -t rsa                                     # 利用 ssh-keygen 生成密钥，会有提示，疯狂按回车就行
-$ cat ./id_rsa.pub &amp;gt;&amp;gt; ./authorized_keys                 # 将密钥加入授权
-$ scp ~/.ssh/id_rsa.pub Slave01:/home/hadoop/           # 将密钥传到 Slave01 节点
-$ scp ~/.ssh/id_rsa.pub Slave02:/home/hadoop/           # 将密钥传到 Slave02 节点&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;接着在 Slave01和 Slave02 节点上，将 ssh 公匙加入授权：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ mkdir ~/.ssh       # 如果不存在该文件夹需先创建，若已存在则忽略
-$ cat ~/id_rsa.pub &amp;gt;&amp;gt; ~/.ssh/authorized_keys&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;这样，在 Master 节点上就可以无密码 SSH 到各个 Slave 节点了，可在 Master 节点上执行如下命令进行检验，如下图所示变为 Slave01了，再按 &lt;code&gt;exit&lt;/code&gt; 可退回到 Master：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;p&gt;&lt;span&gt;至此网络配置完成。&lt;/span&gt;&lt;/p&gt;
-
-&lt;h2 id=&quot;安装-hadoop&quot;&gt;安装 Hadoop&lt;/h2&gt;
-&lt;p&gt;去到镜像站 &lt;a href=&quot;https://archive.apache.org/dist/hadoop/core/&quot;&gt;&lt;span&gt;https://archive.apache.org/dist/hadoop/core/&lt;/span&gt;&lt;/a&gt; 下载，我下载的是 &lt;code&gt;hadoop-2.8.4.tar.gz&lt;/code&gt; 。在 Master 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo tar -zxf /home/ubuntu/hadoop-2.8.4.tar.gz -C /usr/lib     # 解压到/usr/lib中
-$ cd /usr/lib/
-$ sudo mv ./hadoop-2.8.4/ ./hadoop                               # 将文件夹名改为hadoop
-$ sudo chown -R hadoop ./hadoop                                  # 修改文件权限&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;将 hadoop 目录加到环境变量，这样就可以在任意目录中直接使用 hadoop、hdfs 等命令。执行 &lt;code&gt;vim ~/.bashrc&lt;/code&gt; ，加入一行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;export PATH=$PATH:/usr/lib/hadoop/bin:/usr/lib/hadoop/sbin&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;保存后执行 &lt;code&gt;source ~/.bashrc&lt;/code&gt; 使配置生效。&lt;/p&gt;
-
-&lt;p&gt;完成后开始修改 Hadoop 配置文件(这里也顺便配置了 Yarn)，先执行 &lt;code&gt;cd /usr/lib/hadoop/etc/hadoop&lt;/code&gt; ，共有 6 个需要修改 —— &lt;code&gt;hadoop-env.sh&lt;/code&gt;、&lt;code&gt;slaves&lt;/code&gt;、&lt;code&gt;core-site.xml&lt;/code&gt;、&lt;code&gt;hdfs-site.xml&lt;/code&gt;、&lt;code&gt;mapred-site.xml&lt;/code&gt;、&lt;code&gt;yarn-site.xml&lt;/code&gt; 。&lt;/p&gt;
-
-&lt;p&gt;1、文件 &lt;code&gt;hadoop-env.sh&lt;/code&gt; 中把 &lt;code&gt;export JAVA_HOME=${JAVA_HOME}&lt;/code&gt; 修改为 &lt;code&gt;export JAVA_HOME=/usr/lib/java&lt;/code&gt; ，即 Java 安装路径。&lt;/p&gt;
-
-&lt;p&gt;2、 文件 &lt;code&gt;slaves&lt;/code&gt; 把里面的 localhost 改为 Slave01和 Slave02 。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;3、&lt;code&gt;core-site.xml&lt;/code&gt; 改为如下配置：&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;configuration&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;fs.defaultFS&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;hdfs://Master:9000&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;hadoop.tmp.dir&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;file:/usr/lib/hadoop/tmp&amp;lt;/value&amp;gt;
-                &amp;lt;description&amp;gt;Abase for other temporary directories.&amp;lt;/description&amp;gt;
-        &amp;lt;/property&amp;gt;
-&amp;lt;/configuration&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;4、&lt;code&gt;hdfs-site.xml&lt;/code&gt; 改为如下配置：&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;configuration&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;dfs.namenode.secondary.http-address&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;Master:50090&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;dfs.replication&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;2&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;dfs.namenode.name.dir&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;file:/usr/lib/hadoop/tmp/dfs/name&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;dfs.datanode.data.dir&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;file:/usr/lib/hadoop/tmp/dfs/data&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-&amp;lt;/configuration&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;5、文件 &lt;code&gt;mapred-site.xml&lt;/code&gt; (可能需要先重命名，默认文件名为 mapred-site.xml.template)：&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;configuration&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;mapreduce.framework.name&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;yarn&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;mapreduce.jobhistory.address&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;Master:10020&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;mapreduce.jobhistory.webapp.address&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;Master:19888&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-&amp;lt;/configuration&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;6、文件 &lt;code&gt;yarn-site.xml&lt;/code&gt; ：&lt;/p&gt;
-&lt;pre class=&quot;xml&quot;&gt;
-&lt;code&gt;&amp;lt;configuration&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;yarn.resourcemanager.hostname&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;Master&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-        &amp;lt;property&amp;gt;
-                &amp;lt;name&amp;gt;yarn.nodemanager.aux-services&amp;lt;/name&amp;gt;
-                &amp;lt;value&amp;gt;mapreduce_shuffle&amp;lt;/value&amp;gt;
-        &amp;lt;/property&amp;gt;
-&amp;lt;/configuration&amp;gt;&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;配置好后，将 Master 上的 &lt;code&gt;/usr/lib/hadoop&lt;/code&gt; 文件夹复制到各个 slave 节点上。在 Master 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ cd /usr/lib
-$ tar -zcf ~/hadoop.master.tar.gz ./hadoop   # 先压缩再复制
-$ scp ~/hadoop.master.tar.gz Slave01:/home/hadoop
-$ scp ~/hadoop.master.tar.gz Slave02:/home/hadoop&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;分别在两个 slave 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo tar -zxf ~/hadoop.master.tar.gz -C /usr/lib
-$ sudo chown -R hadoop /usr/lib/hadoop&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;安装完成后，首次启动需要先在 Master 节点执行 NameNode 的格式化：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ hdfs namenode -format       # 首次运行需要执行初始化，之后不需要&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;成功的话，会看到 “successfully formatted” 和 “Exitting with status 0” 的提示，若为 “Exitting with status 1” 则是出错。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;接着可以启动 Hadoop 和 Yarn 了，启动需要在 Master 节点上进行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ start-dfs.sh
-$ start-yarn.sh
-$ mr-jobhistory-daemon.sh start historyserver&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;通过命令 &lt;code&gt;jps&lt;/code&gt; 可以查看各个节点所启动的进程。正确的话，在 Master 节点上可以看到 NameNode、ResourceManager、SecondrryNameNode、JobHistoryServer 进程，如下图所示：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;p&gt;在 Slave 节点可以看到 DataNode 和 NodeManager 进程，如下图所示：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;通过命令 &lt;code&gt;hdfs dfsadmin -report&lt;/code&gt; 可查看集群状态，其中 &lt;code&gt;Live datanodes (2)&lt;/code&gt; 表明两个从节点都已正常启动，如果是 0 则表示不成功：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;可以通过下列三个地址查看 hadoop 的 web UI，其中 &lt;code&gt;ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com&lt;/code&gt; 是该实例的外部 DNS 主机名，&lt;code&gt;50070、8088、19888&lt;/code&gt; 分别是 hadoop、yarn、JobHistoryServer 的默认端口：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com:50070
-ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com:8088
-ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com:19888&lt;/code&gt;
-&lt;/pre&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;h2 id=&quot;执行-hadoop-分布式实例&quot;&gt;执行 Hadoop 分布式实例&lt;/h2&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ hadoop fs -mkdir -p /user/hadoop   # 在hdfs上创建hadoop账户
-$ hadoop fs -mkdir input
-$ hadoop fs -put /usr/lib/hadoop/etc/hadoop/*.xml input  # 将hadoop配置文件复制到hdfs中
-$ hadoop jar /usr/lib/hadoop/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar grep input output 'dfs[a-z.]+'  # 运行实例&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;如果成功可以看到以下输出：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;最后关闭 Hadoop 集群需要执行以下命令：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ stop-yarn.sh
-$ stop-dfs.sh
-$ mr-jobhistory-daemon.sh stop historyserver&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;h2 id=&quot;安装-spark&quot;&gt;安装 Spark&lt;/h2&gt;
-&lt;p&gt;去到镜像站 &lt;a href=&quot;https://archive.apache.org/dist/spark/&quot;&gt;&lt;span&gt;https://archive.apache.org/dist/spark/&lt;/span&gt;&lt;/a&gt; 下载，由于之前已经安装了Hadoop，所以我下载的是无 Hadoop 版本的，即 &lt;code&gt;spark-2.3.3-bin-without-hadoop.tgz&lt;/code&gt; 。在 Master 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo tar -zxf /home/ubuntu/spark-2.3.3-bin-without-hadoop.tgz -C /usr/lib  # 解压到/usr/lib中
-$ cd /usr/lib/
-$ sudo mv ./spark-2.3.3-bin-without-hadoop/ ./spark  # 将文件夹名改为spark
-$ sudo chown -R hadoop ./spark                        # 修改文件权限&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;将 spark 目录加到环境变量，执行 &lt;code&gt;vim ~/.bashrc&lt;/code&gt; 添加如下配置：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;export SPARK_HOME=/usr/lib/spark
-export PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;保存后执行 &lt;code&gt;source ~/.bashrc&lt;/code&gt; 使配置生效。&lt;/p&gt;
-
-&lt;p&gt;接着需要配置了两个文件，先执行 &lt;code&gt;cd /usr/lib/spark/conf&lt;/code&gt; 。&lt;/p&gt;
-&lt;p&gt;1、 配置 &lt;code&gt;slaves&lt;/code&gt; 文件&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;mv slaves.template slaves  # 将slaves.template重命名为slaves&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;slaves文件设置从节点。编辑 &lt;code&gt;slaves&lt;/code&gt; 内容,把默认内容localhost替换成两个从节点的名字：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;Slave01
-Slave02&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;2、配置 &lt;code&gt;spark-env.sh&lt;/code&gt; 文件&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;mv spark-env.sh.template spark-env.sh&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;编辑 &lt;code&gt;spark-env.sh&lt;/code&gt; 添加如下内容：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;export SPARK_DIST_CLASSPATH=$(/usr/lib/hadoop/bin/hadoop classpath)
-export HADOOP_CONF_DIR=/usr/lib/hadoop/etc/hadoop
-export SPARK_MASTER_IP=172.31.40.68   # 注意这里填的是Master节点的私有IP 
-export JAVA_HOME=/usr/lib/java&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;配置好后，将 Master 上的 &lt;code&gt;/usr/lib/spark&lt;/code&gt; 文件夹复制到各个 slave 节点上。在 Master 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ cd /usr/lib
-$ tar -zcf ~/spark.master.tar.gz ./spark
-$ scp ~/spark.master.tar.gz Slave01:/home/hadoop
-$ scp ~/spark.master.tar.gz Slave02:/home/hadoop&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;然后分别在两个 slave 节点上执行：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ sudo tar -zxf ~/spark.master.tar.gz -C /usr/lib
-$ sudo chown -R hadoop /usr/lib/spark&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;在启动 Spark 集群之前，先确保启动了 Hadoop 集群：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ start-dfs.sh
-$ start-yarn.sh
-$ mr-jobhistory-daemon.sh start historyserver
-$ start-master.sh  # 启动 spark 主节点
-$ start-slaves.sh  # 启动 spark 从节点&lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;可通过 &lt;code&gt;ec2-xx-xxx-xxx-xx.us-west-2.compute.amazonaws.com:8080&lt;/code&gt; 访问 spark web UI 。&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;h2 id=&quot;执行-spark-分布式实例&quot;&gt;执行 Spark 分布式实例&lt;/h2&gt;
-&lt;p&gt;1、通过命令行提交 JAR 包：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ spark-submit --class org.apache.spark.examples.SparkPi --master spark://Master:7077 /usr/lib/spark/examples/jars/spark-examples_2.11-2.3.3.jar 100 2&amp;gt;&amp;amp;1 | grep &quot;Pi is roughly&quot; &lt;/code&gt;
-&lt;/pre&gt;
-&lt;p&gt;结果如下说明成功：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;2、通过 IDEA 远程连接运行程序：&lt;/p&gt;
-&lt;p&gt;可以在 本地 IDEA 中编写代码，远程提交到云端机上执行，这样比较方便调试。需要注意的是 &lt;code&gt;Master&lt;/code&gt; 地址填云端机的公有 IP 地址。下面以一个 &lt;code&gt;WordVec&lt;/code&gt; 程序示例，将句子转换为向量形式：&lt;/p&gt;
-&lt;pre class=&quot;scala&quot;&gt;
-&lt;code&gt;import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.feature.Word2Vec
-import org.apache.spark.ml.linalg.Vector
-import org.apache.spark.sql.Row
-import org.apache.spark.sql.SparkSession
-
-object Word2Vec {
-  def main(args: Array[String]) {
-    Logger.getLogger(&quot;org&quot;).setLevel(Level.ERROR)  // 控制输出信息
-    Logger.getLogger(&quot;com&quot;).setLevel(Level.ERROR)
-
-    val conf = new SparkConf()
-      .setMaster(&quot;spark://ec2-54-190-51-132.us-west-2.compute.amazonaws.com:7077&quot;)  // 填公有DNS或公有IP地址都可以
-      .setAppName(&quot;Word2Vec&quot;)
-      .set(&quot;spark.cores.max&quot;, &quot;4&quot;)
-      .set(&quot;spark.executor.memory&quot;, &quot;2g&quot;)
-    val sc = new SparkContext(conf)
-
-    val spark = SparkSession
-      .builder
-      .appName(&quot;Word2Vec&quot;)
-      .getOrCreate()
-
-    val documentDF = spark.createDataFrame(Seq(
-      &quot;Hi I heard about Spark&quot;.split(&quot; &quot;),
-      &quot;I wish Java could use case classes&quot;.split(&quot; &quot;),
-      &quot;Logistic regression models are neat&quot;.split(&quot; &quot;)
-    ).map(Tuple1.apply)).toDF(&quot;text&quot;)
-
-    val word2Vec = new Word2Vec()
-      .setInputCol(&quot;text&quot;)
-      .setOutputCol(&quot;result&quot;)
-      .setVectorSize(3)
-      .setMinCount(0)
-    val model = word2Vec.fit(documentDF)
-
-    val result = model.transform(documentDF)
-    result.collect().foreach { case Row(text: Seq[_], features: Vector) =&amp;gt;
-      println(s&quot;Text: [${text.mkString(&quot;, &quot;)}] =&amp;gt; \nVector: $features\n&quot;) }
-  }
-}&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;IDEA 控制台输出：&lt;/p&gt;
-&lt;center&gt;
-
-&lt;/center&gt;
-
-&lt;p&gt;关闭 Spark 和 Hadoop 集群有以下命令：&lt;/p&gt;
-&lt;pre class=&quot;shell&quot;&gt;
-&lt;code&gt;$ stop-master.sh
-$ stop-slaves.sh
-$ stop-yarn.sh
-$ stop-dfs.sh
-$ mr-jobhistory-daemon.sh stop historyserver&lt;/code&gt;
-&lt;/pre&gt;
-
-&lt;p&gt;&lt;span&gt;&lt;strong&gt;当然最后也是最重要的是，使用完后不要忘了关闭 EC2 实例，不然会 24 小时不间断产生费用的。&lt;/strong&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;/&lt;/p&gt;
-</description>
-<pubDate>Tue, 24 Dec 2019 11:19:00 +0000</pubDate>
-<dc:creator>massquantity</dc:creator>
-<og:description>前言 本篇演示如何使用 AWS EC2 云服务搭建集群。当然在只有一台计算机的情况下搭建完全分布式集群，还有另外几种方法：一种是本地搭建多台虚拟机，好处是免费易操控，坏处是虚拟机对宿主机配置要求较高，</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/massquantity/p/12088449.html</dc:identifier>
-</item>
-<item>
-<title>.Net Core 认证系统源码解析 - 郑小超</title>
-<link>http://www.cnblogs.com/GreenLeaves/p/12093033.html</link>
-<guid isPermaLink="true" >http://www.cnblogs.com/GreenLeaves/p/12093033.html</guid>
-<description>&lt;p&gt;       不知不觉.Net Core已经推出到3.1了,大多数以.Net为技术栈的公司也开始逐步的切换到了Core,从业也快3年多了,一直坚持着.不管环境怎么变,坚持自己的当初的选择,坚持信仰 .Net Core是个非常优秀的框架,如果各位是从WebForm开始,一步步走到今天,自然而然就会发现.微软慢慢的开始将整个框架组件化,不在像以前那样,所以的东西都傻瓜化,比如WebForm,拖拖控件往往能搞定大部分的事情.Core的扩展性很好,将很多选择权交给我们自己,而不是强行的让我们去接受他那一套,对第三方组件的兼容性很好.换句话说,很多核心组件微软提供了高层抽象,如果你想换,可以,不想换,也可以,用他默认的实现.其他的优缺点也不一一细说了,也不是本文的重点。如果时间允许,建议大家可以深入的研究.Net Core的底层.&lt;/p&gt;
-&lt;p&gt;1、简介&lt;/p&gt;
-&lt;p&gt;省去前面的创建Core Web项目的一系列操作.VS帮你自动化初始化好所有的基础组件、环境.第一步就是认证.就是登陆.当然微软提供了一套登陆组件.很全,很完善。项目在Core源码 &lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224165917950-2076788875.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; Security文件夹下,源码自行去github下载.里面提供了若干个认证方法,常见的Cookie认证、JwtBear认证等等.还包括FaceBook、Google等远程认证方式.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224170021923-26669111.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;本文暂时不讲解具体的认证方式,主要阐述核心认证流程.&lt;/p&gt;
-
-&lt;p&gt;(1)、认证系统的执行过程&lt;/p&gt;
-&lt;p&gt;Core启动认证系统的方式很简单&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224170957041-935588714.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 很简单的一段代码,看看它干了什么&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224171102245-645825825.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 很简单,注入认证中间件,关于中间件这里就不说多,不是文本的重点,自行百度.看看中间价干了什么.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224171439405-1894249029.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 核心代码,首先拿到DI中注入的处理认证请求处理器集合,接着去DI中获取认证处理方案集合中的处理认证请求上下文的方案类.接着去处理器集合中拿到处理认证请求上下文的方案类对应的认证请求处理器,接着执行处理器的HandleRequestAsync方法,完成认证请求上下文的处理.这意味着我们的认证请求参数是可以被我们做特殊处理的.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224171657665-1981799037.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;接着&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224172643001-1973737434.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 处理完认证请求参数之后,接着去认证方案中拿到默认的认证方案,不为空,执行上下文的扩展方法context.AuthenticateAsync,这个方法干了什么如下:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224172939133-659277168.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 执行DI中注入的认证服务方法,并传入上下文和默认的认证方案名称.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224173623677-1860641768.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224173636457-409279962.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 先判断存不存在默认认证方案,不存在抛异常,接着去所有的认证处理器集合中拿到默认认证方案的处理器.接着调用处理的认证方法,认证成功,判断当前用户身份集合中在临时缓存中存不存在,不存在,可以执行Claim的转换.这很好,说明用户认证成功之后的Cliam也是可以被转换的.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224174300176-329424762.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 只要注入IClaimsTransformation服务即可,你就可以执行你需要的业务的Claim转换，最后返回结果&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224174401267-561919057.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 到这里整个认证流程结束.非常的简单.且关键点的扩展微软都预留了.可以自定义实现&lt;/p&gt;
-
-&lt;p&gt;(2)、流转服务的介绍.&lt;/p&gt;
-&lt;p&gt;上面介绍了整个认证组件的流转过程,因为我对流程很清楚,所以大家可能还是不理解.所以接下去开始介绍流转必须服务的注入.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224175131047-1762583454.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 认证处理器的Provider类,那么Core实在哪里注入认证处理器的呢?&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224175301460-1005078979.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 这里,核心也是红框里的,下面的只是一些依赖组件。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224175413257-1740143622.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 微软注入默认的认证处理器.看下获取处理器的实现,对应中间件.&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224175626972-946912996.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 阅读源码发现,Provider类并不具体实现提供认证处理器的方法.而是通过SchemeProvider来提供.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224175814954-1758035946.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt;原来是IAuthenticationSchemeProvider类提供认证处理器.而且是通过反射实现(这点开销,就没必要考虑性能问题,当然你可以考虑重构),那么问题来了,在哪里出入IAuthenticationSchemeProvider服务内,回到上面那张图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224180048338-388073863.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 微软也提供了默认实现,去看看GetSchemeAsync方法的实现&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224180218574-65374022.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224180251675-200164967.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; ok,到这里就说明认证处理器通过向这个字典写入值,来实现的.也就是微软认证方案提供了认证处理器.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224180512021-40978835.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-
-&lt;p&gt; 上面是认证方案的核心字段,HandlerType就是认证处理器.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224180611648-1309175770.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;AuthenticationSchemeProvider类维护了一个_schemes的字典,通过它向外输出.认证方案集合提供类.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224181824017-1952484436.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 接着认证处理器集合提供类AuthenticationHandlerProvider通过解析&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224181945922-344299055.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;认证方案集合提供类,拿到所有的认证处理器.&lt;/p&gt;
-&lt;p&gt;到这里,很明显,所有的认证处理器都是通过向AuthenticationSchemeProvider的_schemes字典注入认证处理器.既然如此,入口在哪？在AuthenticationBuilder类下面.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224182812247-1127266997.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 下面是Cookie认证方式注入认证处理器的方式&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224182917695-991684425.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; AddScmeme方法.在配置参数的同时,指定了处理器.&lt;/p&gt;
-
-&lt;p&gt; 接着,回到中间件的图&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224183348335-1460076353.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 我们通过AuthenticationBuilder的AddScheme方法向_schemes集合写入了认证处理器且配置了处理器的参数,接着通过AuthenticationHandlerProvider拿到了所有的认证处理器.&lt;/p&gt;
-&lt;p&gt;接着我们通过Schemes方案集合拿到所有处理认证请求上下文的处理器,执行处理认证请求上下文参数.处理完毕.&lt;/p&gt;
-
-&lt;p&gt;接着我们解析Schemes中提供的默认认证方案,代码如下:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224183940629-953763147.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224183928269-312200489.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 根据&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224184030408-1898759208.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 这个配置参数,一般在入口注入:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224184153907-1944806111.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; 中配置默认方案名称,拿到默认认证方案.再将处理过的认证请求上下文和默认方案传给IAuthenticationService,这个Service也有默认实现,如下:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224184408671-825965645.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; &lt;img src=&quot;https://img2018.cnblogs.com/blog/772156/201912/772156-20191224184415586-2094323188.png&quot; alt=&quot;&quot;/&gt;&lt;/p&gt;
-&lt;p&gt; AuthenticationService将处理过的认证请求上下文交给具体的认证请求处理器来处理.并返回处理结果.认证请求处理器前面说过了,通过AuthenticationBuilder的AddScheme方法来注入.&lt;/p&gt;
-&lt;p&gt;到这里,整个组件的流程介绍结束.纯属个人理解,能力有限,有问题,请指正,谢谢.&lt;/p&gt;
-&lt;p&gt;下面开始介绍基于Cookie的认证组件.&lt;/p&gt;
-
-</description>
-<pubDate>Tue, 24 Dec 2019 10:47:00 +0000</pubDate>
-<dc:creator>郑小超</dc:creator>
-<og:description>不知不觉.Net Core已经推出到3.1了,大多数以.Net为技术栈的公司也开始逐步的切换到了Core,从业也快3年多了,一直坚持着.不管环境怎么变,坚持自己的当初的选择,坚持信仰 .Net Cor</og:description>
-<dc:language>zh-cn</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.cnblogs.com/GreenLeaves/p/12093033.html</dc:identifier>
+<dc:identifier>https://www.cnblogs.com/ZaraNet/p/12099286.html</dc:identifier>
 </item>
 </channel>
 </rss>
