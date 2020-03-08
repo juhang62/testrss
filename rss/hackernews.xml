@@ -9,6 +9,274 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
+<title>We have to talk about this Python, Gunicorn, Gevent thing</title>
+<link>https://rachelbythebay.com/w/2020/03/07/costly/</link>
+<guid isPermaLink="true" >https://rachelbythebay.com/w/2020/03/07/costly/</guid>
+<description>&lt;p&gt;Even if you're in a terrible situation, you should probably try to learn from it. You never know if your purpose in life is to actually serve as a warning to others as that &quot;Demotivational&quot; poster puts it.&lt;/p&gt;
+&lt;p&gt;There are a lot of things I will not do myself. I, for example, will not write a service in Python. I will not use web requests when the situation calls for RPCs. I will not use &quot;green&quot; (userspace) &quot;threads&quot; when there are actual OS-level threads and parallelization is necessary.&lt;/p&gt;
+&lt;p&gt;I've had these beliefs for a while, but they weren't rooted in experience with those specific technologies. I had seen them from afar, and decided they were no good, and besides, I had other things I was using that worked better and made me happier.&lt;/p&gt;
+&lt;p&gt;However, I actually have that experience now, and I can serve as that warning. Here's what happens when you build around Python, Gunicorn, Gevent, and web requests instead of something more sensible.&lt;/p&gt;
+&lt;p&gt;So there's this &quot;service&quot;, right? And it's sitting there on this box. The box has 4 CPUs so you're running 5 instances of it because someone decided the ideal situation was (num_cpus + 1). Exactly how does it get there?&lt;/p&gt;
+&lt;p&gt;Well, first up, something runs gunicorn, which does some housekeeping, sets up a listening socket and then calls fork(). Then, the children all import your &quot;app&quot; -- that is, your actual &quot;service&quot; code. Then they do some local housekeeping, twiddle epoll a little, and start waiting on that listening socket to go live. At this point, every one of your processes is sitting in the kernel, having called epoll_wait().&lt;/p&gt;
+&lt;p&gt;A connection arrives on the socket. Linux runs a pass down the list of listeners doing the epoll thing -- all of them! -- and tells every single one of them that something's waiting out there. They each wake up, one after another, a few nanoseconds apart.&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;All five processes&lt;/em&gt; call accept4(). There's only one connection waiting, so only one of them succeeds. Obviously, the first one who called it won. The first one to call it was probably the first one which was awakened by the kernel. (The kernel seems to be doing some kind of LIFO thing, so that one process keeps winning, but I digress.)&lt;/p&gt;
+&lt;p&gt;The winner proceeds to recvfrom() on that socket to find out what they want. It's some kind of &quot;GET /blah HTTP/1.1&quot; thing. Oh, it's a web request.&lt;/p&gt;
+&lt;p&gt;Meanwhile, the other four processes have gotten -1 with errno set to EAGAIN, because - surprise! - nothing else was waiting on that socket. They sulk a little bit, kick at the pebbles by their feet, do a little housekeeping and jostle some data around, redefine their epoll sets, and call back into epoll_wait(), having burned a bit of CPU time for exactly no benefit.&lt;/p&gt;
+&lt;p&gt;This situation, incidentally, was dubbed the &quot;thundering herd&quot; back in the '90s when Linux people started freaking out about how Windows NT web servers were whipping Linux royally. People realized that maybe it wasn't a great idea to have every single Apache httpd blocking in accept() and then waking up at the same time. They came up with semaphore tricks and (much later) things like EPOLLONESHOT. It got better.&lt;/p&gt;
+&lt;p&gt;In this world, the '90s apparently never ended.&lt;/p&gt;
+&lt;p&gt;Let's carry on with this scenario. Process #1 is still running this request. It in turn has to fire something down the network to yet another &quot;service&quot;. When it does, something in the &quot;green thread&quot; libraries notices what's going on and says &quot;hey, you seem to be waiting on the network, so how about we go back for more work?&quot;. It pushes that original request aside and goes back to the epoll situation.&lt;/p&gt;
+&lt;p&gt;And, hey, what do you know, it actually gets another connection! It does recvfrom() on it, and sees what it wants, and now it starts fulfilling this request. It involves a bit of cranking on some data. Maybe it's manipulating strings. Maybe it's reading JSON off the filesystem, and then deserializing it into local objects. Maybe it's applying translations. (Maybe it's already done this a bunch of times, and is too stupid to keep it around from the last time.) Whatever. The point is, it's now very busy with this new request.&lt;/p&gt;
+&lt;p&gt;Meanwhile, that original request is getting old. The request it made has since received a response, but since there's not been an opportunity to flip back to it, the new request is still cooking. Eventually, that new request's computations are done, and it sends back a reply: 200 HTTP/1.1 OK, blah blah blah.&lt;/p&gt;
+&lt;p&gt;Then it does its weird userspace &quot;thread&quot; flip back to the original request's context and reads the response. It chews on this data, because, again, it's terrible JSON stuff and not anything reasonable like a strongly-typed, unambiguously, easily-deserialized message. The clock is ticking and ticking.&lt;/p&gt;
+&lt;p&gt;Finally, it sends back a reply to this original request. But, oh, what's this?&lt;/p&gt;
+&lt;p&gt;SIGPIPE.&lt;/p&gt;
+&lt;p&gt;Yep, the write() down the file descriptor for that original request returned -1 with errno=EPIPE, and it also caused a SIGPIPE signal to be fired at the process at the same time. What happened?&lt;/p&gt;
+&lt;p&gt;What happened is that the client got tired of waiting and bailed. It hung up the connection. With that connection dead on the network side of things, the write immediately failed.&lt;/p&gt;
+&lt;p&gt;The service shrugs, closes down the connection, does its usual post-request cleanup stuff, and goes back to waiting with everyone else.&lt;/p&gt;
+&lt;p&gt;Consider that the client has no idea the request actually completed. It's total byzantine agreement stuff here. The client's only option now is to try it again and hope it finds someone who doesn't run away in the middle of their &quot;conversation&quot; to take care of the latest request.&lt;/p&gt;
+&lt;p&gt;(I sure hope these requests are idempotent...)&lt;/p&gt;
+&lt;p&gt;What's going on here? Many things. So many things.&lt;/p&gt;
+&lt;p&gt;Within any given worker, only one thing is ever really going to execute at once. It's either handling one request or it's handing another. There's only one thread associated with this process. It's not like it can use multiple CPUs and go off and do work. These aren't OS threads, they're fake userspace threads. If one's running, the other one is waiting. If the waiting one has a tighter deadline, oops!&lt;/p&gt;
+&lt;p&gt;So why not have a bunch of workers? Just fork a crapload more than just num_cpus plus one? Well, that's another thing. All of those workers cost memory.&lt;/p&gt;
+&lt;p&gt;But wait, you say. fork() is copy on write. You shouldn't have all of those copies of the code. And, well, you're half right. fork() is in fact copy on write for those pages, but it's only applicable to the pages you've already loaded.&lt;/p&gt;
+&lt;p&gt;&quot;Huh?&quot; you probably think.&lt;/p&gt;
+&lt;p&gt;Go back and look. I said that it forks &lt;em&gt;and then&lt;/em&gt; it imports your app. Your app (which is almost certainly the bulk of the code inside the Python interpreter) is not actually in memory when the fork happens. It gets loaded AFTER that point.&lt;/p&gt;
+&lt;p&gt;&quot;Why in the hell would you fork then load, instead of load then fork?&quot;&lt;/p&gt;
+&lt;p&gt;It's around this time that you discover that people have been doing naughty, nasty things, like causing work to occur at &quot;import time&quot;. That is, they have code hanging out in their .py files which is not enclosed by a function or class or whatever, such that importing it runs it. That code has side-effects. Nobody ever told them to not do that. (Clearly though, nobody's ever told them not to do anything, based on the wobbly tower of bad architectural decisions I've been describing.)&lt;/p&gt;
+&lt;p&gt;That's why they fork-then-load. That's why it takes up so much memory, and that's why you can't just have a bunch of these stupid things hanging around, each handling one request at a time and not pulling a &quot;SHINYTHING!&quot; and ignoring one just because another came in. There's just not enough RAM on the machine to let you do this. So, num_cpus + 1 it is.&lt;/p&gt;
+&lt;p&gt;I'm not even going to get into the whole insanity of using web requests when you really should be using a real RPC mechanism, with, oh, you know, strongly defined data types and methods which use them, timeouts, load balancing, health checks, queue depth determination, sharding, pick-two, selective LIFO, and everything else that tends to show up given enough time in a battle-tested system. That's a rant for another post entirely.&lt;/p&gt;
+&lt;p&gt;So how do you keep this kind of monster running? First, you make sure you never allow it to use too much of the CPU, because empirically, it'll mean that you're getting distracted too much and are timing out some requests while chasing down others. You set your system to &quot;elastically scale up&quot; at some pitiful utilization level, like 25-30% of the &lt;em&gt;entire machine&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;Your cloud provider loves this. They tell you: sure, run more instances! Buy our stuff to help you manage the tens of thousands of identical underutilized virtual machines that this design gives you! It'll buy our founder a lovely ivory-handled back scratcher.&lt;/p&gt;
+&lt;p&gt;It means you have to come up with breathtaking things to deal with thousands of instances when the work could really be done with something far smaller, given a reasonable implementation. One of your friends points out the &lt;a href=&quot;https://www.usenix.org/system/files/conference/hotos15/hotos15-paper-mcsherry.pdf&quot;&gt;COST paper&lt;/a&gt; and you weep silently.&lt;/p&gt;
+&lt;p&gt;Have you ever learned something and realized, gee, I wish I didn't know any of that? Only someone in a terrible situation should ever experience that and have to understand that? Yeah. That's me.&lt;/p&gt;
+</description>
+<pubDate>Sat, 07 Mar 2020 20:59:50 +0000</pubDate>
+<dc:creator>emsal</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://rachelbythebay.com/w/2020/03/07/costly/</dc:identifier>
+</item>
+<item>
+<title>Firecracker: Secure and fast microVMs for serverless computing</title>
+<link>https://firecracker-microvm.github.io/</link>
+<guid isPermaLink="true" >https://firecracker-microvm.github.io/</guid>
+<description>&lt;header&gt;Firecracker is an open source virtualization technology that is purpose-built for creating and managing secure, multi-tenant container and function-based services.&lt;/header&gt;&lt;section readability=&quot;23.222305389222&quot;&gt;&lt;p&gt;Until now, you needed to choose between containers with fast startup times and high density, or VMs with strong hardware-virtualization-based security and workload isolation. With Firecracker, you no longer have to choose. Firecracker enables you to deploy workloads in lightweight virtual machines, called microVMs, which provide enhanced security and workload isolation over traditional VMs, while enabling the speed and resource efficiency of containers. Firecracker was developed at Amazon Web Services to improve the customer experience of services like &lt;a href=&quot;https://aws.amazon.com/lambda/&quot;&gt;AWS Lambda&lt;/a&gt; and &lt;a href=&quot;https://aws.amazon.com/fargate/&quot;&gt;AWS Fargate&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Firecracker is a virtual machine monitor (VMM) that uses the Linux Kernel-based Virtual Machine (KVM) to create and manage microVMs. Firecracker has a minimalist design. It excludes unnecessary devices and guest functionality to reduce the memory footprint and attack surface area of each microVM. This improves security, decreases the startup time, and increases hardware utilization. Firecracker currently supports Intel CPUs, with AMD and Arm support in developer preview.&lt;/p&gt;
+&lt;p&gt;Firecracker is integrated with &lt;a href=&quot;https://github.com/kata-containers/documentation/wiki/Initial-release-of-Kata-Containers-with-Firecracker-support&quot;&gt;Kata Containers&lt;/a&gt;, &lt;a href=&quot;https://www.weave.works/oss/firekube/&quot;&gt;Weave FireKube&lt;/a&gt; (via &lt;a href=&quot;https://github.com/weaveworks/ignite&quot;&gt;Weave Ignite&lt;/a&gt;), and containerd via &lt;a href=&quot;https://github.com/firecracker-microvm/firecracker-containerd&quot;&gt;firecracker-containerd&lt;/a&gt;. It's also available within the &lt;a href=&quot;https://github.com/solo-io/unik&quot;&gt;UniK&lt;/a&gt; unikernel and microVM platform. Firecracker can run Linux and &lt;a href=&quot;http://blog.osv.io/blog/2019/04/19/making-OSv-run-on-firecraker&quot;&gt;OSv&lt;/a&gt; guests. Our latest roadmap can be found &lt;a href=&quot;https://github.com/firecracker-microvm/firecracker/projects/13&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;
+&lt;/section&gt;</description>
+<pubDate>Sat, 07 Mar 2020 16:02:55 +0000</pubDate>
+<dc:creator>based2</dc:creator>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://firecracker-microvm.github.io/</dc:identifier>
+</item>
+<item>
+<title>Google tracking a bike ride past a burglarized home made the rider a suspect</title>
+<link>https://www.nbcnews.com/news/us-news/google-tracked-his-bike-ride-past-burglarized-home-made-him-n1151761</link>
+<guid isPermaLink="true" >https://www.nbcnews.com/news/us-news/google-tracked-his-bike-ride-past-burglarized-home-made-him-n1151761</guid>
+<description>&lt;div id=&quot;emailSignup&quot; class=&quot;newsletter-signup-inline-container mt8 mt2-m mb8&quot; readability=&quot;6.6127167630058&quot;&gt;
+
+&lt;p&gt;Let our news meet your inbox. The news and stories that matters, delivered weekday mornings.&lt;/p&gt;
+
+&lt;/div&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;That request triggered the Jan. 14 notice the technology giant sent to McCoy, part of its &lt;a href=&quot;https://policies.google.com/terms/information-requests&quot;&gt;general policy on notifying users about government requests for their information.&lt;/a&gt; The notice was McCoy’s only indication that police wanted his data.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Gainesville police declined to comment.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;While privacy and civil liberties advocates have been concerned that geofence warrants violate constitutional protections from unreasonable searches, law enforcement authorities say those worries are overblown. They say police don’t obtain any identifying information about a Google user until they find a device that draws their suspicion. And the information alone is not enough to justify charging someone with a crime, they say.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Google geofence warrants have been used by &lt;a href=&quot;https://www.nytimes.com/2019/08/08/nyregion/proud-boys-antifa-trial.html&quot;&gt;police&lt;/a&gt; &lt;a href=&quot;https://www.wral.com/scene-of-a-crime-raleigh-police-search-google-accounts-as-part-of-downtown-fire-probe/17340984/&quot;&gt;agencies&lt;/a&gt; &lt;a href=&quot;https://www.mprnews.org/story/2019/02/07/google-location-police-search-warrants&quot;&gt;around&lt;/a&gt; &lt;a href=&quot;https://www.forbes.com/sites/thomasbrewster/2019/12/11/google-gives-feds-1500-leads-to-arsonist-smartphones-in-unprecedented-geofence-search/#312f9d027dc3&quot;&gt;the country&lt;/a&gt;, &lt;a href=&quot;https://www.forbes.com/sites/thomasbrewster/2018/10/23/feds-are-ordering-google-to-hand-over-a-load-of-innocent-peoples-locations/#1947c0c45a0d&quot;&gt;including the FBI&lt;/a&gt;. Google said in a court filing last year that the requests from state and federal law enforcement authorities were increasing rapidly: by more than 1,500 percent from 2017 to 2018, and by 500 percent from 2018 to 2019.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;“It’s a great tool and a great technology,” said Kevin Armbruster, a retired lieutenant with the Milwaukee Police Department, where he oversaw the use of high-tech investigative work, including geofence warrants.&lt;/p&gt;
+&lt;section class=&quot;related related--single dn-print&quot; data-test=&quot;related&quot;&gt;&lt;h4 class=&quot;related__title&quot;&gt;Related&lt;/h4&gt;
+
+&lt;/section&gt;&lt;p class=&quot;endmarkEnabled&quot;&gt;Milwaukee police have used Google geofence warrants to solve an array of crimes, including homicides, shootings, a string of robberies and kidnappings and a sexual assault involving an abduction, he said. “I would think the majority of citizens in the world would love the fact that we are putting violent offenders in jail,” Armbruster said.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;There have been very few court challenges to Google geofence warrants, mainly because the warrants are done in secret and defense lawyers may not realize the tool was used to identify their clients. One exception is an accused bank robber in Midlothian, Virginia, who is fighting the charge by &lt;a href=&quot;https://www.nbcnews.com/news/us-news/police-used-google-location-data-find-accused-bank-robber-he-n1086836&quot;&gt;arguing the geofence warrant used against him was illegal&lt;/a&gt;. That case is pending.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Once McCoy realized his bike ride had placed him near the scene of the crime, he had a strong theory of why police had picked his device out of all the others swept up by the warrant. He and Kenyon set out to keep them from getting any more information about him ─ and persuade them that he was innocent.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Kenyon said he got on the phone with the detective on the case and told him, “You’re looking at the wrong guy.”&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;For most of his life, McCoy said, he had tried to live online anonymously, a habit that dated to the early days of the internet when there was less expectation that people would use their real names. He used pseudonyms on his social media accounts and the email account that Google used to notify him about the police investigation.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;But until then, he hadn’t thought much about Google collecting information about him.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;“I didn’t realize that by having location services on that Google was also keeping a log of where I was going,” McCoy said. “I’m sure it’s in their terms of service but I never read through those walls of text, and I don’t think most people do either.”&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Just before the start of his ordeal, he’d listened to a call-in radio debate about &lt;a href=&quot;https://www.nbcnews.com/news/us-news/fbi-seeks-apple-s-help-unlocking-phones-suspected-pensacola-naval-n1111636&quot;&gt;the Department of Justice’s fight with Apple&lt;/a&gt; over access to an iPhone left by a Saudi national who’d gunned down several people at an air base in Pensacola, Florida, in December. He remembered some callers saying they had no problem with law enforcement having access to phone data, arguing that people had nothing to worry about as long as they didn’t break the law. Now McCoy thought the callers weren’t considering predicaments like his.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;“If you’re innocent, that doesn’t mean you can’t be in the wrong place at the wrong time, like going on a bike ride in which your GPS puts you in a position where police suspect you of a crime you didn’t commit,” McCoy said.&lt;/p&gt;
+&lt;section class=&quot;related related--single dn-print&quot; data-test=&quot;related&quot;&gt;&lt;h4 class=&quot;related__title&quot;&gt;Related&lt;/h4&gt;
+
+&lt;/section&gt;&lt;p class=&quot;endmarkEnabled&quot;&gt;On Jan. 31, Kenyon filed a motion in Alachua County civil court to render the warrant “null and void” and to block the release of any further information about McCoy, identifying him only as “John Doe.” At that point, Google had not turned over any data that identified McCoy but would have done so if Kenyon hadn’t intervened. Kenyon argued that the warrant was unconstitutional because it allowed police to conduct sweeping searches of phone data from untold numbers of people in order to find a single suspect.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;That approach, Kenyon said, flipped on its head the traditional method of seeking a search warrant, in which police target a person they already suspect.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;“This geofence warrant effectively blindly casts a net backwards in time hoping to ensnare a burglar,” Kenyon wrote. “This concept is akin to the plotline in many a science fiction film featuring a dystopian, fascist government.”&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;The filing seemed to give law enforcement authorities second thoughts about the warrant. Not long afterward, Kenyon said, a lawyer in the state attorney’s office assigned to represent the Gainesville Police Department told him there were details in the motion that led them to believe that Kenyon’s client was not the burglar. The state attorney’s office withdrew the warrant, asserting in a court filing that it was no longer necessary. The office did not respond to a request for comment.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;Kenyon said that in a visit to his office, the detective acknowledged that police no longer considered his client a suspect.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;On Feb. 24, Kenyon dropped his legal challenge.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;The case ended well for McCoy, Kenyon said, but “the larger privacy fight will go unanswered.”&lt;/p&gt;
+&lt;section class=&quot;related related--single dn-print&quot; data-test=&quot;related&quot;&gt;&lt;h4 class=&quot;related__title&quot;&gt;Related&lt;/h4&gt;
+
+&lt;/section&gt;&lt;p class=&quot;endmarkEnabled&quot;&gt;Even then, Kenyon wanted to make sure police didn’t have lingering doubts about McCoy, whom they still knew only as “John Doe.” So he met with the detective again and showed him screenshots of his client’s Google location history, including data recorded by RunKeeper. The maps showed months of bike rides past the burglarized home.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;In the end, the same location data that raised police suspicions of McCoy also helped to vindicate him, Kenyon said. “But there was no knowing what law enforcement was going to do with that data when they got it behind closed doors. Not that I distrust them, but I wouldn’t trust them not to arrest someone.”&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;He pointed to &lt;a href=&quot;https://www.nytimes.com/interactive/2019/04/13/us/google-location-tracking-police.html&quot;&gt;an Arizona case&lt;/a&gt; in which a man was &lt;a href=&quot;https://www.phoenixnewtimes.com/news/google-geofence-location-data-avondale-wrongful-arrest-molina-gaeta-11426374&quot;&gt;mistakenly arrested&lt;/a&gt; and jailed for murder largely based on Google data received from a geofence warrant.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;McCoy said he may have ended up in a similar spot if his parents hadn’t given him several thousand dollars to hire Kenyon.&lt;/p&gt;
+&lt;p class=&quot;endmarkEnabled&quot;&gt;He regrets having to spend that money. He also thinks about the elderly burglary victim. Police said they have not made any arrests.&lt;/p&gt;
+
+&lt;p class=&quot;endmarkEnabled&quot;&gt;“I’m definitely sorry that happened to her, and I’m glad police were trying to solve it,” McCoy said. “But it just seems like a really broad net for them to cast. What’s the cost-benefit? How many innocent people do we have to harass?”&lt;/p&gt;
+</description>
+<pubDate>Sat, 07 Mar 2020 14:23:46 +0000</pubDate>
+<dc:creator>oftenwrong</dc:creator>
+<og:url>https://www.nbcnews.com/news/us-news/google-tracked-his-bike-ride-past-burglarized-home-made-him-n1151761</og:url>
+<og:title>Google tracked his bike ride past a burglarized home. That made him a suspect.</og:title>
+<og:description>&quot;I was using an app to see how many miles I rode my bike and now it was putting me at the scene of the crime,&quot; the man said.</og:description>
+<og:image>https://media2.s-nbcnews.com/j/newscms/2020_10/3259061/200306-geofencing-mn-1132_56f9dbad5a588f0a60ca9bf0166a899a.nbcnews-fp-1200-630.jpg</og:image>
+<og:type>article</og:type>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.nbcnews.com/news/us-news/google-tracked-his-bike-ride-past-burglarized-home-made-him-n1151761</dc:identifier>
+</item>
+<item>
+<title>I have seen things</title>
+<link>https://muratbuffalo.blogspot.com/2020/03/i-have-seen-things.html</link>
+<guid isPermaLink="true" >https://muratbuffalo.blogspot.com/2020/03/i-have-seen-things.html</guid>
+<description>&lt;blockquote class=&quot;twitter-tweet&quot;&gt;
+&lt;div dir=&quot;ltr&quot; lang=&quot;en&quot;&gt;&lt;br/&gt;I still don't have any idea what Instagram or Facebook stories is. Tried Googling and still don't have a good idea about it.&lt;/div&gt;
+— Murat Demirbas (@muratdemirbas) &lt;a href=&quot;https://twitter.com/muratdemirbas/status/1235414746129518593?ref_src=twsrc%5Etfw&quot;&gt;March 5, 2020&lt;/a&gt;&lt;/blockquote&gt;
+ Yesterday Twitter spoke and told me that I am an old man, with overwhelming decisiveness. If this has been with any more votes, I would be declared part of the vulnerable population for Corona virus, one of the expendables as people seem to refer to them.&lt;p&gt;Twitter followers... I thought we were friends!&lt;/p&gt;&lt;p&gt;But, Ok, I get the point. I have seen things.&lt;/p&gt;&lt;p&gt;I was born in 1976. I understand that in the eyes of millennials 1976 is around the same time period as 1796. My son sometimes asks me if TV was invented when I was a child.&lt;/p&gt;&lt;p&gt;Yes, we had a black and white TV when I was growing up. And a dial phone, that was tethered to the wall.&lt;/p&gt;&lt;p&gt;At 7th grade, my dad got us a Commodore 64, and I played Boulderdash, Load runner, Falcon Patrol etc.&lt;/p&gt;&lt;p&gt;At 9th grade, I saw the TV broadcasting the first Gulf War. I didn't follow it, because at that time it didn't feel like Turkey was part of Middle East. Back then we thought Turkey was part of Europe. We used to call it the bridge to Europe.&lt;/p&gt;&lt;p&gt;In 1993, when I started college, I used the Mosaic browser. The Netscape browser arrived couple years later. My university had Sun workstations, and also black and green terminals.&lt;/p&gt;&lt;p&gt;My university was named Middle East Technical University. (Yeah, somehow, I still didn't connect the dots then...) We learned Pascal, C, Lisp, ML, Prolog. C++ was new back then, the department started a C++ course when I was in my 3rd year.&lt;/p&gt;&lt;p&gt;I started an MS+PhD at The Ohio State University in 1998. My flight from Istanbul to JFK had a lot of cigarette smokers -- smoking was permitted on the planes then. My flight from JFK to Columbus was a slow propeller plane.&lt;/p&gt;&lt;p&gt;In 2000, I was among the first to use 802.11b cards and WAPs at home, because one of my roommates was working at a company developing WAPs and writing drivers for 802.11b cards.&lt;/p&gt;&lt;p&gt;I have seen peer-to-peer networks become a thing, and then not become a thing.&lt;/p&gt;&lt;p&gt;I got my first cell phone in 2004. It was a Motorola Razr. I didn't like it... I didn't have much use for it.&lt;/p&gt;&lt;p&gt;In 2007 iPhone was released, and I bought one. I liked the iPhone a lot.&lt;/p&gt;&lt;p&gt;Yeah, I have seen things, but that doesn't make me old. It was interesting times, and I feel lucky I got to see computers and information technologies taking off.&lt;/p&gt;&lt;p&gt;Not having a Facebook account doesn't make me old.  I am a Twitter person, I never saw much point in Facebook.&lt;/p&gt;&lt;p&gt;I also want to come clean and say it. I never watched the Game of Thrones, not a single episode. I just know that winter is involved (learned this from Twitter memes), and there is a red wedding where a lot of people died (&lt;a href=&quot;https://pdfs.semanticscholar.org/3b01/a0be5dadcc92d2ee00d6842452d8c6354319.pdf?_ga=2.31967934.104007056.1583540832-724371247.1582688894&quot;&gt;learned this from this CS paper&lt;/a&gt;).&lt;/p&gt;&lt;p&gt;When you miss a lot of things in popular culture, you may start to become irrelevant. But I think missing a couple things is OK. I don't want to be the same as everyone else. &quot;If you only read the books that everyone else is reading, you can only think what everyone else is thinking.&quot; -- Haruki Murakami, Norwegian Wood&lt;/p&gt;&lt;p&gt;In order to delay old age, I try to start new things and get involved in new experiences. Entropy is hard to beat, I know. But, not today old age, not today.&lt;br/&gt;&lt;a href=&quot;https://1.bp.blogspot.com/-M73fwzJZFwM/XmLw3rsuSeI/AAAAAAAAImE/GOkWK0UwAskdkfZAjh2uMu-KBPIdg1b3gCK4BGAYYCw/s1600/crop.php.jpeg&quot; imageanchor=&quot;1&quot;&gt;&lt;img border=&quot;0&quot; height=&quot;320&quot; src=&quot;https://1.bp.blogspot.com/-M73fwzJZFwM/XmLw3rsuSeI/AAAAAAAAImE/GOkWK0UwAskdkfZAjh2uMu-KBPIdg1b3gCK4BGAYYCw/s320/crop.php.jpeg&quot; width=&quot;180&quot;/&gt;&lt;/a&gt;
+&lt;/p&gt;
+</description>
+<pubDate>Sat, 07 Mar 2020 08:55:38 +0000</pubDate>
+<dc:creator>ingve</dc:creator>
+<og:url>http://muratbuffalo.blogspot.com/2020/03/i-have-seen-things.html</og:url>
+<og:title>I have seen things</og:title>
+<og:description>I still don't have any idea what Instagram or Facebook stories is. Tried Googling and still don't have a good idea about it. — Murat Dem...</og:description>
+<og:image>https://1.bp.blogspot.com/-M73fwzJZFwM/XmLw3rsuSeI/AAAAAAAAImE/GOkWK0UwAskdkfZAjh2uMu-KBPIdg1b3gCK4BGAYYCw/w1200-h630-p-k-no-nu/crop.php.jpeg</og:image>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://muratbuffalo.blogspot.com/2020/03/i-have-seen-things.html</dc:identifier>
+</item>
+<item>
+<title>The Brave browser is brilliant, but probably not for the reasons you think</title>
+<link>https://rudism.com/the-brave-browser-is-brilliant/</link>
+<guid isPermaLink="true" >https://rudism.com/the-brave-browser-is-brilliant/</guid>
+<description>&lt;section&gt;&lt;time datetime=&quot;2020-03-06T15:16:00.000Z&quot;&gt;2020-03-06&lt;/time&gt; (posted in &lt;a href=&quot;https://rudism.com/tech&quot;&gt;tech&lt;/a&gt;)&lt;/section&gt;&lt;h2 id=&quot;But-probably-not-for-the-reasons-you-think…&quot;&gt;But probably not for the reasons you think…&lt;/h2&gt;
+&lt;p&gt;When I was in grade school (I believe it was grade 7, which would put this somewhere around 1994 or 1995), I created my own currency. It was called Daddy-O dollars, and was minted with pen on post-it notes. Each bill sported a crude drawing of a spiky-haired kid with sunglasses in the middle and the monetary value written at each of the four corners. There was no printing press–each bill was lovingly hand-crafted by me, sitting at the desk in my room over the course of a single night.&lt;/p&gt;
+&lt;p&gt;I understood that the little drawings of my Daddy-O mascot, divided into piles of various denominations (1DD, 5DDs, 10DDs, and so-on), had no actual value in terms of real dollars. I knew that I couldn’t simply show up at school the next day and expect people to give me stuff in exchange for a bunch of worthless post-it notes. But that was OK, because I had a cunning plan.&lt;/p&gt;
+&lt;p&gt;That night I snuck down to the basement where my younger brother and I kept all of our toys, and gathered up some of what I considered to be my brother’s best stuff. Ninja Turtle figures, GI-JOEs, cap guns, board games, books, and all kinds of knick knacks. Along with my brother’s toys, I gathered a healthy supply of unhealthy snacks from the kitchen pantry. I shoved the goods into my backpack, topped them off with my fat stack of Daddy-O dollars, and dreamed all night of the riches that would undoubtedly soon be mine.&lt;/p&gt;
+&lt;h2 id=&quot;Let’s-Talk-about-Brave&quot;&gt;Let’s Talk about Brave&lt;/h2&gt;
+&lt;p&gt;If you haven’t heard about the Brave browser, it’s a fork of Chromium–the same open source browser that serves as the foundation for Google Chrome. It blocks ads by default and claims to be focused on speed and privacy. The general consensus, when reading various reviews and opinions of it around the internet, seems to be that it excels on both of those fronts. I am personally skeptical of some of these reviews (for reasons that I will expand on later in this article) and of whether the speed and privacy gains go beyond what you could already experience by using ad blocking and privacy extensions for Google Chrome or Firefox. But that’s not the focus of this article.&lt;/p&gt;
+&lt;p&gt;The focus of this article is on the other feature of Brave that distinguishes it from other web browsers: its built-in advertising network and Ethereum-based crypto token exchange system.&lt;/p&gt;
+&lt;p&gt;Before I get into this, I’ll state that I don’t use Brave, I’m not affiliated with Brave or any other web browser in any way, nor do I have any information about Brave that can’t be gleaned through normal web searches. Everything I’m stating here is my personal opinion and if I get something wrong (which I probably will) I will make my best effort to update this article in a transparent way to reflect the truth. (The story about Daddy-O dollars is true to the best of my recollection of the incident, which is hazy at best.)&lt;/p&gt;
+&lt;p&gt;While Brave blocks ads on websites that you visit, you have the option of joining something called “Brave Rewards” which, bizarrely, opts you in to viewing ads generated by the browser itself. The pitch to sell this feature to users is multi-faceted:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;The ads being blocked on the websites you visit are not respectful of your privacy, but the ads selected and displayed by Brave are.&lt;/li&gt;
+&lt;li&gt;Brave will reward you for simply browsing the web by “paying” you and the websites you visit in the form of crypto tokens called “Basic Attention Tokens” or BAT.&lt;/li&gt;
+&lt;li&gt;You have the ability to further support your favorite websites by “tipping” some of your BAT to them.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Sounds pretty neat on the surface, right? You’re going to be browsing the web anyway; you’re going to be inundated with ads anyway; why not get paid to do it and have the opportunity to directly support the websites you like in the process?&lt;/p&gt;
+&lt;p&gt;Let’s take a look at how this disrupts the normal relationship between users, content publishers (websites), and normal ad networks (such as Google). That relationship for a user not using Brave might look like this:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://rudism.com/images/brave_1.png&quot; alt=&quot;diagram 1&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;While I admit that this is probably an over-simplified model, it illustrates the fundamental idea. A user (that’s you) gives attention to their browser, and a content publisher provides content to the browser (by creating blog posts or news articles, for example). In order to earn money for the content they are creating, the content publisher employs an ad network. The ad network has relationships with several companies that wish to advertise their products, and those companies pay the ad network to put their ads into the web browser, and the ad network pays the content publisher for the right to do so amidst the content they have created.&lt;/p&gt;
+&lt;p&gt;Under this model the user gets to view the content they’re seeking, the content publisher gets paid for the content by the ad network, the ad network gets paid by the advertisers, and the advertisers get paid when users find their ads interesting enough to click on and then purchase goods or services from them.&lt;/p&gt;
+&lt;p&gt;Let’s take a look at what that model might look like for someone using Brave with the Rewards Program activated, not yet taking into account the BAT crypto tokens:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://rudism.com/images/brave_2.png&quot; alt=&quot;diagram 2&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;The first obvious difference is that the old ad network is nowhere to be found. You may notice that the revenue stream provided to the content publisher from the missing ad network has also vanished.&lt;/p&gt;
+&lt;p&gt;And as far as I’m concerned, that’s fine. Fuck ads. I personally use an aggressive battery of ad blocking techniques to eliminate them from my browser too–the content publisher just has to suck that up as part of how the internet works now. They can cry and whine and employ pathetic ad-blocker-blocking techniques and other annoyances to ensure that they slowly fade into obscurity, or they can switch to a donation or subscription model through which users like me can support them directly. Maybe those models suck too and the whole internet is just broken now. I don’t know. I’m not particularly interested in solving that problem myself.&lt;/p&gt;
+&lt;p&gt;Brave, on the other hand, claims that fixing this broken model is its core mission. They want to foster a radical new internet advertising economy in which content providers are paid for their efforts proportionally to the share of total user attention they can attract, and users are rewarded through not only increased privacy but are actually paid a hefty chunk of the generated ad revenue themselves.&lt;/p&gt;
+&lt;p&gt;Looking at that second relationship diagram doesn’t seem to paint that picture, however. Notice that all the money is going from the advertisers to Brave and then nowhere else. The content publisher probably wouldn’t have seen any money either way since this particular user would likely be blocking ads even if they weren’t using Brave. But what about that poor user? He doesn’t want to see ads. He hates ads just as much as I do. Thats why he’s trying Brave out in the first place. But Brave seems to have tricked him into looking at ads anyway for no reason other than to funnel all of that sweet advertising money away from the old ad network and content publisher and straight into Brave’s pocket instead.&lt;/p&gt;
+&lt;p&gt;“Aha!” you exclaim. “What about BAT?”&lt;/p&gt;
+&lt;h2 id=&quot;What-about-BAT&quot;&gt;What about BAT?&lt;/h2&gt;
+&lt;p&gt;The next day at school I whipped open my pack in the middle of the school yard, announced loudly that I’m selling a bunch of sweet toys and junk food, and started to give free Daddy-O dollars to anyone who expressed even the slightest interest in what I was doing. Friends, friends of friends, complete strangers–everyone got a few Daddy-O dollars for free and was invited to browse the Daddy-O Shop-O’ Treats.&lt;/p&gt;
+&lt;p&gt;You want a bag of chips? That will be two of the Daddy-O dollars that I just handed you for free. Thanks! A pack of gum? That will be one Daddy-O dollar. Oh you didn’t get any Daddy-O dollars? Here’s three on the house! The cheaper food items and the junkier of my brother’s toys quickly flew off the proverbial shelves, leaving just a few big-ticket items in my pack.&lt;/p&gt;
+&lt;p&gt;“How much for that cap gun?” a kid named Graham asked me. This is the moment I’d been waiting for. In my mind I was twirling my handlebar mustache and cackling. Several other kids who had been eyeing the remaining toys–including the cap gun and several action figures–turned to me expectantly, anxiously clutching what few post-it notes they still had in their greasy little palms.&lt;/p&gt;
+&lt;p&gt;“Oh, that?” I replied calmly. “Seventy five Daddy-O dollars.”&lt;/p&gt;
+&lt;p&gt;Of course, I was already aware that Graham could not afford this. None of the kids could. The most I handed out to any one kid was probably five DDs and they had all spent them on junk food, candy, and other worthless trash. Graham frowned and shook his head, then asked a question that sent shivers of glee down my spine.&lt;/p&gt;
+&lt;p&gt;“I only have one left, how do I get more?”&lt;/p&gt;
+&lt;p&gt;“Well, I’d be willing to buy stuff of yours for Daddy-O dollars, if you’ve got anything worth selling,” I said. Several kids opened their own back packs and started rooting around, and I was grinning like the Cheshire Cat.&lt;/p&gt;
+&lt;h2 id=&quot;Daddy-O-Dollars-and-Crypto-Tokens&quot;&gt;Daddy-O Dollars and Crypto Tokens&lt;/h2&gt;
+&lt;p&gt;&lt;em&gt;Keep in mind that I didn’t understand a lick about any of this prior to doing a minimum of research for this article specifically, so my understanding may be incomplete or flawed.&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;If you wanted to create your own crypto token based on the Ethereum blockchain (same as BAT), here are the basic steps that would seem to be involved:&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;Come up with a name for your token.&lt;/li&gt;
+&lt;li&gt;Make a symbol for your token that would show up on crypto exchanges.&lt;/li&gt;
+&lt;li&gt;Decide how many tokens you want to make.&lt;/li&gt;
+&lt;li&gt;Write an ERC-20 smart contract that defines all of the above with some boilerplate code to handle balance lookups and transfers.&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;Admittedly, step 4 may sound daunting, especially for a non-programmer, but it can be done in under 50 lines of code, and probably just copy-and-pasted from an existing one with minor tweaks. It’s really not that hard. There are five minute video tutorials on YouTube that show you how to create crypto tokens.&lt;/p&gt;
+&lt;p&gt;Creating tokens is easy. And as implied in step 3, you can make as many as you want. Brave created 1.5 billion BAT just like that with the stroke of a keyboard. I probably spent way more time drawing my little Daddy-O dude on post-it notes than it took them to do that. The difficulty, obviously, lies in generating value for your crypto tokens–getting people to want them.&lt;/p&gt;
+&lt;p&gt;Let’s throw BAT into our relationship diagram:&lt;/p&gt;
+&lt;p&gt;&lt;img src=&quot;https://rudism.com/images/brave_3.png&quot; alt=&quot;diagram 3&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;Roughly once a month, Brave sends some BAT to the user as a reward for looking at ads. The user can choose to send some of that BAT back to Brave to hold on to for their favorite publishers to claim, but in order to actually claim that BAT the publisher must:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;be aware that Brave and BAT is a thing;&lt;/li&gt;
+&lt;li&gt;register for a publisher account and BAT wallet with Brave;&lt;/li&gt;
+&lt;li&gt;and comply with a bunch of terms and policies dictated by Brave.&lt;/li&gt;
+&lt;/ul&gt;&lt;p&gt;Let’s be honest; at least at present and for the distant foreseeable future, the percentage of content publishers taken as a whole across the entire internet who will actually receive any BAT for their content is negligible enough to be effectively zero. So while Brave is extending a purple BAT arrow toward the content publisher, in reality that’s just going straight back to a pool of BAT that Brave calls the “User Growth Pool” or UGP. I did leave a few purple crumbs for savvy content publishers to scoop up in the diagram, but they are almost certainly not to scale.&lt;/p&gt;
+&lt;p&gt;The BAT in the UGP, which I assume is just another wallet controlled by Brave, are given away to new users as an incentive to start using the Brave browser. This is in Brave’s interest, as more eye balls means more of that money flowing in from the advertisers. This is &lt;em&gt;probably&lt;/em&gt; also where the BAT comes from for their referral program, through which a Brave user who writes a positively glowing review of the browser could entice other users to download and use Brave using their referral link and earn themselves some extra BAT. This is what I was referring to earlier when I mentioned I didn’t fully trust all of the reviews and articles out there raving about Brave’s incredible speed and ad-blocking capabilities–most of the ones I came across had referral links.&lt;/p&gt;
+&lt;p&gt;The only other thing that BAT adds to the relationship is the ability for users to also give their money to Brave in exchange for BAT. I suppose this is for those users who wish to make the gesture of donating BAT to content publishers without having to look at Brave’s ads, though, as mentioned, in reality are likely just donating it back to the UGP.&lt;/p&gt;
+&lt;p&gt;So why is BAT worth anything? Why do people want it?&lt;/p&gt;
+&lt;p&gt;In grade 7 I generated value for my Daddy-O dollars by giving them away for free, then selling a bunch of stuff that didn’t actually have any value to me so that other kids would perceive them as valuable. I kept the lion’s share of Daddy-O dollars to myself so that I could then use them to buy things that did have value to me from other kids. I was literally printing my own money, controlling my own economy, and trading ridiculous little post-it note doodles for actual tangible goods like digital watches and Far Side comic books.&lt;/p&gt;
+&lt;p&gt;Brave is certainly giving away BAT for free–that’s the whole purpose of the UGP, but I don’t entirely understand where the value is coming from. I have anecdotal evidence from a Brave user who earned around $25 worth of BAT (at current exchange rates) from just browsing the web normally over the course of a month. The idea that a single user browsing the web could have earned Brave anywhere near $25 in ad revenue is (coming from someone who &lt;a href=&quot;https://rudism.com/exploiting-android-users-for-fun-and-profit/&quot;&gt;worked in the ad industry&lt;/a&gt; for a couple years) completely absurd.&lt;/p&gt;
+&lt;p&gt;Is it just the hype around the lofty vision that Brave espouses in its marketing material? The idea of an ad network that respects privacy and pays both content publishers and consumers of that content is certainly appealing, right up there in too-good-to-be-true territory. Or maybe the kind of user who seeks out third party ad-blocking web browsers is also inclined to get excited and perceive value in a new crypto currency just for the sake of having a new crypto currency? I don’t know. I do know that if I were in Brave’s position–taking ad revenue from advertisers, not paying any of that to the publishers of the content over which I display the ads, and controlling a whole secondary crypto economy which serves as yet another potential source of revenue–well, let’s just say my Cheshire Cat grin would probably start hurting my face muscles after a while.&lt;/p&gt;
+&lt;h2 id=&quot;Conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;In the end, some teachers at my junior high caught wind of the ridiculous economy I had created. They contacted my parents and I was made to destroy my remaining stash of Daddy-O dollars and return all of the stuff I had bought from other kids. I also had to pay restitution to my brother by giving him some of my toys to replace the ones of his that I had sold.&lt;/p&gt;
+&lt;p&gt;My little scheme didn’t really play out as I had imagined. Will Brave’s? I don’t know. I just know that I’m not going to use their browser any time soon.&lt;/p&gt;
+
+
+&lt;details id=&quot;discussion-container&quot;&gt;&lt;a data-isso-id=&quot;/the-brave-browser-is-brilliant/&quot; href=&quot;https://rudism.com/the-brave-browser-is-brilliant/#isso-thread&quot; class=&quot;counter&quot;&gt;Comments&lt;/a&gt;
+&lt;section id=&quot;isso-thread&quot;/&gt;&lt;/details&gt;</description>
+<pubDate>Sat, 07 Mar 2020 05:44:07 +0000</pubDate>
+<dc:creator>Rudism</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://rudism.com/the-brave-browser-is-brilliant/</dc:identifier>
+</item>
+<item>
+<title>Netlify raises $53M Series C as microservices approach to web development grows</title>
+<link>https://techcrunch.com/2020/03/04/netfily-nabs-53m-series-c-as-micro-services-approach-to-web-development-grows/</link>
+<guid isPermaLink="true" >https://techcrunch.com/2020/03/04/netfily-nabs-53m-series-c-as-micro-services-approach-to-web-development-grows/</guid>
+<description>&lt;p id=&quot;speakable-summary&quot;&gt;&lt;a href=&quot;http://www.netlify.com/&quot;&gt;Netlify&lt;/a&gt;, the startup that wants to kill the web server and change the way developers build websites, announced a $53 million Series C today.&lt;/p&gt;
+&lt;p&gt;&lt;a class=&quot;crunchbase-link&quot; href=&quot;https://crunchbase.com/organization/eqtventures&quot; target=&quot;_blank&quot; data-type=&quot;organization&quot; data-entity=&quot;eqtventures&quot;&gt;EQT Ventures&lt;/a&gt; Fund led the round with contributions from existing investors Andreessen Horowitz and Kleiner Perkins and newcomer Preston-Werner Ventures. Under the terms of the deal Laura Yao, deal partner and investment advisor at EQT Ventures will be joining the &lt;a class=&quot;crunchbase-link&quot; href=&quot;https://crunchbase.com/organization/netlify&quot; target=&quot;_blank&quot; data-type=&quot;organization&quot; data-entity=&quot;netlify&quot;&gt;Netlify&lt;/a&gt; board. The startup has now raised $97 million, according to the company.&lt;/p&gt;
+&lt;p&gt;Like many startups recently, Netlify’s co-founder Chris Bach says they weren’t looking for new funding, but felt with the company growing rapidly, it would be prudent to take the money to help continue that growth.&lt;/p&gt;
+
+&lt;p&gt;While Bach and CEO Matt Biilmann didn’t want to discuss valuation, they said it was “very generous” and in line with how they see their business. Neither did they want to disclose specific revenue figures, but did say that the company has tripled revenue three years running.&lt;/p&gt;
+&lt;p&gt;One thing fueling that growth is the sheer number of developers joining the platform. When we spoke to the company &lt;a href=&quot;https://techcrunch.com/2018/10/09/netlify-just-got-30-million-to-change-the-way-developers-build-websites/&quot;&gt;for its Series B&lt;/a&gt; in 2018, it had 300,000 sign-ups. Today that number has ballooned to 800,000.&lt;/p&gt;
+&lt;p&gt;As we wrote about the company &lt;a href=&quot;https://techcrunch.com/2018/03/20/netlify-wants-to-make-it-easier-for-web-developers-to-use-aws-lambda-event-triggers/&quot;&gt;in a 2018 article&lt;/a&gt;, it wants to change the way people develop web sites:&lt;/p&gt;
+&lt;blockquote readability=&quot;10&quot;&gt;
+&lt;p&gt;“Netlify has abstracted away the concept of a web server, which it says is slow to deploy and hard to secure and scale. By shifting from a monolithic website to a static front end with back-end microservices, it believes it can solve security and scaling issues and deliver the site much faster.”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;While developer popularity is a good starting point, getting larger customers on board is the ultimate goal that will drive more revenue, and the company wants to use its new injection of capital to build the enterprise side of the business. Current enterprise customers include Google, Facebook, Citrix and Unilever.&lt;/p&gt;
+&lt;p&gt;Netlify has grown from 38 to 97 employees since the beginning of last year and hopes to reach 180 by year’s end.&lt;/p&gt;
+
+</description>
+<pubDate>Sat, 07 Mar 2020 00:01:29 +0000</pubDate>
+<dc:creator>135792468</dc:creator>
+<og:title>Netlify nabs $53M Series C as microservices approach to web development grows – TechCrunch</og:title>
+<og:description>Netlify, the startup that wants to kill the web server and change the way developers build websites, announced a $53 million Series C today. EQT Ventures Fund led the round with contributions from existing investors Andreessen Horowitz and Kleiner Perkins and newcomer Preston-Werner Ventures. Under…</og:description>
+<og:image>https://techcrunch.com/wp-content/uploads/2020/03/GettyImages-671372127.jpg?w=600</og:image>
+<og:url>http://social.techcrunch.com/2020/03/04/netfily-nabs-53m-series-c-as-micro-services-approach-to-web-development-grows/</og:url>
+<og:type>article</og:type>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://techcrunch.com/2020/03/04/netfily-nabs-53m-series-c-as-micro-services-approach-to-web-development-grows/</dc:identifier>
+</item>
+<item>
+<title>A googol-to-one gear ratio [video]</title>
+<link>https://www.kottke.org/20/03/heres-what-a-googol-to-one-gear-ratio-looks-like</link>
+<guid isPermaLink="true" >https://www.kottke.org/20/03/heres-what-a-googol-to-one-gear-ratio-looks-like</guid>
+<description>&lt;p&gt;To celebrate being alive for a billion seconds, Daniel Bruin built a machine with 100 gears with a 10-to-1 gear ratio…meaning that the overall gear ratio is a googol-to-one. (A googol is 1 with 100 zeros.)&lt;/p&gt;
+&lt;p class=&quot;widescreen embedded&quot;&gt;&lt;iframe width=&quot;100%&quot; src=&quot;https://www.youtube.com/embed/nFslB0AcVmM&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+&lt;blockquote readability=&quot;7&quot;&gt;
+&lt;p&gt;This machine has a gear reduction of 1 to 10 a hundred times. In order to get the last gear to turn once you’ll need to spin the first one a google [sic] amount around. Or better said you’ll need more energy than the entire known universe has to do that. That boggles my mind.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;You can watch the machine spin for an hour — it’s kinda relaxing:&lt;/p&gt;
+&lt;p class=&quot;widescreen embedded&quot;&gt;&lt;iframe width=&quot;100%&quot; src=&quot;https://www.youtube.com/embed/ApqfqiFTO4E&quot; frameborder=&quot;0&quot; allow=&quot;accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture&quot; allowfullscreen=&quot;&quot;&gt;[embedded content]&lt;/iframe&gt;&lt;/p&gt;
+&lt;p&gt;Bruin says his machine was inspired by &lt;a href=&quot;https://kottke.org/15/02/machine-with-concrete&quot;&gt;Arthur Ganson’s Machine with Concrete&lt;/a&gt;, a contraption whose gears spin so slowly that the final gear is embedded in concrete. (via &lt;a href=&quot;https://digg.com/video/biggest-gear-ratio-googol&quot;&gt;digg&lt;/a&gt;)&lt;/p&gt;
+&lt;p&gt;More about...&lt;/p&gt;
+</description>
+<pubDate>Fri, 06 Mar 2020 22:10:08 +0000</pubDate>
+<dc:creator>klohto</dc:creator>
+<og:title>Here’s What a Googol-to-One Gear Ratio Looks Like</og:title>
+<og:type>article</og:type>
+<og:url>https://kottke.org/20/03/heres-what-a-googol-to-one-gear-ratio-looks-like</og:url>
+<og:image>https://img.youtube.com/vi/nFslB0AcVmM/0.jpg</og:image>
+<og:description>To celebrate being alive for a billion seconds, Daniel Bruin built a machine with 100 gears with a 10-to-1 gear ratio...meaning th</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.kottke.org/20/03/heres-what-a-googol-to-one-gear-ratio-looks-like</dc:identifier>
+</item>
+<item>
 <title>Cloud Storage for $2 per TB per month</title>
 <link>https://blog.sia.tech/cloud-storage-for-2-tb-mo-8a34043e93bb</link>
 <guid isPermaLink="true" >https://blog.sia.tech/cloud-storage-for-2-tb-mo-8a34043e93bb</guid>
@@ -70,6 +338,7 @@
 &lt;p id=&quot;bcac&quot; class=&quot;hg hh dt at hi b hj ik hl il hn im hp in hr io ht dl&quot;&gt;With a total revenue requirement of about $1750, an effective utilization of about 172 TB, and an effective earnings period of 11 months, we compute that the host needs to be earning about 90 cents per TB per month in revenue for an investment to make sense. Accounting for siafund fees, the renter needs to pay about $1.00 per TB per month. And then accounting for 1.5x redundancy, the final cost of redundant storage is about &lt;strong class=&quot;hi ip&quot;&gt;$1.50 per TB per month&lt;/strong&gt;.&lt;/p&gt;
 &lt;p id=&quot;34f3&quot; class=&quot;hg hh dt at hi b hj hk hl hm hn ho hp hq hr hs ht dl&quot;&gt;This is possible because the Sia network is designed so that datacenters can take shortcuts while building. The traditional model for the cloud assumes that datacenters need to be ultra high reliability, and often also assumes certain performance requirements on the internal network and servers of the datacenter. Sia is much more relaxed, everything needs to happen on the order of milliseconds as opposed to microseconds, and is perfectly comfortable with datacenters and storage rigs that have over a day of downtime per month on average.&lt;/p&gt;
 &lt;p id=&quot;1bd6&quot; class=&quot;hg hh dt at hi b hj hk hl hm hn ho hp hq hr hs ht dl&quot;&gt;More to the point, as a whole the Sia network has been carefully designed to be optimal as a decentralized system. Many of the fundamental design choices for Sia had to be different to achieve decentralization, and we have been able to leverage the strengths and weaknesses of these requirements to create something entirely new, and ultimately far superior to the traditional cloud.&lt;/p&gt;
+&lt;p id=&quot;1351&quot; class=&quot;hg hh dt at hi b hj hk hl hm hn ho hp hq hr hs ht dl&quot;&gt;Try out Sia’s personal storage solution at &lt;a href=&quot;https://sia.tech&quot; class=&quot;cp fx hu hv hw hx&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;https://sia.tech&lt;/a&gt; or Sia’s content publishing and distribution solution at &lt;a href=&quot;https://siasky.net&quot; class=&quot;cp fx hu hv hw hx&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;https://siasky.net&lt;/a&gt;&lt;/p&gt;
 </description>
 <pubDate>Fri, 06 Mar 2020 19:57:47 +0000</pubDate>
 <dc:creator>beedrillzzzzz</dc:creator>
@@ -80,7 +349,40 @@
 <og:image>https://miro.medium.com/max/1200/1*RwOb3-L7repKtbZAKYzLYw.jpeg</og:image>
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://blog.sia.tech/cloud-storage-for-2-tb-mo-8a34043e93bb?gi=c11717bfe435</dc:identifier>
+<dc:identifier>https://blog.sia.tech/cloud-storage-for-2-tb-mo-8a34043e93bb?gi=2bdb0601a48a</dc:identifier>
+</item>
+<item>
+<title>YC W20 Online-Only Demo Day</title>
+<link>https://blog.ycombinator.com/yc-w20-online-demo-day/</link>
+<guid isPermaLink="true" >https://blog.ycombinator.com/yc-w20-online-demo-day/</guid>
+<description>&lt;div class=&quot;loop-post-title single-title&quot;&gt;
+
+
+&lt;div class=&quot;loop-post-meta loop-post-meta-single&quot;&gt;&lt;span class=&quot;post-share-buttons&quot;/&gt;
+
+&lt;span class=&quot;post-date&quot;&gt;March 6, 2020&lt;/span&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;post-content&quot; readability=&quot;56&quot;&gt;
+&lt;p&gt;On March 23, YC will host our 30th Demo Day online. With the growing concern over COVID-19, we believe this is the right thing to do for the safety of all attendees, including our team, founders, investors, and the media.&lt;/p&gt;
+&lt;p&gt;While we won’t be able to recreate every aspect of Demo Day, we’ll try our best to create an amazing experience for our founders and investors.&lt;/p&gt;
+&lt;p&gt;Presentations will be pre-recorded and released to all investors at the same time on Monday, March 23 on our Demo Day website. We will also provide additional written background information on each company and access to their decks. Finally, our software will make it easy for investors and founders to exchange contact information so that they can arrange one-on-one meetings. All of this will happen on the same YC Demo Day website that investors and founders have used over the past five years.&lt;/p&gt;
+&lt;p&gt;For 15 years, startup investors have supported every new batch of YC companies, and we know the same will be true for this batch.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div id=&quot;mc_embed_signup&quot;&gt;
+&lt;h3 id=&quot;mc_copy&quot;&gt;Sign up for weekly updates from Y Combinator.&lt;/h3&gt;
+
+&lt;/div&gt;
+</description>
+<pubDate>Fri, 06 Mar 2020 18:33:59 +0000</pubDate>
+<dc:creator>mrkurt</dc:creator>
+<og:title>YC W20 Online Demo Day</og:title>
+<og:url>https://blog.ycombinator.com/yc-w20-online-demo-day/</og:url>
+<og:type>article</og:type>
+<og:description>On March 23, YC will host our 30th Demo Day online. With the growing concern over COVID-19, we believe this is the right thing to do for the safety of all attendees, including our team, founders, investors, and the media.</og:description>
+<og:image>https://blog.ycombinator.com/wp-content/uploads/2020/03/yc-w20-online-demo-day.png</og:image>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://blog.ycombinator.com/yc-w20-online-demo-day/</dc:identifier>
 </item>
 <item>
 <title>The EARN IT act is an attack on end-to-end encryption</title>
@@ -126,426 +428,6 @@
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
 <dc:identifier>https://blog.cryptographyengineering.com/2020/03/06/earn-it-is-an-attack-on-encryption/</dc:identifier>
-</item>
-<item>
-<title>Not being an asshole will make you more money</title>
-<link>https://www.atlassquats.com/post/not-being-an-asshole-will-make-you-more-money</link>
-<guid isPermaLink="true" >https://www.atlassquats.com/post/not-being-an-asshole-will-make-you-more-money</guid>
-<description>&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;All too often in the course of building my business, I bump into the existence of countless assholes. From dealing with aggressive and manipulative salesmen to investors offering term sheets a monkey wouldn't be dumb enough to sign. It frankly sucks. Sucks hard.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;I really don't understand why.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;So many people are straight assholes in business. Especially the more you climb the ladder. As my bootstrapped business reached $3M ARR, a wave of no-name investors approached us. Some of the term sheets more than insulted me. They sought to take control of the company without any payout for the co-founders or employees. They just wanted to capitalize a company they'd now own.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;I don't understand why.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;Now, I'll speak negatively of them whenever I'm asked. Hell, I'll shit talk them just in case someone runs into them. How do they ever plan to build a long term business if only idiots would accept their deal?&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;Let's make it simple. If you try to make money from someone's detriment, you're only hurting yourself. It's a short term play.&lt;/p&gt;
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;Smart successful people do not want to work with people they cannot trust. It's not worth it. The world's too big. You'll only ever whittle away your reputation until you're surrounded by mirrors of yourself. It's not worth it.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;When you form a partnership with someone, you should sincerely believe the other person is benefiting. It should be fair. You both should make money. You should both want to continue the partnership. Relationships and reputations last much longer than your shitty new sales tool or your underwater fund.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;I am not a nice person. I do not pretend to be. When I form deals, everyone makes money. Or at least, my attempts were sincere and I always share in the downside. Not everyone feels this way. Most certainly don't act it.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;In business, there is a strong incentive to push risk away from yourself and onto others while retaining as much of the upside as possible. Different people have different lines and perspectives on fairness. Some people view it as a simple game. They seek to selfishly maximize their outcome with as little risk as possible.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;The problem in business is that there is always risk. Most businesses operating now did not exist 150 years ago. The ones now probably won't make it another 50. Risk is everywhere. You can't avoid it.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;You can be smarter. You can work harder. You can lower that risk considerably through sheer will. But it stops at a point. At some point, the temptation to pass risk onto others creeps in. Enter Finance.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;Almost every single company more than 6 months old enters into financial agreements with other companies. Whether it's an investment or it's simple terms on purchasing inputs, companies engage in financial agreements all the time.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;A financial agreement can generally be viewed as an investment of sorts. For example, let's say your company buys t-shirts, puts a logo on it and sells it through a website. If the company you buy t-shirts from offers 30-day net terms, you may able to grow your business faster with less money tied up in inventory and the t-shirt manufacturer gets to sell more t-shirts too. If you go bankrupt, both you and the t-shirt manufacturer suffer somewhat proportionally.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;All good business deals share this trait. They expose both parties to upside and downside somewhat fairly given expected and possible outcomes.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;An evil business deal does the opposite. It seeks to offload risk while retaining reward. Sometimes a particularly evil person will come along and pretend to present an opportunity when in reality, they're looking to steal part of the investment. These are the worst people. Stay away from them at all costs.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;In general, I'd ask you to talk with yourself honestly and see what kind of deals you're making. Do they generally benefit both parties?&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;You should. You should work nonstop to ensure it does. Once you build a reputation for making your partners more money, success will come easier and easier.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;Ever wonder why some people raise a $5M seed with an idea scribbled on a napkin? Generally, these people have a reputation for positive returns for all involved.&lt;/p&gt;
-
-&lt;p class=&quot;XzvDs _208Ie tFDi5 blog-post-text-font blog-post-text-color _2QAo- _25MYV _6RI6N tFDi5&quot;&gt;What's your reputation?&lt;/p&gt;
-
-
-</description>
-<pubDate>Fri, 06 Mar 2020 16:34:41 +0000</pubDate>
-<dc:creator>dumbfoundded</dc:creator>
-<og:title>Not being an asshole will make you more money</og:title>
-<og:description>All too often in the course of building my business, I bump into the existence of countless assholes. From dealing with aggressive and manipulative salesmen to investors offering term sheets a monkey wouldn't be dumb enough to sign. It frankly sucks. Sucks hard. I really don't understand why. So many people are straigh</og:description>
-<og:url>https://www.atlassquats.com/post/not-being-an-asshole-will-make-you-more-money</og:url>
-<og:type>article</og:type>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.atlassquats.com/post/not-being-an-asshole-will-make-you-more-money</dc:identifier>
-</item>
-<item>
-<title>6 months in and $1k MRR: my biggest mistakes so far</title>
-<link>https://lunchbag.ca/lunch-money-mistakes/</link>
-<guid isPermaLink="true" >https://lunchbag.ca/lunch-money-mistakes/</guid>
-<description>&lt;p&gt;&lt;span&gt;Written on &lt;time datetime=&quot;2020-02-17 16:00:00 +0000 UTC&quot;&gt;February 17, 2020&lt;/time&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Quick introduction: 👋 Hi, I’m Jen! I’m the founder, chief budgeter, engineer &amp;amp; designer behind &lt;a href=&quot;https://lunchmoney.app&quot;&gt;Lunch Money&lt;/a&gt;, a personal finance and budgeting web app.&lt;/p&gt;
-&lt;p&gt;It’s been 6 months since the official launch of Lunch Money and I’ve been sharing milestones, both &lt;a href=&quot;https://www.indiehackers.com/product/lunch-money/mentioned-in-techcrunch-and-macrumors--LzBQz1KY0MspKE8mloW&quot;&gt;big&lt;/a&gt; and &lt;a href=&quot;https://www.indiehackers.com/product/lunch-money/shipped-a-boatload-of-new-features-improvements--LtvscbLRqs2xCBWNLIr&quot;&gt;small&lt;/a&gt;. But that’s hardly the full picture. While I like the idea of sharing highlights regularly to keep morale up, I thought it would be a good time to reflect and start a periodic series on the biggest mistakes I’ve made (so far).&lt;/p&gt;
-
-&lt;p&gt;We &lt;a href=&quot;https://news.ycombinator.com/item?id=20811287&quot;&gt;launched via Show HN&lt;/a&gt; on Hacker News in late August 2019. Readers upheld Lunch Money’s standing on the front page for nearly 24 hours!&lt;/p&gt;
-&lt;p&gt;About an hour into the launch, I started to get notifications and emails that users couldn’t connect their accounts via Plaid, our third-party banking importer. In a state of panic, I spammed their support channel and the two friends I know who worked there, crying for help. That is until I realized that it was my own dumb fault because I accidentally left my Plaid environment set to development which only supported 100 connected accounts. My free test accounts which I had been diligently rationing up until this point had been depleted and Plaid was rightfully denying any new connections.&lt;/p&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lesson learned: Have tests in place to check critical environment variables are properly set before deploying to production&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://lunchbag.ca/uploads/Screen%20Shot%202020-02-18%20at%208.23.37%20PM.png&quot; alt=&quot;&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;A simple test could have saved me a ton of headache&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Next, I ran into issues with a third-party email service provider, Sendgrid. I was using Sendgrid to send confirmation emails to new users as they signed up for Lunch Money. The issue was twofold which I discovered while prematurely celebrating the first fix. I had hit my 100 emails per day limit due to being on the free plan, so I quickly upgraded to a paid plan only to find out that Sendgrid was also rate-limiting me! Thankfully, this was quickly resolved through their responsive support chat.&lt;/p&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lessons learned: Ensure your current plans with third-party services you depend on are sufficient, and monitor usage on launch day to catch issues before they arise&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Side note: Lunch Money’s launch was by-and-large unplanned and accidental. If you want to read the “full story” of the launch, &lt;a href=&quot;https://www.indiehackers.com/product/lunch-money/got-on-front-page-of-hacker-news-today--LnVqxbaYPHu7vsPBx39&quot;&gt;check out the Indie Hackers post&lt;/a&gt; I had written at the end of the day.&lt;/p&gt;
-
-&lt;p&gt;I started Lunch Money as a web app since that is the platform I’m most comfortable with and can iterate quickest on. I like the idea of having more screen real estate for a proper user interface and I also have a lot more experience (and fun!) designing and coding for web apps over mobile apps.&lt;/p&gt;
-&lt;p&gt;However, at the back of my mind I always felt that I would need to have a mobile app. Who would use a new budgeting app if it was not mobile-first? Who even owns a laptop or desktop computer anymore?&lt;/p&gt;
-&lt;p&gt;I had a fully-functioning web app that was mobile responsive, but I had also fully convinced myself that no one would take my app seriously because it wasn’t available natively on iOS or Android. Though I wasn’t going to let this be a barrier to launching, I ended up pricing my product low enough as compensation for the fact. I was also a bit overzealous in my copy. I had a line that promised a mobile app was coming soon and I even called it the “pre-mobile launch”.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://lunchbag.ca/uploads/Screen%20Shot%202020-02-18%20at%208.26.10%20PM-1.png&quot; alt=&quot;&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;Way too much attention on the lack of a mobile app 🤦‍♀️&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;After launching, I realized through user feedback that a mobile app was not the dealbreaker I hyped it up to be. Of course, there were a few users who made it clear they would only subscribe once a mobile version was available, but there were way more people who were just excited about the potential of Lunch Money itself. It became obvious that I should focus on continuing to develop the core product rather than halting progress in favour of spawning a half-baked version on a new platform.&lt;/p&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lesson learned: Don't assume what is and isn't important to your users. Focus on an MVP and wait for feedback.&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Looking back now, it was the right decision to hold off on a mobile app. Keeping parity with both web and mobile while iterating regularly on the product would have been nearly impossible. The web version changed so quickly with many features having been completely re-written in the last 6 months. That would have taken more than twice the time if I also had to consider the mobile app whose update cycles are at the mercy of Apple and Google.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://lunchbag.ca/uploads/Screen%20Shot%202020-02-18%20at%2011.26.11%20PM-1.png&quot; alt=&quot;&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;Embracing the fact that we’re a web app!&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;This is not to say that Lunch Money will never have a mobile app. I’m still working on rounding out core features and as the product approaches stability, I’ll spend time thinking seriously about a mobile app. Whether that involves hiring a contractor, outsourcing the development or encouraging users to build their own via our developer API is still up in the air!&lt;/p&gt;
-
-&lt;p&gt;As mentioned earlier, I priced Lunch Money initially to overcompensate for the lack of a mobile app. At launch, the product was offered at $3/month or $29/year.&lt;/p&gt;
-&lt;p&gt;I was getting feedback over the next few weeks that my pricing was too low! If your users are telling you your price is too low, it’s even lower than you think.&lt;/p&gt;
-
-&lt;p&gt;Over the course of 4 weeks, I experimented with pricing. I raised my price every time I came out with a new major feature, which, at that time, was happening on a weekly basis. These are core features to the product today, such as CSV import (+$2/month) and the Query Tool (+$1/month). My pricing basically went from $3/month to $5/month to $6/month and finally $8/month.&lt;/p&gt;
-&lt;p&gt;At $8/month, there was a noticeable drop in signups. But that by itself was not the issue as it was compounded by my next mistake..&lt;/p&gt;
-
-&lt;p&gt;At launch time, we were offering a 45-day free trial. The idea was to allow users the experience of a whole monthly budgeting cycle to assess Lunch Money. Also, YNAB, who I perceived to be my biggest competitor, was offering a 38-day free trial so I thought that with a longer trial and lower price, Lunch Money would be more appealing.&lt;/p&gt;
-&lt;p&gt;While I could have been right about that, it wasn’t worth the painfully long sales cycle that came with offering a 45-day free trial PLUS the option for a whopping two week trial extension. Major facepalm. At the longest, users were not going to convert until 2 months after initially signing up. This made assessing product-market fit an unnecessarily long process. Also, very few users opted to extend the trial after 45 days which was unsurprising– if a user is still on the fence at day 45, they probably won’t be subscribing.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://lunchbag.ca/uploads/Screen%20Shot%202020-02-18%20at%208.39.31%20PM.png&quot; alt=&quot;&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;Fully prepared to give away a 2 week trial extension on top of a 45 day free trial… 🤦‍♀️&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;Eventually, at the advice of a friend much smarter than me, I decided to shorten the free trial length to 14 days. Even though I now ran the risk of users not having enough time to assess the product, I felt the shorter trial might instill some urgency in users, and I was still offering the option for a 1 week trial extension.&lt;/p&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lesson learned: Be aware of the difficulties in offering too long of a free trial&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;It’s worth mentioning now that this realization and the realization that I was charging too little happened in parallel so I actually ended up increasing the pricing to $8/month AND decreasing the free trial length to 14 days on the same day. Yes, I changed two very important variables at the same time. My sign ups dropped drastically and I had no way of knowing if it was because I was charging too high or my trial length was too short.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://media.giphy.com/media/fQMmw06EWWRP9fvhWv/giphy.gif&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;My two inner selves when I realized what I’d done&lt;/span&gt;&lt;/p&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lesson learned: If you are testing major changes, do not change two variables at the same time. (Duh!)&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;The recovery:&lt;/strong&gt; I ended up sticking with the shorter trial length and offering a discount off the $8/month pricing which was determined to be too high. I’d like to eventually get Lunch Money to a point where it is worth $8/month and until then, I’m offering lifetime percentage discounts. I started off with a 30% discount for Cyber Week which had great reception. Afterwards, I lowered the discount to 20% off which amounts to $6.40/month. Based on the rate of new signups and a user feedback survey I sent out a few weeks ago, I’m confident the current trial length and monthly price are both reasonable for the time being.&lt;/p&gt;
-
-&lt;p&gt;For a month and a half, we didn’t have an About page. I wasn’t sure how Lunch Money would be perceived if people found out there was a singular engineer behind a personal finance app. &lt;a href=&quot;https://lunchbag.ca/lunch-money&quot;&gt;I wrote an article on my personal blog&lt;/a&gt; that would link Lunch Money to me, but it would only be discoverable by those eager enough to read the origin story.&lt;/p&gt;
-&lt;p&gt;After some initial feedback, I decided to implement an &lt;a href=&quot;https://lunchmoney.app/about&quot;&gt;About page&lt;/a&gt; and start sending a welcome email to new users introducing myself as the one-woman team behind the product.&lt;/p&gt;
-&lt;center readability=&quot;0.72857142857143&quot;&gt;
-&lt;blockquote class=&quot;twitter-tweet&quot; readability=&quot;3.6428571428571&quot;&gt;
-&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot;&gt;Let’s not be strangers anymore 👋 We finally have an About page! &lt;a href=&quot;https://t.co/koZiMSAM3o&quot;&gt;https://t.co/koZiMSAM3o&lt;/a&gt;&lt;/p&gt;
-— Lunch Money (@LunchbagLabs) &lt;a href=&quot;https://twitter.com/LunchbagLabs/status/1180518703487733766?ref_src=twsrc%5Etfw&quot;&gt;October 5, 2019&lt;/a&gt;&lt;/blockquote&gt;
-&lt;/center&gt;
-&lt;p&gt;I now regularly get emails back from users letting me know that they find my story inspiring, or that they love the fact that an indie developer is behind the product! 🥰&lt;/p&gt;
-&lt;center readability=&quot;2.2987616099071&quot;&gt;
-&lt;blockquote class=&quot;twitter-tweet&quot; readability=&quot;7.3560371517028&quot;&gt;
-&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot;&gt;My mind is kind of blown that &lt;a href=&quot;https://twitter.com/lunchbag?ref_src=twsrc%5Etfw&quot;&gt;@lunchbag&lt;/a&gt; made Lunch Money on her own &lt;em&gt;and&lt;/em&gt; she’s the support staff.&lt;/p&gt;&lt;p&gt;The unbelievable thing is that Lunch Money is truly better than Mint and YNAB. I’ve never been able to keep using budgeting software because they’re so bad. Not anymore!&lt;/p&gt;
-— Eric Windmill (@ericwindmill) &lt;a href=&quot;https://twitter.com/ericwindmill/status/1226992389627072512?ref_src=twsrc%5Etfw&quot;&gt;February 10, 2020&lt;/a&gt;&lt;/blockquote&gt;
-&lt;/center&gt;
-&lt;p class=&quot;tip&quot;&gt;&lt;strong&gt;Lesson learned: People care about the narrative behind your product, so don't be afraid to tell your story!&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Also, I sent out a user survey recently and 20% of responses cited me as an indie developer as a reason why they love Lunch Money. All of this was incredibly heartwarming and I learned to embrace my story more.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://lunchbag.ca/uploads/Screen%20Shot%202020-02-18%20at%2011.03.35%20PM.png&quot; alt=&quot;&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;So much ❤️ from our users!&lt;/span&gt;&lt;/p&gt;
-
-&lt;p&gt;I’m happy to report that despite all these bumps in the road (and many more that didn’t make the cut for this post!), &lt;a href=&quot;https://lunchmoney.app&quot;&gt;Lunch Money&lt;/a&gt; is still alive.&lt;/p&gt;
-&lt;p&gt;Of course, I never thought that any one of these mistakes would be the downfall of Lunch Money but I’m sure in the moment, each one felt like the dumbest thing I could have possibly done.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://media.giphy.com/media/9jObH9PkVPTyM/giphy-downsized.gif&quot;/&gt;&lt;span class=&quot;caption&quot;&gt;My overdramatic self reacting to my mistakes as they happen&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;This whole journey is a learning process and I’m grateful to be able to share mine transparently. It’s important to not only celebrate the highs and stay humble, but also face the lows and forgive yourself.&lt;/p&gt;
-&lt;p&gt;I’m sure there are many more mistakes to be made on the horizon and I look forward to writing and laughing about them in another 6 months!&lt;/p&gt;
-</description>
-<pubDate>Fri, 06 Mar 2020 15:28:46 +0000</pubDate>
-<dc:creator>jnfr</dc:creator>
-<og:title>The biggest mistakes I've made with Lunch Money (so far)</og:title>
-<og:description>It's been 6 months since the official launch of Lunch Money and I've been sharing milestones, both big and small. But that's hardly the full picture.</og:description>
-<og:type>article</og:type>
-<og:url>https://lunchbag.ca/lunch-money-mistakes/</og:url>
-<og:image>https://lunchbag.ca/uploads/ogimage-blog-biggest-mistake-2.png</og:image>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://lunchbag.ca/lunch-money-mistakes/</dc:identifier>
-</item>
-<item>
-<title>DuckDuckGo is good enough for regular use</title>
-<link>https://www.bitlog.com/2020/03/06/duckduckgo-is-good-enough-for-regular-use/</link>
-<guid isPermaLink="true" >https://www.bitlog.com/2020/03/06/duckduckgo-is-good-enough-for-regular-use/</guid>
-<description>&lt;p&gt;Google recently launched a desktop redesign. The favicon and URL breadcrumbs were turned into a header for organic search results. Ads had the same design, but were identified using the string “Ad” instead of the favicon. This design wasn’t new. Google’s mobile web search has served this design &lt;a href=&quot;https://www.theverge.com/2019/5/22/18635774/google-mobile-search-redesign-favicons-website-names&quot;&gt;since May 2019&lt;/a&gt;. But users and regulators complained that the desktop version blurred the distinction between ads and organic results. Google reverted the change a few weeks later, &lt;a href=&quot;https://twitter.com/searchliaison/status/1220768238490939394&quot;&gt;citing the backlash&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;I experienced &lt;a href=&quot;https://uxdesign.cc/design-psychology-change-aversion-cbc10066c41f&quot;&gt;change aversion&lt;/a&gt; when I tried the redesign. Change aversion is a simple idea: users react negatively to new experiences, but they stop caring as new experiences become normal. Anyways, looking at the Google redesign gave me change aversion. I knew that I wouldn’t care about it within a few days. But I decided to put it to good use: I would try &lt;a href=&quot;https://duckduckgo.com/&quot;&gt;DuckDuckGo&lt;/a&gt;. If it was time for Google to experiment, then it was time for me to experiment. I had wanted to try it for a while. This finally gave me the activation energy to switch.&lt;/p&gt;
-&lt;p&gt;DuckDuckGo’s premise is simple. They do not collect or share personal information. They log searches, but they promise that these logs are not linked to personally identifiable information. Their search engine results seemingly come from Bing, but they claim to have their own crawler and hundreds of other sources on top of that. They do customize the results a little: geo-searches like &lt;span&gt;bars near my location&lt;/span&gt; give me results from my home city of New York. But search results aren’t personalized. I’ve always wondered how good the results would be.&lt;/p&gt;
-&lt;p&gt;Anyways, here are the guidelines that I set for my experiment:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;I would &lt;a href=&quot;https://www.pcworld.com/article/249158/how_to_change_your_browsers_default_search_engine.html&quot;&gt;switch all of my browser’s default search engines&lt;/a&gt; to DuckDuckGo across all of my devices.&lt;/li&gt;
-&lt;li&gt;I would use DuckDuckGo for at least a month. This would give me enough time to learn some of its strengths and weaknesses.&lt;/li&gt;
-&lt;li&gt;I would not use any DuckDuckGo poweruser features unless I could guess that they existed. I wanted to understand the out-of-the-box experience on the site.&lt;/li&gt;
-&lt;li&gt;I could use the &lt;span&gt;!g&lt;/span&gt; operator to search Google if DuckDuckGo failed. Some will point out that this violates the previous rule. But as soon as a discussion changes to DuckDuckGo usage, people can’t WAIT to talk about how often they use &lt;span&gt;!g&lt;/span&gt; or &lt;span&gt;g!&lt;/span&gt;. Do you need an example? I discussed it in this paragraph and tried to blame it on other people. I’m serious: people can’t talk about DuckDuckGo without talking about &lt;span&gt;!g&lt;/span&gt;. It’s the law. So I know about it and I will use it.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;I haven’t tried a new search engine since I tried Bing in 2009. It was time to find out how good DuckDuckGo is in 2020. What was the biggest difference that I found?&lt;/p&gt;
-&lt;h2&gt;Google is the king of low-intent searches&lt;/h2&gt;
-&lt;p&gt;Google has a structured understanding of many domains. This is a difficult moat for other search engines to cross. This is evident when comparing low-intent searches. These are searches with an ambiguous purpose. The subject is broad and it’s not clear what the user wanted. The user might not even “want” anything except to kill five minutes before a meeting.&lt;/p&gt;
-&lt;p&gt;Let’s try a low-intent search. Type &lt;span&gt;harry potter&lt;/span&gt; into Google. In response, Google throws everything at the wall to see what sticks. In addition to the organic links, Google serves me:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;A panel on the right with a ton of metadata. This includes oddly-specific structured data like “&lt;strong&gt;Sport&lt;/strong&gt;: Quidditch”.&lt;/li&gt;
-&lt;li&gt;A list of five of the seven books in the series.&lt;/li&gt;
-&lt;li&gt;Fantasy books from five related searches.&lt;/li&gt;
-&lt;li&gt;A news panel containing three articles about Harry Potter actors.&lt;/li&gt;
-&lt;li&gt;The &lt;span&gt;harry potter&lt;/span&gt; Google Maps search, centered on the New York area.&lt;/li&gt;
-&lt;li&gt;A “People also ask” panel with four questions.&lt;/li&gt;
-&lt;li&gt;A link to three Harry Potter-related YouTube videos.&lt;/li&gt;
-&lt;li&gt;Three recent tweets from @HarryPotterFilm.&lt;/li&gt;
-&lt;li&gt;A panel with 7 “Fantasy book series” results.&lt;/li&gt;
-&lt;li&gt;A panel with 7 “Kids book series” results.&lt;/li&gt;
-&lt;li&gt;8 other search strings related to &lt;span&gt;harry potter&lt;/span&gt;.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;This makes sense: what did I want when I searched for &lt;span&gt;harry potter&lt;/span&gt;? Google can’t know. So Google returns information from many domains to attempt to satisfy the query. Google returns so much information that something will be close enough. This is a huge competitive advantage. They can serve good results for bad searches by covering as many domains as possible.&lt;/p&gt;
-&lt;p&gt;This is a departure from how search used to work. When I was in grade school, I was taught how to craft search queries. Someone herded us into a library and explained how to pick effective keywords, quote text, use operators like AND or OR, etc. These days are dead. None of this matters on Google. If you want to know showtimes for “Harry Potter and the Cursed Child,” a search for &lt;span&gt;harry potter&lt;/span&gt; will get you close enough.&lt;/p&gt;
-&lt;p&gt;In comparison, DuckDuckGo’s results for &lt;span&gt;harry potter&lt;/span&gt; are relaxing. It serves a small knowledge panel to the right and three recent news articles at the top, some organic links, and nothing else. It’s much easier to scan this page. It’s a more relaxed vibe. But if I actually wanted something, it likely wouldn’t be on this page. You can make the argument that I got what I deserved: I didn’t clearly communicate what I wanted, and therefore I didn’t get it. But Google has trained everyone that broad queries are effective. It feels like magic. It’s not. It’s the result of years of developing a structured understanding of the world and crafting ways to surface the structure. And it’s something that potential competitors will need to come to terms with.&lt;/p&gt;
-&lt;p&gt;I don’t personally miss most of Google’s result panels. Especially the panels that highlight information snippets. It’s easy to find these. Searching &lt;span&gt;microsoft word justify text&lt;/span&gt; provides me a snippet from Microsoft’s Office’s support page explaining what to click or type to justify text. I’ve learned not to trust information in these panels without reading the source they came from. Google seems to cite this information uncritically. I’ve found enough oversimplified knowledge panel answers that I’ve stopped reading most of them. Recently, I was chatting with a Googler who works on these. I asked them if I was wrong to feel this way. And they replied, “I trust them, but I’ve read enough bug reports and user feedback that I don’t blame you.” So my position is wrong, but not very wrong. I’ll take that.&lt;/p&gt;
-&lt;p&gt;Some of Google’s panels are great. I miss them. I haven’t found anything better than Google’s stock panel for quickly looking at after-hours stock movements. Searching Google for &lt;span&gt;goog stock&lt;/span&gt; will show you this panel. I miss you buddy. I hope you’re doing well.&lt;/p&gt;
-&lt;p&gt;Ultimately, it stresses me out when Google returns many panels in a search. I’m sure that each is a marginal gain for Google. But I don’t like how Google feels as a result. I’m continually glad to see just 10 links on DuckDuckGo, even if this means that I’m not getting what I wanted. This has been training me to craft more specific searches.&lt;/p&gt;
-&lt;h2&gt;DuckDuckGo is good enough&lt;/h2&gt;
-&lt;p&gt;Let’s move away from Google’s competitive advantages. How does DuckDuckGo perform for most of my search traffic? DuckDuckGo does a good job. I haven’t found a reason to switch back to Google.&lt;/p&gt;
-&lt;p&gt;I combed through my browser’s history of DuckDuckGo searches. I compared it to my Google search history. When I fell back to Google, I often didn’t find what I wanted on Google either.&lt;/p&gt;
-&lt;p&gt;Most of my searches relate to my job, which means that most of my searches are technical queries. DuckDuckGo serves good results for my searches. I’ll admit that I’m a paranoid searcher: I reformat error strings, remove identifiers that are unique to my code, and remove quotes before searching. I’m not sure how well DuckDuckGo would handle copy/pasted error strings with lots of quotes and unique identifiers. This means that I don’t know if DuckDuckGo handles all technical searches well. But it does a good job for me.&lt;/p&gt;
-&lt;p&gt;There are many domains where Google outperforms DuckDuckGo. Product search and local search are some examples. I recently made a &lt;a href=&quot;https://soundproofliving.com/make-diy-soundproof-window-plug/&quot;&gt;window plug&lt;/a&gt;. It was much easier to find which big-box hardware stores had the materials I need with Google. I also recently bought a pair of ANC headphones. I got much better comparison information starting at Google. Google also shines with sparse results like rare programming error messages. If you’re a programmer, you know what I’m talking about: imagine a Google search page with three results. One is a page in Chinese that has the English error string, one is a forum post that gives you the first hint that you need to solve the problem, and one is the error string in the original source code in Github. DuckDuckGo often returns nothing for these kinds of searches.&lt;/p&gt;
-&lt;p&gt;Even though Google is better for some specific domains, I am confident that DuckDuckGo can find what I need. When it doesn’t, Google often doesn’t help either.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Sample of times when both Google and DuckDuckGo failed me&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;I tried to write a &lt;a href=&quot;https://developers.google.com/protocol-buffers/docs/reference/other&quot;&gt;protobuf compiler plugin&lt;/a&gt; using the official PHP protocol buffer bindings. I now believe that writing a protobuf compiler plugin in PHP is impossible due to several arbitrary facts, but I needed to piece this information together myself. My searches sprawled over Google and DuckDuckGo across several days before I concluded that it could not be done and that I could not find a workaround. This isn’t DuckDuckGo or Google’s fault. Some things just don’t have answers online.&lt;/li&gt;
-&lt;li&gt;I often fell back to Google for gif searches. It turns out that I’m bad at finding gifs. Sometimes I get exactly what I want, like searching for &lt;span&gt;gritty turning around&lt;/span&gt;. But I had a lot of trouble finding a string that gave me &lt;a href=&quot;https://video.twimg.com/tweet_video/EQwQKSWUwAEo846.mp4&quot;&gt;this&lt;/a&gt;. Eventually I found it by remembering a Twitter user that had posted it and scanning their “Media” posts.&lt;/li&gt;
-&lt;li&gt;Trying to find a &lt;a href=&quot;https://www.youtube.com/watch?v=KVrHgCs6fQc&quot;&gt;very specific CS:GO clip&lt;/a&gt; that I had seen on Reddit years ago. I found it via a combination of Reddit search and skimming the bottom of Reddit threads for video links.&lt;/li&gt;
-&lt;li&gt;What is &lt;span&gt;australian licorice&lt;/span&gt;? Is it a marketing gimmick? Stores sell it. It’s tasty. But I can’t find an explanation anywhere.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;If you’re thinking of switching to DuckDuckGo because of the Google redesign, I’ll save you the trouble: DuckDuckGo’s inline ads are formatted similarly to the Google redesign that got reverted. If anything, DuckDuckGo’s ads are harder to spot because DuckDuckGo’s (Ad) icon is on the right, while Google’s was on the left where my eyes naturally skim.&lt;/p&gt;
-&lt;h2&gt;It turns out that I care about privacy, but I still use Google Analytics on my blog. I haven’t been thinking about digital privacy for long enough to have a consistent and principled opinion. Sorry about that.&lt;/h2&gt;
-&lt;p&gt;Let’s go back to the original selling point of DuckDuckGo: they don’t track you.&lt;/p&gt;
-&lt;p&gt;I have been reading my DuckDuckGo searches in my browser history for this post. It’s wonderful that all of these searches remained private. Some of them should remain private for stupid reasons. I don’t want anyone to know that I searched for &lt;span&gt;what is the value of a human life&lt;/span&gt; because it makes me sound like a killer robot. Other searches are much more sensitive. One is the name of a medication I’m on. Others are searches about pains and fears that I have. DuckDuckGo allows me to perform these searches without building a profile of me. I’m sure that advertisers pick up the scent as soon as I click a link. But I appreciate the delay. I didn’t think about the traces I left online when I searched on Google. But now that I know I have the choice, I’m actively comforted by reviewing my DuckDuckGo search history and reading everything that they didn’t track.&lt;/p&gt;
-&lt;p&gt;I also noticed that many searches show trends. I knew that this was true in theory. But it’s different when you see it in your own search results. A month ago, many of my searches related to vacation planning. But now they don’t anymore. The coronavirus scrapped my plans. But there are many life events that could have also caused this: health reasons, family problems, etc. These are things that ad networks could piece together as I visit sites. It’s possible to imagine even darker versions of this – imagine the months of searches that relate to a pregnancy with a miscarriage. Many companies could profit from a couple going through that process, if they showed the right ads in the right places at the right time. There is a lot of trend information that you just want to keep to yourself.&lt;/p&gt;
-&lt;h2&gt;What happens moving forward?&lt;/h2&gt;
-&lt;p&gt;I will continue using DuckDuckGo. I don’t see a reason to switch back to Google. I’m going to continue to fall back using &lt;span&gt;!g&lt;/span&gt; when I need to. I’m going to try to avoid talking about the fallback (but let’s be honest, I just did it again).&lt;/p&gt;
-&lt;p&gt;I still use lots of Google products. I’m not in the process of porting away from any of them. I still use Chrome in addition to Firefox and mobile Safari. Google Docs still holds a place in my heart. Etsy is hosted on GCP and uses Google Apps. Google Photos is still the best place for me to store and share my photos.&lt;/p&gt;
-&lt;p&gt;I liked the exercise of reading a month of my search history. You should do it, too. It became clear that I broadcast lots of information by having these very personal conversations with search engines. I’d like to understand more about the digital traces I leave online.&lt;/p&gt;
-&lt;p&gt;I don’t want to turn into a digital hermit. But I would like to become more deliberate about the traces that I leave around the internet. Even as a developer, I’m not sure what will happen if I disable third-party cookies across the internet. But I’d like to start reading more about digital privacy to understand what tradeoffs I am making.&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;Disclaimer: I worked at Google from 2010-2015, but did not work on search.&lt;/em&gt;&lt;/p&gt;
-</description>
-<pubDate>Fri, 06 Mar 2020 14:57:32 +0000</pubDate>
-<dc:creator>braythwayt</dc:creator>
-<og:type>article</og:type>
-<og:title>DuckDuckGo is good enough for regular use | www.bitlog.com</og:title>
-<og:description>I haven't tried a new search engine since I tried Bing in 2009. It was time to find out how good DuckDuckGo is in 2020. What was the biggest difference that I found?</og:description>
-<og:url>https://www.bitlog.com/2020/03/06/duckduckgo-is-good-enough-for-regular-use/</og:url>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://www.bitlog.com/2020/03/06/duckduckgo-is-good-enough-for-regular-use/</dc:identifier>
-</item>
-<item>
-<title>Caffeine boosts problem-solving ability but not creativity, study indicates</title>
-<link>https://news.uark.edu/articles/52447/caffeine-boosts-problem-solving-ability-but-not-creativity-study-indicates</link>
-<guid isPermaLink="true" >https://news.uark.edu/articles/52447/caffeine-boosts-problem-solving-ability-but-not-creativity-study-indicates</guid>
-<description>&lt;div class=&quot;articleHead clearfix&quot;&gt;
-
-&lt;p&gt;March 05, 2020&lt;/p&gt;
-
-&lt;/div&gt;
-&lt;div id=&quot;storyImagePanel&quot; class=&quot;col-sm-12 col-md-6 pull-right&quot;&gt;&lt;a href=&quot;https://campusdata.uark.edu/resources/images/articles/2020-03-04_12-35-16-PMRS73279_9097_Darya_Zabelina-17-Edit-lpr.jpg&quot;&gt;&lt;img class=&quot;img-responsive&quot; src=&quot;https://campusdata.uark.edu/resources/images/articles/2020-03-04_12-35-16-PMRS73279_9097_Darya_Zabelina-17-Edit-lpr.jpg?width=800&amp;amp;mode=max&quot; alt=&quot;Darya Zabelina&quot; width=&quot;100%&quot;/&gt;&lt;/a&gt;
-&lt;div class=&quot;nwArticleCaption&quot;&gt;&lt;span class=&quot;text-right nwPhotoCaption&quot;&gt;Russell Cothren&lt;/span&gt;
-&lt;p&gt;Darya Zabelina&lt;/p&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;p&gt;FAYETTEVILLE, Ark. – Caffeine increases the ability to focus and problem solve, but a new study by a University of Arkansas researcher indicates it doesn’t stimulate creativity.&lt;/p&gt;
-&lt;p&gt;“In Western cultures, caffeine is stereotypically associated with creative occupations and lifestyles, from writers and their coffee to programmers and their energy drinks, and there’s more than a kernel of truth to these stereotypes,” wrote Darya Zabelina, assistant professor of psychology and first author of the study recently published in the journal Consciousness and Cognition.&lt;/p&gt;
-&lt;p&gt;While the cognitive benefits of caffeine — increased alertness, improved vigilance, enhanced focus and improved motor performance — are well established, she said, the stimulant’s affect on creativity is less known.&lt;/p&gt;
-&lt;p&gt;In the paper, Zabelina differentiates “convergent” from “divergent” thinking. The former is defined as seeking a specific solution to a problem, for example, the “correct” answer. The latter is characterized by idea generation where a large set of apt, novel or interesting responses would be suitable. Caffeine was shown to improve convergent thinking in the study, while consuming it had no significant impact on divergent thinking.&lt;/p&gt;
-&lt;p&gt;For the study, 80 volunteers were randomly given either a 200mg caffeine pill, equivalent to one strong cup of coffee, or a placebo. They were then tested on standard measures of convergent and divergent thinking, working memory and mood. In addition to the results on creativity, caffeine did not significantly affect working memory, but test subjects who took it did report feeling less sad.&lt;/p&gt;
-&lt;p&gt;“The 200mg enhanced problem solving significantly, but had no effect on creative thinking,” said Zabelina. “It also didn’t make it worse, so keep drinking your coffee; it won’t interfere with these abilities.”&lt;/p&gt;
-&lt;p&gt;About the University of Arkansas: The University of Arkansas provides an internationally competitive education for undergraduate and graduate students in more than 200 academic programs. The university contributes new knowledge, economic development, basic and applied research, and creative activity while also providing service to academic and professional disciplines. The Carnegie Foundation classifies the University of Arkansas among fewer than 3% of colleges and universities in America that have the highest level of research activity. U.S. News &amp;amp; World Report ranks the University of Arkansas among its top American public research universities. Founded in 1871, the University of Arkansas comprises 10 colleges and schools and maintains a low student-to-faculty ratio that promotes personal attention and close mentoring.&lt;/p&gt;
-
-
-</description>
-<pubDate>Fri, 06 Mar 2020 13:42:54 +0000</pubDate>
-<dc:creator>rajnathani</dc:creator>
-<og:title>Caffeine Boosts Problem-Solving Ability but Not Creativity, Study Indicates</og:title>
-<og:url>https://news.uark.edu/articles/52447</og:url>
-<og:description>While the drug is known to increase focus, alertness and motor skills, its effect on creative thinking had not been studied previously.</og:description>
-<og:type>article</og:type>
-<og:image>https://campusdata.uark.edu/resources/images/articles/2020-03-04_12-35-16-PMRS73279_9097_Darya_Zabelina-17-Edit-lpr.jpg</og:image>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://news.uark.edu/articles/52447/caffeine-boosts-problem-solving-ability-but-not-creativity-study-indicates</dc:identifier>
-</item>
-<item>
-<title>Study: Low Carb Diet May Prevent, Reverse Age-Related Effects Within the Brain</title>
-<link>https://news.stonybrook.edu/newsroom/study-shows-low-carb-diet-may-prevent-reverse-age-related-effects-within-the-brain/</link>
-<guid isPermaLink="true" >https://news.stonybrook.edu/newsroom/study-shows-low-carb-diet-may-prevent-reverse-age-related-effects-within-the-brain/</guid>
-<description>&lt;p&gt;&lt;strong&gt;The news in brief:&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;1) Brain changes associated with aging become visible much earlier than would be expected, in the late 40’s.&lt;/p&gt;
-&lt;p&gt;2) This is hypothesized to result from neurons’ loss of energy; if so, researchers may have found a way to prevent or reverse these effects.&lt;/p&gt;
-&lt;p&gt;3) This can be done with diet, by switching neurons’ fuel from glucose to ketones. Ketones have previously been shown to increase the availability of energy to the heart. However, this is the first evidence that a similar benefit may be achieved for the brain.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Study Shows Low Carb Diet May Prevent, Reverse Age-Related Effects Within the Brain&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;STONY BROOK, NY, March 4, 2020&lt;/strong&gt; &lt;strong&gt;–&lt;/strong&gt; A study using neuroimaging led by Stony Brook University professor and lead author &lt;a href=&quot;https://www.stonybrook.edu/commcms/bme/people/l_parodi.php&quot;&gt;Lilianne R. Mujica-Parodi&lt;/a&gt;, PhD, and published in &lt;a href=&quot;https://www.pnas.org/content/early/2020/03/02/1913042117&quot;&gt;PNAS&lt;/a&gt;, reveals that neurobiological changes associated with aging can be seen at a much younger age than would be expected, in the late 40s. However, the study also suggests that this process may be prevented or reversed based on dietary changes that involve minimizing the consumption of simple carbohydrates.&lt;/p&gt;
-&lt;img class=&quot;wp-image-126488 size-medium&quot; title=&quot;Mujica parodi 2020web&quot; src=&quot;https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-300x232.jpg&quot; alt=&quot;Mujica parodi 2020web&quot; width=&quot;300&quot; height=&quot;232&quot; srcset=&quot;https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-300x232.jpg 300w, https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-768x594.jpg 768w, https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-370x286.jpg 370w, https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-270x209.jpg 270w, https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web-740x572.jpg 740w, https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web.jpg 900w&quot; sizes=&quot;(max-width: 300px) 100vw, 300px&quot;/&gt;Lilianne R. Mujica-Parodi, Ph.D.
-&lt;p&gt;To better understand how diet influences brain aging, the research team focused on the presymptomatic period during which prevention may be most effective. In the article titled “Diet modulates brain network stability, a biomarker for brain aging, in young adults,” they showed, using large-scale life span neuroimaging datasets, that functional communication between brain regions destabilizes with age, typically in the late 40’s, and that destabilization correlates with poorer cognition and accelerates with insulin resistance. Targeted experiments then showed this biomarker for brain aging to be reliably modulated with consumption of different fuel sources: glucose decreases, and ketones increase, the stability of brain networks. This effect was replicated across both changes to total diet as well as after drinking a fuel-specific calorie-matched supplement.&lt;/p&gt;
-&lt;p&gt;“What we found with these experiments involves both bad and good news,” said Mujica-Parodi, a Professor in the Department of Biomedical Engineering with joint appointments in the College of Engineering &amp;amp; Applied Sciences and Renaissance School of Medicine at Stony Brook University, and a faculty member in &lt;a href=&quot;https://laufercenter.stonybrook.edu/&quot;&gt;the Laufer Center for Physical and Quantitative Biology&lt;/a&gt;. “The bad news is that we see the first signs of brain aging much earlier than was previously thought. However, the good news is that we may be able to prevent or reverse these effects with diet, mitigating the impact of encroaching hypometabolism by exchanging glucose for ketones as fuel for neurons.”&lt;/p&gt;
-&lt;p&gt;What the researchers discovered, using neuroimaging of the brain, is that quite early on there is breakdown of communication between brain regions (“network stability”).&lt;/p&gt;
-&lt;p&gt;“We think that, as people get older, their brains start to lose the ability to metabolize glucose efficiently, causing neurons to slowly starve, and brain networks to destabilize,” said Mujica-Parodi. “Thus, we tested whether giving the brain a more efficient fuel source, in the form of ketones, either by following a low-carb diet or drinking ketone supplements, could provide the brain with greater energy. Even in younger individuals, this added energy further stabilized brain networks.”&lt;/p&gt;
-&lt;p&gt;To conduct their experiments, brain network stability was established as a biomarker for aging by using two large-scale brain neuroimaging (fMRI) datasets totaling nearly 1,000 individuals, ages 18 to 88. Destabilization of brain networks was associated with impaired cognition and was accelerated with Type 2 diabetes, an illness that blocks neurons’ ability to effectively metabolize glucose. To identify the mechanism as being specific to energy availability, the researchers then held age constant and scanned an additional 42 adults under the age of 50 years with fMRI. This allowed them to observe directly the impact of glucose and ketones on each individual’s brain.&lt;/p&gt;
-&lt;p&gt;The brain’s response to diet was tested in two ways. The first was holistic, comparing brain network stability after participants had spent one week on a standard (unrestricted) vs. low carb (for example: meat or fish with salad, but no sugar, grains, rice, starchy vegetables) diet. In a standard diet, the primary fuel metabolized is glucose, whereas in a low-carb diet, the primary fuel metabolized is ketones. However, there might have been other differences between diets driving the observed effects. Therefore, to isolate glucose vs. ketones as the crucial difference between the diets, an independent set of participants was scanned before and after drinking a small dose of glucose on one day, and ketones on the other, where the two fuels were individually weight-dosed and calorically matched. The results replicated, showing that the differences between the diets could be attributed to the type of fuel they provide to the brain.&lt;/p&gt;
-&lt;p&gt;Additional findings from the study included the following: Effects of brain aging emerged at age 47, with most rapid degeneration occurring at age 60. Even in younger adults, under age 50, dietary ketosis (whether achieved after one week of dietary change or 30 minutes after drinking ketones) increased overall brain activity and stabilized functional networks. This is thought to be due to the fact that ketones provide greater energy to cells than glucose, even when the fuels are calorically matched. This benefit has previously been shown for the heart, but the current set of experiments provides the first evidence for equivalent effects in the brain.&lt;/p&gt;
-&lt;p&gt;“This effect matters because brain aging, and especially dementia, are associated with “hypometabolism,” in which neurons gradually lose the ability to effectively use glucose as fuel. Therefore, if we can increase the amount of energy available to the brain by using a different fuel, the hope is that we can restore the brain to more youthful functioning. In collaboration with Dr. Eva Ratai at Massachusetts General Hospital, we’re currently addressing this question, by now extending our studies to older populations,” said Mujica-Parodi.&lt;/p&gt;
-&lt;p&gt;“Additional research with collaborators at Children’s National, under the direction of Dr. Nathan Smith, focuses on discovering the precise mechanisms by which fuel impacts signaling between neurons. Finally, in collaboration with Dr. Ken Dill and Dr. Steven Skiena, at Stony Brook, we’re working on building a comprehensive computational model that can incorporate our understanding of the biology, from individual neurons to whole brains to cognition, as it develops.”&lt;/p&gt;
-&lt;p&gt;The research is currently funded under a new $2.5 million National Science Foundation BRAIN Initiative “Frontiers” grants (numbers (NSFECCS1533257 and NSFNCS-FR 1926781) awarded to Stony Brook, as well as by the W. M. Keck Foundation, which originally funded the team in 2017 with a $1 million seed grant designed to jump-start “pioneering discoveries in science, engineering, and medical research.”&lt;/p&gt;
-&lt;p&gt;Collaborators included Stony Brook faculty from the Laufer Center for Physical and Quantitative Biology, Departments of Biomedical Engineering, Applied Mathematics and Statistics, Physics and Astronomy, and Computer Science; and scientists at the Athinoula A. Martinos Center for Biomedical Imaging (Massachusetts General Hospital and Harvard Medical School), Children’s National, the National Institutes of Health, and Oxford University.&lt;/p&gt;
-&lt;p&gt;###&lt;/p&gt;
-&lt;div class=&quot;rp4wp-related-posts rp4wp-related-post&quot;&gt;
-&lt;h3&gt;Related Posts&lt;/h3&gt;
-&lt;/div&gt;
-</description>
-<pubDate>Fri, 06 Mar 2020 13:17:48 +0000</pubDate>
-<dc:creator>rajnathani</dc:creator>
-<og:title>Study Shows Low Carb Diet May Prevent, Reverse Age-Related Effects Within the Brain | | SBU News</og:title>
-<og:type>article</og:type>
-<og:url>https://news.stonybrook.edu/newsroom/study-shows-low-carb-diet-may-prevent-reverse-age-related-effects-within-the-brain/</og:url>
-<og:image>https://news.stonybrook.edu/wp-content/uploads/2020/03/mujica-parodi-2020web.jpg</og:image>
-<og:description>The news in brief: 1) Brain changes associated with aging become visible much earlier than would be expected, in the late 40's. 2) This is hypothesized to result from neurons' loss of energy; if so, researchers may have found a way to prevent or reverse these effects. 3) This can be done with diet, by switching neurons' fuel from glucose to ketones. Ketones have previously been shown to increase the availability of energy to the heart. However, this is the first evidence that a similar benefit may be achieved for the brain. Study Shows Low Carb Diet May Prevent, Reverse Age-Related Effects Within the Brain STONY BROOK, NY, March 4, 2020 – A study using neuroimaging led by Stony Brook University professor and lead author Lilianne R. Mujica-Parodi, PhD, and published in PNAS, reveals that neurobiological changes associated with aging can be seen at a much younger age than would be expected, in the late 40s. However, the study also suggests that this process may be prevented or reversed</og:description>
-<dc:language>en-US</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://news.stonybrook.edu/newsroom/study-shows-low-carb-diet-may-prevent-reverse-age-related-effects-within-the-brain/</dc:identifier>
-</item>
-<item>
-<title>Who is Facebook&amp;#039;s mysterious “Lan Tim 2”?</title>
-<link>https://shkspr.mobi/blog/2020/03/who-is-facebooks-mysterious-lan-tim-2/</link>
-<guid isPermaLink="true" >https://shkspr.mobi/blog/2020/03/who-is-facebooks-mysterious-lan-tim-2/</guid>
-<description>&lt;p&gt;Facebook has an interesting feature. It will let you see which companies have associated your off-Facebook activity with your Facebook account. If you visit:&lt;br/&gt;&lt;a href=&quot;https://www.facebook.com/off_facebook_activity/&quot;&gt;https://www.facebook.com/off_facebook_activity/&lt;/a&gt;&lt;br/&gt;you'll see what companies are snitching on you to Facebook.&lt;/p&gt;
-&lt;blockquote class=&quot;twitter-tweet&quot; data-width=&quot;550&quot; data-dnt=&quot;true&quot;&gt;
-&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot;&gt;&lt;a href=&quot;https://twitter.com/hashtag/AirBnB?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#AirBnB&lt;/a&gt; shares your activity with &lt;a href=&quot;https://twitter.com/hashtag/Facebook?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#Facebook&lt;/a&gt; ?!&lt;/p&gt;
-&lt;p&gt;Delete that &lt;a href=&quot;https://twitter.com/Airbnb?ref_src=twsrc%5Etfw&quot;&gt;@Airbnb&lt;/a&gt; app, folks!&lt;/p&gt;
-&lt;p&gt;Mine didn't even allow me to change its Facebook connection 😡 isn't that against GDPR, &lt;a href=&quot;https://twitter.com/vestager?ref_src=twsrc%5Etfw&quot;&gt;@Vestager&lt;/a&gt; &amp;amp; &lt;a href=&quot;https://twitter.com/dreynders?ref_src=twsrc%5Etfw&quot;&gt;@DReynders&lt;/a&gt;?&lt;/p&gt;
-&lt;p&gt;And delete your off-&lt;a href=&quot;https://twitter.com/Facebook?ref_src=twsrc%5Etfw&quot;&gt;@Facebook&lt;/a&gt; activity here:&lt;a href=&quot;https://t.co/9Ccih8wur3&quot;&gt;https://t.co/9Ccih8wur3&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;HT &lt;a href=&quot;https://twitter.com/alexstamos?ref_src=twsrc%5Etfw&quot;&gt;@AlexStamos&lt;/a&gt; &lt;a href=&quot;https://t.co/3nZnK6LAi8&quot;&gt;pic.twitter.com/3nZnK6LAi8&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;— Alice Stollmeyer (@StollmeyerEU) &lt;a href=&quot;https://twitter.com/StollmeyerEU/status/1222203127585288192?ref_src=twsrc%5Etfw&quot;&gt;January 28, 2020&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Off-Facebook activity includes information that businesses and organisations share with us about your interactions with them. Interactions are things such as visiting their website or logging in to their app with Facebook.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Because I use the &lt;a href=&quot;https://getfirefox.com&quot;&gt;Firefox web browser&lt;/a&gt;, all my off-FB activity is kept private from Facebook. I don't use FB to sign into things. I also run an ad-blocker. So I expected my &quot;Off Facebook Activity&quot; to be completely blank.&lt;/p&gt;
-&lt;p&gt;It wasn't.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://shkspr.mobi/blog/wp-content/uploads/2020/02/Off-Facebook-Activity.png&quot; alt=&quot;Facebook activity page saying they received data from &amp;quot;Lan Tim 2&amp;quot;.&quot; width=&quot;810&quot; height=&quot;304&quot; class=&quot;aligncenter size-full wp-image-34270&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Who are Lan Tim 2? And what did I purchase from them? First up, let's check that I'm as paranoid as I think I am...&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://shkspr.mobi/blog/wp-content/uploads/2020/02/Blank-apps-and-websites-page.jpeg&quot; alt=&quot;Blank apps and websites page.&quot; width=&quot;994&quot; height=&quot;402&quot; class=&quot;aligncenter size-full wp-image-34271&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;Yup! I've connected &lt;em&gt;nothing&lt;/em&gt; to my FB account.&lt;/p&gt;
-&lt;p&gt;Perhaps I'm being a dolt. Perhaps I signed in to a store with Facebook without thinking about it? Perhaps it &lt;em&gt;is&lt;/em&gt; a legitimate purchase.... And then I saw this:&lt;/p&gt;
-&lt;blockquote class=&quot;twitter-tweet&quot; data-width=&quot;550&quot; data-dnt=&quot;true&quot;&gt;
-&lt;p lang=&quot;en&quot; dir=&quot;ltr&quot;&gt;Take a look at your off-Facebook activity and &lt;a href=&quot;https://twitter.com/hashtag/ClearHistory?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#ClearHistory&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Everything I've seen to date has been through &lt;a href=&quot;https://twitter.com/hashtag/Android?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#Android&lt;/a&gt; &lt;a href=&quot;https://twitter.com/hashtag/Facebook?src=hash&amp;amp;ref_src=twsrc%5Etfw&quot;&gt;#Facebook&lt;/a&gt; App tracking. I wrote a report on this last year which can be found here &lt;a href=&quot;https://t.co/xge3h3cSZP&quot;&gt;https://t.co/xge3h3cSZP&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;My Activity: 👇👇👇 &lt;a href=&quot;https://t.co/ELrVkCauhX&quot;&gt;pic.twitter.com/ELrVkCauhX&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;— Christopher Weatherhead (@CJFWeatherhead) &lt;a href=&quot;https://twitter.com/CJFWeatherhead/status/1222519352764837888?ref_src=twsrc%5Etfw&quot;&gt;January 29, 2020&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;I don't know Christopher - although we appear to have some mutual friends. It strikes me as a bit odd that two random individuals, who are both pretty privacy conscious, would both have made the same mistake which led to a Facebook associated purchase.&lt;/p&gt;
-&lt;p&gt;I checked through all my credit card statements and emails. I didn't purchase anything around that time, and I couldn't find any reference to the merchant.&lt;/p&gt;
-&lt;p&gt;You can download your Facebook data as JSON. So I did that. This is all it had about those mystery transactions:&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://shkspr.mobi/blog/wp-content/uploads/2020/02/JSON-code.png&quot; alt=&quot;Scrap of JSON which doesn't say much.&quot; width=&quot;322&quot; height=&quot;350&quot; class=&quot;aligncenter size-full wp-image-34272&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;What's going on?&lt;/p&gt;
-&lt;h2&gt;It's actually a bit more complicated than that&lt;/h2&gt;
-&lt;p&gt;Off-Facebook activity doesn't just mean stuff that happens online. Facebook also does &lt;a href=&quot;https://www.facebook.com/business/help/1142103235885551?id=565900110447546&quot;&gt;offline conversions&lt;/a&gt; which allows advertisers to &lt;a href=&quot;https://www.facebook.com/business/help/341425252616329?id=2469097953376494&quot;&gt;match offline activity with online activity.&lt;/a&gt;.&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;we use a process called matching to match the hashed information with Facebook profiles so that you can advertise to your customers on Facebook, Instagram and Audience Network. The more information you can provide, the better the match rate&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Suppose I go to a restaurant, and I booked using my name and phone number. The restaurant sends that data to Facebook to say &quot;Terence Eden ate at this restaurant on this day.&quot; Facebook can then tell if I saw an advert which led me to make a purchase.&lt;/p&gt;
-&lt;p&gt;A good reason to use a disposable phone number for &lt;em&gt;everything!&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;I reached out to a friend who worked at Facebook. Obviously they couldn't tell me too much, but here's what I did find out.&lt;/p&gt;
-&lt;p&gt;Lan Tim 2 supply custom printed apparel. Print your logo on a t-shirt or mug, that sort of thing. They're a &quot;white label&quot; operation. That is, you buy from &quot;Tom's Terrific T-Shirts&quot; but it's Lan Tim 2 who print and supply the final item.&lt;/p&gt;
-&lt;p&gt;Had I bought anything like that? I didn't think so. And then, I remembered...&lt;/p&gt;
-&lt;p&gt;Spreadshirt! I'd made some custom printed t-shirts through them. I contacted a few other people who'd seen Lan Tim 2. They'd also used Spreadshirt! And, like me, their last purchase was inconsistent with the data given to Facebook.&lt;/p&gt;
-&lt;p&gt;I assume I gave my phone number to Spreadshirt to provide delivery information.&lt;/p&gt;
-&lt;p&gt;If this is correct, then it looks to me like Spreadshirt took the phone numbers given to it for one reason - and then used them for another.&lt;/p&gt;
-&lt;p&gt;Or, perhaps I'm wrong, and some dodgy company has been randomly spamming Facebook with fake data?&lt;/p&gt;
-&lt;p&gt;It goes to show, Facebook's level of transparency of data isn't good enough.&lt;/p&gt;
-</description>
-<pubDate>Fri, 06 Mar 2020 13:02:29 +0000</pubDate>
-<dc:creator>edent</dc:creator>
-<og:type>article</og:type>
-<og:title>Who is Facebook's mysterious &quot;Lan Tim 2&quot;?</og:title>
-<og:url>https://shkspr.mobi/blog/2020/03/who-is-facebooks-mysterious-lan-tim-2/</og:url>
-<og:description>Facebook has an interesting feature. It will let you see which companies have associated your off-Facebook activity with your Facebook account. If you visit: you’ll see what companies are sni…</og:description>
-<og:image>https://shkspr.mobi/blog/wp-content/uploads/2020/02/Off-Facebook-Activity.png</og:image>
-<dc:language>en-GB</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://shkspr.mobi/blog/2020/03/who-is-facebooks-mysterious-lan-tim-2/</dc:identifier>
-</item>
-<item>
-<title>Smart Algorithms beat Hardware Acceleration for Large-Scale Deep Learning</title>
-<link>https://arxiv.org/abs/1903.03129</link>
-<guid isPermaLink="true" >https://arxiv.org/abs/1903.03129</guid>
-<description>&lt;div readability=&quot;10.702702702703&quot;&gt;(Submitted on 7 Mar 2019 (&lt;a href=&quot;https://arxiv.org/abs/1903.03129v1&quot;&gt;v1&lt;/a&gt;), last revised 1 Mar 2020 (this version, v2))&lt;/div&gt;&lt;div id=&quot;&quot;&gt;
-&lt;p&gt;&lt;span class=&quot;descriptor&quot;&gt;Abstract:&lt;/span&gt; Deep Learning (DL) algorithms are the central focus of modern machine learning systems. As data volumes keep growing, it has become customary to train large neural networks with hundreds of millions of parameters to maintain enough capacity to memorize these volumes and obtain state-of-the-art accuracy. To get around the costly computations associated with large models and data, the community is increasingly investing in specialized hardware for model training. However, specialized hardware is expensive and hard to generalize to a multitude of tasks. The progress on the algorithmic front has failed to demonstrate a direct advantage over powerful hardware such as NVIDIA-V100 GPUs. This paper provides an exception. We propose SLIDE (Sub-LInear Deep learning Engine) that uniquely blends smart randomized algorithms, with multi-core parallelism and workload optimization. Using just a CPU, SLIDE drastically reduces the computations during both training and inference outperforming an optimized implementation of Tensorflow (TF) on the best available GPU. Our evaluations on industry-scale recommendation datasets, with large fully connected architectures, show that training with SLIDE on a 44 core CPU is more than 3.5 times (1 hour vs. 3.5 hours) faster than the same network trained using TF on Tesla V100 at any given accuracy level. On the same CPU hardware, SLIDE is over 10x faster than TF. We provide codes and scripts for reproducibility.&lt;/p&gt;
-&lt;/div&gt;</description>
-<pubDate>Fri, 06 Mar 2020 09:19:27 +0000</pubDate>
-<dc:creator>rkwasny</dc:creator>
-<og:title>SLIDE : In Defense of Smart Algorithms over Hardware Acceleration for Large-Scale Deep Learning Systems</og:title>
-<og:url>https://arxiv.org/abs/1903.03129v2</og:url>
-<og:description>Deep Learning (DL) algorithms are the central focus of modern machine learning systems. As data volumes keep growing, it has become customary to train large neural networks with hundreds of millions of parameters to maintain enough capacity to memorize these volumes and obtain state-of-the-art accuracy. To get around the costly computations associated with large models and data, the community is increasingly investing in specialized hardware for model training. However, specialized hardware is expensive and hard to generalize to a multitude of tasks. The progress on the algorithmic front has failed to demonstrate a direct advantage over powerful hardware such as NVIDIA-V100 GPUs. This paper provides an exception. We propose SLIDE (Sub-LInear Deep learning Engine) that uniquely blends smart randomized algorithms, with multi-core parallelism and workload optimization. Using just a CPU, SLIDE drastically reduces the computations during both training and inference outperforming an optimized implementation of Tensorflow (TF) on the best available GPU. Our evaluations on industry-scale recommendation datasets, with large fully connected architectures, show that training with SLIDE on a 44 core CPU is more than 3.5 times (1 hour vs. 3.5 hours) faster than the same network trained using TF on Tesla V100 at any given accuracy level. On the same CPU hardware, SLIDE is over 10x faster than TF. We provide codes and scripts for reproducibility.</og:description>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://arxiv.org/abs/1903.03129</dc:identifier>
-</item>
-<item>
-<title>CLUI: Building a Graphical Command Line</title>
-<link>https://blog.repl.it/clui</link>
-<guid isPermaLink="true" >https://blog.repl.it/clui</guid>
-<description>&lt;blockquote readability=&quot;13&quot;&gt;
-&lt;p&gt;“Command line interfaces. Once that was all we had. Then they disappeared, replaced by what we thought was a great advance: GUIs. GUIs were - and still are - valuable, but they fail to scale to the demands of today's systems. So now command line interfaces are back again, hiding under the name of search. Now you see them, now you don't. Now you see them again. And they will get better and better with time: mark my words, that is my prediction for the future of interfaces.” [1]&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;Don Norman wrote this in 2008. Since then, search has become more powerful and users have grown more dependent on it-- searching for information with context-aware autocomplete is present in almost every popular digital product. Traditional CLIs, however, were never widely adopted by end-users because of their learning curve. Terminals, the primary platform for command-lines, are intimidating and feel like a black box to non-technical people. Also, a text-only interface is limiting-- it only allows actions to take place through language instead of the clicks, taps, and hovers that we’re used to today. Commands and flags often have obscure names, and spelling mistakes can result in cryptic errors, or worse, doing something you didn't intend.&lt;/p&gt;
-&lt;p&gt;Despite all these problems, CLIs are still powerful. The input mechanism is always the same: text. It’s predictable and constant. Adding more commands takes minimal effort from the developer. Users aren’t overwhelmed with information-- you just specify the exact commands you need at any given moment. These benefits, however, come with the tradeoff that commands must be memorized to be efficient.&lt;/p&gt;
-&lt;p&gt;Today, GUIs are the most popular user interface paradigm because they address many of the concerns above. They use visual metaphors for everyday objects we are used to: desktops, windows, tabs, buttons, menus, files, and folders. They’re intuitive and offer a small learning curve to perform basic actions, like moving files via drag and drop. It’s faster to recognize an icon than to remember the action’s name. The benefits of GUIs are rooted in both memory recognition, which “...refers to our ability to “recognize” an event or piece of information as being familiar”, and memory recall, which “...designates the retrieval of related details from memory.” [4, 5]&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;So GUIs are obviously the best UI paradigm ever, right?&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;Probably not. Although GUIs might solve some core usability issues that most CLIs present, they &quot;...fail to scale to the demands of today's systems&quot; [2, 3]. The moment you want to add a feature to a GUI, there’s an immediate question about where to put that feature. Should it be in the top right? Bottom left? Nav bar? Behind a tab? In the sidebar? Revealed on hover?&lt;/p&gt;
-&lt;p&gt;You end up with buttons, panels, and menus competing for space in the UI-- screen real estate. Every pixel becomes more and more valuable for primary features. You don’t need to look very far to see what happens when you need to include dozens of features into a tiny rectangle.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/adobe-premiere.jpg&quot; alt=&quot;Adobe Premiere&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Adobe Premiere UI. &lt;a target=&quot;_blank&quot; href=&quot;https://www.youtube.com/watch?v=54dUzkzEb-8&quot;&gt;Source&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Can you see the issue here?&lt;/p&gt;
-&lt;p&gt;There’s a reason using simple, lightweight software feels like a breath of fresh air. Professional creative tools like Adobe Premiere are often so packed with features that they become unapproachable, slow, ugly, and unfocused. YouTube is swamped with multi-part tutorials that deter beginners from learning. Power users will show you that their workflows are heavily dependent on keyboard shortcuts, elaborate workspace setups, custom automation tools and plugins, and help/search bars.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/dropdowns.png&quot; alt=&quot;Nested dropdowns&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Are nested dropdowns the 10th circle of hell?&lt;/p&gt;
-&lt;p&gt;This isn’t a problem with GUIs inherently but rather a symptom of poor product scaling, which can often affect the density of a GUI first. The biggest issue with GUI density is throwing new features into endless submenus, dropdowns, hidden settings pages, or worse, the dreaded “more” button (which currently plagues Repl.it as well). Some apps try to mitigate this UI flood by using progressive disclosure: gradually revealing information to the user over time to avoid cognitive overload and make usage context clearer [6]. But the double-edged sword here is that reducing clutter in a UI can potentially make features harder to discover. A “simple UI” doesn’t necessarily mean it’s simple to use. Simplicity instead should be an emergent property of a well progressively disclosed UI.&lt;/p&gt;
-&lt;p&gt;The interesting thing about bloated GUIs is that they beg for search. Once menus become deeply nested and panels flood your screen, it feels natural to want to search for something. You don’t want to look for what you need; you just want it in front of you immediately. However, the UX of searching to easily navigate through deeply nested menus seems like an afterthought. What if it was the primary way to interact with a tool?&lt;/p&gt;
-&lt;p&gt;Many popular products and services are starting to explore this thought. In a way, voice assistants are one of the closest things we have to a synthesis of GUIs and CLIs. The input is semi-structured natural language (CLI-inspired) but the output can be rich media and interactive controls (GUI-inspired).&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/siri.jpg&quot; alt=&quot;Siri&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;When you ask Siri to turn on alarms, iOS will bring up portions of familiar GUI elements to further interact with. &lt;a target=&quot;_blank&quot; href=&quot;https://support.apple.com/en-us/HT207512&quot;&gt;Source&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;There are also plugins like Runner Pro for Sketch (a UI design tool) that allows you to quickly access information and automate design actions [7].&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/sketch-runner.png&quot; alt=&quot;Sketch runner&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Kind of funny that CLI-inspired interfaces are also useful in design tools. &lt;a target=&quot;_blank&quot; href=&quot;https://medium.com/sketch-app-sources/hello-runner-pro-13ba62cbac35&quot;&gt;Source&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;At Repl.it, where our goal is to build a simple yet powerful programming environment, we run into UI scalability issues every time we have an IDE feature to add. So when it came to building our admin tools, we decided to explore a new UI paradigm. We often need to do simple things like changing single values in the database, so it’s usually easier to connect to the database directly and run some SQL than build new UI for it. But that's both unsafe and excludes anyone unfamiliar with SQL or the CLI. So we asked ourselves, “how can we marry the conciseness of CLIs with approachability of GUIs in the same interface?”&lt;/p&gt;
-&lt;p&gt;There are a few requirements for a CLI to be approachable:&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;strong&gt;You should be able to use it with a mouse.&lt;/strong&gt; This may seem contradictory to CLIs as a paradigm since their real power comes from using the keyboard, but being able to click through commands does two things: gives beginners a chance to &quot;level up&quot; to the keyboard and makes the interface more approachable. It also paves the way to make programming environments more accessible via touch and mobile.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;It needs to be discoverable.&lt;/strong&gt; That means context-aware autocomplete with clear and concise language providing the right level of detail about a command. The primary issue with discoverability in CLIs is that the commands are invisible. You either need to have memorized the commands already or use some form of documentation to gain access. In CLUI, the commands come to you.&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;The output should support rich and interactive media.&lt;/strong&gt; That means that images, gifs, video, graphs, interactive diagrams, buttons, and forms should be able to integrate directly into the CLI experience. ASCII art is fun, but text is only as useful as the information it can convey. Interactive media should be treated as a first class citizen.&lt;/li&gt;
-&lt;/ol&gt;&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/comparison-table.png&quot; alt=&quot;UI Feature Comparisons&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;To meet these requirements, we started to build CLUI: an easily extensible interface that blends GUIs and CLIs. On the surface, it’s simple: type in what you want, and get suggestions for commands. When you enter a full command, you get back some UI relevant to what you asked for. But the potential here is much larger than just a CLI with autocomplete and buttons. Eventually, we plan on making all of Repl.it accessible through CLUI.&lt;/p&gt;
-&lt;p&gt;While there are dozens of features we could have implemented first, we prioritized the three bullets listed above. Keep in mind these are prototypes!&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;1. Approachability&lt;/strong&gt; &lt;img src=&quot;https://blog.repl.it/images/clui/clui-approachability.gif&quot; alt=&quot;CLUI Approachability&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Being able to click through the commands makes CLUI more approachable to beginners than traditional CLIs.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;2. Discoverability&lt;/strong&gt; &lt;img src=&quot;https://blog.repl.it/images/clui/clui-discoverability.gif&quot; alt=&quot;CLUI Discoverability&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Autocomplete and fuzzy-search makes commands significantly more discoverable.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;3. Interactivity&lt;/strong&gt; &lt;img src=&quot;https://blog.repl.it/images/clui/clui-interactivity.gif&quot; alt=&quot;CLUI Interactivity&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Interactive form elements makes interacting with the output of CLUI commands much more approachable.&lt;/p&gt;
-&lt;p&gt;One of the unique parts about CLUI is that &lt;strong&gt;any new UI is automatically generated from the data you give it.&lt;/strong&gt; This means that adding features is as simple as adding commands on the backend. It’s an incredibly scalable approach for a small team like ours, and it makes new features much more modular and easier to reason about.&lt;/p&gt;
-&lt;p&gt;On a high level, CLUI really operates like a flowchart or a decision tree. You start at the root of the tree and gradually select commands one by one. Once you are done going down the tree (similar to a depth first search), you end up with your complete command.&lt;/p&gt;
-&lt;p&gt;&lt;img src=&quot;https://blog.repl.it/images/clui/command-tree.gif&quot; alt=&quot;Command tree&quot;/&gt;&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;Going down the command tree. Disclaimer: these are currently not real commands.&lt;/p&gt;
-&lt;p&gt;Because the tree is hierarchical, you might think that it actually resembles a large dropdown menu. The difference is that search is built directly into its navigation, not just pointing and clicking. One clear improvement that could be made is being able to search for any subcommand without having to specify its parent command first. That way you can access any deeply nested information instantly, similar to spotlight search.&lt;/p&gt;
-&lt;p&gt;On a technical level, a CLUI command is conceptually similar to a file path or URL. Since a complete CLUI command is simply a path down the command tree, each potential subcommand is like a portion of a file path or URL. Flags, on the other hand, function like query parameters. CLUI’s resemblance to URL paths means &lt;em&gt;you can send someone a complete, executable CLUI command as a URL.&lt;/em&gt; They’re mapped 1:1.&lt;/p&gt;
-&lt;p&gt;Since we have a GraphQL backend, we know all the potential fields and arguments a client can use. By using an &lt;a href=&quot;https://graphql.org/learn/introspection/&quot;&gt;introspection&lt;/a&gt; query we generate a tree of commands/sub-commands that map onto their respective resolve functions. Now, to add a new admin command all that's needed is a new field on a GraphQL type.&lt;/p&gt;
-&lt;p&gt;CLUI’s architecture thus makes it easy to create a direct mapping between our data primitives and UI primitives. For example, booleans are mapped to toggles or checkboxes and JSON is mapped to an auto-generated form. That means that we can focus on features of our product in isolation and trust that CLUI will help us manage their complexity.&lt;/p&gt;
-&lt;p&gt;Some of our future plans for CLUI include, but aren’t limited to:&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Unified terminal, REPL, shell, and spotlight search.&lt;/strong&gt; We want to eventually combine all command driven user interfaces together— this includes navigating the website, finding relevant information, action automation, and of course, traditional access to the UNIX shell and any language REPL. Many people are confused by the difference between the REPL and shell, and advanced users are often frustrated when they have to switch contexts and leave one or the other. Making a unified, CLUI driven design pattern across Repl.it will help mitigate both sides of these issues.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;End user programming.&lt;/strong&gt; Empowering our users to customize Repl.it and make CLUI work for them is one of our primary goals. You can easily imagine users being able to create aliases/shortcuts for base CLUI commands. For example, &lt;code&gt;repl new python —invite rachel95&lt;/code&gt; could be mapped to &lt;code&gt;lesson with rachel&lt;/code&gt;. The power in this comes from combining these shortcuts together, essentially abstracting away from our standard library of CLUI commands altogether and allowing users to create their own pseudo-languages to command Repl.it. When you extend this concept of user-created shortcuts to include parameterization, suddenly any command acts like a function— and the idea of piping inputs and outputs between commands becomes obvious. Users will be able to share, remix, and plug and play an entire command store’s worth of automation tools and utilities that make Repl.it truly unique to each user.&lt;/p&gt;
-&lt;p&gt;We've &lt;a href=&quot;https://github.com/replit/clui&quot;&gt;open-sourced some of the code&lt;/a&gt; used to build this system. There's also a &lt;a href=&quot;https://repl.it/@moudy/clui-demo&quot;&gt;demo application&lt;/a&gt; that shows how everything works together. Right now, CLUI is offered as an unopinionated library for dealing with trees of commands- so you can bring your own UI and use it anywhere JavaScript runs. For example, we’re going to use CLUI as a base for a Figma plugin to automate parts of our design workflow, similar to Sketch Runner. We’re excited to see what the community (you!) can do with CLUI and your input on its design.&lt;/p&gt;
-&lt;p&gt;Ultimately, all user interfaces-- command driven or graphical-- are supposed to convey important, actionable information while being imperfect models of how people expect them to behave. There's a constant struggle to figure out how much information to expose, how to expose it, when, where, and why. Although we know that CLUI won’t be a panacea for Repl.it’s UI and UX development going forward, we think it'll help us through many core design scalability problems and hopefully get rid of some dropdown menus along the way.&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;Sources:&lt;/em&gt;&lt;/p&gt;
-&lt;ol&gt;&lt;li&gt;&lt;a href=&quot;https://jnd.org/ui_breakthrough-command_line_interfaces&quot;&gt;https://jnd.org/ui_breakthrough-command_line_interfaces&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.computerhope.com/issues/ch000619.htm&quot;&gt;https://www.computerhope.com/issues/ch000619.htm&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://jnd.org/natural_user_interfaces_are_not_natural/&quot;&gt;https://jnd.org/natural_user_interfaces_are_not_natural/&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.nngroup.com/articles/recognition-and-recall/&quot;&gt;https://www.nngroup.com/articles/recognition-and-recall/&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://www.nngroup.com/articles/ten-usability-heuristics/&quot;&gt;https://www.nngroup.com/articles/ten-usability-heuristics/&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://en.wikipedia.org/wiki/Progressive_disclosure&quot;&gt;https://en.wikipedia.org/wiki/Progressive_disclosure&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href=&quot;https://sketchrunner.com/&quot;&gt;https://sketchrunner.com/&lt;/a&gt;&lt;/li&gt;
-&lt;/ol&gt;</description>
-<pubDate>Thu, 05 Mar 2020 21:42:32 +0000</pubDate>
-<dc:creator>amasad</dc:creator>
-<og:title>CLUI: Building a Graphical Command Line</og:title>
-<og:description>&gt; “Command line interfaces. Once that was all we had. Then they disappeared, replaced by what we thought was a great advance: GUIs. GUIs…</og:description>
-<og:type>article</og:type>
-<og:image>/images/clui-cover.png</og:image>
-<og:url>https://blog.repl.it/clui</og:url>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://blog.repl.it/clui</dc:identifier>
 </item>
 </channel>
 </rss>
