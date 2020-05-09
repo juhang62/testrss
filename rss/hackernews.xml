@@ -9,428 +9,930 @@
 <link>https://news.ycombinator.com/newest</link>
 <description>Hacker News RSS</description>
 <item>
-<title>Old box, dumb code, few thousand connections, no big deal</title>
-<link>https://rachelbythebay.com/w/2020/05/07/serv/</link>
-<guid isPermaLink="true" >https://rachelbythebay.com/w/2020/05/07/serv/</guid>
-<description>&lt;p&gt;I think some of us who have been doing this a while have been doing a terrible job of showing what's possible to those folks who are somewhat newer. I get the impression that a lot of us (myself included) hit a certain point, get tired of this crap, and just want to be free of it. Sometimes I wonder what it would be like if I could just forget I knew anything about systems stuff and just disappear into the world to... I don't know, raise goldfish, or something.&lt;/p&gt;
-&lt;p&gt;But, as long as I'm here writing about this stuff, I might as well share some of what's been learned over the years. Not all of it is good, and some of it is probably just flat-out wrong or outdated, but there are other things people need to know.&lt;/p&gt;
-&lt;p&gt;First of all, it does not take &quot;that much machine&quot; to serve a fair number of clients. Ever since I &lt;a href=&quot;https://rachelbythebay.com/w/2020/03/07/costly/&quot;&gt;wrote&lt;/a&gt; about the whole Python/Gunicorn/Gevent mess a couple of months back, people have been asking me &quot;if not that, then what&quot;. It got me thinking about alternatives, and finally I just started writing code.&lt;/p&gt;
-&lt;p&gt;The result is something kind of unusual for me: a server without a real purpose just yet. It's more of a demonstrative thing at this point.&lt;/p&gt;
-&lt;p&gt;What I have is a server which starts up and kicks off a &quot;listener&quot; thread to do nothing but watch for incoming traffic. When it gets a new connection, it kicks off a &quot;serviceworker&quot; thread to handle it. The &quot;listener&quot; thread owns all of the file descriptors (listeners and clients both), and manages a single epoll set to watch over them.&lt;/p&gt;
-&lt;p&gt;When a client fd goes active, it pokes that serviceworker thread with a condvar, and it wakes up and does a read from the network. If there's a complete and usable message, it dispatches it to my wacky little RPC situation which is sitting behind it. Then it pushes the result out to the network again and goes back to waiting for another wakeup.&lt;/p&gt;
-&lt;p&gt;If you're keeping score, this means I spawn a whole OS-level thread every time I get a connection. I designed this thing around the notion of &quot;what if we weren't afraid to create threads&quot;, and this is the result.&lt;/p&gt;
-&lt;p&gt;I wrote up a load testing tool, too. It will create any number of worker threads, each of which opens a TCP connection back to the server. Each one of those will fire a request down the pipe, wait for the response, sleep a configurable period, and then go again.&lt;/p&gt;
-&lt;p&gt;Let's say I stand up the server and a loadgen instance on the same machine. In this case it's my nine-year-old workstation box running Slackware64. I tell the load generator to hit the server (on localhost), run 2000 workers, and wait 200 milliseconds between queries.&lt;/p&gt;
-&lt;p&gt;Doing the math, every worker should run about 5 queries per second. It's not exactly 5 because the request itself takes some amount of time to complete. That means I should see about 10000 per second overall.&lt;/p&gt;
-&lt;p&gt;I start it up. What do you suppose happens to the server? It now has 2000 client connections and 10000 QPS to worry about. Does it eat the whole machine? No, far from it.&lt;/p&gt;
-&lt;p&gt;The server process has about 90 MB of RSS -- that is, physical memory. That's not bad for something with a hair over 2000 threads! Now, sure, the virtual size (VSZ) of the process is something like 20 GB, but who cares? That's all of the overhead of having that many threads around, but they aren't actually using it in physical terms, so it works.&lt;/p&gt;
-&lt;p&gt;What does the latency look like? Since this is all running over loopback, it looks stellar. Most of the time, all of the requests finish in under a millisecond. Every now and then, a handful slop over into &quot;more than 1, less than 2&quot; territory. That's pretty cool, right?&lt;/p&gt;
-&lt;p&gt;But, all right, that's not realistic. Queries don't come from localhost, they come from other machines on the same network. Fine. So what happens when I keep those 2000 clients running, then add 4000 more over the local gig Ethernet from my Mac laptop?&lt;/p&gt;
-&lt;p&gt;Well, first of all, the latency spreads out. Those requests going over loopback aren't all now happening in under a millisecond. Now some of them are actually making it up to 40 ms. Gasp!&lt;/p&gt;
-&lt;p&gt;The Mac, meanwhile, is seeing a nice spread of latencies, too. I have it doing some really terrible analysis to yield percentiles. If I haven't screwed this up too badly, the numbers look like this for one five-second period grabbed from the scrolling console:&lt;/p&gt;
-&lt;p&gt;p50: 24ms, p75: 31ms, p90: 42ms, p95: 49ms, p99: 68ms&lt;/p&gt;
-&lt;p&gt;If you're not familiar, this means that half (50%) of the requests finished in 24 milliseconds or less. 75% finished in 31 milliseconds or less, and so on.&lt;/p&gt;
-&lt;p&gt;This seems to be lagging my laptop a lot worse than the Linux box which is doing all of the serving. I'm ON the Linux box running X, in an X terminal, sshed into the Mac, typing this post... and it's now lagging. It's not the Linux box, either, since I can do more interactive things on it, and it's ho-hum, boring, same old same old.&lt;/p&gt;
-&lt;p&gt;The server, meanwhile, is up around 256 MB of physical memory, and is juggling just over 6000 threads. The load average on the whole machine (which is running the server, a load generator, and some other unrelated things) is about 4.4.&lt;/p&gt;
-&lt;p&gt;So what happens if I throw more load at it? I have one more vaguely-Unixy box here on my local network: a 2011 Mac Mini. How about another 4000 clients from that thing?&lt;/p&gt;
-&lt;p&gt;The server is now up to about 422 MB of physical memory and just over 10000 threads. The load average on the whole machine is about 7.8 now. The whole server is running about 32000 QPS now.&lt;/p&gt;
-&lt;p&gt;What did this do to the timing? Back on my laptop, things have slowed down a little bit. Here's another five-second snapshot:&lt;/p&gt;
-&lt;p&gt;p50: 25ms, p75: 38ms, p90: 57ms, p95: 75ms, p99: 127ms&lt;/p&gt;
-&lt;p&gt;To be quite honest, the numbers from the laptop are all over the place. It also has Firefox and at least one stupid chat client that's actually a giant piggy web browser running, plus whatever else Apple decides to kick off in the background. Still, the p99 stays under 250ms. In theory, I could run this a lot longer and get some error bars out of this whole business. I could also use sensible systems to do this testing which don't have tons of other crap running on them which add noise to my results. But hey, I'm using what I have on hand.&lt;/p&gt;
-&lt;p&gt;Now, to be clear, this all hinges on exactly what kind of work the server is doing. It's not doing TLS. It IS dealing with my own little goofy wire protocol, deserializing that into a protobuf, figuring out what it means, deserializing the inside of *that* thing into another (request-dependent) protobuf, and then dispatching it to the handler. The handler does a little work (more on that in a bit), and then the server has to serialize the response, jam it into the outer message, serialize that, wrap it up in my goofy wire protocol, and fire it down the socket.&lt;/p&gt;
-&lt;p&gt;What, then, is the workload? Well, for this test, I wrote something truly stupid called LavaLamp. It's an homage to the &lt;a href=&quot;https://en.wikipedia.org/wiki/Lavarand&quot;&gt;SGI Lavarand&lt;/a&gt; project which used cameras pointing at lava lamps to generate random numbers.&lt;/p&gt;
-&lt;p&gt;Mine does not use lava lamps. The name is meant to be ironic. It DOES generate &lt;em&gt;pseudo&lt;/em&gt;-random numbers, though. The idea is to do just a little work on the CPU without being anything too interesting. It's deliberately not optimized. Every time it runs, it creates a random device, a random engine, and a uniform int distribution which is constrained between 'A' and 'Z'. Yep, that's right, this thing only spits out capital letters in ASCII.&lt;/p&gt;
-&lt;p&gt;It runs this 16 times and sends you the result. There's no caching, so every client gets their little blob fresh off the grill, so to speak.&lt;/p&gt;
-&lt;p&gt;It's kind of funny since it does actually open /dev/urandom every time through. In fact, if you don't give this thing a high enough file descriptor limit, it might just blow up when it gets that far. After all, being connected to 10000 clients each consumes a fd, the listening sockets eat a few, epoll has one, there's stdin/out/err, and now you want to open /dev/urandom every time you get a request? That's a lot of cruft!&lt;/p&gt;
-&lt;p&gt;Note: it doesn't crash when this happens. I catch the random device failure and just kill the request. Why bring down the whole server when one request failed? That's just asking for trouble.&lt;/p&gt;
-&lt;p&gt;I just wanted something that would present a little churn to the box instead of being something truly stupid like an &quot;echo&quot; endpoint. This does a teeny tiny amount of work and makes it that much more interesting.&lt;/p&gt;
-&lt;p&gt;So, my dumb little box from 2011 can handle 10000 persistent connections each firing a request down the pipe 5 times a second to do something truly stupid with random numbers. It does this with maybe half a gig of physical memory used, and about 75% of the CPU power available. I haven't done anything special in terms of balancing IRQs from the NIC, splitting up the accept/epoll/dispatch load, or pipelining requests. It's about as stupid as you can imagine.&lt;/p&gt;
-&lt;p&gt;The only thing that should be even mildly interesting is that I built it with a deliberate decision to not be afraid of threads. I figure, I'll stand 'em up, and let the kernel figure out when to schedule them. So far, it's been working pretty well.&lt;/p&gt;
-&lt;p&gt;This is just one example of what can be done. It's not magic. It's just engineering.&lt;/p&gt;
-</description>
-<pubDate>Thu, 07 May 2020 20:32:11 +0000</pubDate>
-<dc:creator>ingve</dc:creator>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://rachelbythebay.com/w/2020/05/07/serv/</dc:identifier>
-</item>
-<item>
-<title>Cross-signing and end-to-end encryption by default</title>
-<link>https://matrix.org/blog/2020/05/06/cross-signing-and-end-to-end-encryption-by-default-is-here</link>
-<guid isPermaLink="true" >https://matrix.org/blog/2020/05/06/cross-signing-and-end-to-end-encryption-by-default-is-here</guid>
-<description>&lt;p&gt;Hi all,&lt;/p&gt;
-&lt;p&gt;As of today, Matrix is end-to-end encrypted &lt;strong&gt;by default&lt;/strong&gt; for private conversations.&lt;/p&gt;
-&lt;p&gt;Three years have passed since we &lt;a href=&quot;https://matrix.org/blog/2016/11/21/matrixs-olm-end-to-end-encryption-security-assessment-released-and-implemented-cross-platform-on-riot-at-last&quot; target=&quot;_blank&quot; rel=&quot;nofollow noopener noreferrer&quot;&gt;first announced End-to-end Encryption in Matrix&lt;/a&gt; and started to beta test it in Riot - and after an enormous amount of polishing and refinement on its user experience, we are finally declaring it out of beta and enabling it by default for all new private conversations in Riot. As Riot is currently the most common Matrix client, this means that Matrix as a whole should now be considered end-to-end encrypted by default for DMs and invite-only rooms.&lt;/p&gt;
-&lt;p&gt;Work on E2EE in Matrix has progressed in waves since we first shipped it - including:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;adding keysharing (letting you share encryption keys between your devices to improve reliability)&lt;/li&gt;
-&lt;li&gt;making Riot Web's encryption resilient to running concurrently in multiple tabs&lt;/li&gt;
-&lt;li&gt;adding online key backup (so you don't lose all your history if you lose all your devices)&lt;/li&gt;
-&lt;li&gt;making encryption resilient to restoring the app from a backup&lt;/li&gt;
-&lt;li&gt;adding interactive key verification via emoji to make the verification process easier.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;However, our goal was always to enable E2EE by default for all private rooms, which means having feature parity between unencrypted and E2EE Matrix so that we can enable encryption without &lt;em&gt;any&lt;/em&gt; negative impact on usability. The high-level remaining items were significant:&lt;/p&gt;
-&lt;ul&gt;&lt;li&gt;Cross-signing: verifying your own logins so others don’t have to.&lt;/li&gt;
-&lt;li&gt;Adding QR codes for even better verification UX, to make cross-signing as painless as possible.&lt;/li&gt;
-&lt;li&gt;Replacing the old prototype UI for E2EE with final polished UI/UX.&lt;/li&gt;
-&lt;li&gt;Ability to support non-E2EE clients.&lt;/li&gt;
-&lt;li&gt;Ability to search encrypted rooms.&lt;/li&gt;
-&lt;li&gt;Ability to view file indexes in encrypted rooms.&lt;/li&gt;
-&lt;li&gt;Fixing the remaining “Unable to decrypt” errors.&lt;/li&gt;
-&lt;/ul&gt;&lt;p&gt;Over the last few months the Riot team has been almost entirely focused on implementing solutions to these items - and we're finally at the point where the switch can be flipped and as of Riot Web/Desktop 1.6, Riot iOS 0.11.1 and RiotX Android 0.19, all new private rooms will be encrypted by default; completing the transition we began at &lt;a href=&quot;https://fosdem.org/2020/schedule/event/matrix/&quot; target=&quot;_blank&quot; rel=&quot;nofollow noopener noreferrer&quot;&gt;FOSDEM 2020&lt;/a&gt; when we landed cross-signing E2E-by-default in the development branches of Riot.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;For full details, please go check out the &lt;a href=&quot;https://blog.riot.im/e2e-encryption-by-default-cross-signing-is-here/&quot; target=&quot;_blank&quot; rel=&quot;nofollow noopener noreferrer&quot;&gt;massive deep dive over at the Riot blog&lt;/a&gt;&lt;/strong&gt; - also featuring all the other recent progress in Riot!&lt;/p&gt;
-&lt;p&gt;Heads up that encrypted traffic is slightly more heavier on the server than unencrypted (due to exchanging keys, verification traffic, and keybackup traffic), and so there is a risk that the already-over-popular Matrix.org server instance may feel a little hugged to death. However, unprecedented Synapse performance breakthroughs are on the horizon in the coming weeks which will fix this - and, of course, you can (and should!) be using your own instance anyway.&lt;/p&gt;
-&lt;p&gt;Thanks everyone for helping us test encryption over the years and getting us to this point: cross-signing provides a more secure way of tracking device trust than almost any other comms system out there, and we hope that you'll agree the improved UX has been worth the wait.&lt;/p&gt;
-&lt;p&gt;Next stop: Synapse performance, and rebuilding Riot's first time user experience!&lt;/p&gt;
-&lt;p&gt;thanks,&lt;/p&gt;
-&lt;p&gt;Matthew, Amandine &amp;amp; the Matrix Team.&lt;/p&gt;
-</description>
-<pubDate>Thu, 07 May 2020 20:02:52 +0000</pubDate>
-<dc:creator>thanksforfish</dc:creator>
-<og:url>https://matrix.org/blog/2020/05/06/cross-signing-and-end-to-end-encryption-by-default-is-here</og:url>
-<og:type>article</og:type>
-<og:title>Cross-signing and End-to-end Encryption by Default is HERE!!! | Matrix.org</og:title>
-<og:image>https://blog.riot.im/content/images/2020/05/Frame-29-1.png</og:image>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://matrix.org/blog/2020/05/06/cross-signing-and-end-to-end-encryption-by-default-is-here/</dc:identifier>
-</item>
-<item>
-<title>Making Emacs Popular Again</title>
-<link>https://lwn.net/SubscriberLink/819452/1480c3a59d3d9093/</link>
-<guid isPermaLink="true" >https://lwn.net/SubscriberLink/819452/1480c3a59d3d9093/</guid>
-<description>&lt;center&gt;
-&lt;table width=&quot;90%&quot; cellspacing=&quot;5&quot; readability=&quot;4.1829745596869&quot;&gt;&lt;tr readability=&quot;11.154598825832&quot;&gt;&lt;td valign=&quot;top&quot; readability=&quot;9&quot;&gt;
-&lt;h3&gt;Welcome to LWN.net&lt;/h3&gt;
-&lt;p&gt;The following subscription-only content has been made available to you by an LWN subscriber. Thousands of subscribers depend on LWN for the best news from the Linux and free software communities. If you enjoy this article, please consider accepting the trial offer on the right. Thank you for visiting LWN.net!&lt;/p&gt;
-&lt;/td&gt;
-&lt;td valign=&quot;top&quot;&gt;
-&lt;table class=&quot;Form&quot; width=&quot;100%&quot; readability=&quot;1.2016574585635&quot;&gt;&lt;tr readability=&quot;3.6049723756906&quot;&gt;&lt;td readability=&quot;4.8066298342541&quot;&gt;
-&lt;h3&gt;Free trial subscription&lt;/h3&gt;
-&lt;p&gt;Try LWN for free for 1 month: no payment or credit card required. &lt;a href=&quot;https://lwn.net/Promo/slink-trial2-3/claim&quot;&gt;Activate your trial subscription now&lt;/a&gt; and see why thousands of readers subscribe to LWN.net.&lt;/p&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/center&gt;
-&lt;p&gt;By &lt;strong&gt;Jake Edge&lt;/strong&gt;&lt;br /&gt;May 6, 2020&lt;/p&gt;
-&lt;p&gt;The &lt;a href=&quot;https://www.gnu.org/software/emacs/&quot;&gt;Emacs editor&lt;/a&gt; predates Linux, and was once far more popular, but it has fallen into relative obscurity over the years. In a mega-thread on the emacs-devel mailing list, participants discussed various ideas for making Emacs more &quot;attractive&quot;, in both aesthetic and in &quot;appealing to more users&quot; senses of that term. Any improvements to Emacs in that regard have numerous hurdles to overcome, however. There are technical questions and, naturally, licensing considerations, but there is also the philosophical question of what it is, exactly, that stops the venerable text editor from being more popular.&lt;/p&gt;
-&lt;h4&gt;So square&lt;/h4&gt;
-&lt;p&gt;The discussion started with &lt;a href=&quot;https://lwn.net/ml/emacs-devel/8wXYP4GY9hwW-9mYv6_LGMETZ8Vz3Ob1Bec6yh6kPT7yxjTkxA3V6dXY4ELra9tYiJUxJmgXKSIEX4w8HFiPRoeGVSQHDSoBVy1voj1e3Qo=@protonmail.com/&quot;&gt;post&lt;/a&gt; from &quot;ndame&quot; asking why Emacs is &quot;&lt;span&gt;so square&lt;/span&gt;&quot;; the appearance of things like buttons could be improved with rounded corners, they said. Richard Stallman, one of the original authors of Emacs, seemed somewhat dismissive in his &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jOYIC-000709-3J@fencepost.gnu.org/&quot;&gt;reply&lt;/a&gt;: &quot;&lt;span&gt;Perhaps we should implement a mode that puts cosmetics on Emacs so it will appeal to those who judge by the surface of things.&lt;/span&gt;&quot; But Stefan Kangas &lt;a href=&quot;https://lwn.net/ml/emacs-devel/CADwFkmnyYPjLd8=N7K955v5+34+wgDAUrC6C6KGG0xvT3OJr9g@mail.gmail.com/&quot;&gt;thought&lt;/a&gt; there was more to it than that:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;14&quot;&gt;I think it's unfortunate if we assume that this is all bells and whistles. Graphical design elements can also improve usability.
-&lt;p&gt;I also don't know that it's helpful to assume that the rest of the world will take the enlightened stance. For example, I've always assumed that many people use Sublime Text not due to any serious feature comparison with Emacs, but because they like its &quot;sleek look&quot;.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;He wondered if there was &quot;&lt;span&gt;any reason not to improve the default look&lt;/span&gt;&quot;. Stallman &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jOuIG-0004CF-OB@fencepost.gnu.org/&quot;&gt;said&lt;/a&gt; that there are some technical barriers in finding someone interested in and capable of doing the work needed, but there is an overarching problem that needs to be addressed first:&lt;/p&gt;
-&lt;p&gt;The code to interface Emacs to X-based GUIs needs rewriting by an expert, and has needed it for decades. Until it gets that rewrite, changes in it are likely to break something.&lt;/p&gt;
-&lt;p&gt;Stallman did agree that the graphical design could improve usability, &quot;&lt;span&gt;but I have a feeling that the changes that would help are deeper issues than the shape of corners&lt;/span&gt;&quot;. The GUI interface only matters if Emacs users are leaving those features (e.g. the menu bar and tool bar) enabled, Eli Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83y2qwdmnd.fsf@gnu.org/&quot;&gt;said&lt;/a&gt;, but much of the advice out there on configuring Emacs suggests disabling those things.&lt;/p&gt;
-&lt;p&gt;It is hard to be enthusiastic about making these features more modern when the community seems to be divided on whether they should at all be present. IMO, we should first get our act together and decide whether these features are important, and then speak up according to those decisions when we see advice to the contrary.&lt;/p&gt;
-&lt;p&gt;Beyond that, though, there are bigger problems with Emacs as a whole, Joseph Garvin &lt;a href=&quot;https://lwn.net/ml/emacs-devel/CAH=MJ4Yu0_ZLzm-W1-+i4JNh0PLSdNUGOxrzCkPjwtZ55EDEyg@mail.gmail.com/&quot;&gt;said&lt;/a&gt;. The Emacs user interface &quot;&lt;span&gt;doesn't look or behave like any other application&lt;/span&gt;&quot;, the keyboard shortcuts are different than other programs, and the terminology used in the Emacs world does not match with what users expect:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;16&quot;&gt;[...] no Microsoft word user has ever considered themselves to have opened a &quot;buffer&quot;. They open &quot;files&quot;. They move &quot;windows&quot; around, not &quot;frames.&quot; They cut and paste not kill and yank, etc.
-&lt;p&gt;You are basically making a commitment to being or becoming a power user. I certainly would not have put up with it if I didn't think it was going to save me a lot of time as a software developer (and it does, everyday). I doubt anyone invests the mental effort to deal with learning emacs nowadays unless this is their goal. If you just want to do &quot;casual&quot; text editing emacs is a very weird choice in 2020.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;But &quot;modernizing&quot; Emacs (however defined) is likely to be a waste of the project's time, since its look is not what's holding it back, Ahmed Khanzada &lt;a href=&quot;https://lwn.net/ml/emacs-devel/863691n4xl.wl-me@enzu.ru/&quot;&gt;said&lt;/a&gt;. For example: &quot;&lt;span&gt;Terminal-based Vim is not like a modern application, yet is more popular than Emacs.&lt;/span&gt;&quot; The appeal of an editor that can be extended using the Lisp language is somewhat limited, he said. Spending a bunch of time and energy to give it a modern look would not change that and, by the time the work was done, the definition of &quot;modern&quot; will have changed again.&lt;/p&gt;
-&lt;h4&gt;Popularity&lt;/h4&gt;
-&lt;p&gt;Kangas &lt;a href=&quot;https://lwn.net/ml/emacs-devel/CADwFkm=Vashc18sr=+h8XEdLAKa38U94jsnzc+TgABWFx0uQ9g@mail.gmail.com/&quot;&gt;wondered&lt;/a&gt; about the assertion of Vim's popularity; Khanzada &lt;a href=&quot;https://lwn.net/ml/emacs-devel/86blno9yle.wl-me@enzu.ru/&quot;&gt;pointed&lt;/a&gt; to a &lt;a href=&quot;https://insights.stackoverflow.com/survey/2019#development-environments-and-tools&quot;&gt;2019 survey&lt;/a&gt; that showed Vim with a substantial lead over Emacs (20% to 3% is what he reported, though it shows 25% to 4% as of this writing). That survey showed that &lt;a href=&quot;https://en.wikipedia.org/wiki/Visual_Studio_Code&quot;&gt;Visual Studio Code&lt;/a&gt; (VSC) is the clear winner, however, with 50+% of respondents using that tool. You could perhaps quibble with the survey's methodology, but the broad-brush numbers do not seem wildly out of line.&lt;/p&gt;
-&lt;p&gt;That set off some discussion of why users prefer the experience with VSC. &quot;&lt;span&gt;We need to figure out why VSC is so popular, and then fill in the areas that Emacs is missing&lt;/span&gt;&quot;, Po Lu &lt;a href=&quot;https://lwn.net/ml/emacs-devel/875zdv9jf3.fsf@yahoo.com/&quot;&gt;said&lt;/a&gt;. Bob Newell &lt;a href=&quot;https://lwn.net/ml/emacs-devel/CADoYgq-tj61Pfgm=zVJ50ZLjG+nTcLt_p0W0pZa4sFzsb59Tfg@mail.gmail.com/&quot;&gt;thought&lt;/a&gt; that &quot;&lt;span&gt;the goal of making Emacs more accessible and more appealing is laudable and ambitious&lt;/span&gt;&quot;; it is something that the project could accomplish, he said. He is worried, though, that today's software is aimed at &quot;instant gratification&quot; rather than long-term usability—and power.&lt;/p&gt;
-&lt;p&gt;Yes, make Emacs appealing and user friendly. But don't forget that a masterful tool in the end requires mastery, which can't come for free. I certainly draw the line at saying Emacs is for everyone. I'm not saying it's only for some sort of snooty &quot;elite&quot; but I am saying that it's for those who are willing to learn, seeing some extra work as the aforementioned long-term investment, and who have the patience reach a worthy goal a little later rather than right this very minute.&lt;/p&gt;
-&lt;p&gt;Stallman &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jQi0V-000320-Sf@fencepost.gnu.org/&quot;&gt;agreed&lt;/a&gt; with that sentiment. But he would also &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jQM1d-0007n9-BV@fencepost.gnu.org/&quot;&gt;like to see&lt;/a&gt; Emacs return to popularity &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jQi44-0003eV-0u@fencepost.gnu.org/&quot;&gt;as an editor of text for publication&lt;/a&gt;. Several noted that &lt;a href=&quot;https://orgmode.org/&quot;&gt;Org mode&lt;/a&gt; is already being used successfully for text-publication purposes. That mode is &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jR5ss-0001xM-L9@fencepost.gnu.org/&quot;&gt;not familiar&lt;/a&gt; to Stallman and he was unable to learn much about using it for word processing by reading the documentation. Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83v9lregx0.fsf@gnu.org/&quot;&gt;pointed out&lt;/a&gt; that there is a high barrier to learning Org mode from its documentation, at least for the word-processing use case.&lt;/p&gt;
-&lt;p&gt;Once again, though, it seems quite unlikely that some putative, well-documented word-processing Emacs mode is likely to have users flocking to the editor. But Stallman &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jPzXg-0003tH-MT@fencepost.gnu.org/&quot;&gt;said&lt;/a&gt; that the user profile for Emacs was much broader 30 years ago; he would like to see it be that way again. He personally does not see rounded corners as part of that, though he is not opposed to efforts in that direction; &quot;&lt;span&gt;[...] if you want to attract more users to Emacs, I think there are more important areas for improvement.&lt;/span&gt;&quot; Lu &lt;a href=&quot;https://lwn.net/ml/emacs-devel/87imhw431x.fsf@yahoo.com/&quot;&gt;had some ideas&lt;/a&gt; along those lines, for example using &lt;a href=&quot;https://www.emacswiki.org/emacs/StarterKits&quot;&gt;starter kits&lt;/a&gt; (or packs) to help make the editor &quot;&lt;span&gt;more friendly to newcomers&lt;/span&gt;&quot;.&lt;/p&gt;
-&lt;p&gt;There was a difference of opinion about making changes to the defaults, though, in order to help newcomers. If changes need to be made for the sake of newcomers, ndame &lt;a href=&quot;https://lwn.net/ml/emacs-devel/nBz61t2TEA4FJbun5KtDMQlnaI3Y8jE1loAcCJPTgilcVDC5ns7QyUh6WUfGEFn0Bnw5od3SX-iZRZ08Sfj26GUO64h91QPuc2HeOzWyPVU=@protonmail.com/&quot;&gt;said&lt;/a&gt;, established users can just turn them off. For example, &lt;a href=&quot;https://www.emacswiki.org/emacs/CuaMode&quot;&gt;Cua Mode&lt;/a&gt;, which adds the &quot;standard&quot; keybindings for things like cut and paste (i.e. ctrl-c, ctrl-x, ctrl-v) to Emacs, should be on by default; &quot;&lt;span&gt;it could make the life of new users easier if they didn't have to turn it on explicitly and they could use their copy/paste keys from the start like they are used it to in other tools&lt;/span&gt;&quot;.&lt;/p&gt;
-&lt;p&gt;But Lu &lt;a href=&quot;https://lwn.net/ml/emacs-devel/87k12bdgx7.fsf@yahoo.com/&quot;&gt;suggested&lt;/a&gt; adding a button for newcomers to turn on those features from the splash screen instead. Better still might be for Emacs to recognize a possible newcomer, ndame &lt;a href=&quot;https://lwn.net/ml/emacs-devel/RtuoskwUPgcjfttdVWYUzFKTAPGRcbaMR_zTV1bZGTDbo_07pkyfq6avexjdhEWZDNZmI3WCFZjgIhiIOEwODgZZTqN_QjYFa7S70kRZ4zU=@protonmail.com/&quot;&gt;suggested&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;11&quot;&gt;A button can work too. Or if emacs is started with no config file then it can ask &quot;Are you using Emacs for the first time?&quot; If the user says yes then it can offer to set some convenience features like CUA mode.
-&lt;p&gt;And if the user says no then everything is as usual.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;There was some discussion of gathering feedback before deciding to change defaults and such, but Dmitry Gutov &lt;a href=&quot;https://lwn.net/ml/emacs-devel/45098d13-2770-4a19-6f82-b22276eb51c8@yandex.ru/&quot;&gt;wondered&lt;/a&gt; if existing users are even relevant. If expanding the reach of Emacs is the goal, it may make sense to look at the problem differently:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;17&quot;&gt;So for all questions about changing defaults, we should ask ourselves, do we prioritize the existing 5% (or 3%, as SO poll says) userbase that will naturally continue shrinking over the years, or whether we prefer to make life easier and more productive for the users that should come later.
-&lt;p&gt;And it's not like existing, long-time users can't grow to like the new defaults (even after a certain amount of grumbling).&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;Lu &lt;a href=&quot;https://lwn.net/ml/emacs-devel/877dy91mb0.fsf@yahoo.com/&quot;&gt;disagreed&lt;/a&gt;; &quot;&lt;span&gt;We should prioritize existing users over hypothetical users that don't even exist yet.&lt;/span&gt;&quot; But Gutov &lt;a href=&quot;https://lwn.net/ml/emacs-devel/0ce06d95-0593-bc55-983f-6b6601503a1a@yandex.ru/&quot;&gt;said&lt;/a&gt; that might be shortsighted; &quot;&lt;span&gt;I don't want Emacs to die out, and it will if we don't do the work of attracting new users.&lt;/span&gt;&quot; No real conclusion was reached; everyone would like to see the number of Emacs users (developers, testers, documentation writers, ...) grow, but how to do so is unclear at best.&lt;/p&gt;
-&lt;h4&gt;Licensing&lt;/h4&gt;
-&lt;p&gt;Back to rounded corners, Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83lfmxgt6c.fsf@gnu.org/&quot;&gt;said&lt;/a&gt; that the only thing standing in the way of that was code to implement it; &quot;&lt;span&gt;[...] patches to add such capabilities to Emacs are most welcome&lt;/span&gt;&quot;. But Emacs is multi-platform, Gutov &lt;a href=&quot;https://lwn.net/ml/emacs-devel/ce35ba27-622e-4f78-fc00-7f17ef6d7dcb@yandex.ru/&quot;&gt;said&lt;/a&gt;, which means that buttons look different on each. Even on the same platform, different graphics toolkits give different looks—and the looks change between toolkit releases.&lt;/p&gt;
-&lt;p&gt;Alex Bennée &lt;a href=&quot;https://lwn.net/ml/emacs-devel/87r1wng2ki.fsf@linaro.org/&quot;&gt;suggested&lt;/a&gt; that &quot;&lt;span&gt;unifying under a single cross-platform toolkit like GTK+&lt;/span&gt;&quot; would avoid some parts of the problem, but he also noted that a longstanding &lt;a href=&quot;https://bugzilla.gnome.org/show_bug.cgi?id=85715&quot;&gt;bug&lt;/a&gt; in GTK+ had caused him to use Emacs with the Lucid toolkit instead. He also worried about the next generation: &quot;&lt;span&gt;I've been thinking about text editors for my children to use as they graduate from point and click programming to proper text and even I'm not sure I want their first experience to be Emacs.&lt;/span&gt;&quot;&lt;/p&gt;
-&lt;p&gt;Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83o8rrenn1.fsf@gnu.org/&quot;&gt;pointed out&lt;/a&gt; that GTK+ is not really cross-platform. In addition, the bug in question is not considered to be one by the GNOME developers, which led Ulrich Mueller to &lt;a href=&quot;https://lwn.net/ml/emacs-devel/u8sivv1lb_-_@gentoo.org/&quot;&gt;muse&lt;/a&gt; about a switch to Qt. But Stallman was quick to &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jPGhC-0003i1-W4@fencepost.gnu.org/&quot;&gt;put the kibosh&lt;/a&gt; on that; Qt is only available for GPL 2 and 3, using it would mean that if there is a GPL 4 someday, Emacs could not switch to it. &quot;&lt;span&gt;So we must avoid using Qt.&lt;/span&gt;&quot;&lt;/p&gt;
-&lt;p&gt;Electron was also &lt;a href=&quot;https://lwn.net/ml/emacs-devel/CAO2hHWZGk0iq0ROoLoeLGwDYRmu-sQeMJuVQ-rziFd+O5Z=8ng@mail.gmail.com/&quot;&gt;raised&lt;/a&gt; as a possibility, but it turns out to have &quot;&lt;span&gt;freedom issues&lt;/span&gt;&quot;, Lu &lt;a href=&quot;https://lwn.net/ml/emacs-devel/878siptegk.fsf@yahoo.com/&quot;&gt;said&lt;/a&gt;. It is not clear how serious any of these ideas were; switching graphics toolkits is a decidedly non-trivial undertaking. It does seem like an indication that some in the Emacs development community are getting frustrated with the GUI version(s) of the editor. Beyond that, many of the Emacs developers do not even use the GTK+ version because of the bug, which leads to less interest in improving that version of Emacs; it all seems to be something of a mess.&lt;/p&gt;
-&lt;p&gt;The icons used by Emacs were also questioned in the thread, with licensing rearing its head there as well. The &lt;a href=&quot;https://www.reddit.com/r/emacs/&quot;&gt;Emacs subreddit&lt;/a&gt; is apparently fertile ground for thoughts and suggestions as it came up a few times in the thread. For example, ndame &lt;a href=&quot;https://lwn.net/ml/emacs-devel/qcx9gTVkYn55kqfq16drSfrURpHlTlC3JVCnh8v0MWHsJCFHzg-CPbHgaAw4SP6otQ_Q1VED_2Wrx5XrzNvWtAlZeryp7ssZc8ANKNL7Xv8=@protonmail.com/&quot;&gt;reported&lt;/a&gt; &quot;&lt;span&gt;that a user posted a &lt;a href=&quot;https://i.imgur.com/6sIHOGt.png&quot;&gt;screenshot&lt;/a&gt; of an emacs toolbar with really sad looking icons at the end&lt;/span&gt;&quot;. There are icon sets available under the GPL that could be used instead, they asserted. But Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83y2qvcjv6.fsf@gnu.org/&quot;&gt;cautioned&lt;/a&gt; that things may not be that clear-cut:&lt;/p&gt;
-&lt;p&gt;Feel free to point us to GPLed icons that can be incorporated in Emacs. At the time, the situation was nowhere as easy as you imply, but maybe things have changed since then.&lt;/p&gt;
-&lt;p&gt;Several icon sets were suggested, including GNOME icons, some from Wikimedia, and those from KDE, all of which are available under various free licenses (GPL, Creative Commons, LGPL). But there is more work to do than just identifying candidates, Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83k12ed20s.fsf@gnu.org/&quot;&gt;said&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;24&quot;&gt;Someone™ needs to invest the time and effort to figure out the legal issues, find the icons that we want out of those which are legally fit, and post the resulting information. We did that process at the time (AFAIR, quite a few of our icons come from Gnome/GTK), and it wasn't easy.
-&lt;p&gt;Alternatively, someone could create our own icons, in which case they could be even prettier than the ones pointed out here.&lt;/p&gt;
-&lt;p&gt;In any case, this is a non-trivial job, and volunteers are most welcome to do it. I don't think anyone is happy about the icons shown on the tool bar by Message mode; the only reason we use them is that we couldn't find better ones that are free and suitable for inclusion in Emacs.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;But, ndame &lt;a href=&quot;https://lwn.net/ml/emacs-devel/9GxTqx0raB6NkyAQ4gjUHfoCFK4rgmvRKZaUUxM-p6WOuO_3oJOBYiXI4L8pGz-VtHtgYKJ14Z1nU9UmZ68nJLO18nLYnaBaqBxLEaNN9mg=@protonmail.com/&quot;&gt;asked&lt;/a&gt;, shouldn't icons that come from GNOME, a longstanding free-software project, be perfectly acceptable to use in Emacs? Sadly, it is not so easy as that, Zaretskii &lt;a href=&quot;https://lwn.net/ml/emacs-devel/83d086cu05.fsf@gnu.org/&quot;&gt;said&lt;/a&gt;: &quot;&lt;span&gt;IANAL, but I think it has to be GPL v2+ at least. And perhaps we would also need the copyright assigned to the FSF.&lt;/span&gt;&quot; For example, the Wikimedia icons are available under the the LGPLv3 and Creative Commons Attribution-ShareAlike (CC BY-SA) 3.0 licenses, but neither of those would work for pieces that are part of the Emacs program, Stallman &lt;a href=&quot;https://lwn.net/ml/emacs-devel/E1jPzZX-0004DO-HS@fencepost.gnu.org/&quot;&gt;said&lt;/a&gt;. Without the &quot;or later&quot; on the LGPL grant, the Qt problem would exist; CC BY-SA 3.0 &quot;&lt;span&gt;is incompatible with every version of the GPL&lt;/span&gt;&quot;. But that may not matter in the end:&lt;/p&gt;
-&lt;div class=&quot;BigQuote&quot; readability=&quot;17&quot;&gt;If the icons would NOT be part of the program, Emacs, then there is no conflict.
-&lt;p&gt;The Emacs distribution contains many works, including textual, art, and small programs, which are distinct from the program, Emacs.&lt;/p&gt;
-&lt;/div&gt;
-&lt;p&gt;Zaretskii and Stallman were able to determine that icons for Emacs fall into that category, so they simply need to be available under any free license, which should simplify things—if someone gets the time and energy to work on the problem. Like most projects, Emacs suffers from a shortage of human power; a project to improve the GUI that may not be widely used by those developers could go wanting. And that, in a lot of ways, sums up the situation with the editor project.&lt;/p&gt;
-&lt;h4&gt;Moving forward&lt;/h4&gt;
-&lt;p&gt;Emacs is quite useful for its adherents; many of them see it is their main interface to their computers. Others use it regularly but less universally. There are even longtime Vim users (who may have started on vi, in truth) that need Emacs for certain tasks—me for example. It serves all of these users well, but does it really still have a role in ten, twenty, or forty years? It is not an easy question to answer, of course; certainly it will still be with us in both ten and twenty years, but how many users will it have in forty?&lt;/p&gt;
-&lt;p&gt;Part of the problem is that the dedicated following for Emacs is also pretty resistant to change to any major degree. That's not meant as a knock of any sort, simply an observation. There are plenty of examples in that huge thread of ideas that were seemingly shot down because they represent change that might upset existing users. But it would seem that some changes of some sort are needed to bring in new blood. If few or no new users are coming in and nothing is done to attract more, it can only lead to eventual extinction.&lt;/p&gt;
-&lt;p&gt;Hopefully that is not the path that Emacs is on—or if it is, that it changes direction before (too) long. It is one of the earliest free-software programs in existence; pre-dating the term &quot;free software&quot; by nearly a decade, in fact. Of course, the code itself need never disappear entirely, but a vibrant—growing—Emacs community would be wonderful to see.&lt;/p&gt;
-&lt;p&gt;In truth, we have barely scratched the surface of that mega-thread. There are plenty of sub-threads that went completely unmentioned here; those interested in Emacs development—warts and all—will find plenty to read and digest there. Whether Emacs ends up with rounded corners or not seems like simply the tip of the iceberg of things that might need to be addressed to make Emacs more newcomer-friendly. How that can happen within that community remains to be seen.&lt;/p&gt;
+<title>Rebuilding our tech stack for the new facebook.com</title>
+<link>https://engineering.fb.com/web/facebook-redesign/</link>
+<guid isPermaLink="true" >https://engineering.fb.com/web/facebook-redesign/</guid>
+<description>&lt;p&gt;&lt;span&gt;Facebook.com launched in 2004 as a simple, server-rendered PHP website. Over time, we’ve added layer upon layer of new technology to deliver more interactive features. Each of these new features and technologies incrementally slowed the site down and made it harder to maintain. This made it harder to introduce new experiences. Features like dark mode and saving your place in News Feed had no straightforward technical implementation. We needed to take a step back to rethink our architecture.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;When we thought about how we would build a new web app — one designed for today’s browsers, with the features people expect from Facebook — we realized that our existing tech stack wasn’t able to support the app-like feel and performance we needed. A complete rewrite is extremely rare, but in this case, since so much has changed on the web over the course of the past decade, we knew it was the only way we’d be able to achieve our goals for performance and sustainable future growth. Today, we’re sharing the lessons we’ve learned while rearchitecting Facebook.com,&lt;/span&gt; using &lt;a href=&quot;https://reactjs.org/&quot;&gt;React&lt;/a&gt; (a declarative JavaScript library for building user interfaces) and &lt;a href=&quot;https://relay.dev/&quot;&gt;Relay&lt;/a&gt; (a GraphQL client for React).&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;Getting started&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;We knew we wanted Facebook.com to start up fast, respond fast, and provide a highly interactive experience. Although a server-driven app could deliver a fast startup time, we weren’t convinced we could make it as interactive and delightful as a client-driven app. However, we believed we could build a client-driven app with a competitively fast startup time.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;But starting from the ground up with a client-first app brought a new set of problems. We needed to rebuild the site quickly while also addressing speed and other user experience issues — and we needed to do it in such a way that it would be sustainable for years to come.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Throughout the process, we anchored our work around two technical mantras:&lt;/span&gt;&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;strong&gt;As little as possible, as early as possible.&lt;/strong&gt; &lt;span&gt;We should deliver only the resources we need, and we should strive to have them arrive right before we need them.&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Engineering experience in service of user experience.&lt;/strong&gt; &lt;span&gt;The end goal of our development is all about the people using our website. As we think about the UX challenges on our site, we can adapt the experience to guide engineers to do the right thing by default.&lt;/span&gt;&lt;/li&gt;
+&lt;/ol&gt;&lt;p&gt;&lt;span&gt;We applied these same principles to improve four main elements of the site: CSS, JavaScript, data, and navigation.&lt;/span&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;Rethinking CSS to unlock new capabilities&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;First, we reduced the CSS on the homepage by 80 percent by changing how we write and build our styles. On the new site, the CSS we write is different from what gets sent to the browser. While we write familiar CSS-like JavaScript in the same files as our components, a build tool splits these styles into separate, optimized bundles. As a result, the new site ships less CSS, supports dark mode and dynamic font sizes for accessibility, and has improved image rendering performance — all while making it easier for engineers to work with.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Generating atomic CSS to reduce homepage CSS by 80 percent&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;On our old site, we were loading more than 400 KB of compressed CSS (2 MB uncompressed) when loading the homepage, but only 10 percent of that was actually used for the initial render. We didn’t start out with that much CSS; it just grew over time and rarely decreased. This happened in part because every new feature meant adding new CSS. &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;We addressed this by generating atomic CSS at build time. Atomic CSS has a logarithmic growth curve because it’s proportional to the number of unique style declarations rather than to the number of styles and features we write. This lets us combine the generated atomic CSS from across our site into a single, small, shared stylesheet. As a result, the new homepage downloads less than 20 percent of the CSS the old site downloaded.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Colocating styles to reduce unused CSS and make it easier to maintain&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;Another reason our CSS grew over time was that it was difficult to identify whether various CSS rules were still in use. Atomic CSS helps mitigate the performance impact of this, but unique styles still add unnecessary bytes, and the unused CSS in our source code adds engineering overhead. Now, we colocate our styles with our components so they can be deleted in tandem, and only split them into separate bundles at build time.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;We also addressed another issue we were facing: CSS precedence depends on ordering, which is especially difficult to manage when using automated packaging that can change over time. It was previously possible for changes in one file to break the styles in another without the author realizing it. Instead, we now author styles using a familiar syntax inspired by&lt;/span&gt; &lt;a href=&quot;https://reactnative.dev/&quot;&gt;&lt;span&gt;React Native&lt;/span&gt;&lt;/a&gt; &lt;span&gt;styling APIs: We guarantee that the styles are applied in a stable order, and we don’t support CSS descendant selectors.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Changing font sizes for better accessibility&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;We’ve taken advantage of our offline build step to make accessibility updates as well. On many websites today, people enlarge text by using their browser’s zoom function. This can accidentally trigger a tablet or mobile layout or increase the size of things they didn’t need to enlarge, such as images.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;By using&lt;/span&gt; &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/CSS/font-size&quot;&gt;&lt;span&gt;rems&lt;/span&gt;&lt;/a&gt;&lt;span&gt;, we can respect user-specified defaults and are able to provide controls for customizing font size without requiring changes to the stylesheet. Designs, however, are usually created using CSS pixel values. Manually converting to rems adds engineering overhead and the potential for bugs, so we have our build tool do this conversion for us.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Sample build-time handling&lt;/span&gt;&lt;/h3&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;const styles = stylex.create({
+  emphasis: {
+    fontWeight: 'bold',
+  },
+  text: {
+    fontSize: '16px',
+    fontWeight: 'normal',
+  },
+});
+ 
+function MyComponent(props) {
+  return &amp;lt;span className={styles('text', props.isEmphasized &amp;amp;&amp;amp; 'emphasis')} /&amp;gt;;
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Example of source code.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-css&quot;&gt;.c0 { font-weight: bold; }
+.c1 { font-weight: normal; }
+.c2 { font-size: 0.9rem; }&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Example of generated CSS.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;function MyComponent(props) {
+  return &amp;lt;span className={(props.isEmphasized ? 'c0 ' : 'c1 ') + 'c2 '} /&amp;gt;;
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Example of generated JavaScript.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;CSS variables for theming (dark mode)&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;On the old site, we used to attempt to apply themes by adding a class name to the body element and then using that class name to override existing styles with rules that had a higher specificity. This approach has issues, and it no longer works with our new atomic CSS-in-JavaScript approach, so we have switched to&lt;/span&gt; &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/CSS/Using_CSS_custom_properties&quot;&gt;&lt;span&gt;CSS variables&lt;/span&gt;&lt;/a&gt; &lt;span&gt;for theming.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;CSS variables are defined under a class, and when that class is applied to a DOM element, its values are applied to the styles within its DOM subtree. This lets us combine the themes into a single stylesheet, meaning toggling different themes doesn’t require reloading the page, different pages can have different themes without downloading additional CSS, and different products can use different themes side by side on the same page.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-css&quot;&gt;.light-theme {
+  --card-bg: #eee;
+}
+.dark-theme {
+  --card-bg: #111;
+}
+.card {
+  background-color: var(--card-bg);
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;span&gt;This made the performance impact of a theme proportional to the size of the color palette rather than to the size or complexity of the component library. A single atomic CSS bundle also includes the dark mode implementation.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;SVGs in JavaScript for fast, single-render performance&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;To prevent flickering as icons come in after the rest of the content, we inline SVGs into the HTML using React rather than passing SVG files to&lt;/span&gt; &lt;span&gt;&amp;lt;img&amp;gt;&lt;/span&gt; &lt;span&gt;tags. Because these SVGs are now effectively JavaScript, they can be bundled and delivered together with their surrounding components for a clean one-pass render. We’ve found that the upside of loading these at the same time as the JavaScript was greater than the cost of SVG painting performance. By inlining, there’s no flickering of icons that pop in afterward.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;function MyIcon(props) {
+  return (
+    &amp;lt;svg {...props} className={styles({/*...*/})}&amp;gt;
+       &amp;lt;path d=&quot;M17.5 ... 25.479Z&quot; /&amp;gt;
+    &amp;lt;/svg&amp;gt;
+  );
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;span&gt;Additionally, these icons can change colors smoothly at runtime without requiring further downloads. We’re able to style the icon according to its props and use our CSS variables to theme certain types of icons, especially ones that are monochrome.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-15039 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png&quot; alt=&quot;New Facebook.com design in light mode &quot; width=&quot;2732&quot; height=&quot;1536&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png 2732w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=916,515 916w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=1024,576 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=1536,864 1536w, https://engineering.fb.com/wp-content/uploads/2020/05/1.-Home-Setting-Light-Mode.png?resize=2048,1151 2048w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img class=&quot;alignnone wp-image-15040 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png&quot; alt=&quot;Facebook.com redesign in dark mode&quot; width=&quot;2732&quot; height=&quot;1536&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png 2732w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=916,515 916w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=1024,576 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=1536,864 1536w, https://engineering.fb.com/wp-content/uploads/2020/05/2.-Home-Setting-Dark-Mode.png?resize=2048,1151 2048w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;span&gt;Code-splitting JavaScript for faster performance&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;Code size is one of the biggest concerns with a JavaScript-based single-page app because it has a large influence on page load performance. We knew that if we wanted a client-side React app for Facebook.com, we’d need to solve for this. We introduced several new APIs that work in line with our “as little as possible, as early as possible” mantra.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Incremental code download to deliver just what we need, when we need it&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;When someone is waiting for a page to load, our goal is to give immediate feedback by rendering UI “skeletons” of what the page is going to look like. This skeleton needs minimal resources, but we can’t render it early if our code is packaged in a single bundle, so we need to code-split into bundles based on the order in which the page should be displayed. However, if we do this naively (i.e., by using&lt;/span&gt; &lt;a href=&quot;https://github.com/tc39/proposal-dynamic-import&quot;&gt;&lt;span&gt;dynamic imports&lt;/span&gt;&lt;/a&gt; &lt;span&gt;that are fetched during render), we could hurt performance instead of helping it. This is the basis of our code-splitting design of JavaScript Loading Tiers: We split the JavaScript needed for the initial load into three tiers, using a declarative, statically analyzable API.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Tier 1&lt;/span&gt; &lt;span&gt;is the basic layout needed to display the first paint for the above-the-fold content, including UI skeletons for initial loading states.&lt;/span&gt;&lt;span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15041 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png&quot; alt=&quot;Tier 1 is the basic layout needed to display the first paint for the above-the-fold content, including UI skeletons for initial loading states.&quot; width=&quot;2732&quot; height=&quot;1536&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png 2732w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=916,515 916w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=1024,576 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=1536,864 1536w, https://engineering.fb.com/wp-content/uploads/2020/05/3.-Tier-1.png?resize=2048,1151 2048w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;The page after Tier 1 code loads and renders.
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;import ModuleA from 'ModuleA';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Tier 1 uses regular &lt;code&gt;import&lt;/code&gt;syntax.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Tier 2 includes all the JavaScript needed to fully render all above-the-fold content. After Tier 2, nothing on the screen should still be visually changing as a result of code loading.&lt;/span&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15042 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png&quot; alt=&quot;Tier 2 includes all the JavaScript needed to fully render all above-the-fold content. After Tier 2, nothing on the screen should still be visually changing as a result of code loading.&quot; width=&quot;2732&quot; height=&quot;1536&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png 2732w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=916,515 916w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=1024,576 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=1536,864 1536w, https://engineering.fb.com/wp-content/uploads/2020/05/4.-Tier-2.png?resize=2048,1151 2048w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;The page after Tier 2 code loads and renders.
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;importForDisplay ModuleBDeferred from 'ModuleB';&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Once an &lt;code&gt;importForDisplay&lt;/code&gt; is encountered, it and its dependencies are moved into Tier 2. This returns a promise-based wrapper to access the module once it’s loaded.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15043 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png&quot; alt=&quot;Tier 3 includes everything that is only needed after display that doesn’t affect the current pixels on the screen, including logging code and subscriptions for live-updating data.&quot; width=&quot;2732&quot; height=&quot;1536&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png 2732w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=916,515 916w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=1024,576 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=1536,864 1536w, https://engineering.fb.com/wp-content/uploads/2020/05/5.-Tier-2-after-Interaction.png?resize=2048,1151 2048w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;Tier 2 needs to be fully interactive. If someone clicks on a menu after Tier 2 code loads and renders, they get immediate feedback about the interaction, even if the contents of the menu are not ready to render.
+&lt;p&gt;Tier 3 includes everything that is only needed after display that doesn’t affect the current pixels on the screen, including logging code and subscriptions for live-updating data.&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;importForAfterDisplay ModuleCDeferred from 'ModuleC';
+ 
+// ...
+ 
+function onClick(e) {
+  ModuleCDeferred.onReady(ModuleC =&amp;gt; {
+    ModuleC.log('Click happened! ', e);
+  });
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;Once an &lt;code&gt;importForAfterDisplay&lt;/code&gt; is encountered, it and its dependencies are moved into Tier 3. This returns a promise-based wrapper to access the module once it’s loaded.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;A 500 KB JavaScript page can become 50 KB in Tier 1, 150 KB in Tier 2, and 300 KB in Tier 3. Splitting our code this way enables us to improve time to first paint and time to visual completion by reducing the amount of code that needs to be downloaded to hit each milestone. Because Tier 3 doesn’t affect the pixels on the screen, it isn’t really a render, and the final paint finishes earlier. Most significantly, the loading screen is able to render much earlier.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Delivering experiment-driven dependencies only when they’re needed&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;We often need to render two variations of the same UI, e.g., in an A/B test. The simplest way to do this is to download both versions for all people, but this means we often download code that is never executed. A slightly better approach is to use dynamic imports on render, but this can be slow.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Instead, in keeping with our “as little as possible, as early as possible” mantra, we built a declarative API that alerts us to these decisions early and encodes them in our dependency graph. As the page is loading, the server is able to check the experiment and send down only the required version of the code.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;const Composer = importCond('NewComposerExperiment', {
+  true: 'NewComposer',
+  false: 'OldComposer',
+});
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;span&gt;This works well when the conditions we split on are static across page loads for that person, such as A/B tests, locales, or device classes.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Delivering data-driven dependencies only when they’re needed&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;What about code branches that are not static across page loads? For example, sending down all the rendering code for all the different types and combinations of components for News Feed posts would considerably bloat the page’s JavaScript size.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;These dependencies are decided at runtime, based on which data is returned from the back end. This allows us to use a new feature of&lt;/span&gt; &lt;a href=&quot;https://github.com/facebook/relay&quot;&gt;&lt;span&gt;Relay&lt;/span&gt;&lt;/a&gt; &lt;span&gt;to express which rendering code is needed, depending on what type of data is returned. If the post has a special attachment, such as a photo, we describe that we need the&lt;/span&gt; &lt;span&gt;PhotoComponent&lt;/span&gt; &lt;span&gt;in order to render that photo.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;... on Post {
+  ... on PhotoPost {
+    @module('PhotoComponent.js')
+    photo_data
+  }
+  ... on VideoPost {
+    @module('VideoComponent.js')
+    video_data
+  }
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;&lt;em&gt;&lt;span&gt;We express the dependencies needed to render each post type as part of the query.&lt;/span&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Even better, the &lt;code&gt;PhotoComponent&lt;/code&gt; itself describes exactly which data on the photo attachment type it needs as a fragment, which means we can even split out the query logic.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Using JavaScript budgets to prevent code creep&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;Tiers and conditional dependencies help us deliver just the code necessary for each phase, but we also need to make sure the size of each tier stays under control over time. To manage this, we’ve introduced per-product JavaScript budgets.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;We set budgets based on performance goals, technical constraints, and product considerations. We allocated page-level budgets and subdivide the page based on product boundaries and team boundaries. Shared infra is added to a carefully curated list and given its own budget. Shared infra counts against all pages’ budgets, but modules within it are free for product teams to use. We also have budgets for code that’s deferred, conditionally loaded, or loaded on interaction.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;We’ve created additional tooling for each step of the process:&lt;/span&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;&lt;span&gt;A dependency graph tool makes it easier to understand where bytes are coming from and identify opportunities to decrease code size.&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Size monitoring on merge requests displays size regressions/improvements and triggers customizable alerts.&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Interactive graphs show historical size and how things have changed between revisions.&lt;/span&gt;&lt;/li&gt;
+&lt;li&gt;&lt;span&gt;Dashboards help us understand the current state of sizes in relation to budgets.&lt;/span&gt;&lt;/li&gt;
+&lt;/ul&gt;&lt;h2&gt;&lt;span&gt;Modernizing data-fetching to get it as early as possible &lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;As part of this rebuild, we modernized our data-fetching infra on the web. While some features of the old site used Relay and&lt;/span&gt; &lt;a href=&quot;https://graphql.org/&quot;&gt;&lt;span&gt;GraphQL&lt;/span&gt;&lt;/a&gt; &lt;span&gt;for data-fetching, most fetched data ad-hoc as part of their server-side PHP rendering. With the new site, we were able to standardize with our mobile apps and ensure that all data-fetching goes through GraphQL. Since Relay and GraphQL already handle the “as little as possible” work for us, we just needed to make some changes to support getting the data we needed as early as possible.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Preloading data on the initial server request to improve startup&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;Many web apps need to wait until all their JavaScript is downloaded and executed before fetching data from the server. With Relay, we know statically what data the page needs. This means that as soon as our server receives the request for a page, it can immediately start preparing the necessary data and download it in parallel with the required code. We stream this data with the page as it becomes available so the client can avoid additional round trips and render the final page content sooner.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Streaming data for fewer round trips and better interactivity&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;On the initial load of Facebook.com, some content may initially be hidden or rendered outside of the viewport. For example, most screens fit one or two News Feed posts, but we don’t know in advance how many will fit. Additionally, it’s very likely the user will scroll, and it would take time to fetch each story individually in a serial round trip. On the other hand, the more stories we fetch in one query, the slower that query gets, which leads to longer query times and a longer Visually Complete time for even the first story.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;To solve this, we use an internal GraphQL extension, &lt;code&gt;@stream&lt;/code&gt;, to stream the feed connection to the client both for initial load and subsequent pagination on scroll. This allows us to send each feed story as soon it’s ready, one by one, with just a single query operation.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;fragment HomepageData on User {
+  newsFeed(first: 10) {
+    edges @stream
+  }
+  ...AdditionalData
+}
 
-&lt;br clear=&quot;all&quot; /&gt;&lt;blockquote&gt;
-&lt;table class=&quot;Form&quot; readability=&quot;1.2534246575342&quot;&gt;&lt;tr readability=&quot;2.5068493150685&quot;&gt;&lt;td&gt;&lt;strong&gt;Did you like this article?&lt;/strong&gt; Please accept our &lt;a href=&quot;https://lwn.net/Promo/slink-trial2-3/claim&quot;&gt;trial subscription offer&lt;/a&gt; to be able to see more content like it and to participate in the discussion.&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/blockquote&gt;
-&lt;hr width=&quot;60%&quot; align=&quot;left&quot; /&gt;
-(&lt;a href=&quot;https://lwn.net/Login/?target=/Articles/819452/&quot;&gt;Log in&lt;/a&gt; to post comments)</description>
-<pubDate>Thu, 07 May 2020 19:25:23 +0000</pubDate>
-<dc:creator>todsacerdoti</dc:creator>
-<dc:language>en</dc:language>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://lwn.net/SubscriberLink/819452/1480c3a59d3d9093/</dc:identifier>
-</item>
-<item>
-<title>New Lenovo ThinkPad Range with Ryzen 4000 and 4000 Pro Mobile</title>
-<link>https://www.anandtech.com/show/15772/new-lenovo-thinkpad-range-with-ryzen-4000-4000-pro-mobile</link>
-<guid isPermaLink="true" >https://www.anandtech.com/show/15772/new-lenovo-thinkpad-range-with-ryzen-4000-4000-pro-mobile</guid>
-<description>&lt;p&gt;Small to medium business owners generally want a something in a compact design, to lug it around to a business meeting to take essential notes, but ultimately can be managed from a central administration system across hundreds or thousands of employees. Catering for this market is Lenovo, and it has announced a pair of new models designed for its SMB customers. The Lenovo ThinkPad E14 and E15 series of notebooks have been improved in design and are now available with up to an including an AMD Ryzen 7 4700U APU. Also announced are AMD's ThinkPad T14, T14s, L14, L15, and smaller X13 models all featuring the latest AMD Ryzen 4000 PRO series processors with extra security features designed for professional and business users.&lt;/p&gt;
-&lt;p&gt;Adding to its portfolio, including its Intel 10th gen mobile refresh ThinkPad E14 and E15 series, SMB users looking now have an AMD Ryzen based option. Similar in design to the previous E14 and E15 series, the new Lenovo ThinkPad E series will be available with Ryzen 4000 Mobile. Lenovo has stated that it has an improved screen to body ratio of 85%, although it doesn't provide the metric which this is measured against.&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;a href=&quot;https://images.anandtech.com/doci/15772/Lenovo%20ThinkPad%20E15%202.jpg&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://images.anandtech.com/doci/15772/Lenovo%20ThinkPad%20E15%202_575px.jpg&quot;/&gt;&lt;/a&gt;&lt;br/&gt;Lenovo ThinkPad E15 with Ryzen 4000 Mobile&lt;/p&gt;
-&lt;p&gt;The Lenovo ThinkPad series is is available with an eight-core AMD Ryzen 7 4700U APU without SMT and has seven Radeon graphics cores to power the display. While Lenovo hasn't detailed the display or the other vital specifications at this time, it has added a touch fingerprint reader and an optional IR camera powered by Mirametrix. They are quoted as specialists in security and privacy with its gaze tracking technology. This combined with its Glance software which is integrated within adds an extra element of security which respond to a users presence and can automatically lock the laptop when users step away. The touch fingerprint reader is built into the power button and allows users the ability to turn the system on with one touch, which is more secure than conventional power buttons and is suited to business environments.&lt;/p&gt;
-&lt;p align=&quot;center&quot;&gt;&lt;a href=&quot;https://images.anandtech.com/doci/15772/Lenovo%20X13.jpg&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://images.anandtech.com/doci/15772/Lenovo%20X13_575px.jpg&quot;/&gt;&lt;/a&gt;&lt;br/&gt;Lenovo ThinkPad X13 is the most portable from its range&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;Lenovo has also announced new ThinkPad T, X, and L series models powered by AMD Ryzen PRO 4000 series processors. The Lenovo ThinkPad 14 Gen 1 is advertised to include a projected 16-hour battery life and a thin lightweight frame of 17.9 mm and 1.46 Kg, with an even bigger 20-hour battery life on its uprated T14s model. The ThinkPad T14s has a slimmer profile at 16.1 mm thick, with a weight starting at 1.27 Kg. The smaller ThinkPad X13 model has a claimed battery life of up to 17.5 hours, with a thickness of 16.9 mm and a weight on an upward curve starting at just 1.28 Kg. This makes the ThinkPad X13 the lightest from its announced stack.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://images.anandtech.com/doci/15772/Lenovo%20ThinkPad%20L15.jpg&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://images.anandtech.com/doci/15772/Lenovo%20ThinkPad%20L15_575px.jpg&quot;/&gt;&lt;/a&gt;&lt;br/&gt;The Lenovo ThinkPad L15 powered by Ryzen 4000 PRO Mobile&lt;/p&gt;
-&lt;p&gt;Moving down the new Lenovo ThinkPad stack are the L14 and L15 models which are the largest in size with a thickness of 20.4 mm on the L14, whereas the L15 is slightly chunkier with a thickness of 21 mm. The ThinkPad L14 will have a weight starting at 1.61 Kg, while the L15 will weigh upwards of 1.98 Kg. Both include a projected battery life of up to 14-hours, which Lenovo claims it has used the MobileMark14 benchmark to get this data.&lt;/p&gt;
-&lt;p&gt;All the Lenovo ThinkPad T, X, and L series models will feature AMD's newest Ryzen 4000 PRO mobile series processors, with extra layers of built-in security features, and feature Lenovo's Self-Healing BIOS, and Lenovo ThinkShield. &lt;span&gt;These new models will be available from June, with prices starting at $849 for the T14, $1029 for the T14s, and $849 for the X13 series. Also available from June will be the L14 and L15 series of ThinkPad models which will both start at $649.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;As for the Lenovo ThinkPad E14 and E15 series, both will be available from June and come with a price tag starting at $639.&lt;/span&gt;&lt;/p&gt;
-&lt;h3&gt;Related Reading&lt;/h3&gt;
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3&gt;&lt;span&gt;Deferring data that’s not needed right away&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;Different parts of certain queries take longer to compute than others. For example, when viewing a profile, it’s relatively quick to fetch a person’s name and profile photo, but it takes a bit longer to fetch the contents of their Timeline.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;To fetch both types of data with a single query, we use &lt;code&gt;@defer&lt;/code&gt;, which enables different sections of the response to be streamed as soon as they’re ready. This lets us render the bulk of the UI with initial data as quickly as possible, and render loading states for the rest. With&lt;/span&gt; &lt;a href=&quot;https://reactjs.org/docs/concurrent-mode-suspense.html&quot;&gt;&lt;span&gt;React Suspense&lt;/span&gt;&lt;/a&gt;&lt;span&gt;, this is even easier, as we can explicitly craft our loading states to ensure a smooth, top-down page load experience.&lt;/span&gt;&lt;/p&gt;
+&lt;pre class=&quot;line-numbers&quot;&gt;
+&lt;code class=&quot;language-javascript&quot;&gt;fragment ProfileData on User {
+  name
+  profile_picture { ... }
+  ...AdditionalData @defer
+}
+&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2&gt;&lt;span&gt;Route maps and definitions for faster navigation&lt;/span&gt;&lt;/h2&gt;
+&lt;p&gt;&lt;span&gt;Fast navigation is an important feature of single-page applications. When navigating to a new route, we need to fetch various code and data from the server to render the destination page. To reduce the number of network round trips required when loading a new page, the client needs to know which resources will be needed for each route ahead of time. We call this a route map and each entry a route definition.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Getting route definitions as early as possible&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;For Facebook, this route map is too large to send all at once. Instead, we dynamically add route definitions to the route map during the session, as new links are rendered. The route map and the router live at the very top of the application, allowing the combination of current application and router state to drive app-level state decisions, such as the behavior of the top navigation bar or chat tabs based on the current route.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Prefetching resources as early as possible&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;It’s common for client-side applications to wait until a page is being rendered by React to download the code and data needed for that page. Often this is done using&lt;/span&gt; &lt;a href=&quot;https://reactjs.org/docs/code-splitting.html#reactlazy&quot;&gt;&lt;span&gt;React.lazy&lt;/span&gt;&lt;/a&gt; &lt;span&gt;or a similar primitive. Since this can make page navigation slow, we instead start our first request for some of the necessary resources even before a link is clicked:&lt;/span&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15026 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg&quot; alt=&quot;We kick off fetches early, preloading on hover or focus, and fetching on mousedown. This example is specific to desktop, but other heuristics can be used for touch devices.&quot; width=&quot;2000&quot; height=&quot;1126&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg 2000w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg?resize=580,326 580w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg?resize=916,516 916w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg?resize=768,432 768w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg?resize=1024,577 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-01.jpg?resize=1536,865 1536w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;We kick off fetches early, preloading on hover or focus, and fetching on mousedown. This example is specific to desktop, but other heuristics can be used for touch devices.
+&lt;p&gt;&lt;span&gt;To provide a more fluid experience than just showing a blank screen when navigating, we use&lt;/span&gt; &lt;a href=&quot;https://reactjs.org/docs/concurrent-mode-patterns.html#transitions&quot;&gt;&lt;span&gt;React Suspense transitions&lt;/span&gt;&lt;/a&gt; &lt;span&gt;to continue rendering the previous route until the next route is either fully rendered or suspends into a “good” loading state with UI skeletons for the next page. This is much less jarring, and it mimics standard browser behavior.&lt;/span&gt;&lt;/p&gt;
+&lt;h3&gt;&lt;span&gt;Parallelizing code and data download&lt;/span&gt;&lt;/h3&gt;
+&lt;p&gt;&lt;span&gt;We do a lot of&lt;/span&gt; &lt;a href=&quot;https://developer.mozilla.org/en-US/docs/Web/Performance/Lazy_loading&quot;&gt;&lt;span&gt;lazy loading&lt;/span&gt;&lt;/a&gt; &lt;span&gt;of code on the new site, but if we lazy load the code for a route and the data-fetching code for that route lives inside of that code, we end up with a serial load.&lt;/span&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15031 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg&quot; alt=&quot;A “traditional” React/Relay app with lazy loaded routes results in two round trips.&quot; width=&quot;2000&quot; height=&quot;570&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg 2000w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg?resize=916,261 916w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg?resize=768,219 768w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg?resize=1024,292 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-02.jpg?resize=1536,438 1536w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;A “traditional” React/Relay app with lazy loaded routes results in two round trips.
+&lt;p&gt;&lt;span&gt;To solve this problem, we came up with EntryPoints, which are files that wrap a code-split point and transform inputs into queries. These files are very small and are downloaded in advance for any reachable code-split point.&lt;/span&gt;&lt;span&gt;&lt;br/&gt;&lt;/span&gt;&lt;/p&gt;
+&lt;img class=&quot;wp-image-15033 size-full&quot; data-src=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg&quot; alt=&quot;Code and data are fetched in parallel, allowing us to download these in a single network round trip.&quot; width=&quot;2000&quot; height=&quot;776&quot; data-srcset=&quot;https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg 2000w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg?resize=916,355 916w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg?resize=768,298 768w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg?resize=1024,397 1024w, https://engineering.fb.com/wp-content/uploads/2020/05/Comet-03-1.jpg?resize=1536,596 1536w&quot; sizes=&quot;(max-width: 992px) 100vw, 62vw&quot;/&gt;Code and data are fetched in parallel, allowing us to download these in a single network round trip.
+&lt;p&gt;&lt;span&gt;The GraphQL query is still colocated with the view, but the EntryPoint encapsulates when that query is needed and how to transform the inputs into the correct variables. The app uses these EntryPoints to automatically decide when to fetch the resources, making sure the right thing happens by default. This has the added benefit of creating a single JavaScript function that contains all the data-fetching needs for any given point in the app, which can be used for the server preloading discussed earlier.&lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Many of the changes we’ve discussed here are not specific to Facebook. These concepts and patterns can be applied to any client-side app using any framework or library. By standardizing our tech stack, we have been able to rethink how we introduce functionality that people want in a performant, sustainable way — even as we operate at engineering and product scale. &lt;/span&gt;&lt;/p&gt;
+&lt;p&gt;&lt;span&gt;Engineering experience improvements and user experience improvements must go hand in hand, and performance and accessibility cannot be viewed as a tax on shipping features. With great APIs, tools, and automation, we can help engineers move faster and ship better, more performant code at the same time. The work done to improve performance for the new Facebook.com was extensive and we expect to share more on this work soon. To check out the redesign, visit &lt;a href=&quot;https://www.facebook.com/&quot;&gt;facebook.com&lt;/a&gt; from your desktop. It’s rolling out gradually and will be available to everyone soon.&lt;/span&gt;&lt;/p&gt;
+
 </description>
-<pubDate>Thu, 07 May 2020 17:15:29 +0000</pubDate>
-<dc:creator>awiesenhofer</dc:creator>
-<og:title>New Lenovo ThinkPad Range with Ryzen 4000 &amp; 4000 PRO Mobile</og:title>
+<pubDate>Fri, 08 May 2020 16:04:56 +0000</pubDate>
+<dc:creator>alexvoica</dc:creator>
 <og:type>article</og:type>
-<og:url>https://www.anandtech.com/show/15772/new-lenovo-thinkpad-range-with-ryzen-4000-4000-pro-mobile</og:url>
-<og:image>https://images.anandtech.com/doci/15772/Lenovo%20ThinkPad%20E15_678x452.jpg</og:image>
+<og:title>Rebuilding our tech stack for a new Facebook.com - Facebook Engineering</og:title>
+<og:description>Building a new web app for today’s browsers, we completely rebuilt our tech stack to achieve our goals for performance and sustainable future growth.</og:description>
+<og:url>https://engineering.fb.com/web/facebook-redesign/</og:url>
+<og:image>https://engineering.fb.com/wp-content/uploads/2020/05/Comet_hero.jpg</og:image>
+<dc:language>en-US</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://www.anandtech.com/show/15772/new-lenovo-thinkpad-range-with-ryzen-4000-4000-pro-mobile</dc:identifier>
+<dc:identifier>https://engineering.fb.com/web/facebook-redesign/</dc:identifier>
 </item>
 <item>
-<title>Google ends plans for smart city in Toronto</title>
-<link>https://www.bbc.com/news/technology-52572362</link>
-<guid isPermaLink="true" >https://www.bbc.com/news/technology-52572362</guid>
-<description>&lt;figure class=&quot;media-landscape has-caption full-width lead&quot;&gt;&lt;span class=&quot;image-and-copyright-container&quot;&gt;
-                
-                &lt;img class=&quot;js-image-replace&quot; alt=&quot;Aerial shot of Toronto with the waterfront land in front&quot; src=&quot;https://ichef.bbci.co.uk/news/320/cpsprodpb/13F01/production/_106856618_waterfronttoronto.gif&quot; width=&quot;976&quot; height=&quot;549&quot;/&gt;&lt;span class=&quot;off-screen&quot;&gt;Image copyright&lt;/span&gt;
-                 &lt;span class=&quot;story-image-copyright&quot;&gt;Waterfront Toronto&lt;/span&gt;
-                
-            &lt;/span&gt;
-            
-            &lt;figcaption class=&quot;media-caption&quot;&gt;&lt;span class=&quot;off-screen&quot;&gt;Image caption&lt;/span&gt;
-                &lt;span class=&quot;media-caption__text&quot;&gt;
-                    The former dockland and industrial area of Toronto that Sidewalk Labs planned to develop sits on the edge of Lake Ontario
-                &lt;/span&gt;
-            &lt;/figcaption&gt;&lt;/figure&gt;&lt;p class=&quot;story-body__introduction&quot;&gt;Google's sister firm Sidewalk Labs has scrapped a plan to build a smart city in Canada, citing complications caused by the Covid-19 pandemic.&lt;/p&gt;&lt;p&gt;For several years it had pursued ambitions to build a digital-first city in Toronto &quot;from the internet up&quot;.&lt;/p&gt;&lt;p&gt;Chief executive Dan Doctoroff blamed &quot;unprecedented economic uncertainty&quot; for abandoning the plan.&lt;/p&gt;&lt;p&gt;The project had proved controversial and Sidewalk Labs had already been forced to scale back its ambitions.&lt;/p&gt;&lt;p&gt;&lt;a href=&quot;https://medium.com/sidewalk-talk/why-were-no-longer-pursuing-the-quayside-project-and-what-s-next-for-sidewalk-labs-9a61de3fee3a&quot; class=&quot;story-body__link-external&quot;&gt;In a blog post&lt;/a&gt;, Mr Doctoroff said: &quot;As unprecedented economic uncertainty has set in around the world, and in the Toronto real estate market, it has become too difficult to make the 12-acre project financially viable without sacrificing core parts of the plan we had developed together with Waterfront Toronto to build a truly inclusive, sustainable community.&lt;/p&gt;&lt;p&gt;&quot;I believe the ideas we have developed over the last two-and-a-half years will represent a meaningful contribution to the work of tackling big urban problems, particularly in the areas of affordability and sustainability.&quot;&lt;/p&gt;&lt;p&gt;The vision was to have a city full of technology, from autonomous cars to innovative ways of collecting rubbish, and hundreds of sensors collecting data on air quality and the movements of people. Buildings would be sustainable and built in radical new ways, and cycle lanes would be heated.&lt;/p&gt;&lt;p&gt;But some questioned how Sidewalk Labs had won the contract. When it emerged that it planned to develop a much larger site than originally stated, a lobby group of citizens opposing the plans emerged, asking why they would want to be &quot;lab rats&quot; in a digital experiment.&lt;/p&gt;&lt;p&gt;An independent panel was set up to scrutinise its plans and released a report suggesting some of its ideas were &quot;tech for tech's sake&quot;, and potentially unnecessary.&lt;/p&gt;&lt;p&gt;Sidewalk Labs was eventually given a tentative green light to continue its plan, but it was heavily scaled back from the 190-acre site it wanted to work with to a 12-acre piece of land. &lt;/p&gt;&lt;p&gt;It was also told that any data it collected from its sensors would have to become a public asset.&lt;/p&gt;&lt;p&gt;Stephen Diamond is chairman of Waterfront Toronto, the body set up to oversee development of the site. &lt;/p&gt;&lt;p&gt;Reacting to Sidewalk's announcement, he said: &quot;While this is not the outcome we had hoped for, Waterfront Toronto offers thanks and appreciation to Sidewalk Labs for its vision, effort and the many commitments that both the company and its employees have made to the future of Toronto.&lt;/p&gt;&lt;p&gt;&quot;Quayside remains an excellent opportunity to explore innovative solutions to affordable housing, improved mobility, climate change and several other urban challenges that Toronto - and cities around the world - must address in order to continue to grow and succeed.&quot;&lt;/p&gt;&lt;p&gt;In his blog, Dan Doctoroff said the firm continued to invest in start-ups &quot;working on everything from robotic furniture to digital electricity&quot;.&lt;/p&gt;&lt;p&gt;&quot;We continue to work internally on factory-made mass timber construction that can improve housing affordability&quot;&lt;/p&gt;
-            </description>
-<pubDate>Thu, 07 May 2020 16:46:27 +0000</pubDate>
-<dc:creator>colinprince</dc:creator>
-<og:title>Google ends plans for smart city in Toronto</og:title>
-<og:type>article</og:type>
-<og:description>Sister firm Sidewalk Labs cites Covid-19 as the reason for stepping back from its ambitious plan.</og:description>
-<og:url>https://www.bbc.com/news/technology-52572362</og:url>
-<og:image>https://ichef.bbci.co.uk/news/1024/branded_news/13F01/production/_106856618_waterfronttoronto.gif</og:image>
+<title>Analysis of dev agencies with hourly rates, team size and tech stack</title>
+<link>https://devquarterly.com/report/q2_2020</link>
+<guid isPermaLink="true" >https://devquarterly.com/report/q2_2020</guid>
+<description>&lt;div data-server-rendered=&quot;true&quot; id=&quot;__nuxt&quot;&gt;
+&lt;div id=&quot;__layout&quot;&gt;
+&lt;div data-app=&quot;true&quot; id=&quot;app&quot; class=&quot;v-application v-application--is-ltr theme--light&quot;&gt;
+&lt;div class=&quot;v-application--wrap&quot;&gt;
+&lt;header class=&quot;v-sheet v-sheet--tile theme--dark v-toolbar v-toolbar--dense v-app-bar v-app-bar--elevate-on-scroll v-app-bar--fixed v-app-bar--hide-shadow&quot;&gt;&lt;div class=&quot;v-toolbar__content&quot;&gt;
+&lt;div class=&quot;v-toolbar__title headline text-uppercase&quot;&gt;
+&lt;div class=&quot;v-responsive v-image&quot;&gt;
+
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;div class=&quot;v-toolbar__items hidden-sm-and-down&quot;&gt;&lt;a href=&quot;https://devquarterly.com/report/&quot; class=&quot;v-btn--active v-btn v-btn--flat v-btn--router v-btn--text theme--dark v-size--default&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Q2 2020&lt;/span&gt;&lt;/a&gt;
+
+&lt;a href=&quot;https://devquarterly.com/report/finder&quot; class=&quot;v-btn v-btn--flat v-btn--router v-btn--text theme--dark v-size--default&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Agency Finder&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://agency.devquarterly.com/register&quot; target=&quot;_blank&quot; class=&quot;v-btn v-btn--flat v-btn--text theme--dark v-size--default&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Agency Sign Up&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://agency.devquarterly.com/register?get_featured=1&quot; target=&quot;_blank&quot; class=&quot;v-btn v-btn--flat v-btn--text theme--dark v-size--default orange--text&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Get featured&lt;/span&gt;&lt;/a&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/header&gt;&lt;nav flat=&quot;&quot; class=&quot;dq--left-menu v-navigation-drawer v-navigation-drawer--close v-navigation-drawer--fixed v-navigation-drawer--is-mobile theme--light&quot;&gt;&lt;div class=&quot;v-navigation-drawer__content&quot;&gt;
+&lt;div class=&quot;v-list v-sheet v-sheet--tile theme--light v-list--dense v-list--nav&quot;&gt;
+&lt;p&gt;Q2 2020 &lt;/p&gt;
+&lt;hr role=&quot;separator&quot; aria-orientation=&quot;horizontal&quot; class=&quot;mt-2 mb-2 v-divider theme--light&quot;/&gt;
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;Get featured&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;Agency Finder&lt;/p&gt;
+&lt;/div&gt;
+&lt;hr role=&quot;separator&quot; aria-orientation=&quot;horizontal&quot; class=&quot;mt-2 mb-2 v-divider theme--light&quot;/&gt;
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;I. Introduction&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;II. Mobile dev agencies&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;III. Web and software&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;IV. E-commerce&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;V. Blockchain &amp;amp; Crypto&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;VI. Data science &amp;amp; BI&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;VII. Methodology&lt;/p&gt;
+&lt;/div&gt;
+&lt;hr role=&quot;separator&quot; aria-orientation=&quot;horizontal&quot; class=&quot;mt-2 mb-2 v-divider theme--light&quot;/&gt;
+
+&lt;div class=&quot;v-list-item__content&quot;&gt;
+&lt;p&gt;Next: Q3 2020&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;/nav&gt;&lt;div class=&quot;dq--loader&quot;&gt;
+
+&lt;/div&gt;
+&lt;footer class=&quot;v-footer v-sheet v-sheet--tile theme--light v-footer--padless v-footer--inset&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;div class=&quot;container grid-list-xl&quot; data-v-c472d1f2=&quot;&quot;&gt;
+&lt;div class=&quot;layout wrap fluid align-center justify-center row fill-height&quot; data-v-c472d1f2=&quot;&quot;&gt;
+&lt;div class=&quot;flex xs12 sm12 md12 lg12 xl10&quot; data-v-c472d1f2=&quot;&quot;&gt;
+&lt;div class=&quot;layout wrap fluid align-center justify-center row fill-height&quot; data-v-c472d1f2=&quot;&quot;&gt;
+&lt;div class=&quot;flex caption text-right text-xs-left md4&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;a href=&quot;https://devquarterly.com&quot; target=&quot;_blank&quot; class=&quot;mx-3 caption v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Copyright © 2020 DevQuarterly&lt;/span&gt;&lt;/a&gt;&lt;/div&gt;
+&lt;div class=&quot;flex text-xs-center md4&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;a href=&quot;https://twitter.com/DevQuarterlyCom&quot; target=&quot;_blank&quot; class=&quot;mx-3 caption v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Twitter&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://devquarterly.com/cdn-cgi/l/email-protection#e28b8c848da2868794939783909687908e9bcc818d8f&quot; target=&quot;_blank&quot; class=&quot;mx-3 caption v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;&lt;span class=&quot;__cf_email__&quot; data-cfemail=&quot;bcd5d2dad3fcd8d9cacdc9ddcec8d9ced0c592dfd3d1&quot;&gt;[email protected]&lt;/span&gt;&lt;/span&gt;&lt;/a&gt;&lt;/div&gt;
+&lt;div class=&quot;flex text-xs-center md4&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;a href=&quot;https://devquarterly.com/privacy&quot; target=&quot;_blank&quot; class=&quot;mx-3 caption v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Privacy Policy&lt;/span&gt;&lt;/a&gt; &lt;a href=&quot;https://devquarterly.com/tos&quot; target=&quot;_blank&quot; class=&quot;mx-3 caption v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Terms of Use&lt;/span&gt;&lt;/a&gt;&lt;/div&gt;
+&lt;div class=&quot;flex text-center md12&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;a href=&quot;https://strapi.io/&quot; target=&quot;_blank&quot; class=&quot;mx-3 overline v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;Powered by&lt;/span&gt;&lt;/a&gt;
+&lt;div class=&quot;v-responsive v-image ml-2&quot; data-v-c472d1f2=&quot;&quot;&gt;
+
+
+&lt;/div&gt;
+&lt;a href=&quot;https://nuxtjs.org/&quot; target=&quot;_blank&quot; class=&quot;mx-3 overline v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;built with&lt;/span&gt;&lt;/a&gt;
+&lt;div class=&quot;v-responsive v-image ml-1 mr-2&quot; data-v-c472d1f2=&quot;&quot;&gt;
+
+
+&lt;/div&gt;
+nuxt.js &lt;a href=&quot;https://vuetifyjs.com/&quot; target=&quot;_blank&quot; class=&quot;mx-3 overline v-btn v-btn--flat v-btn--text theme--light v-size--small&quot; data-v-c472d1f2=&quot;&quot;&gt;&lt;span class=&quot;v-btn__content&quot;&gt;and&lt;/span&gt;&lt;/a&gt;
+&lt;div class=&quot;v-responsive v-image ml-1 mr-1&quot; data-v-c472d1f2=&quot;&quot;&gt;
+
+
+&lt;/div&gt;
+vuetify&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/footer&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+</description>
+<pubDate>Fri, 08 May 2020 14:48:19 +0000</pubDate>
+<dc:creator>tombrm</dc:creator>
+<og:type>website</og:type>
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://www.bbc.com/news/technology-52572362</dc:identifier>
+<dc:identifier>https://devquarterly.com/report/q2_2020</dc:identifier>
 </item>
 <item>
-<title>The Cost of Free Doughnuts: 70 Years of Regret</title>
-<link>https://www.npr.org/sections/money/2012/07/13/156737801/the-cost-of-free-doughnuts-70-years-of-regret</link>
-<guid isPermaLink="true" >https://www.npr.org/sections/money/2012/07/13/156737801/the-cost-of-free-doughnuts-70-years-of-regret</guid>
-<description>&lt;div id=&quot;res156740239&quot; class=&quot;bucketwrap image large&quot;&gt;
-&lt;div class=&quot;imagewrap&quot; data-crop-type=&quot;&quot;&gt;&lt;img src=&quot;https://media.npr.org/assets/img/2012/07/13/8e02281v1-a4643e6defc77b420d078b8ccab425a868aae477-s1100-c15.jpg&quot; data-original=&quot;https://media.npr.org/assets/img/2012/07/13/8e02281v1-a4643e6defc77b420d078b8ccab425a868aae477-s1100.jpg&quot; class=&quot;img lazyOnLoad&quot; alt=&quot;&quot; loading=&quot;lazy&quot;/&gt;&lt;/div&gt;
+<title>U.S. field hospitals stand down, most without treating any Covid-19 patients</title>
+<link>https://www.npr.org/2020/05/07/851712311/u-s-field-hospitals-stand-down-most-without-treating-any-covid-19-patients</link>
+<guid isPermaLink="true" >https://www.npr.org/2020/05/07/851712311/u-s-field-hospitals-stand-down-most-without-treating-any-covid-19-patients</guid>
+<description>&lt;div id=&quot;res851968961&quot; class=&quot;bucketwrap image large&quot;&gt;
+&lt;div class=&quot;imagewrap&quot; data-crop-type=&quot;&quot;&gt;&lt;img src=&quot;https://media.npr.org/assets/img/2020/05/07/ap_20121523242226_custom-f74f6c4fc5f7d89a650de2622183c0a68b2aa80b-s1100-c15.jpg&quot; data-original=&quot;https://media.npr.org/assets/img/2020/05/07/ap_20121523242226_custom-f74f6c4fc5f7d89a650de2622183c0a68b2aa80b-s1100.jpg&quot; class=&quot;img lazyOnLoad&quot; alt=&quot;&quot; loading=&quot;lazy&quot;/&gt;
+&lt;/div&gt;
 &lt;div class=&quot;credit-caption&quot;&gt;
-&lt;div class=&quot;caption-wrap&quot; readability=&quot;7.3183856502242&quot;&gt;
-&lt;div class=&quot;caption&quot; aria-label=&quot;Image caption&quot; readability=&quot;9.9951923076923&quot;&gt;
-&lt;p&gt;U.S. soldiers receive refreshments, including doughnuts, from an American Red Cross clubmobile in London. Soldiers today still resent a Red Cross move to charge for doughnuts. &lt;strong class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;&lt;a href=&quot;http://lcweb2.loc.gov/service/pnp/fsa/8e02000/8e02200/8e02281v.jpg&quot; target=&quot;_blank&quot;&gt;Library of Congress&lt;/a&gt;&lt;/strong&gt; &lt;strong class=&quot;hide-caption&quot;&gt;hide caption&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&quot;caption-wrap&quot; readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;caption&quot; aria-label=&quot;Image caption&quot; readability=&quot;10&quot;&gt;
+&lt;p&gt;Construction at the COVID-19 field hospital at McCormick Place in Chicago on April 10. The city pared back plans for a 3,000-bed temporary hospital at the nation's largest convention center as infection numbers decreased. &lt;strong class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Nam Y. Huh/AP&lt;/strong&gt; &lt;strong class=&quot;hide-caption&quot;&gt;hide caption&lt;/strong&gt;&lt;/p&gt;
 &lt;/div&gt;
 &lt;strong class=&quot;toggle-caption&quot;&gt;toggle caption&lt;/strong&gt;&lt;/div&gt;
-&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;&lt;a href=&quot;http://lcweb2.loc.gov/service/pnp/fsa/8e02000/8e02200/8e02281v.jpg&quot; target=&quot;_blank&quot;&gt;Library of Congress&lt;/a&gt;&lt;/span&gt;&lt;/div&gt;
+&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Nam Y. Huh/AP&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;enlarge_measure&quot;&gt;
+&lt;div class=&quot;img_wrap&quot;&gt;&lt;img data-original=&quot;https://media.npr.org/assets/img/2020/05/07/ap_20121523242226_custom-f74f6c4fc5f7d89a650de2622183c0a68b2aa80b-s1200.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
 &lt;/div&gt;
-&lt;p&gt;A lot of the online services you probably use are free. Gmail is free. Facebook is free. Yahoo News and NPR are free (though we certainly &lt;a href=&quot;http://www.npr.org/stations/donate/index.php?ps=st273&quot; target=&quot;_blank&quot;&gt;solicit contributions&lt;/a&gt;!). But increasingly, online companies are trying to figure out how to start charging, at least for some services, some of the time.&lt;/p&gt;
-&lt;p&gt;But today, we have a cautionary tale about charging for things that were once free. It's the story of how one small mistake moving away from free can cause trouble that's impossible to fix.&lt;/p&gt;
-&lt;p&gt;The story starts when Russ Roberts, a George Mason University economist, started hearing about how veterans don't like the Red Cross. That struck him as odd, and when he asked about it, he always got the same answer: the doughnuts.&lt;/p&gt;
-&lt;p&gt;&quot;And I thought, the doughnuts?&quot; Roberts says. &quot;What could that be?&quot;&lt;/p&gt;
-&lt;p&gt;Go to any VFW hall, even today, and you'll get the same story: During World War II, the Red Cross had comfort stations for soldiers overseas, with free coffee and free doughnuts. Then, in 1942, the Red Cross started charging for the doughnuts. Soldiers have held a grudge ever since.&lt;/p&gt;
+&lt;div class=&quot;enlarge_html&quot; readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;image_data&quot; readability=&quot;10&quot;&gt;
+&lt;p class=&quot;caption&quot;&gt;Construction at the COVID-19 field hospital at McCormick Place in Chicago on April 10. The city pared back plans for a 3,000-bed temporary hospital at the nation's largest convention center as infection numbers decreased.&lt;/p&gt;
+&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Nam Y. Huh/AP&lt;/span&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;As hospitals were overrun by coronavirus patients in other parts of the world, the Army Corps of Engineers mobilized in the U.S., hiring private contractors to build emergency field hospitals around the country.&lt;/p&gt;
+&lt;p&gt;The endeavor cost more than $660 million, according to an NPR analysis of federal spending records.&lt;/p&gt;
+&lt;p&gt;But nearly four months into the pandemic, most of these facilities haven't treated a single patient.&lt;/p&gt;
+&lt;div id=&quot;res851972117&quot; class=&quot;bucketwrap statichtml&quot;&gt;
+&lt;p data-pym-loader=&quot;&quot; data-child-src=&quot;https://apps.npr.org/dailygraphics/graphics/field-hospitals-20200501/&quot; id=&quot;responsive-embed-field-hospitals-20200501&quot;&gt;Loading...&lt;/p&gt;
+&lt;/div&gt;
+&lt;p&gt;&lt;a href=&quot;https://apps.npr.org/dailygraphics/graphics/field-hospitals-20200501?mode=childlink&amp;amp;utm_source=nprnews&amp;amp;utm_medium=app&amp;amp;utm_campaign=storyredirect&quot;&gt;&lt;em&gt;&lt;strong&gt;Don't see the graphic above? Click here.&lt;/strong&gt;&lt;/em&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Public health experts said this episode exposes how ill-prepared the U.S. is for a pandemic. They praised the Army Corps for quickly providing thousands of extra beds, but experts said there wasn't enough planning to make sure these field hospitals could be put to use once they were finished.&lt;/p&gt;
+&lt;p&gt;&quot;It's so painful because what it's showing is that the plans we have in place, they don't work,&quot; said Robyn Gershon, a professor at New York University's School of Global Public Health. &quot;We have to go back to the drawing board and redo it.&quot;&lt;/p&gt;
+&lt;p&gt;But the nation's governors — who requested the Army Corps projects and, in some cases, contributed state funding — said they're relieved these facilities didn't get more use. They said early models predicted a catastrophic shortage of hospital beds, and no one knew for sure when or if stay-at-home orders would reduce the spread of the coronavirus.&lt;/p&gt;
+&lt;p&gt;&quot;All those field hospitals and available beds sit empty today,&quot; Florida Gov. Ron DeSantis, a Republican, said last month. &quot;And that's a very, very good thing.&quot;&lt;/p&gt;
 &lt;aside id=&quot;ad-backstage-wrap&quot; aria-label=&quot;advertisement&quot;&gt;
-&lt;/aside&gt;&lt;p&gt;Turns out it's true.&lt;/p&gt;
-&lt;p&gt;&quot;It keeps coming up, that they were charged for coffee and doughnuts,&quot; says Susan Watson, archivist for the Red Cross.&lt;/p&gt;
-&lt;p&gt;The organization started charging only because the U.S. Secretary of War asked it to. British soldiers had to pay for their snacks, and the free doughnuts for Americans were causing tensions. So the Red Cross complied, after protesting to no avail. It didn't last long — for most of the last 70 years, Red Cross doughnuts have remained free — but veterans haven't forgotten.&lt;/p&gt;
-&lt;p&gt;Chalk it up to something called categorical change, says Uri Simonsohn, a University of Pennsylvania business professor. Price changes, people can adjust to. But this was different.&lt;/p&gt;
-&lt;p&gt;&quot;Imagine, for Thanksgiving, you go to your parents' for dinner and after a nice dinner they say, 'That's going to be $10 per person,' &quot; Simonsohn says. &quot;You would be upset.&quot;&lt;/p&gt;
-&lt;p&gt;The problem isn't the price — $10 for a good turkey dinner might not be such a bad deal — but that you're being charged in the first place. It changes the relationship. For the veterans, the Red Cross went from being a little like Mom, to being the corner store.&lt;/p&gt;
-&lt;p&gt;So for all the Internet companies out there looking to charge for your service — take heed. Changing categories is really difficult.&lt;/p&gt;
+&lt;/aside&gt;&lt;p&gt;Michigan Gov. Gretchen Whitmer, a Democrat, said: &quot;These 1,000-bed alternate care sites are not necessary; they're not filled. Thank God.&quot;&lt;/p&gt;
+&lt;p&gt;Senior military leaders also said the effort was a success — even if the beds sit empty. Gen. John Hyten, vice chairman of the Joint Chiefs of Staff, was asked at a news conference if it bothered him to see the field hospitals go unused.&lt;/p&gt;
+&lt;p&gt;&quot;For gosh sakes, no,&quot; Hyten said. &quot;If you see beds full, that means the local capacity of the local hospitals to handle this [has] been overwhelmed. And now we're into an emergency situation.&quot;&lt;/p&gt;
+&lt;p&gt;The Army Corps started building more than 30 field hospitals, retrofitting convention centers and erecting climate-controlled tents, in mid-March. Agency officials pushed to get these facilities done fast — limiting the bidding process and often negotiating directly with contractors they knew could deliver on time.&lt;/p&gt;
+
+&lt;p&gt;&quot;I tell our guys, you have three weeks,&quot; Lt. Gen. Todd Semonite, commander of the Army Corps of Engineers, said at &lt;a href=&quot;https://www.c-span.org/video/?470758-1/army-corps-engineers-coronavirus-news-conference&quot;&gt;a Pentagon news briefing&lt;/a&gt; in March. &quot;You get as much as you can [get] done in three weeks. And then the mission is complete. We have a narrow window of opportunity. If we don't leverage that window of opportunity, we're gonna miss it.&quot;&lt;/p&gt;
+&lt;p&gt;At Chicago's McCormick Place, workers scrambled in April to transform the convention center into a massive temporary hospital with 3,000 beds — more than the biggest hospital in Illinois.&lt;/p&gt;
+&lt;p&gt;&quot;This was an empty convention hall,&quot; Illinois Gov. J.B. Pritzker said &lt;a href=&quot;https://www.youtube.com/watch?v=qnBzqL6aoZg&quot;&gt;during a news conference&lt;/a&gt; while flanked by construction workers in hard hats and bright yellow vests. &quot;Monumental, round-the-clock dedication is what got this done before we need it, preparing for saving lives in the event that things become as bad as some have predicted.&quot;&lt;/p&gt;
+&lt;p&gt;But just as construction got underway, states were issuing stay-at-home orders. And the spread of the coronavirus eventually began to slow.&lt;/p&gt;
+&lt;p&gt;Work on the field hospitals continued, though some projects were scaled back — including McCormick Place. The field hospital opened with one-third of the beds originally planned, and it closed its doors a few weeks later after treating fewer than 40 patients.&lt;/p&gt;
+&lt;p&gt;The same story is playing out across the country. In fact, most Army Corps field hospitals haven't seen a single patient.&lt;/p&gt;
+&lt;p&gt;In many parts of the U.S., hospitals were able to expand their capacity to keep up with the surge of coronavirus patients. But in New York, hospitals were overwhelmed, and local officials pleaded with the public to save hospital beds for people who needed them most.&lt;/p&gt;
+&lt;p&gt;&quot;The mantra was, 'Don't come to the hospital, don't go to the doctor, stay home, stay home till your lips turn blue,' &quot; said Gershon of NYU's School of Global Public Health. &quot;Well, we now know that was a crazy set of advice.&quot;&lt;/p&gt;
+
+&lt;p&gt;Gershon said she worries that a lot of people followed that advice and that some may have died because of it — including a cousin of hers on Long Island. He stayed at home as he got sicker, Gershon said, and later died on a ventilator in the hospital.&lt;/p&gt;
+&lt;p&gt;Contractors built two field hospitals on Long Island, on the campuses of the State University of New York at Stony Brook and SUNY Old Westbury, at a total cost of more than $270 million.&lt;/p&gt;
+&lt;p&gt;The Army Corps limited the competition in awarding the projects to speed the process, which usually takes six to nine months, according to agency documents. Officials noted they were able to complete the contract award for the Stony Brook project in a &quot;little more than three days.&quot;&lt;/p&gt;
+&lt;p&gt;&quot;This time savings was critical in order for construction to begin as quickly as possible, supporting the unusual and compelling nature of the urgency of this procurement and the national emergency,&quot; the document said.&lt;/p&gt;
+&lt;p&gt;The two Long Island field hospitals were completed in late April. They never opened to the public and didn't treat any patients.&lt;/p&gt;
+&lt;p&gt;&quot;That's outrageous,&quot; Gershon said. &quot;That's completely crazy. I hope they didn't take them down.&quot;&lt;/p&gt;
+&lt;p&gt;The temporary hospitals in New York haven't been taken down. They're on hold in case they need to be reopened in the future, according to a state health department spokesman.&lt;/p&gt;
+&lt;p&gt;New York has &quot;so far avoided the worst-case scenario we were preparing for,&quot; the spokesman said in a statement. &quot;There has been a reduced need for hospital beds, and as of now we are not moving forward on purchasing supplies and equipment or securing staff for these sites.&quot;&lt;/p&gt;
+&lt;p&gt;Even in New York City, where the Army Corps field hospital did treat COVID-19 patients, it never reached full capacity.&lt;/p&gt;
+&lt;p&gt;&quot;There are a lot of losers in it and not a lot of winners,&quot; said Dario Gonzalez, an emergency doctor with the New York City Fire Department who helped lead the medical response at the temporary hospital at the Javits Center in Manhattan.&lt;/p&gt;
+&lt;p&gt;&quot;It was very disappointing,&quot; Gonzalez said. &quot;Everybody was here, ready to work, ready to get patients in.&quot;&lt;/p&gt;
+&lt;div id=&quot;res851976540&quot; class=&quot;bucketwrap image large&quot;&gt;
+&lt;div class=&quot;imagewrap&quot; data-crop-type=&quot;&quot;&gt;&lt;img src=&quot;https://media.npr.org/assets/img/2020/05/07/gettyimages-1208072070-edit_custom-3ad7a55877550feeaeecefa48d2f008c87e5dd2c-s1100-c15.jpg&quot; data-original=&quot;https://media.npr.org/assets/img/2020/05/07/gettyimages-1208072070-edit_custom-3ad7a55877550feeaeecefa48d2f008c87e5dd2c-s1100.jpg&quot; class=&quot;img lazyOnLoad&quot; alt=&quot;&quot; loading=&quot;lazy&quot;/&gt;
+&lt;/div&gt;
+&lt;div class=&quot;credit-caption&quot;&gt;
+&lt;div class=&quot;caption-wrap&quot; readability=&quot;7.5&quot;&gt;
+&lt;div class=&quot;caption&quot; aria-label=&quot;Image caption&quot; readability=&quot;10&quot;&gt;
+&lt;p&gt;Medical supplies are viewed inside the Javits Center in March in New York City. The Javits field hospital treated about 1,100 patients while it was open for three weeks. &lt;strong class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Bryan R. Smith/AFP via Getty Images&lt;/strong&gt; &lt;strong class=&quot;hide-caption&quot;&gt;hide caption&lt;/strong&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;strong class=&quot;toggle-caption&quot;&gt;toggle caption&lt;/strong&gt;&lt;/div&gt;
+&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Bryan R. Smith/AFP via Getty Images&lt;/span&gt;&lt;/div&gt;
+&lt;div class=&quot;enlarge_measure&quot;&gt;
+&lt;div class=&quot;img_wrap&quot;&gt;&lt;img data-original=&quot;https://media.npr.org/assets/img/2020/05/07/gettyimages-1208072070-edit_custom-3ad7a55877550feeaeecefa48d2f008c87e5dd2c-s1200.jpg&quot; alt=&quot;&quot;/&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class=&quot;enlarge_html&quot; readability=&quot;7&quot;&gt;
+&lt;div class=&quot;image_data&quot; readability=&quot;9&quot;&gt;
+&lt;p class=&quot;caption&quot;&gt;Medical supplies are viewed inside the Javits Center in March in New York City. The Javits field hospital treated about 1,100 patients while it was open for three weeks.&lt;/p&gt;
+&lt;span class=&quot;credit&quot; aria-label=&quot;Image credit&quot;&gt;Bryan R. Smith/AFP via Getty Images&lt;/span&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;p&gt;The plan was for the Javits Center to take patients from overwhelmed hospitals in the city. But in practice it wasn't that easy. Some hospitals complained that the intake process was too complicated. And they sent few patients to Javits — even as they resorted to treating patients in the hallways.&lt;/p&gt;
+&lt;p&gt;During the three weeks it was open, the Javits field hospital treated about 1,100 patients. Gonzales said it could have handled a lot more.&lt;/p&gt;
+&lt;p&gt;&quot;We all could have done a much better job,&quot; Gonzalez says. &quot;And we've got to really get it together to get that right the next time.&quot;&lt;/p&gt;
+&lt;p&gt;Officials in other states such as Illinois and Michigan also said field hospitals can be quickly reopened if there's an increase in coronavirus cases.&lt;/p&gt;
+&lt;p&gt;&quot;We really wanted to make sure that we were maintaining some of the physical infrastructure that has been built there. So that should we need it, it doesn't take us a long time to potentially turn that back on,&quot; said Allison Arwady, the public health commissioner in Chicago.&lt;/p&gt;
+&lt;p&gt;She said officials there are keeping a close eye on the number of COVID-19 patients in local hospitals.&lt;/p&gt;
+&lt;p&gt;&quot;We watch it really closely every day,&quot; Arwady said. &quot;And certainly if we start to see any direction that things are not going the right way, we stand ready in case that needs to be reassessed.&quot;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;National Desk Senior Producer&lt;/em&gt; &lt;em&gt;Walter Watson and intern Brooklyn Riepma contributed to this report.&lt;/em&gt;&lt;/p&gt;
 </description>
-<pubDate>Thu, 07 May 2020 16:33:04 +0000</pubDate>
-<dc:creator>leoh</dc:creator>
-<og:title>The Cost Of Free Doughnuts: 70 Years Of Regret</og:title>
-<og:url>https://www.npr.org/sections/money/2012/07/13/156737801/the-cost-of-free-doughnuts-70-years-of-regret</og:url>
+<pubDate>Fri, 08 May 2020 14:14:33 +0000</pubDate>
+<dc:creator>hhs</dc:creator>
+<og:title>U.S. Field Hospitals Stand Down, Most Without Treating Any COVID-19 Patients</og:title>
+<og:url>https://www.npr.org/2020/05/07/851712311/u-s-field-hospitals-stand-down-most-without-treating-any-covid-19-patients</og:url>
 <og:type>article</og:type>
-<og:description>When the Red Cross began charging soldiers for snacks during World War II, it learned a painful lesson in the economics of free stuff.</og:description>
-<og:image>https://media.npr.org/assets/img/2012/07/13/8e02281v1_wide-661637be7b88a6c9cdebb385a02d056485e9c25b.jpg?s=1400</og:image>
+<og:description>Across the U.S., convention centers and empty fields were transformed into emergency field hospitals at a cost to federal taxpayers of more than $660 million. Most haven't treated a single patient.</og:description>
+<og:image>https://media.npr.org/assets/img/2020/05/07/ap_20121523242226_wide-00653eb81f8608db600ff7992eae77d91a96cec7.jpg?s=1400</og:image>
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://www.npr.org/sections/money/2012/07/13/156737801/the-cost-of-free-doughnuts-70-years-of-regret</dc:identifier>
+<dc:identifier>https://www.npr.org/2020/05/07/851712311/u-s-field-hospitals-stand-down-most-without-treating-any-covid-19-patients</dc:identifier>
 </item>
 <item>
-<title>Driving engineers to an arbitrary date is a value destroying mistake</title>
-<link>https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49</link>
-<guid isPermaLink="true" >https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49</guid>
+<title>Intel accused by workers of prioritizing chip output over safety</title>
+<link>https://www.bloomberg.com/news/articles/2020-05-08/intel-accused-by-workers-of-prioritizing-chip-output-over-safety</link>
+<guid isPermaLink="true" >https://www.bloomberg.com/news/articles/2020-05-08/intel-accused-by-workers-of-prioritizing-chip-output-over-safety</guid>
 <description>[unable to retrieve full-text content]
-&lt;p&gt;Article URL: &lt;a href=&quot;https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49&quot;&gt;https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=23103582&quot;&gt;https://news.ycombinator.com/item?id=23103582&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Points: 223&lt;/p&gt;
-&lt;p&gt;# Comments: 96&lt;/p&gt;
+&lt;p&gt;Article URL: &lt;a href=&quot;https://www.bloomberg.com/news/articles/2020-05-08/intel-accused-by-workers-of-prioritizing-chip-output-over-safety&quot;&gt;https://www.bloomberg.com/news/articles/2020-05-08/intel-accused-by-workers-of-prioritizing-chip-output-over-safety&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Comments URL: &lt;a href=&quot;https://news.ycombinator.com/item?id=23114997&quot;&gt;https://news.ycombinator.com/item?id=23114997&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Points: 269&lt;/p&gt;
+&lt;p&gt;# Comments: 167&lt;/p&gt;
 </description>
-<pubDate>Thu, 07 May 2020 14:47:32 +0000</pubDate>
-<dc:creator>signa11</dc:creator>
-<og:description>Executive Mandates shutdown the value discovery efforts of software teams</og:description>
-<og:type>article</og:type>
-<og:url>https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49</og:url>
-<og:title>Driving engineers to an arbitrary date is a value destroying mistake</og:title>
-<og:image>https://iism.org/material-assets/software-management-essentials-product-execution/driving-to-a-date-is-a-value-destroying-journey-small-r1.jpg</og:image>
-<dc:language>en</dc:language>
+<pubDate>Fri, 08 May 2020 14:06:45 +0000</pubDate>
+<dc:creator>fortran77</dc:creator>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://iism.org/article/driving-engineers-to-an-arbitrary-date-is-a-value-destroying-mistake-49</dc:identifier>
+<dc:identifier>https://www.bloomberg.com/tosv2.html?vid=&amp;uuid=a7cfe800-9190-11ea-83d5-e756b6d24216&amp;url=L25ld3MvYXJ0aWNsZXMvMjAyMC0wNS0wOC9pbnRlbC1hY2N1c2VkLWJ5LXdvcmtlcnMtb2YtcHJpb3JpdGl6aW5nLWNoaXAtb3V0cHV0LW92ZXItc2FmZXR5</dc:identifier>
 </item>
 <item>
-<title>GCC 10.1 Released</title>
-<link>https://gcc.gnu.org/pipermail/gcc-announce/2020/000163.html</link>
-<guid isPermaLink="true" >https://gcc.gnu.org/pipermail/gcc-announce/2020/000163.html</guid>
-<description>&lt;head&gt;&lt;title&gt;GCC 10.1 Released&lt;/title&gt;&lt;link rel=&quot;Index&quot; href=&quot;index.html&quot; /&gt;&lt;link rel=&quot;made&quot; href=&quot;mailto:jakub%40redhat.com?Subject=Re:%20Re%3A%20GCC%2010.1%20Released&amp;amp;In-Reply-To=%3C20200507125959.GO8462%40tucnak%3E&quot; /&gt;&lt;meta name=&quot;robots&quot; content=&quot;index,nofollow&quot; /&gt;&lt;meta http-equiv=&quot;Content-Type&quot; content=&quot;text/html; charset=utf-8&quot; /&gt;&lt;link rel=&quot;Previous&quot; href=&quot;000000.html&quot; /&gt;&lt;/head&gt;&lt;body bgcolor=&quot;#FFFFFF&quot; id=&quot;readabilityBody&quot; readability=&quot;33.674157303371&quot;&gt;
-
-&lt;p&gt;&lt;strong&gt;Jakub Jelinek&lt;/strong&gt; &lt;a href=&quot;mailto:jakub%40redhat.com?Subject=Re:%20Re%3A%20GCC%2010.1%20Released&amp;amp;In-Reply-To=%3C20200507125959.GO8462%40tucnak%3E&quot; title=&quot;GCC 10.1 Released&quot;&gt;jakub@redhat.com&lt;/a&gt;&lt;br /&gt;&lt;em&gt;Thu May 7 12:59:59 GMT 2020&lt;/em&gt;&lt;/p&gt;
-&lt;hr /&gt;&lt;pre&gt;
-A year has lapsed away since the release of last major
-GCC release, more than 33 years passed since the first
-public GCC release and the GCC developers survived
-repository conversion from SVN to GIT earlier this year.
-
-Today, we are glad to announce another major GCC release, 10.1.
-
-This release makes great progress in the C++20 language support,
-both on the compiler and library sides [1], some C2X enhancements,
-various optimization enhancements and bug fixes, several new
-hardware enablement changes and enhancements to the compiler back-ends
-and many other changes.  There is even a new experimental static
-analysis pass [2].
-
-Some code that compiled successfully with older GCC versions might require
-source changes, see &lt;a href=&quot;http://gcc.gnu.org/gcc-10/porting_to.html&quot;&gt;http://gcc.gnu.org/gcc-10/porting_to.html&lt;/a&gt; for
-details.
-
-See
-
-  &lt;a href=&quot;https://gcc.gnu.org/gcc-10/changes.html&quot;&gt;https://gcc.gnu.org/gcc-10/changes.html&lt;/a&gt;
-
-for more information about changes in GCC 10.1.
-
-This release is available from the FTP servers listed here:
-
- &lt;a href=&quot;http://www.gnu.org/order/ftp.html&quot;&gt;http://www.gnu.org/order/ftp.html&lt;/a&gt;
-
-The release is in gcc/gcc-10.1.0/ subdirectory.
-
-If you encounter difficulties using GCC 10.1, please do not contact me
-directly.  Instead, please visit &lt;a href=&quot;http://gcc.gnu.org&quot;&gt;http://gcc.gnu.org&lt;/a&gt; for information about
-getting help.
-
-Driving a leading free software project such as GNU Compiler Collection
-would not be possible without support from its many contributors.
-Not to only mention its developers but especially its regular testers
-and users which contribute to its high quality.  The list of individuals
-is too large to thank individually!
-
-Please consider a donation to the GNU Toolchain Fund to support the
-continued development of GCC! [3]
-
-----
-
-[1] See &lt;a href=&quot;https://gcc.gnu.org/projects/cxx-status.html,&quot;&gt;https://gcc.gnu.org/projects/cxx-status.html,&lt;/a&gt;
-    and &lt;a href=&quot;https://gcc.gnu.org/onlinedocs/libstdc++/manual/status.html#status.iso.2020&quot;&gt;https://gcc.gnu.org/onlinedocs/libstdc++/manual/status.html#status.iso.2020&lt;/a&gt;
-
-[2] See &lt;a href=&quot;https://developers.redhat.com/blog/2020/03/26/static-analysis-in-gcc-10&quot;&gt;https://developers.redhat.com/blog/2020/03/26/static-analysis-in-gcc-10&lt;/a&gt;
-
-[3] See &lt;a href=&quot;https://my.fsf.org/civicrm/contribute/transact?reset=1&amp;amp;id=57&quot;&gt;https://my.fsf.org/civicrm/contribute/transact?reset=1&amp;amp;id=57&lt;/a&gt;
-
+<title>April Unemployment Rate Rose to a Record 14.7%</title>
+<link>https://www.wsj.com/articles/april-jobs-report-coronavirus-2020-11588888089</link>
+<guid isPermaLink="true" >https://www.wsj.com/articles/april-jobs-report-coronavirus-2020-11588888089</guid>
+<description>&lt;p&gt;WASHINGTON—The April unemployment rate surged to a record 14.7% and payrolls dropped by a historic 20.5 million workers as the coronavirus pandemic hit the economy, wiping out a decade of job gains in a single month.&lt;/p&gt; &lt;p&gt;Employment fell sharply in all broad business sectors last month and across all groups of workers, with particularly large increases in unemployment among women, college dropouts and Hispanics.&lt;/p&gt; &lt;p&gt;The...
+  &lt;/p&gt;</description>
+<pubDate>Fri, 08 May 2020 12:55:02 +0000</pubDate>
+<dc:creator>ericmay</dc:creator>
+<og:title>April Unemployment Rate Rose to a Record 14.7%</og:title>
+<og:description>The unemployment rate rose to a record as employers shed millions of jobs, evidence of the economic destruction wrought by the coronavirus pandemic.</og:description>
+<og:url>https://www.wsj.com/articles/april-jobs-report-coronavirus-2020-11588888089</og:url>
+<og:image>https://images.wsj.net/im-184980/social</og:image>
+<og:type>article</og:type>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://www.wsj.com/articles/april-jobs-report-coronavirus-2020-11588888089</dc:identifier>
+</item>
+<item>
+<title>OpenCV in the browser using WebAssembly and web workers</title>
+<link>https://aralroca.com/blog/opencv-in-the-web</link>
+<guid isPermaLink="true" >https://aralroca.com/blog/opencv-in-the-web</guid>
+<description>&lt;p&gt;We'll see how to use the OpenCV library directly on the browser! To do this, we will compile OpenCV to webassembly and then run it inside a webworker.&lt;/p&gt;
+&lt;h2 id=&quot;what-is-opencv&quot;&gt;What is OpenCV&lt;/h2&gt;
+&lt;p&gt;OpenCV is the most popular library of Computer Vision, and has existed since 1999! What it does is providing a user-friendly and highly efficient development environment. It is a library written in C and C++ by Intel.&lt;/p&gt;
+&lt;p&gt;OpenCV can also use Intel's embedded performance primitives, a set of low-level routines specific of Intel.&lt;/p&gt;
+&lt;p&gt;With OpenCV you can develop things like:&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;2D and 3D feature toolkits&lt;/li&gt;
+&lt;li&gt;Egomotion estimation&lt;/li&gt;
+&lt;li&gt;Facial recognition system&lt;/li&gt;
+&lt;li&gt;Gesture recognition&lt;/li&gt;
+&lt;li&gt;Human–computer interaction (HCI)&lt;/li&gt;
+&lt;li&gt;Mobile robotics&lt;/li&gt;
+&lt;li&gt;Motion understanding&lt;/li&gt;
+&lt;li&gt;Object identification&lt;/li&gt;
+&lt;li&gt;Segmentation and recognition&lt;/li&gt;
+&lt;li&gt;Stereopsis stereo vision: depth perception from 2 cameras&lt;/li&gt;
+&lt;li&gt;Structure from motion (SFM)&lt;/li&gt;
+&lt;li&gt;Motion tracking&lt;/li&gt;
+&lt;li&gt;Augmented reality&lt;/li&gt;
+&lt;/ul&gt;&lt;br/&gt;&lt;img loading=&quot;lazy&quot; class=&quot;center&quot; src=&quot;https://aralroca.com/images/blog-images/30.png&quot; alt=&quot;OpenCV logo&quot;/&gt;&lt;br/&gt;&lt;h2 id=&quot;why-in-the-browser&quot;&gt;Why in the browser&lt;/h2&gt;
+&lt;p&gt;Being able to run computer vision algorithms directly from the browser allows us to move costs to the client device, and thus save many costs on the server.&lt;/p&gt;
+&lt;p&gt;Imagine you want to get the characteristics of a label of wine from a picture. There are many ways to do this. If we look for the most ergonomic way for our server, we'd move part of the wine label detection logic in the browser. Then, when we fetch the request to the server, we'll only need to send the final vector. This way, we avoid processing the image on the server.&lt;/p&gt;
+&lt;p&gt;Or even if it's an embedded app for the private use of a company, we could put all the logic in the browser.&lt;/p&gt;
+&lt;h2 id=&quot;starting-a-new-nextjs-project&quot;&gt;Starting a new Next.js project&lt;/h2&gt;
+&lt;p&gt;We're going to use the Next.js framework with React, to ease the setup and use of the project. However, the same can be applied to a project with Angular, Vue.js, Svelte... or vanilla.js.&lt;/p&gt;
+&lt;p&gt;To start with, let's just create a new Next.js project with the following command:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code&gt;yarn create next-app&lt;/code&gt;
 &lt;/pre&gt;
-&lt;hr /&gt;&lt;hr /&gt;&lt;p&gt;&lt;a href=&quot;http://gcc.gnu.org/mailman/listinfo/gcc-announce&quot;&gt;More information about the gcc-announce mailing list&lt;/a&gt;&lt;br /&gt;&lt;/p&gt;
-&lt;/body&gt;</description>
-<pubDate>Thu, 07 May 2020 14:47:15 +0000</pubDate>
-<dc:creator>nayefc</dc:creator>
-<dc:format>text/html</dc:format>
-<dc:identifier>https://gcc.gnu.org/pipermail/gcc-announce/2020/000163.html</dc:identifier>
-</item>
-<item>
-<title>Ask HN: Keybase Alternatives?</title>
-<link>https://news.ycombinator.com/item?id=23103386</link>
-<guid isPermaLink="true" >https://news.ycombinator.com/item?id=23103386</guid>
-<description>&lt;tr readability=&quot;0.58823529411765&quot;&gt;&lt;td bgcolor=&quot;#FF6600&quot;&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr id=&quot;pagespace&quot; title=&quot;Ask HN: Keybase Alternatives?&quot;&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;9.0843537414966&quot;&gt;&lt;td&gt;
-&lt;table class=&quot;fatitem&quot; border=&quot;0&quot; readability=&quot;6.1938775510204&quot;&gt;&lt;tr class=&quot;athing&quot; id=&quot;23103386&quot; readability=&quot;0&quot;&gt;&lt;td align=&quot;right&quot; valign=&quot;top&quot; class=&quot;title&quot;/&gt;
-&lt;td valign=&quot;top&quot; class=&quot;votelinks&quot;&gt;
-&lt;center&gt;
+&lt;p&gt;Once you fill in the name of your project, raise the local environment with &lt;code&gt;yarn dev&lt;/code&gt;. Now we are ready to start using OpenCV in our Next.js project.&lt;/p&gt;
+&lt;h2 id=&quot;compile-opencv-into-webassembly&quot;&gt;Compile OpenCV into Webassembly&lt;/h2&gt;
+&lt;p&gt;To compile OpenCV to webassembly we can follow the official documentation at:&lt;/p&gt;
+&lt;p&gt;However, I'll tell you the steps I've taken:&lt;/p&gt;
+&lt;p&gt;First clone the OpenCV repo:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-bh&quot;&gt;git clone https://github.com/opencv/opencv.git&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Now, once inside the repo directory we've cloned, let's compile with Docker!&lt;/p&gt;
+&lt;p&gt;For Linux / Mac:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-bh&quot;&gt;docker run --rm --workdir /code -v &quot;$PWD&quot;:/code &quot;trzeci/emscripten:latest&quot; python ./platforms/js/build_js.py build&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;For Windows:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-bh&quot;&gt;docker run --rm --workdir /code -v &quot;$(get-location):/code&quot; &quot;trzeci/emscripten:latest&quot; python ./platforms/js/build_js.py build&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Now it's time to wait... it may take about 15 minutes.&lt;/p&gt;
+&lt;img loading=&quot;lazy&quot; class=&quot;center&quot; alt=&quot;compiling OpenCV into webassembly&quot; src=&quot;https://aralroca.com/images/blog-images/31.png&quot;/&gt;&lt;p&gt;Once finished, copy the file you've generated into the project and then move it into &lt;code&gt;/public&lt;/code&gt;.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-diff&quot;&gt;public
+├── favicon.ico
+├── js
+&lt;span class=&quot;hljs-addition&quot;&gt;+│   ├── opencv.js&lt;/span&gt;
+└── vercel.svg&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;loading-opencv-on-a-worker&quot;&gt;Loading OpenCV on a Worker&lt;/h2&gt;
+&lt;p&gt;Once we have the OpenCV file in webassembly inside the &lt;code&gt;/public&lt;/code&gt; directory, it's ready to use it inside a worker.&lt;/p&gt;
+&lt;p&gt;It is important to use a worker because all OpenCV functions are very expensive and would block the UI. It is not mandatory to use a worker, but highly recommended.&lt;/p&gt;
+&lt;h3 id=&quot;creating-the-worker&quot;&gt;Creating the worker&lt;/h3&gt;
+&lt;p&gt;Let's create the worker within the same &lt;code&gt;/public&lt;/code&gt; directory.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-diff&quot;&gt;public
+├── favicon.ico
+├── js
+&lt;span class=&quot;hljs-addition&quot;&gt;+│   ├── cv.worker.js&lt;/span&gt;
+│   ├── opencv.js
+└── vercel.svg&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The initial content will be like this:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;
+&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;waitForOpencv&lt;/span&gt;(&lt;span class=&quot;hljs-params&quot;&gt;callbackFn, waitTimeMs = &lt;span class=&quot;hljs-number&quot;&gt;30000&lt;/span&gt;, stepTimeMs = &lt;span class=&quot;hljs-number&quot;&gt;100&lt;/span&gt;&lt;/span&gt;) &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (cv.Mat) callbackFn(&lt;span class=&quot;hljs-literal&quot;&gt;true&lt;/span&gt;)
 
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;td class=&quot;title&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=23103386&quot; class=&quot;storylink&quot;&gt;Ask HN: Keybase Alternatives?&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;0.71428571428571&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td class=&quot;subtext&quot;&gt;&lt;span class=&quot;score&quot; id=&quot;score_23103386&quot;&gt;632 points&lt;/span&gt; by &lt;a href=&quot;https://news.ycombinator.com/user?id=capableweb&quot; class=&quot;hnuser&quot;&gt;capableweb&lt;/a&gt; &lt;span class=&quot;age&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/item?id=23103386&quot;&gt;10 hours ago&lt;/a&gt;&lt;/span&gt; &lt;span id=&quot;unv_23103386&quot;/&gt; | &lt;a href=&quot;https://news.ycombinator.com/hide?id=23103386&amp;amp;goto=item%3Fid%3D23103386&quot;&gt;hide&lt;/a&gt; | &lt;a href=&quot;https://hn.algolia.com/?query=Ask%20HN%3A%20Keybase%20Alternatives%3F&amp;amp;sort=byDate&amp;amp;dateRange=all&amp;amp;type=story&amp;amp;storyText=false&amp;amp;prefix&amp;amp;page=0&quot; class=&quot;hnpast&quot;&gt;past&lt;/a&gt; | &lt;a href=&quot;https://www.google.com/search?q=Ask%20HN%3A%20Keybase%20Alternatives%3F&quot;&gt;web&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/fave?id=23103386&amp;amp;auth=ce70aa5baee075da94c8cbd53117623e3d9f0ad8&quot;&gt;favorite&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/item?id=23103386&quot;&gt;161 comments&lt;/a&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;16.229838709677&quot;&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td readability=&quot;14.838709677419&quot;&gt;Since Keybase is being acquired by Zoom (see &lt;a href=&quot;https://news.ycombinator.com/item?id=23102430&quot; rel=&quot;nofollow&quot;&gt;https://news.ycombinator.com/item?id=23102430&lt;/a&gt;), it would be lazy to not start looking at alternatives already
-&lt;p&gt;I myself mostly use the following features from Keybase: Chat, KBFS, Git repositories and encrypting messages sent out-of-band via PGP in Keybase (and the various cryptographic tools [signing, validation etc])&lt;/p&gt;
-&lt;p&gt;What alternatives have the features outlined above, but are ideally either FOSS or at least not run by a for-profit company? I mainly used Keybase to make using those features easier, so please don't suggest the cli of gnupgp (or similar) as alternatives.&lt;/p&gt;
-&lt;/td&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td/&gt;
-&lt;/tr&gt;&lt;tr&gt;&lt;td colspan=&quot;2&quot;/&gt;
-&lt;td&gt;
+  &lt;span class=&quot;hljs-keyword&quot;&gt;let&lt;/span&gt; timeSpentMs = &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; interval = &lt;span class=&quot;hljs-keyword&quot;&gt;set&lt;/span&gt;&lt;span class=&quot;hljs-title&quot;&gt;Interval&lt;/span&gt;(&lt;span class=&quot;hljs-params&quot;&gt;(&lt;/span&gt;) =&amp;gt; {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; limitReached = timeSpentMs &amp;gt; waitTimeMs
+    &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (cv.Mat || limitReached) {
+      clearInterval(interval)
+      &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; callbackFn(!limitReached)
+    } &lt;span class=&quot;hljs-keyword&quot;&gt;else&lt;/span&gt; {
+      timeSpentMs += stepTimeMs
+    }
+  }, stepTimeMs)
+}
 
-&lt;/td&gt;
-&lt;/tr&gt;&lt;/table&gt;&lt;/td&gt;
-&lt;/tr&gt;&lt;tr readability=&quot;1&quot;&gt;&lt;td&gt;&lt;img src=&quot;https://news.ycombinator.com/s.gif&quot; height=&quot;10&quot; width=&quot;0&quot;/&gt;&lt;br/&gt;&lt;center&gt;&lt;span class=&quot;yclinks&quot;&gt;&lt;a href=&quot;https://news.ycombinator.com/newsguidelines.html&quot;&gt;Guidelines&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/newsfaq.html&quot;&gt;FAQ&lt;/a&gt; | &lt;a href=&quot;mailto:hn@ycombinator.com&quot;&gt;Support&lt;/a&gt; | &lt;a href=&quot;https://github.com/HackerNews/API&quot;&gt;API&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/security.html&quot;&gt;Security&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/lists&quot;&gt;Lists&lt;/a&gt; | &lt;a href=&quot;https://news.ycombinator.com/bookmarklet.html&quot; rel=&quot;nofollow&quot;&gt;Bookmarklet&lt;/a&gt; | &lt;a href=&quot;http://www.ycombinator.com/legal/&quot;&gt;Legal&lt;/a&gt; | &lt;a href=&quot;http://www.ycombinator.com/apply/&quot;&gt;Apply to YC&lt;/a&gt; | &lt;a href=&quot;mailto:hn@ycombinator.com&quot;&gt;Contact&lt;/a&gt;&lt;/span&gt;
-&lt;/center&gt;
-&lt;/td&gt;
-&lt;/tr&gt;</description>
-<pubDate>Thu, 07 May 2020 14:34:15 +0000</pubDate>
-<dc:creator>capableweb</dc:creator>
+
+onmessage = &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; (&lt;span class=&quot;hljs-params&quot;&gt;e&lt;/span&gt;) &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;switch&lt;/span&gt; (e.data.msg) {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;case&lt;/span&gt; &lt;span class=&quot;hljs-string&quot;&gt;'load'&lt;/span&gt;: {
+      
+      self.importScripts(&lt;span class=&quot;hljs-string&quot;&gt;'./opencv.js'&lt;/span&gt;)
+      waitForOpencv(&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; (&lt;span class=&quot;hljs-params&quot;&gt;success&lt;/span&gt;) &lt;/span&gt;{
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (success) postMessage({ &lt;span class=&quot;hljs-attr&quot;&gt;msg&lt;/span&gt;: e.data.msg })
+        &lt;span class=&quot;hljs-keyword&quot;&gt;else&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;throw&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Error&lt;/span&gt;(&lt;span class=&quot;hljs-string&quot;&gt;'Error on loading OpenCV'&lt;/span&gt;)
+      })
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+    }
+    &lt;span class=&quot;hljs-attr&quot;&gt;default&lt;/span&gt;:
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+  }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;loading-the-worker-in-our-project&quot;&gt;Loading the worker in our project&lt;/h3&gt;
+&lt;p&gt;Okay, now we can create in our project a service that communicates with the worker. For this, we are going to create a &lt;code&gt;services&lt;/code&gt; directory where we will put our file.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-diff&quot;&gt;services
+&lt;span class=&quot;hljs-addition&quot;&gt;+└── cv.js&lt;/span&gt;&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;Once the file has been created, we will enter this initial code, which will allow us to load OpenCV into our project:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;CV&lt;/span&gt; &lt;/span&gt;{
+  
+  _dispatch(event) {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; { msg } = event
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status[msg] = [&lt;span class=&quot;hljs-string&quot;&gt;'loading'&lt;/span&gt;]
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;.worker.postMessage(event)
+    &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Promise&lt;/span&gt;(&lt;span class=&quot;hljs-function&quot;&gt;(&lt;span class=&quot;hljs-params&quot;&gt;res, rej&lt;/span&gt;) =&amp;gt;&lt;/span&gt; {
+      &lt;span class=&quot;hljs-keyword&quot;&gt;let&lt;/span&gt; interval = &lt;span class=&quot;hljs-keyword&quot;&gt;set&lt;/span&gt;&lt;span class=&quot;hljs-title&quot;&gt;Interval&lt;/span&gt;(&lt;span class=&quot;hljs-params&quot;&gt;(&lt;/span&gt;) =&amp;gt; {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; status = &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status[msg]
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (status[&lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;] === &lt;span class=&quot;hljs-string&quot;&gt;'done'&lt;/span&gt;) res(status[&lt;span class=&quot;hljs-number&quot;&gt;1&lt;/span&gt;])
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (status[&lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;] === &lt;span class=&quot;hljs-string&quot;&gt;'error'&lt;/span&gt;) rej(status[&lt;span class=&quot;hljs-number&quot;&gt;1&lt;/span&gt;])
+        &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (status[&lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;] !== &lt;span class=&quot;hljs-string&quot;&gt;'loading'&lt;/span&gt;) {
+          &lt;span class=&quot;hljs-keyword&quot;&gt;delete&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status[msg]
+          clearInterval(interval)
+        }
+      }, &lt;span class=&quot;hljs-number&quot;&gt;50&lt;/span&gt;)
+    })
+  }
+
+  
+  load() {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status = {}
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;.worker = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; Worker(&lt;span class=&quot;hljs-string&quot;&gt;'/js/cv.worker.js'&lt;/span&gt;) 
+
+    
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;.worker.onmessage = &lt;span class=&quot;hljs-function&quot;&gt;(&lt;span class=&quot;hljs-params&quot;&gt;e&lt;/span&gt;) =&amp;gt;&lt;/span&gt; (&lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status[e.data.msg] = [&lt;span class=&quot;hljs-string&quot;&gt;'done'&lt;/span&gt;, e])
+    &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;.worker.onerror = &lt;span class=&quot;hljs-function&quot;&gt;(&lt;span class=&quot;hljs-params&quot;&gt;e&lt;/span&gt;) =&amp;gt;&lt;/span&gt; (&lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._status[e.data.msg] = [&lt;span class=&quot;hljs-string&quot;&gt;'error'&lt;/span&gt;, e])
+    &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._dispatch({ &lt;span class=&quot;hljs-attr&quot;&gt;msg&lt;/span&gt;: &lt;span class=&quot;hljs-string&quot;&gt;'load'&lt;/span&gt; })
+  }
+}
+
+
+&lt;span class=&quot;hljs-keyword&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;default&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; CV()&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h3 id=&quot;using-the-service&quot;&gt;Using the service&lt;/h3&gt;
+&lt;p&gt;Since we are exporting the instance directly, we can import it into our page or component.&lt;/p&gt;
+&lt;p&gt;For example, we could load it on an &lt;code&gt;onClick&lt;/code&gt; event:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;onClick&lt;/span&gt;() &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;await&lt;/span&gt; cv.load()
+  
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;h2 id=&quot;using-opencv-in-the-browser&quot;&gt;Using OpenCV in the browser&lt;/h2&gt;
+&lt;p&gt;Now that we have managed to load the OpenCV library in our browser we will see how to run some utilities from the library.&lt;/p&gt;
+&lt;p&gt;Of course you can do many things with OpenCV. Here I'll show a simple example. Then it will be your job to read the official documentation and learn how to use OpenCV.&lt;/p&gt;
+&lt;p&gt;The example we're going to use is a simple image processing, to take pictures with the camera and processing them to a grayscale. Although it may seem simple, this is our first &quot;hello world&quot; with OpenCV.&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-jsx&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;import&lt;/span&gt; { useEffect, useRef, useState } &lt;span class=&quot;hljs-keyword&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;hljs-string&quot;&gt;'react'&lt;/span&gt;
+&lt;span class=&quot;hljs-keyword&quot;&gt;import&lt;/span&gt; cv &lt;span class=&quot;hljs-keyword&quot;&gt;from&lt;/span&gt; &lt;span class=&quot;hljs-string&quot;&gt;'../services/cv'&lt;/span&gt;
+
+
+&lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; maxVideoSize = &lt;span class=&quot;hljs-number&quot;&gt;200&lt;/span&gt;
+
+
+&lt;span class=&quot;hljs-keyword&quot;&gt;export&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;default&lt;/span&gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;Page&lt;/span&gt;() &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; [processing, updateProcessing] = useState(&lt;span class=&quot;hljs-literal&quot;&gt;false&lt;/span&gt;)
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; videoElement = useRef(&lt;span class=&quot;hljs-literal&quot;&gt;null&lt;/span&gt;)
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; canvasEl = useRef(&lt;span class=&quot;hljs-literal&quot;&gt;null&lt;/span&gt;)
+
+  
+  &lt;span class=&quot;hljs-keyword&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;onClick&lt;/span&gt;() &lt;/span&gt;{
+    updateProcessing(&lt;span class=&quot;hljs-literal&quot;&gt;true&lt;/span&gt;)
+
+    &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; ctx = canvasEl.current.getContext(&lt;span class=&quot;hljs-string&quot;&gt;'2d'&lt;/span&gt;)
+    ctx.drawImage(videoElement.current, &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;, maxVideoSize, maxVideoSize)
+    &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; image = ctx.getImageData(&lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;, maxVideoSize, maxVideoSize)
+    
+    &lt;span class=&quot;hljs-keyword&quot;&gt;await&lt;/span&gt; cv.load()
+    
+    &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; processedImage = &lt;span class=&quot;hljs-keyword&quot;&gt;await&lt;/span&gt; cv.imageProcessing(image)
+    
+    ctx.putImageData(processedImage.data.payload, &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;, &lt;span class=&quot;hljs-number&quot;&gt;0&lt;/span&gt;)
+    updateProcessing(&lt;span class=&quot;hljs-literal&quot;&gt;false&lt;/span&gt;)
+  }
+
+  
+  useEffect(&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-params&quot;&gt;()&lt;/span&gt; =&amp;gt;&lt;/span&gt; {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;initCamara&lt;/span&gt;() &lt;/span&gt;{
+      videoElement.current.width = maxVideoSize
+      videoElement.current.height = maxVideoSize
+
+      &lt;span class=&quot;hljs-keyword&quot;&gt;if&lt;/span&gt; (navigator.mediaDevices &amp;amp;&amp;amp; navigator.mediaDevices.getUserMedia) {
+        &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; stream = &lt;span class=&quot;hljs-keyword&quot;&gt;await&lt;/span&gt; navigator.mediaDevices.getUserMedia({
+          &lt;span class=&quot;hljs-attr&quot;&gt;audio&lt;/span&gt;: &lt;span class=&quot;hljs-literal&quot;&gt;false&lt;/span&gt;,
+          &lt;span class=&quot;hljs-attr&quot;&gt;video&lt;/span&gt;: {
+            &lt;span class=&quot;hljs-attr&quot;&gt;facingMode&lt;/span&gt;: &lt;span class=&quot;hljs-string&quot;&gt;'user'&lt;/span&gt;,
+            &lt;span class=&quot;hljs-attr&quot;&gt;width&lt;/span&gt;: maxVideoSize,
+            &lt;span class=&quot;hljs-attr&quot;&gt;height&lt;/span&gt;: maxVideoSize,
+          },
+        })
+        videoElement.current.srcObject = stream
+
+        &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Promise&lt;/span&gt;(&lt;span class=&quot;hljs-function&quot;&gt;(&lt;span class=&quot;hljs-params&quot;&gt;resolve&lt;/span&gt;) =&amp;gt;&lt;/span&gt; {
+          videoElement.current.onloadedmetadata = &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-params&quot;&gt;()&lt;/span&gt; =&amp;gt;&lt;/span&gt; {
+            resolve(videoElement.current)
+          }
+        })
+      }
+      &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; errorMessage =
+        &lt;span class=&quot;hljs-string&quot;&gt;'This browser does not support video capture, or this device does not have a camera'&lt;/span&gt;
+      alert(errorMessage)
+      &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Promise&lt;/span&gt;.reject(errorMessage)
+    }
+
+    &lt;span class=&quot;hljs-keyword&quot;&gt;async&lt;/span&gt; &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;load&lt;/span&gt;() &lt;/span&gt;{
+      &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; videoLoaded = &lt;span class=&quot;hljs-keyword&quot;&gt;await&lt;/span&gt; initCamara()
+      videoLoaded.play()
+      &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; videoLoaded
+    }
+
+    load()
+  }, [])
+
+  &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; (
+    &lt;span class=&quot;xml&quot;&gt;&lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;&lt;span class=&quot;hljs-name&quot;&gt;div&lt;/span&gt;
+      &lt;span class=&quot;hljs-attr&quot;&gt;style&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{{&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;display:&lt;/span&gt; '&lt;span class=&quot;hljs-attr&quot;&gt;flex&lt;/span&gt;',
+        &lt;span class=&quot;hljs-attr&quot;&gt;justifyContent:&lt;/span&gt; '&lt;span class=&quot;hljs-attr&quot;&gt;center&lt;/span&gt;',
+        &lt;span class=&quot;hljs-attr&quot;&gt;alignItems:&lt;/span&gt; '&lt;span class=&quot;hljs-attr&quot;&gt;center&lt;/span&gt;',
+        &lt;span class=&quot;hljs-attr&quot;&gt;flexDirection:&lt;/span&gt; '&lt;span class=&quot;hljs-attr&quot;&gt;column&lt;/span&gt;',
+      }}
+    &amp;gt;&lt;/span&gt;
+      &lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;&lt;span class=&quot;hljs-name&quot;&gt;video&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;className&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;&quot;video&quot;&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;playsInline&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;ref&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{videoElement}&lt;/span&gt; /&amp;gt;&lt;/span&gt;
+      &lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;&lt;span class=&quot;hljs-name&quot;&gt;button&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;disabled&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{processing}&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;style&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{{&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;width:&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;maxVideoSize&lt;/span&gt;, &lt;span class=&quot;hljs-attr&quot;&gt;padding:&lt;/span&gt; &lt;span class=&quot;hljs-attr&quot;&gt;10&lt;/span&gt; }}
+        &lt;span class=&quot;hljs-attr&quot;&gt;onClick&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{onClick}&lt;/span&gt;
+      &amp;gt;&lt;/span&gt;
+        {processing ? 'Processing...' : 'Take a photo'}
+      &lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;/&lt;span class=&quot;hljs-name&quot;&gt;button&lt;/span&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;&lt;span class=&quot;hljs-name&quot;&gt;canvas&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;ref&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{canvasEl}&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;width&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{maxVideoSize}&lt;/span&gt;
+        &lt;span class=&quot;hljs-attr&quot;&gt;height&lt;/span&gt;=&lt;span class=&quot;hljs-string&quot;&gt;{maxVideoSize}&lt;/span&gt;
+      &amp;gt;&lt;/span&gt;&lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;/&lt;span class=&quot;hljs-name&quot;&gt;canvas&lt;/span&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;hljs-tag&quot;&gt;&amp;lt;/&lt;span class=&quot;hljs-name&quot;&gt;div&lt;/span&gt;&amp;gt;&lt;/span&gt;&lt;/span&gt;
+  )
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;In our service:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;&lt;span class=&quot;hljs-class&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;class&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;CV&lt;/span&gt; &lt;/span&gt;{
+  
+
+  
+  imageProcessing(payload) {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;this&lt;/span&gt;._dispatch({ &lt;span class=&quot;hljs-attr&quot;&gt;msg&lt;/span&gt;: &lt;span class=&quot;hljs-string&quot;&gt;'imageProcessing'&lt;/span&gt;, payload })
+  }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;In our worker:&lt;/p&gt;
+&lt;pre&gt;
+&lt;code class=&quot;language-js&quot;&gt;
+
+
+&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;imageProcessing&lt;/span&gt;(&lt;span class=&quot;hljs-params&quot;&gt;{ msg, payload }&lt;/span&gt;) &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; img = cv.matFromImageData(payload)
+  &lt;span class=&quot;hljs-keyword&quot;&gt;let&lt;/span&gt; result = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; cv.Mat()
+
+  
+  cv.cvtColor(img, result, cv.COLOR_BGR2GRAY)
+  postMessage({ msg, &lt;span class=&quot;hljs-attr&quot;&gt;payload&lt;/span&gt;: imageDataFromMat(result) })
+}
+
+
+&lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; &lt;span class=&quot;hljs-title&quot;&gt;imageDataFromMat&lt;/span&gt;(&lt;span class=&quot;hljs-params&quot;&gt;mat&lt;/span&gt;) &lt;/span&gt;{
+  
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; img = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; cv.Mat()
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; depth = mat.type() % &lt;span class=&quot;hljs-number&quot;&gt;8&lt;/span&gt;
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; scale =
+    depth &amp;lt;= cv.CV_8S ? &lt;span class=&quot;hljs-number&quot;&gt;1.0&lt;/span&gt; : depth &amp;lt;= cv.CV_32S ? &lt;span class=&quot;hljs-number&quot;&gt;1.0&lt;/span&gt; / &lt;span class=&quot;hljs-number&quot;&gt;256.0&lt;/span&gt; : &lt;span class=&quot;hljs-number&quot;&gt;255.0&lt;/span&gt;
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; shift = depth === cv.CV_8S || depth === cv.CV_16S ? &lt;span class=&quot;hljs-number&quot;&gt;128.0&lt;/span&gt; : &lt;span class=&quot;hljs-number&quot;&gt;0.0&lt;/span&gt;
+  mat.convertTo(img, cv.CV_8U, scale, shift)
+
+  
+  &lt;span class=&quot;hljs-keyword&quot;&gt;switch&lt;/span&gt; (img.type()) {
+    &lt;span class=&quot;hljs-keyword&quot;&gt;case&lt;/span&gt; cv.CV_8UC1:
+      cv.cvtColor(img, img, cv.COLOR_GRAY2RGBA)
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+    &lt;span class=&quot;hljs-keyword&quot;&gt;case&lt;/span&gt; cv.CV_8UC3:
+      cv.cvtColor(img, img, cv.COLOR_RGB2RGBA)
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+    &lt;span class=&quot;hljs-keyword&quot;&gt;case&lt;/span&gt; cv.CV_8UC4:
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+    &lt;span class=&quot;hljs-attr&quot;&gt;default&lt;/span&gt;:
+      &lt;span class=&quot;hljs-keyword&quot;&gt;throw&lt;/span&gt; &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Error&lt;/span&gt;(
+        &lt;span class=&quot;hljs-string&quot;&gt;'Bad number of channels (Source image must have 1, 3 or 4 channels)'&lt;/span&gt;
+      )
+  }
+  &lt;span class=&quot;hljs-keyword&quot;&gt;const&lt;/span&gt; clampedArray = &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; ImageData(
+    &lt;span class=&quot;hljs-keyword&quot;&gt;new&lt;/span&gt; &lt;span class=&quot;hljs-built_in&quot;&gt;Uint8ClampedArray&lt;/span&gt;(img.data),
+    img.cols,
+    img.rows
+  )
+  img.delete()
+  &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; clampedArray
+}
+
+onmessage = &lt;span class=&quot;hljs-function&quot;&gt;&lt;span class=&quot;hljs-keyword&quot;&gt;function&lt;/span&gt; (&lt;span class=&quot;hljs-params&quot;&gt;e&lt;/span&gt;) &lt;/span&gt;{
+  &lt;span class=&quot;hljs-keyword&quot;&gt;switch&lt;/span&gt; (e.data.msg) {
+    
+    &lt;span class=&quot;hljs-keyword&quot;&gt;case&lt;/span&gt; &lt;span class=&quot;hljs-string&quot;&gt;'imageProcessing'&lt;/span&gt;:
+      &lt;span class=&quot;hljs-keyword&quot;&gt;return&lt;/span&gt; imageProcessing(e.data)
+    &lt;span class=&quot;hljs-attr&quot;&gt;default&lt;/span&gt;:
+      &lt;span class=&quot;hljs-keyword&quot;&gt;break&lt;/span&gt;
+  }
+}&lt;/code&gt;
+&lt;/pre&gt;
+&lt;p&gt;The result:&lt;/p&gt;
+&lt;img loading=&quot;lazy&quot; class=&quot;center&quot; alt=&quot;First result of image processing using OpenCV in JavaScript&quot; src=&quot;https://aralroca.com/images/blog-images/28.gif&quot;/&gt;&lt;p&gt;Although we have processed the image in a very simple way and we could have done it without using OpenCV, this is our &quot;hello world&quot; with OpenCV. It opens the doors to more complex things.&lt;/p&gt;
+&lt;h2 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;We have seen how to use the most used library for computer vision in the browser. We've seen how to compile OpenCV into webassembly and use it in a worker to not block the UI for a good performance. I hope that even if you have never heard of this library, now you'll give it a try.&lt;/p&gt;
+&lt;br/&gt;&lt;img loading=&quot;lazy&quot; class=&quot;center&quot; src=&quot;https://aralroca.com/images/blog-images/29.jpg&quot; alt=&quot;Example of computer vision&quot;/&gt;&lt;br/&gt;&lt;h2 id=&quot;code&quot;&gt;Code&lt;/h2&gt;
+&lt;p&gt;I've uploaded the code of this article on GitHub in case you want to take a look.&lt;/p&gt;
+&lt;p&gt;To see a more sophisticated example implemented in Vue.js, take a look at this other repo:&lt;/p&gt;
+&lt;h2 id=&quot;references&quot;&gt;References&lt;/h2&gt;
+</description>
+<pubDate>Fri, 08 May 2020 12:39:31 +0000</pubDate>
+<dc:creator>aralroca</dc:creator>
+<og:url>https://aralroca.com/blog/opencv-in-the-web</og:url>
+<og:type>article</og:type>
+<og:image>https://aralroca.com/images/cover-images/6_cover_image.jpg</og:image>
+<og:title>OpenCV directly in the browser (webassembly + webworker)</og:title>
+<og:description>Learn how to use OpenCV in the web without a lot of headaches.</og:description>
 <dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://news.ycombinator.com/item?id=23103386</dc:identifier>
+<dc:identifier>https://aralroca.com/blog/opencv-in-the-web</dc:identifier>
 </item>
 <item>
-<title>Microsoft&amp;#039;s GitHub account allegedly hacked, 500GB stolen</title>
-<link>https://www.bleepingcomputer.com/news/security/microsofts-github-account-allegedly-hacked-500gb-stolen/</link>
-<guid isPermaLink="true" >https://www.bleepingcomputer.com/news/security/microsofts-github-account-allegedly-hacked-500gb-stolen/</guid>
-<description>&lt;p&gt;&lt;img alt=&quot;Microsoft GitHub&quot; height=&quot;455&quot; src=&quot;https://www.bleepstatic.com/content/hl-images/2020/05/06/MSFT_open_source.jpg&quot; width=&quot;1280&quot;/&gt;&lt;/p&gt;
-&lt;p&gt;A hacker claims to have stolen over 500GB of data from Microsoft's private GitHub repositories, BleepingComputer has learned.&lt;/p&gt;
-&lt;p&gt;This evening, a hacker going by the name Shiny Hunters contacted BleepingComputer to tell us they had hacked into the Microsoft GitHub account, gaining full access to the software giant's 'Private' repositories.&lt;/p&gt;
-&lt;div&gt;&lt;img alt=&quot;Actor's proof of access to Microsoft's private GitHub repos&quot; height=&quot;500&quot; src=&quot;https://www.bleepstatic.com/images/news/Microsoft/g/github-repo-breach/private-repo.png&quot; width=&quot;942&quot;/&gt;&lt;strong&gt;Actor's proof of access to Microsoft's private GitHub repos&lt;/strong&gt;&lt;/div&gt;
-&lt;p&gt;The individual told us that they then downloaded 500GB of private projects and initially planned on selling it, but has now decided to leak it for free&lt;/p&gt;
-&lt;p&gt;Based on the file stamps in the leaked files, the breach may have occurred on March 28th, 2020.&lt;/p&gt;
-&lt;div&gt;&lt;img alt=&quot;Leaked data listing showing the breach date​​​​​​​&quot; height=&quot;500&quot; src=&quot;https://www.bleepstatic.com/images/news/Microsoft/g/github-repo-breach/timestamps.jpg&quot; width=&quot;712&quot;/&gt;&lt;strong&gt;Leaked data listing showing the breach date&lt;/strong&gt;&lt;/div&gt;
-&lt;p&gt;Shiny Hunters told BleepingComputer he no longer has access to the account.&lt;/p&gt;
-&lt;h2&gt;Private repositories leaked&lt;/h2&gt;
-&lt;p&gt;As a teaser, the hacker offered 1GB of files on a hacker forum for registered members to use site 'credits' to gain access to the leaked data.&lt;/p&gt;
-&lt;p&gt;As some of the leaked files contain Chinese text or references to latelee.org, other threat actors on the forum do not feel that the data is real.&lt;/p&gt;
-&lt;p&gt;In a directory listing and samples of other private repositories sent to BleepingComputer, the stolen data appears to be mostly code samples, test projects, an eBook, and other generic items.&lt;/p&gt;
-&lt;p&gt;Some private repositories look a bit more interesting such as ones named some 'wssd cloud agent', a The Rust/WinRT language projection', and a 'PowerSweep' PowerShell project.&lt;/p&gt;
-&lt;p&gt;Overall, from what was shared, there does not appear to be anything significant for Microsoft to worry about, such as Windows or Office source code.&lt;/p&gt;
-&lt;p&gt;Cyber intelligence firm Under the Breach, who saw the leak on the hacker forum, also does not think there is much to worry about.&lt;/p&gt;
-&lt;p&gt;They did express concern that private API keys or passwords could have accidentally been left behind in some of the private repositories like other developers have done in the past.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&quot;https://twitter.com/underthebreach/status/1258168260492701702&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;&lt;img alt=&quot;Tweet&quot; height=&quot;320&quot; src=&quot;data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==&quot; width=&quot;488&quot; data-src=&quot;https://www.bleepstatic.com/images/news/Microsoft/g/github-repo-breach/ub-tweet.jpg&quot; class=&quot;b-lazy&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Microsoft employee Sam Smith &lt;a href=&quot;https://twitter.com/samsmithnz/status/1258174191834222594&quot; rel=&quot;nofollow&quot; target=&quot;_blank&quot;&gt;replied&lt;/a&gt; to Under the Breach's tweet stating that he thought the leak was fake as &quot;Msft has a “rule” that GitHub repos must be public within 30 days.&quot;&lt;/p&gt;
-&lt;p&gt;BleepingComputer has contacted Microsoft to confirm if these are indeed legitimate files but have not received a reply.&lt;/p&gt;
-&lt;p&gt;&lt;em&gt;This is a developing story.&lt;/em&gt;&lt;/p&gt;
+<title>Show HN: Twitch Roulette – Find and chat with streamers who are streaming alone</title>
+<link>https://twitchroulette.net/</link>
+<guid isPermaLink="true" >https://twitchroulette.net/</guid>
+<description>&lt;head&gt;&lt;meta http-equiv=&quot;Content-Type&quot; content=&quot;text/html; charset=UTF-8&quot; /&gt;&lt;title&gt;twitch roulette&lt;/title&gt;&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot; /&gt;&lt;link href=&quot;https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,200;0,300;0,400;0,600;0,700;0,800;0,900;1,200;1,300;1,400;1,600;1,700;1,800;1,900&amp;amp;display=swap&quot; rel=&quot;stylesheet&quot; type=&quot;text/css&quot; /&gt;&lt;/head&gt;&lt;body id=&quot;readabilityBody&quot; readability=&quot;26.25219170076&quot;&gt;
+&lt;div class=&quot;c&quot; readability=&quot;12.878433664524&quot;&gt;
+
+&lt;p&gt;
+
+&lt;h3&gt;Spin the wheel and match with a random streamer with little to no viewers. Say hi! Make new Friends!&lt;/h3&gt;
+&lt;/p&gt;
+&lt;br /&gt;&lt;div class=&quot;row&quot; readability=&quot;10&quot;&gt;
+&lt;p&gt;Filter by game &lt;/p&gt;
+&lt;p&gt;&lt;button class=&quot;btn primary&quot; onclick=&quot;handleStart()&quot;&gt;Spin The Wheel&lt;/button&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class=&quot;row&quot; readability=&quot;8.5840707964602&quot;&gt;
+&lt;p&gt;Note: twitchroulette does not track any user information or require any cookies, however I would love to hear your feedback! Please feel free to follow me on twitter &lt;a href=&quot;https://twitter.com/elgruntox&quot;&gt;@elgruntox&lt;/a&gt; or on my github located at &lt;a href=&quot;https://github.com/ell&quot;&gt;https://github.com/ell&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/body&gt;</description>
+<pubDate>Fri, 08 May 2020 12:34:25 +0000</pubDate>
+<dc:creator>mumphster</dc:creator>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://twitchroulette.net/</dc:identifier>
+</item>
+<item>
+<title>Show HN: Micro-mitten – Research language with compile-time memory management</title>
+<link>https://github.com/doctorn/micro-mitten</link>
+<guid isPermaLink="true" >https://github.com/doctorn/micro-mitten</guid>
+<description>&lt;p&gt;metal's too hot? wear a mitten!&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://travis-ci.com/doctorn/micro-mitten&quot; rel=&quot;nofollow&quot;&gt;&lt;img src=&quot;https://camo.githubusercontent.com/9dadc6848d95e7ca12cabf06528707e0a3c48a01/68747470733a2f2f7472617669732d63692e636f6d2f646f63746f726e2f6d6963726f2d6d697474656e2e7376673f746f6b656e3d4b684a6d53457a63464731616978637041417642266272616e63683d6d6173746572&quot; alt=&quot;Build Status&quot; data-canonical-src=&quot;https://travis-ci.com/doctorn/micro-mitten.svg?token=KhJmSEzcFG1aixcpAAvB&amp;amp;branch=master&quot;/&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h2&gt;&lt;code&gt;micro-mitten&lt;/code&gt;??&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;micro-mitten&lt;/code&gt; is a bare-bones Rust-like programming language, stripped down to simplify control-flow structures and the type system.&lt;/p&gt;
+&lt;p&gt;Like Rust, &lt;code&gt;micro-mitten&lt;/code&gt; offers a static approach to memory management; however, &lt;code&gt;micro-mitten&lt;/code&gt;'s approach is significantly different from Rust's. Rather than depending on single ownership and a complex lifetime system, &lt;code&gt;micro-mitten&lt;/code&gt; uses a series of data-flow analyses to statically approximate heap liveness. This means that it maintains the ability to insert freeing code at appropriate program points, without putting restrictions on how you write your code. The theory behind the approach is documented in &lt;a href=&quot;https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-908.pdf&quot; rel=&quot;nofollow&quot;&gt;this thesis&lt;/a&gt; (Proust 2017).&lt;/p&gt;
+&lt;p&gt;Long story short, this is an attempt to see if we really can have unrestrictive compile-time garbage collection.&lt;/p&gt;
+&lt;h2&gt;How can I use it?!&lt;/h2&gt;
+&lt;p&gt;The project depends on &lt;code&gt;libgc&lt;/code&gt; and the LLVM-8 toolchain. Cloning this repository and running the following should get you set up with a working copy of &lt;code&gt;mmtnc&lt;/code&gt; (the &lt;code&gt;micro-mitten&lt;/code&gt; compiler).&lt;/p&gt;
+&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;10&quot;&gt;
+&lt;pre&gt;
+./tools.sh &lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; installs `mitten-test`, `mitten-bench`, `knit` and the language runtime&lt;/span&gt;
+cargo install --path ./ --force &lt;span class=&quot;pl-c&quot;&gt;&lt;span class=&quot;pl-c&quot;&gt;#&lt;/span&gt; installs `mmtnc`&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;code&gt;mmtnc&lt;/code&gt; compiles &lt;code&gt;.mmtn&lt;/code&gt; files to LLVM IR (&lt;code&gt;.ll&lt;/code&gt;) and just dumps the textual representation. Much more helpfully, you can get binaries directly using &lt;code&gt;knit&lt;/code&gt;. To build a binary (&lt;code&gt;example&lt;/code&gt;) from a source file (&lt;code&gt;example.mmtn&lt;/code&gt;) use:&lt;/p&gt;
+&lt;div class=&quot;highlight highlight-source-shell&quot; readability=&quot;7&quot;&gt;
+&lt;pre&gt;
+knit --src example.mmtn --gc-strategy=proust 
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;code&gt;--gc-strategy&lt;/code&gt; argument is optional, but the default is to use &lt;em&gt;no&lt;/em&gt; garbage collection (your computer will hate you). The other options are &lt;code&gt;proust&lt;/code&gt; (uses static memory management) and &lt;code&gt;bdw&lt;/code&gt; (uses &lt;code&gt;libgc&lt;/code&gt;).&lt;/p&gt;
+&lt;h2&gt;Notes&lt;/h2&gt;
+&lt;p&gt;To get an idea of the language syntax, check out the examples in &lt;code&gt;src/test/&lt;/code&gt;. If you get something wrong, the compiler shoud moan at you. Otherwise, please open an issue!&lt;/p&gt;
+&lt;p&gt;Please note, &lt;code&gt;micro-mitten&lt;/code&gt; is purely a research language and its performance is not brilliant when using static memory management. For a full run-down, see &lt;a href=&quot;http://nathancorbyn.com/nc513.pdf&quot; rel=&quot;nofollow&quot;&gt;my dissertation&lt;/a&gt;. Most of the examples in &lt;code&gt;src/test/&lt;/code&gt; will run with static memory management, but there are some notable exceptions and one or two memory leaks.&lt;/p&gt;
+</description>
+<pubDate>Fri, 08 May 2020 11:45:30 +0000</pubDate>
+<dc:creator>doctor_n_</dc:creator>
+<og:image>https://avatars2.githubusercontent.com/u/6421560?s=400&amp;v=4</og:image>
+<og:type>object</og:type>
+<og:title>doctorn/micro-mitten</og:title>
+<og:url>https://github.com/doctorn/micro-mitten</og:url>
+<og:description>you might not need your garbage collector. Contribute to doctorn/micro-mitten development by creating an account on GitHub.</og:description>
+<dc:language>en</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://github.com/doctorn/micro-mitten</dc:identifier>
+</item>
+<item>
+<title>On responses to “Bye, Amazon”</title>
+<link>https://www.tbray.org/ongoing/When/202x/2020/05/06/Answers</link>
+<guid isPermaLink="true" >https://www.tbray.org/ongoing/When/202x/2020/05/06/Answers</guid>
+<description>&lt;p itemprop=&quot;description&quot;&gt;Boy, when your &lt;a href=&quot;https://www.tbray.org/ongoing/When/202x/2020/04/29/Leaving-Amazon&quot;&gt;I’m-outta-here essay&lt;/a&gt; goes viral, do you ever get a lot of input. A few responses came up often enough to be worth sharing. This was via email, Twitter DMs, blog comments, and LinkedIn messages. All of which went completely batshit.&lt;/p&gt;
+&lt;p&gt;So, some answers. But first…&lt;/p&gt;
+&lt;p id=&quot;p-1&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;Thanks for the kind words!&lt;/span&gt; · I had no notion how the world might react to a cranky old overpaid geek’s public temper tantrum. The world’s been astonishingly warm and welcoming. Apparently I hit a hot button I didn’t know existed. The crankiest geek on the planet couldn’t fail to have their heart warmed. So in a huge number of cases, simply “Thanks for the kind words” was the right thing to say.&lt;/p&gt;
+&lt;p&gt;Dear readers: Yes, some of the answers described in this piece were kept handy in editor buffers and delivered by cut-and-paste. But I did read a lot of the messages, and all the ones I actually responded to.&lt;/p&gt;
+&lt;p id=&quot;p-2&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“Can you come on our TV show?”&lt;/span&gt; · You name it: ABC, BBC, Bloomberg, CBC, CBS, CTV, CNBC, CNN, NBC, NPR, and a whole lot of cool blogs and indies. Also Anderson Cooper’s people!&lt;/p&gt;
+&lt;p id=&quot;p-3&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“Can we get on the phone so I can ask you some questions?”&lt;/span&gt; · A variation on the theme, from non-broadcast organizations.&lt;/p&gt;
+&lt;p&gt;They all got the same answer: “Hmm, I'm not that interesting, just a grumpy old one-percenter white-guy engineer with a social media presence. If you want to go live with this story you should do it with the actual people who got fired, who are young, fresh-faced, passionate, and really at the center of the news story. I recommend reaching out to Emily Cunningham (contact info redacted) or Maren Costa (same) or Chris Smalls (same).”&lt;/p&gt;
+&lt;p id=&quot;p-4&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“OK, we talked to them. Now will you talk to us live?”&lt;/span&gt; · These people were nice and just trying to do their job. I agreed to answer a couple of email questions in a couple of cases, but mostly just said “For complicated reasons, I don’t want to be the public face of this story. Sorry.”&lt;/p&gt;
+&lt;p id=&quot;p-5&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“Complicated reasons?”&lt;/span&gt; · Yeah, the story is about firing whistleblowers, not about a random Canadian Distinguished Engineer’s reaction to it. So news organizations should follow the primary sources, not me.&lt;/p&gt;
+&lt;p&gt;There’s more. I put a lot of thought into what I should say, and then really a whole lot of work into writing that blog piece. I had help with style and fact-checking. (Thanks, Lauren. Thanks, Emily.) It is very, very, unlikely that anything I’d improvise on a phone-call or TV interview would be better. I’ve also had bitter first-hand experience with the &lt;a href=&quot;https://www.goodreads.com/quotes/65213-briefly-stated-the-gell-mann-amnesia-effect-is-as-follows-you&quot;&gt;Gell-Mann amnesia effect&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;I think it worked. The news coverage, lacking alternatives, quoted heavily from the blog, and I thought basically all of it came out fair and accurate. Let’s acknowledge that this tactic is only available to someone who’s near the center of a news story, is a competent writer, and has a good place to publish.&lt;/p&gt;
+&lt;p&gt;I’ve no interest in becoming some sort of full-time anti-Amazon activist. I just don’t want to work for an organization that fires whistleblowers. I said so. It looks like the message got through.&lt;/p&gt;
+&lt;p id=&quot;p-6&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“What response did you expect?”&lt;/span&gt; · I have seventeen years of blogging scars, so I speak from experience in saying: No idea. I’ve had blogs that I considered mightily important and labored over for days sink like a stone with no trace. Then I’ll toss off some three-paragraph squib that I wrote while watching TV and drinking gin, and it goes white-hot. Neither outcome would have surprised me.&lt;/p&gt;
+&lt;p id=&quot;p-8&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“What were you trying to accomplish?”&lt;/span&gt; · I’m a blogger. I’ve been writing the story of my life here for seventeen years. Enough people read it and respond to give me hope that it’s at least intermittently interesting, and perhaps even useful. I’m a writer, I can’t not write. This is a major turning point in my life. I totally couldn’t not write it. That’s all. That’s &lt;em&gt;really, really&lt;/em&gt; why.&lt;/p&gt;
+&lt;p id=&quot;p-10&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“What about Brad’s piece?”&lt;/span&gt; · They’re asking about &lt;a href=&quot;https://www.linkedin.com/pulse/response-tim-brays-departure-brad-porter/&quot;&gt;Response to Tim Bray’s departure&lt;/a&gt; by &lt;a href=&quot;https://www.linkedin.com/in/brad-porter-1a989/&quot;&gt;Brad Porter&lt;/a&gt;. Since he has the same “VP/Distinguished Engineer” title I did you’d think he’d be a peer. Actually he’s way more important and influential than I used to be, partly because he’s been there since the early days and is directly involved with the retail operation.&lt;/p&gt;
+&lt;p&gt;I believe that (as Brad says) Amazon retail is working intensely and intelligently to make the warehouses safer. But I also believe the workers. And anyhow, firing whistleblowers is just way, way out of bounds.&lt;/p&gt;
+&lt;p&gt;While it’s sort of a sideshow to the real issue here (firing whistleblowers), Brad also wrote:&lt;/p&gt;
+&lt;blockquote readability=&quot;8&quot;&gt;
+&lt;p&gt;Ultimately though, Tim Bray is simply wrong when he says “It’s that Amazon treats the humans in the warehouses as fungible units of pick-and-pack potential.” I find that deeply offensive to the core.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;We’ll have to agree to disagree. If you run an organization with hundreds of thousands of line workers and tens of thousands of managers, and where turnover is typically significant, you need processes where the staff are fungible. Two things can be true at once: You work hard to preserve your employees’ health, and your administrative culture treats them as fungible units.&lt;/p&gt;
+&lt;p&gt;I actually found the patterns emerging in the responses to Brad’s piece more culturally interesting than his original post.&lt;/p&gt;
+&lt;p&gt;And hey, bonus: There’s another Amazon voice in the conversation: &lt;a href=&quot;https://www.linkedin.com/in/antonok/&quot;&gt;Anton Okmyanskiy&lt;/a&gt;, who’s a “Principal Engineer”, which is to say regarded as a world-class technologist, wrote &lt;a href=&quot;https://www.linkedin.com/pulse/tim-bray-quit-amazon-my-opinion-anton-okmyanskiy/?trackingId=GaNNzAG%2FQY%2ByI9IEKicP8g%3D%3D&quot;&gt;Tim Bray quit Amazon. My thoughts...&lt;/a&gt;. It contains the remarkable sentence “Amazon should stay ahead of anger-driven regulatory enforcement by becoming a leader on social justice issues.”&lt;/p&gt;
+&lt;p&gt;It’d be great if a few more Amazonian voices weighed in. But I’m not holding my breath.&lt;/p&gt;
+&lt;p id=&quot;p-11&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;“Any regrets?”&lt;/span&gt; · Yes, I regret intensely that I didn’t link to Emily Cunningham’s original &lt;a href=&quot;https://twitter.com/emahlee/status/1249968430465175552&quot;&gt;“Amazon fired me” tweet thread&lt;/a&gt;, which is exquisite (you have to click “show this thread”).&lt;/p&gt;
+&lt;p id=&quot;p-9&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;Favorite response?&lt;/span&gt; · Note, header not in quotes because nobody asked, but I’ll answer anyhow. I could drop a dozen portentous media-heavyweight names and yeah, pretty well everyone weighed in. But it’s not close, my fave was Wonkette: &lt;a href=&quot;https://www.wonkette.com/amazon-vp-tim-bray-resigns-in-protest&quot;&gt;Amazon VP VIP Tim Bray Quitfires Self Over 'Chickensh*t' Activist Quitfirings&lt;/a&gt;. It says, of yr humble scrivener, “Come the revolution, let's remember not to eat this one” and “Class Traitor of the Day”. These lodged in what I thought was a thoroughly lucid and spirited take on the situation.&lt;/p&gt;
+&lt;p id=&quot;p-12&quot; class=&quot;p1&quot;&gt;&lt;span class=&quot;h2&quot;&gt;Once again&lt;/span&gt; · Thanks for the kind words!&lt;/p&gt;
+&lt;hr /&gt;
+
+&lt;hr /&gt;
 
 </description>
-<pubDate>Thu, 07 May 2020 13:35:32 +0000</pubDate>
-<dc:creator>badRNG</dc:creator>
-<og:url>https://www.bleepingcomputer.com/news/security/microsofts-github-account-allegedly-hacked-500gb-stolen/</og:url>
-<og:type>article</og:type>
-<og:title>Microsoft's GitHub account allegedly hacked, 500GB stolen</og:title>
-<og:description>A hacker has claimed to have hacked into Microsoft's GitHub account and downloaded over 500GB of 'Private' repositories, BleepingComputer has learned.</og:description>
-<og:image>https://www.bleepstatic.com/content/hl-images/2020/05/06/MSFT_open_source.jpg</og:image>
-<dc:language>en-us</dc:language>
+<pubDate>Fri, 08 May 2020 11:35:10 +0000</pubDate>
+<dc:creator>chmaynard</dc:creator>
+<dc:language>en</dc:language>
 <dc:format>text/html</dc:format>
-<dc:identifier>https://www.bleepingcomputer.com/news/security/microsofts-github-account-allegedly-hacked-500gb-stolen/</dc:identifier>
+<dc:identifier>https://www.tbray.org/ongoing/When/202x/2020/05/06/Answers</dc:identifier>
+</item>
+<item>
+<title>4D Toys: how objects bounce and roll in 4D – paper accepted to SIGGRAPH 2020</title>
+<link>https://marctenbosch.com/news/2020/05/siggraph-2020-technical-paper-n-dimensional-rigid-body-dynamics/</link>
+<guid isPermaLink="true" >https://marctenbosch.com/news/2020/05/siggraph-2020-technical-paper-n-dimensional-rigid-body-dynamics/</guid>
+<description>&lt;div class=&quot;comment-author vcard&quot;&gt;&lt;img alt=&quot;&quot; src=&quot;https://secure.gravatar.com/avatar/e586f6cd7ed8017e874ce8775875afc8?s=32&amp;amp;d=mm&amp;amp;r=g&quot; srcset=&quot;https://secure.gravatar.com/avatar/e586f6cd7ed8017e874ce8775875afc8?s=64&amp;amp;d=mm&amp;amp;r=g 2x&quot; class=&quot;avatar avatar-32 photo&quot; height=&quot;32&quot; width=&quot;32&quot; /&gt;&lt;cite class=&quot;fn&quot;&gt;Sid_Cypher&lt;/cite&gt; &lt;span class=&quot;says&quot;&gt;says:&lt;/span&gt;&lt;/div&gt;
+
+&lt;p&gt;Congratulations! Independent applied research feels refreshingly different from many other papers, probably due to the lack of the usual “publish or perish” pressure or similar strong constraints.&lt;/p&gt;
+&lt;p&gt;As a mere comp.sci graduate, I find the paper both accessible and inviting to delve deeper into the topic. Thanks!&lt;/p&gt;
+
+</description>
+<pubDate>Fri, 08 May 2020 07:34:40 +0000</pubDate>
+<dc:creator>doppp</dc:creator>
+<dc:language>en-US</dc:language>
+<dc:format>text/html</dc:format>
+<dc:identifier>https://marctenbosch.com/news/2020/05/siggraph-2020-technical-paper-n-dimensional-rigid-body-dynamics/</dc:identifier>
 </item>
 </channel>
 </rss>
